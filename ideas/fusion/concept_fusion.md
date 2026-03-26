@@ -33,6 +33,7 @@ Stage 1 sammelt passive Intrusion-Detection-System (IDS) Timings und CRA-Regulat
 
 **Schicht 3: Core Engine**
 Reine Business-Logik: Update-State-Machine, Signatur-Verifikation, Journal, Merkle-Verify, SUIT-Manifest-Parser (Zwingend als **strikter Stream-Parser wie zcbor**, der zum Schutz vor Heap-Overflows nur bekannte C-Structs allokiert und variable Länge blockt) und **Anti-Rollback Protection**. Letztere nutzt eine Security Version Number - SVN (Monotonic Counter), die veraltete Firmware rigoros abweist (`Target_Manifest_SVN >= Hardware_SVN`). Bei ressourcenfressenden Delta-Patches wird diese SVN-Gültigkeit *zwingend vor dem Start* der Patch-Berechnung validiert.
+**Targeted Updates (Personalisiertes OTA-Pinning):** Der SUIT-Parser evaluiert nativ "Device-ID Conditions". Will ein Cloud-Backend ein A/B-Testing oder hochindividuelles Update an nur einen Kunden ausrollen, injiziert es den spezifischen Hardware-Code (z.B. DSLC/MAC) in das `suit-condition-device-identifier` Feld des Manifests. Stage 1 fragt über die Platform-HAL (`boot_hal_get_dslc()`) die eigene Identität ab und blockt das Update sofort, wenn sie nicht übereinstimmt. Perfekte Personalisierung bei voll erhaltener OTA-Skalierbarkeit!
 
 **Schicht 2: OS Shim (Optional)**
 Eine ultradünne Schicht, die standardmäßig `bare-metal` (malloc-frei) läuft und exakt vier primitive Dinge abstrahiert: `Mutex` (für Multi-Core), `Timer-Tick`, `malloc/free` (nur falls die Crypto-Lib es fordert) und `assert`. Für Zephyr, FreeRTOS oder NuttX existiert hierfür jeweils ein ~50-Zeilen-Adapter.
