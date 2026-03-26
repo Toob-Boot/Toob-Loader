@@ -1,0 +1,246 @@
+{
+  "families": {
+    "esp": {
+      "flash_cmd": "python -m esptool --chip {chip} {port_arg} write_flash {offset} {binary}"
+    },
+    "stm": {
+      "flash_cmd": "st-flash --reset write {binary} {offset}"
+    },
+    "nrf": {
+      "flash_cmd": "nrfjprog -f {family}52 --program {binary} --sectorerase --reset"
+    }
+  },
+  "targets": {
+    "esp32": {
+      "family": "esp",
+      "arch": "xtensa",
+      "compiler": "xtensa-esp32-elf-gcc",
+      "flash_offset": "0x1000",
+      "recovery_pin_rules": {
+        "max_pin": 39,
+        "blacklist": [
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "supported": true
+      }
+    },
+    "esp32s2": {
+      "family": "esp",
+      "arch": "xtensa",
+      "compiler": "xtensa-esp32s2-elf-gcc",
+      "flash_offset": "0x1000",
+      "recovery_pin_rules": {
+        "max_pin": 46,
+        "blacklist": [
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32
+        ],
+        "supported": true
+      }
+    },
+    "esp32s3": {
+      "family": "esp",
+      "arch": "xtensa",
+      "compiler": "xtensa-esp32s3-elf-gcc",
+      "flash_offset": "0x0",
+      "recovery_pin_rules": {
+        "max_pin": 48,
+        "blacklist": [
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32
+        ],
+        "supported": true
+      }
+    },
+    "esp32c3": {
+      "family": "esp",
+      "arch": "riscv",
+      "compiler": "riscv32-esp-elf-gcc",
+      "flash_offset": "0x0",
+      "recovery_pin_rules": {
+        "max_pin": 21,
+        "blacklist": [
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "supported": true
+      }
+    },
+    "esp32c6": {
+      "family": "esp",
+      "arch": "riscv",
+      "compiler": "riscv32-esp-elf-gcc",
+      "flash_offset": "0x0",
+      "recovery_pin_rules": {
+        "max_pin": 29,
+        "blacklist": [
+          24,
+          25,
+          26,
+          27,
+          28,
+          29
+        ],
+        "supported": true
+      }
+    },
+    "esp32h2": {
+      "family": "esp",
+      "arch": "riscv",
+      "compiler": "riscv32-esp-elf-gcc",
+      "flash_offset": "0x0",
+      "recovery_pin_rules": {
+        "max_pin": 27,
+        "blacklist": [
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "supported": true
+      }
+    },
+    "nrf52": {
+      "family": "nrf",
+      "arch": "arm",
+      "compiler": "arm-none-eabi-gcc",
+      "flash_offset": "0x0",
+      "recovery_pin_rules": {
+        "supported": false
+      },
+      "allow_prefix_match": true
+    },
+    "nrf53": {
+      "family": "nrf",
+      "arch": "arm",
+      "compiler": "arm-none-eabi-gcc",
+      "flash_offset": "0x0",
+      "recovery_pin_rules": {
+        "supported": false
+      },
+      "allow_prefix_match": true
+    },
+    "stm32f1": {
+      "family": "stm",
+      "sub_family": "f1",
+      "arch": "arm",
+      "compiler": "arm-none-eabi-gcc",
+      "flash_offset": "0x08000000",
+      "flash_size": "64K",
+      "ram_size": "20K",
+      "recovery_pin_rules": {
+        "supported": true,
+        "max_pin": 255,
+        "blacklist": [
+          13,
+          14
+        ]
+      },
+      "allow_prefix_match": true
+    },
+    "stm32f4": {
+      "family": "stm",
+      "sub_family": "f4",
+      "arch": "arm",
+      "compiler": "arm-none-eabi-gcc",
+      "flash_offset": "0x08000000",
+      "flash_size": "64K",
+      "ram_size": "32K",
+      "recovery_pin_rules": {
+        "supported": true,
+        "max_pin": 255,
+        "blacklist": [
+          13,
+          14
+        ]
+      },
+      "allow_prefix_match": true
+    },
+    "stm32g4": {
+      "family": "stm",
+      "sub_family": "g4",
+      "arch": "arm",
+      "compiler": "arm-none-eabi-gcc",
+      "flash_offset": "0x08000000",
+      "flash_size": "32K",
+      "ram_size": "32K",
+      "recovery_pin_rules": {
+        "supported": true,
+        "max_pin": 255,
+        "blacklist": [
+          13,
+          14
+        ]
+      },
+      "allow_prefix_match": true
+    },
+    "stm32u5": {
+      "family": "stm",
+      "sub_family": "u5",
+      "arch": "arm",
+      "compiler": "arm-none-eabi-gcc",
+      "flash_offset": "0x08000000",
+      "flash_size": "256K",
+      "ram_size": "256K",
+      "recovery_pin_rules": {
+        "supported": true,
+        "max_pin": 255,
+        "blacklist": [
+          13,
+          14
+        ]
+      },
+      "allow_prefix_match": true
+    },
+    "stm32h7": {
+      "family": "stm",
+      "sub_family": "h7",
+      "arch": "arm",
+      "compiler": "arm-none-eabi-gcc",
+      "flash_offset": "0x08000000",
+      "flash_size": "128K",
+      "ram_size": "128K",
+      "recovery_pin_rules": {
+        "supported": true,
+        "max_pin": 255,
+        "blacklist": [
+          13,
+          14
+        ]
+      },
+      "allow_prefix_match": true
+    },
+    "__planned_stm32_architectures__": {
+      "status": "planned",
+      "architectures": [
+        "stm32f0", "stm32f2", "stm32f3", "stm32f7",
+        "stm32l0", "stm32l1", "stm32l4", "stm32l5",
+        "stm32g0", "stm32c0", "stm32w", "stm32h5"
+      ],
+      "note": "These architectures share the Cortex-M cores but require dedicated Flash HALs. Implementation is planned for a future Repowatt-OS milestone."
+    }
+  }
+}

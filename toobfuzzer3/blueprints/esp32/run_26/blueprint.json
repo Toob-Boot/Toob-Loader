@@ -1,0 +1,133 @@
+{
+    "esp32": {
+        "arch": "Xtensa (ESP32)",
+        "boot_vectors": {
+            "rom_base": "0x40000000",
+            "user_app_base": "0x400C2000"
+        },
+        "memory": {
+            "alignment_bytes": 16,
+            "data_segment": "dram",
+            "executable_segment": "iram",
+            "memory_regions": [
+                {
+                    "length": "0x60000",
+                    "name": "irom0",
+                    "origin": "0x40000000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x10000",
+                    "name": "irom1",
+                    "origin": "0x3FF90000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x10000",
+                    "name": "iram_cache",
+                    "origin": "0x40070000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x20000",
+                    "name": "iram",
+                    "origin": "0x40080000",
+                    "permissions": "rwx"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "dram_rom_data",
+                    "origin": "0x3FFAE000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x50000",
+                    "name": "dram",
+                    "origin": "0x3FFB0000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_fast",
+                    "origin": "0x3FF80000",
+                    "permissions": "rwx"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_slow",
+                    "origin": "0x50000000",
+                    "permissions": "rwx"
+                }
+            ],
+            "vector_alignment_section": ".iram0.vectors",
+            "vector_table_offset_bytes": 1024
+        },
+        "security_registers": {
+            "flash_encryption": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5B000"
+            },
+            "jtag_disabled": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5A000"
+            },
+            "rdp_level": {}
+        },
+        "startup": {
+            "abi_initialization_instructions": [
+                "movi a0, 0",
+                "wsr.vecbase a0",
+                "rsync"
+            ],
+            "bss_init_required": true,
+            "stack_top_expression": "ORIGIN(dram) + LENGTH(dram)"
+        },
+        "toolchain_requirements": {
+            "compiler_prefix": "xtensa-esp32-elf-",
+            "core_architecture": "Xtensa (ESP32)",
+            "flashing": {
+                "flash_offset": "0x1000",
+                "method": "UART",
+                "tool": "esptool.py",
+                "write_command": "esptool.py --chip esp32 write_flash 0x1000 {binary_path}"
+            },
+            "packaging": [
+                {
+                    "command": "esptool.py --chip esp32 elf2image --flash_mode dio --flash_freq 40m --flash_size 2MB -o {binary_path} {elf_path}",
+                    "condition": "ANY",
+                    "tool": "esptool.py"
+                },
+                {
+                    "command": "espsecure.py sign_data --version 2 --keyfile {private_key_path} --output {binary_path} {binary_path}",
+                    "condition": "PROFILE_SECURE_BOOT_ONLY",
+                    "tool": "espsecure.py"
+                }
+            ]
+        },
+        "watchdog_kill_registers": [
+            {
+                "address": "0x3FF5F000",
+                "config_addr": "0x3FF5F048",
+                "disable_val": "0x0",
+                "name": "TIMG0_WDT",
+                "unlock_val": "0x50D83AA1"
+            },
+            {
+                "address": "0x3FF60000",
+                "config_addr": "0x3FF60048",
+                "disable_val": "0x0",
+                "name": "TIMG1_WDT",
+                "unlock_val": "0x50D83AA1"
+            },
+            {
+                "address": "0x3FF48000",
+                "config_addr": "0x3FF4808C",
+                "disable_val": "0x0",
+                "name": "RTC_WDT",
+                "unlock_val": "0x50D83AA1"
+            }
+        ]
+    }
+}

@@ -1,0 +1,151 @@
+[GENERATE] Requesting Gemini to parse TRM context for esp32 (Xtensa (ESP32))...
+[GENERATE] Please wait, extracting: Memory Layout, Alignment, Watchdogs, ABI Setup...
+[GENERATE] Ingesting attached document: esp32_datasheet_en.pdf
+[*] Found cached remote file lookup: files/xb0m551aeshq. Verifying...
+[*] Verification complete. Reusing attached Gemini File.
+
+[*] Launching all 3 Stages concurrently (Total 3 API Threads)...
+[*] Initiating model inference (Stage 1: Memory & ABI) with 1x Self-Consistency Voting (Parallel)...[*] Initiating model inference (Stage 2: Security Rings) with 1x Self-Consistency Voting (Parallel)...[*] Initiating model inference (Stage 3: Toolchain & Packaging) with 1x Self-Consistency Voting (Parallel)...
+
+
+  -> Stage 2: Security Rings [Run 1/1] Request fired...
+    -> Stage 1: Memory & ABI [Run 1/1] Request fired...
+    -> Stage 3: Toolchain & Packaging [Run 1/1] Request fired...
+    [->] Stage 3: Toolchain & Packaging Raw 1x Runs saved to ai_history\esp32\run_46\stage_3_toolchain_&_packaging.json
+    [->] Stage 2: Security Rings Raw 1x Runs saved to ai_history\esp32\run_46\stage_2_security_rings.json
+    [->] Stage 1: Memory & ABI Raw 1x Runs saved to ai_history\esp32\run_46\stage_1_memory_&_abi.json
+
+==================================================
+[GEMINI PARSER RESULT]
+==================================================
+{
+    "esp32": {
+        "arch": "Xtensa (ESP32)",
+        "boot_vectors": {
+            "rom_base": "0x40000000",
+            "user_app_base": "0x400C2000"
+        },
+        "memory": {
+            "alignment_bytes": 16,
+            "bootrom_reserved_data_bytes": 8192,
+            "data_segment": "dram0",
+            "executable_segment": "iram0",
+            "memory_regions": [
+                {
+                    "length": "0x60000",
+                    "name": "irom0",
+                    "origin": "0x40000000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x10000",
+                    "name": "irom1",
+                    "origin": "0x3FF90000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x20000",
+                    "name": "iram0",
+                    "origin": "0x40080000",
+                    "permissions": "rwx"
+                },
+                {
+                    "length": "0x52000",
+                    "name": "dram0",
+                    "origin": "0x3FFAE000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_fast_iram",
+                    "origin": "0x400C0000",
+                    "permissions": "rwx"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_fast_dram",
+                    "origin": "0x3FF80000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_slow_dram",
+                    "origin": "0x50000000",
+                    "permissions": "rw"
+                }
+            ],
+            "vector_alignment_section": ".vectors",
+            "vector_table_offset_bytes": 1024
+        },
+        "security_registers": {
+            "flash_encryption": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5B000"
+            },
+            "jtag_disabled": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5A000"
+            },
+            "rdp_level": {}
+        },
+        "startup": {
+            "abi_initialization_instructions": [
+                "movi a0, 0",
+                "wsr.windowstart a0",
+                "wsr.windowbase a0",
+                "rsync"
+            ],
+            "bss_init_required": true,
+            "stack_top_expression": "ORIGIN(dram0) + LENGTH(dram0)"
+        },
+        "toolchain_requirements": {
+            "compiler_prefix": "xtensa-esp32-elf-",
+            "core_architecture": "Xtensa (ESP32)",
+            "flashing": {
+                "flash_offset": "0x1000",
+                "method": "UART",
+                "tool": "esptool.py",
+                "write_command": "esptool.py --chip esp32 write_flash 0x1000 {binary_path}"
+            },
+            "packaging": [
+                {
+                    "command": "esptool.py --chip esp32 elf2image --flash_mode dio --flash_freq 40m --flash_size 2MB -o {binary_path} {elf_path}",
+                    "condition": "ANY",
+                    "tool": "esptool.py"
+                },
+                {
+                    "command": "espsecure.py sign_data --version 2 --keyfile {private_key_path} --output {binary_path} {binary_path}",
+                    "condition": "PROFILE_SECURE_BOOT_ONLY",
+                    "tool": "espsecure.py"
+                }
+            ]
+        },
+        "watchdog_kill_registers": [
+            {
+                "address": "0x3FF5F064",
+                "config_addr": "0x3FF5F048",
+                "disable_val": "0x0",
+                "name": "TIMG0_WDT",
+                "unlock_val": "0x50D83AA1"
+            },
+            {
+                "address": "0x3FF60064",
+                "config_addr": "0x3FF60048",
+                "disable_val": "0x0",
+                "name": "TIMG1_WDT",
+                "unlock_val": "0x50D83AA1"
+            },
+            {
+                "address": "0x3FF480A4",
+                "config_addr": "0x3FF4808C",
+                "disable_val": "0x0",
+                "name": "RTC_WDT",
+                "unlock_val": "0x50D83AA1"
+            }
+        ]
+    }
+}
+==================================================
+

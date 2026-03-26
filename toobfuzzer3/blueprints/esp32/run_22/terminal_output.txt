@@ -1,0 +1,84 @@
+[GENERATE] Blueprint 22 successfully persisted to C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\blueprints\esp32\run_22\blueprint.json
+[GENERATE] Confidence matrix saved to C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\blueprints\esp32\run_22\confidence.json
+[GENERATE] Compiling JSON to Toolchain Syntax & C Profiles...
+[*] Generated Linker Script: C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\build\esp32\run_latest\esp32.ld
+[*] Generated Startup Assembly: C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\build\esp32\run_latest\esp32_startup.S
+[*] Generated Capabilities Shim: C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\build\esp32\run_latest\capabilities_esp32.c
+[GENERATE] Emitted: esp32.ld | esp32_startup.S | capabilities_esp32.c
+[COMPILE] Invoking Universal Toolchain Runner for esp32...
+[*] ToolLocator loaded 80 custom paths (max_depth=6) from user_tools.json
+
+=== STAGE 1: COMPILATION ===
+[*] Preparing execution for: xtensa-esp32-elf-gcc
+[*] Tool 'xtensa-esp32-elf-gcc' not in PATH. Searching common vendor directories (Max Depth: 6)...
+    [+] Found at: C:\Espressif\tools\xtensa-esp-elf\esp-14.2.0_20251107\xtensa-esp-elf\bin\xtensa-esp32-elf-gcc.exe
+    [>] Executing: "C:\Espressif\tools\xtensa-esp-elf\esp-14.2.0_20251107\xtensa-esp-elf\bin\xtensa-esp32-elf-gcc.exe" -O2 -nostdlib -ffreestanding -mlongcalls -T build/esp32/run_latest/esp32.ld -I core/ -I arch/ -I build/esp32/run_latest/ -o build/esp32/run_latest/toobfuzzer.bin.elf core\detect_profile.c core\fuzzer_main.c core\logger.c core\prober_core.c  hal\hal_uart.c mocks\hal_mock.c build/esp32/run_latest/capabilities_esp32.c build/esp32/run_latest/keelhaul_svd.c
+    [+] Success.
+
+=== STAGE 2: PACKAGING (Profile: BARE_METAL_OPEN) ===
+[*] Preparing execution for: esptool.py
+[*] Tool 'esptool.py' not in PATH. Searching common vendor directories (Max Depth: 6)...
+    [+] Found at: C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe
+    [>] Executing: "C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe" --chip esp32 elf2image --flash_mode dio --flash_freq 40m --flash_size 2MB -o build/esp32/run_latest/toobfuzzer.bin build/esp32/run_latest/toobfuzzer.bin.elf
+    [+] Success.
+
+[PAUSE] The Pipeline has prepared the Fuzzer binary.
+[?] Please connect your device and put it into BOOTLOADER mode (if required).
+[DEPLOY] Flashing binary to esp32 BootROM at offset 0x1000 using Data-Driven tools...
+
+=== STAGE 3: DEPLOYMENT ===
+[*] Preparing execution for: esptool.py
+[*] Tool 'esptool.py' not in PATH. Searching common vendor directories (Max Depth: 6)...
+    [+] Found at: C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe
+    [>] Executing: "C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe" --chip esp32 write_flash 0x1000 build/esp32/run_latest/toobfuzzer.bin
+    [+] Success.
+[LISTEN] Opening COM Port. Awaiting Fuzzer Oracle...
+[LISTEN] Attaching to COM3 at 115200 baud...
+[LISTEN] UART Connection Established.
+[esp32] ets Jul 29 2019 12:21:46
+[esp32] rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+[esp32] configsip: 0, SPIWP:0xee
+[esp32] clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+[esp32] mode:DIO, clock div:2
+[esp32] load:0x40080400,len:4740
+[esp32] entry 0x40080400
+[esp32] Fatal exception (28): LoadProhibited
+[esp32] epc1=0x40080407, epc2=0x00000000, epc3=0x00000000, excvaddr=0x03b830e7, depc=0x00000000
+[esp32] ets Jul 29 2019 12:21:46
+[esp32] rst:0x10 (RTCWDT_RTC_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+[esp32] configsip: 0, SPIWP:0xee
+[esp32] clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+[esp32] mode:DIO, clock div:2
+[esp32] load:0x40080400,len:4740
+[esp32] entry 0x40080400
+[esp32] Fatal exception (28): LoadProhibited
+[esp32] epc1=0x40080407, epc2=0x00000000, epc3=0x00000000, excvaddr=0x03b830e7, depc=0x00000000
+[esp32] ets Jul 29 2019 12:21:46
+[esp32] rst:0x10 (RTCWDT_RTC_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+[esp32] configsip: 0, SPIWP:0xee
+[esp32] clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+[esp32] mode:DIO, clock div:2
+[esp32] load:0x40080400,len:4740
+[esp32] entry 0x40080400
+[esp32] Fatal exception (28): LoadProhibited
+[esp32] epc1=0x40080407, epc2=0x00000000, epc3=0x00000000, excvaddr=0x03b830e7, depc=0x00000000
+[esp32] ets Jul 29 2019 12:21:46
+[esp32] rst:0x10 (RTCWDT_RTC_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+[esp32] configsip: 0, SPIWP:0xee
+[esp32] clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+[esp32] mode:DIO, clock div:2
+[esp32] load:0x40080400,len:4740
+[esp32] entry 0x40080400
+[esp32] Fatal exception (28): LoadProhibited
+[esp32] epc1=0x40080407, epc2=0x00000000, epc3=0x00000000, excvaddr=0x03b830e7, depc=0x00000000
+[esp32] ets Jul 29 2019 12:21:46
+[esp32] rst:0x10 (RTCWDT_RTC_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+[esp32] configsip: 0, SPIWP:0xee
+[esp32] clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+[esp32] mode:DIO, clock div:2
+[esp32] load:0x40080400,len:4740
+[esp32] entry 0x40080400
+[esp32] Fatal exception (28): LoadProhibited
+[esp32] epc1=0x40080407, epc2=0x00000000, epc3=0x00000000, excvaddr=0x03b830e7, depc=0x00000000
+[!] Hardware timeout. Boot sequence failed.
+[*] Restarting application...

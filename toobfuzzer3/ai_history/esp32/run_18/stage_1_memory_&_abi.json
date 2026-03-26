@@ -1,0 +1,57 @@
+[
+    {
+        "esp32": {
+            "arch": "Xtensa (ESP32)",
+            "memory": {
+                "dram": {
+                    "alignment_bytes": 16,
+                    "length": "0x50000",
+                    "origin": "0x3FFB0000"
+                },
+                "iram": {
+                    "alignment_bytes": 16,
+                    "length": "0x20000",
+                    "origin": "0x40080000",
+                    "vector_table_offset_bytes": 0
+                }
+            },
+            "startup": {
+                "abi_initialization_instructions": [
+                    "movi a0, 0",
+                    "wsr a0, WINDOWBASE",
+                    "movi a0, 1",
+                    "wsr a0, WINDOWSTART",
+                    "rsync",
+                    "movi a0, 0x40000",
+                    "wsr a0, PS",
+                    "rsync"
+                ],
+                "bss_init_required": true,
+                "stack_top_expression": "ORIGIN(dram) + LENGTH(dram)"
+            },
+            "watchdog_kill_registers": [
+                {
+                    "address": "0x3FF5F000",
+                    "config_addr": "0x3FF5F048",
+                    "disable_val": "0x0",
+                    "name": "TIMG0_WDT",
+                    "unlock_val": "0x50D83AA1"
+                },
+                {
+                    "address": "0x3FF60000",
+                    "config_addr": "0x3FF60048",
+                    "disable_val": "0x0",
+                    "name": "TIMG1_WDT",
+                    "unlock_val": "0x50D83AA1"
+                },
+                {
+                    "address": "0x3FF48000",
+                    "config_addr": "0x3FF4808C",
+                    "disable_val": "0x0",
+                    "name": "RTC_WDT",
+                    "unlock_val": "0x50D83AA1"
+                }
+            ]
+        }
+    }
+]

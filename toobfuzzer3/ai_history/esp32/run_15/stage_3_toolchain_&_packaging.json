@@ -1,0 +1,52 @@
+[
+    {
+        "esp32": {
+            "toolchain_requirements": {
+                "compiler_prefix": "xtensa-esp32-elf-",
+                "core_architecture": "Xtensa (ESP32)",
+                "flashing": {
+                    "method": "UART",
+                    "tool": "esptool.py",
+                    "write_command": "esptool.py --chip esp32 write_flash 0x1000 {binary_path}.bin"
+                },
+                "packaging": [
+                    {
+                        "command": "esptool.py --chip esp32 elf2image --flash_mode dio --flash_freq 40m --flash_size 2MB -o {binary_path}.bin {binary_path}",
+                        "condition": "ANY",
+                        "tool": "esptool.py"
+                    },
+                    {
+                        "command": "espsecure.py sign_data --version 1 --keyfile {private_key_path} --output {binary_path}.bin {binary_path}.bin",
+                        "condition": "PROFILE_SECURE_BOOT_ONLY",
+                        "tool": "espsecure.py"
+                    }
+                ]
+            }
+        }
+    },
+    {
+        "esp32": {
+            "toolchain_requirements": {
+                "compiler_prefix": "xtensa-esp32-elf-",
+                "core_architecture": "Xtensa (ESP32)",
+                "flashing": {
+                    "method": "UART",
+                    "tool": "esptool.py",
+                    "write_command": "esptool.py --chip esp32 write_flash 0x1000 {binary_path}.bin"
+                },
+                "packaging": [
+                    {
+                        "command": "esptool.py --chip esp32 elf2image --flash_mode dio --flash_freq 40m --flash_size 2MB -o {binary_path}.bin {binary_path}",
+                        "condition": "ANY",
+                        "tool": "esptool.py"
+                    },
+                    {
+                        "command": "espsecure.py sign_data --version 1 --keyfile {private_key_path} --output {binary_path}.bin {binary_path}.bin",
+                        "condition": "PROFILE_SECURE_BOOT_ONLY",
+                        "tool": "espsecure.py"
+                    }
+                ]
+            }
+        }
+    }
+]

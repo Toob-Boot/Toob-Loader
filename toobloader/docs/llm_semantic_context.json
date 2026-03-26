@@ -1,0 +1,28 @@
+{
+  "component": "Toobloader",
+  "layer": "Stage 1 (Immutable Bootloader)",
+  "compliance": ["NASA P10", "Zero Dynamic Allocation", "No Recursion"],
+  "core_features": {
+    "ota_ab_provisioning": {
+      "slots": ["Slot A (0x00008000)", "Slot B (0x00028000)"],
+      "state_management": "Triple Modular Redundant (TMR) Boot State",
+      "security": "Anti-Rollback protection via TMR Monotonic Counter (active_version)",
+      "rollback_behavior": "Automated fallback to Slot A on Ed25519 signature failure, Anti-Rollback violation, or CRC corruption."
+    },
+    "recovery_mode": {
+      "trigger": "Both main slots (A and B) entirely corrupted or missing OR Hardware Recovery Button pressed at boot.",
+      "protocol": "Offline UART/USB Listener (115200 Baud)",
+      "authentication": "104-byte token (8B Timestamp + 32B DSLC + 64B Ed25519 Signature)",
+      "transfer": "XMODEM-CRC (CRC16-CCITT) into Slot A"
+    },
+    "hardware_abstraction": {
+      "prefix": "boot_hal_",
+      "dependency": "Zero vendor SDKs. Pure Bare-Metal or ROM bindings.",
+      "mocking_strategy": "Zero-code modification. GNU Linker (-Wl,--wrap) intercepts HAL calls to inject mock eFuses/Secure Elements from RAM during development."
+    },
+    "dev_mode": {
+      "signature_bypass": "Link-time injection of dev_policy.c to --wrap=boot_verify_signature. Forces success without altering production validation code.",
+      "recovery_button": "Compile-time defined GPIO pin mapped via build_standalone.py. Checked via bare-metal MMIO in the first microsecond of boot."
+    }
+  }
+}
