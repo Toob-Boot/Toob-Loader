@@ -27,7 +27,7 @@ Host-Ebene: Das `device.toml` beschreibt die Partitionsarchitektur abstrakt. Da 
 
 **Schicht 4a: Serial Rescue (Fallback)**
 Ein rein passiver Notfall-Zugang (UART / USB-DFU) direkt im Bootloader für das Labor/Werk, falls lokal absolut nichts mehr geht. (Komplexe Flash-Logiken wie XMODEM sind strikt verboten und zwingend in das externe Recovery-OS ausgelagert, siehe unten).
-**WICHTIG (Offline 2FA-Handshake):** Um "Evil-Maid"-Angriffe auf die offene serielle Konsole zu vereiteln, erzwingt Stage 1 einen 104-Byte kryptografischen Auth-Token-Transfer. **Faktor 1 (Besitz):** Der Techniker liest vor Ort einen plattformspezifischen DSLC ("Device Specific Lock Code") per UART aus. **Faktor 2 (Autorisation):** Das HQ (Internet) signiert diesen DSLC zusammen mit einem Timestamp mittels Ed25519 `Root-Key`. Nur bei validem Token öffnet Stage 1 die Recovery-OS Schnittstelle!
+**WICHTIG (Offline 2FA-Handshake):** Um "Evil-Maid"-Angriffe auf die offene serielle Konsole zu vereiteln, erzwingt Stage 1 einen 104-Byte kryptografischen Auth-Token-Transfer. **Faktor 1 (Besitz):** Der Techniker liest vor Ort einen plattformspezifischen DSLC ("Device Specific Lock Code") per UART aus. **Faktor 2 (Autorisation):** Das HQ (Internet) signiert diesen DSLC zusammen mit einem 8-Byte UNIX Timestamp mittels Ed25519 `Root-Key`. Dieser zwingende Timestamp fungiert als **Anti-Replay Schutz**: Ein abgehörtes Token vom Vortag ist wertlos! Nur bei validem Token öffnet Stage 1 die Recovery-OS Schnittstelle!
 **Schicht 4b: Diagnostics**
 Structured Log, Health, Telemetry.
 
@@ -104,6 +104,7 @@ Ursprünglich schien es, als müsste der Bootloader selbst komplexe Stacks wie W
   - 1 Crash: Rollback auf App Slot A.
   - Weitere Crashes (Max-Retries erreicht, Slot A auch gebrickt): Stage 1 bootet zwangsweise in die Recovery-Partition. **WICHTIG (Anti-Lockout & Anti-Downgrade):** Der Recovery-Boot nutzt einen total isolierten `SVN_recovery` Counter. Flasht ein Angreifer manuell ein verwundbares, fabrikaltes v1-Recovery via lokalem SPI, fängt das Manifest es ab. Zugleich wehrt die abgetrennte App-SVN nicht mehr fälschlicherweise das rechtmäßige Recovery-OS ab.
   - Erfolgreicher Start (Confirm-Flag): Der Boot_Failure_Counter wird strikt auf `0` zurückgesetzt, um zeitlich fernliegende Crashes nicht mit alten Ausfällen zu kumulieren!
+  - **Mechanischer Anti-Softbrick-Override:** Um OS-Endlosschleifen zu entkommen, bei denen Slot A zwar kryptografisch legitim ist aber funktional crasht (Softbrick), unterstützt Toob-Boot einen hardwaregebundenen Recovery-Pin (`--rec-pin 0`). Ist dieser Pin beim Start der Stage 1 physikalisch "high" (gedrückt), überspringt Stage 1 jede Logik und weicht sofort atomar auf das Recovery-OS / Schicht 4a aus.
   Dieses Recovery-OS bindet via C-Bibliothek den **Toob-Boot OTA-Agenten** ein, kommuniziert über denselben sicheren Kanal (Transfer-Bitmap, WAL) und repariert das Feature-OS.
 
 ### ✅ Auflösung: Vendor-Linker vs. Automatisierung (Schicht 5)
@@ -117,6 +118,7 @@ Für jede Chip-Familie existieren winzige "Vendor-Builder-Scripte" (z.B. `vendor
 
 Features, die den Konkurrenzsystemen fehlen und die Entwicklerproduktivität maximieren:
 
+- **Link-Time Mocking (Zero Boilerplate):** Klassische Projekte zerstören ihren C-Code mit tausenden `#ifdef DEV_MODE` Blöcken, um für lokale Tests den eFuse/Krypto-Check auszuhebeln. Toob-Boot untersagt "Architectural Slop". Mocking wird stattdessen absolut unsichtbar über den **GNU Linker (`-Wl,--wrap=symbol`)** durchgeführt. Das produktive Stage-1 Binary wird zu 100% identisch kompiliert, aber der Linker lenkt Zugriffe auf Krypto-Hardware sicher in lokale RAM-Funktionen um, was blitzschnelle Mock-Tests ohne Code-Vergiftung erlaubt.
 - **Host-Nativer Sandbox-HAL & Fuzzing:** Der gesamte Bootloader kann auf dem PC (macOS/Linux) als natives Binary kompiliert werden (`$ boot-build --sandbox`). Da das System Host-nativ läuft, erzeugt die CI automatisch **Fuzz-Testing-Targets** (`cargo-fuzz` / `AFL++`) gegen den SUIT-Parser, den Delta-Decoder und Merkle-Verifier. So härten wir die sicherheitskritischen Angriffsflächen, die von außen erreichbar sind, massiv ab, ohne teure Hardware-HIL-Rigs aufzusetzen.
 - **Auto-generierte Renode (Emulator) Configs:** Der Manifest-Compiler parst das `device.toml` und generiert daraus automatisch eine exakte `.resc` Datei für den Renode-Simulator. Hardware-Tests in der CI laufen immer deckungsgleich zur physikalischen Flash-Map, ohne manuelle Konfiguration.
 - **Der Preflight-Report:** Statt kryptischer C-Fehler erhält der Entwickler _vor_ dem C-Compile einen Report: `Alignment check passed`, `Swap-Move kompatibel`, `Power Guard aktiv: min 3300mV`.
