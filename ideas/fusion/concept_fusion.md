@@ -26,7 +26,8 @@ Host-Ebene: Das `device.toml` beschreibt die Partitionsarchitektur abstrakt. Da 
 **SUIT-Regulatorik (CRA):** Das Manifest enthält zwingend einen `sbom_digest` (Trägt den SHA-256 Hash der SPDX/CycloneDX SBOM-Datei). Der Bootloader loggt diesen beim Start in `boot_diag`. Flotten-Manager kennen so die SBOM-Integrität jeder Edge-Node, wodurch EU Cyber Resilience Act (CRA) Compliance 2027 out-of-the-box erfüllt wird.
 
 **Schicht 4a: Serial Rescue (Fallback)**
-Ein rein passiver Notfall-Zugang (UART / USB-DFU) direkt im Bootloader für das Labor/Werk, falls gar nichts mehr geht. (Die komplexe Netzwerkkommunikation ist ausgegliedert in ein Recovery-OS, siehe unten).
+Ein rein passiver Notfall-Zugang (UART / USB-DFU) direkt im Bootloader für das Labor/Werk, falls lokal absolut nichts mehr geht. (Komplexe Flash-Logiken wie XMODEM sind strikt verboten und zwingend in das externe Recovery-OS ausgelagert, siehe unten).
+**WICHTIG (Offline 2FA-Handshake):** Um "Evil-Maid"-Angriffe auf die offene serielle Konsole zu vereiteln, erzwingt Stage 1 einen 104-Byte kryptografischen Auth-Token-Transfer. **Faktor 1 (Besitz):** Der Techniker liest vor Ort einen plattformspezifischen DSLC ("Device Specific Lock Code") per UART aus. **Faktor 2 (Autorisation):** Das HQ (Internet) signiert diesen DSLC zusammen mit einem Timestamp mittels Ed25519 `Root-Key`. Nur bei validem Token öffnet Stage 1 die Recovery-OS Schnittstelle!
 **Schicht 4b: Diagnostics**
 Structured Log, Health, Telemetry.
 
