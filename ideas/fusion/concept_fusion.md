@@ -10,8 +10,8 @@ Die Struktur des Bootloaders löst das klassische Chaos (MCUBoot, WolfBoot) durc
 
 ### A. Der zeitliche Boot-Ablauf (Zwei-Stufen-Architektur)
 
-- **Stage 0 (Immutable Core):** Winzig (~4 KB), fest eingebrannt (ROM / Write-Protected). Führt nur SHA-256 Validierung, Public-Key Check und einen Jump-to-Stage-1 durch. Formell verifizierbar (wie DICE). **Löst das Crypto-Agility-Paradox:** Der Algorithmus in Stage 0 ist fix, aber alles andere inkl. PQC-Algorithmen kann über Stage 1 out-of-band aktualisiert werden. (Zwingend erfordert Stage 0 jedoch eine **Key-Index Rotation Strategy via Hardware-eFuses/OTP**: Statt einen kompromittierten Schlüssel fatal zu verbrennen, weicht der Bootloader bei Widerruf automatisch auf den 2. oder 3. vorprogrammierten Key-Slot aus).
-- **Stage 1 (Updateable Engine):** Das dynamische Herz (Minimalversion ~14 KB, Full-Feature ~24-28 KB). Trägt alle Module: Update-Engine (WAL + Merkle), Crypto-HAL (Pluggable: Micro-Crypto wie `monocypher`, `chacha20`, `compact25519` oder direkte Hardware-Crypto-Wrapper statt des viel zu schweren mbedTLS!), SUIT-Parser, DICE-Identity (Achtung: Update von Stage 1 ändert die CDI-Identität! Dies bedingt einen **Two-Way Handshake**: 1. Vor dem Reboot emittiert Stage 1 ein `INTENT_TO_MIGRATE` (mit altem Token). 2. Nach dem Reboot bestätigt die *neue* Firmware `CURRENT_IDENTITY_CONFIRMED`. Erst dann entwertet die Cloud die alte ID. Das verhindert Lockouts bei Flash-Fails während des Bootens!), Delta-Patcher, Flash-HAL, Diagnostics, Energy-Guard.
+- **Stage 0 (Immutable Core):** Fest eingebrannt (ROM / Write-Protected). Verifiziert Stage 1 via Check und springt dorthin. Da vollwertige Ed25519-Signaturprüfungen (inkl. Big-Int Math) physisch unmöglich in 4 KB RAM/ROM passen, wird die Architektur hier hardware-realistisch. Im TOML wählbar als `stage0.verify_mode`: Entweder `hash-only` (nur SHA-256 Check gegen OTP-Wert, ~2 KB Footprint, limitiert Stage-1 Updates), `ed25519-sw` (~8 KB C-Code, voller Support) oder `ed25519-hw` (~4 KB Instruktionen für Hardware-Krypto-Cores wie CC310). Formell verifizierbar (wie DICE). Löst das Crypto-Agility-Paradox. Um Bricks zu verhindern, nutzt Stage 0 eine **Key-Index Rotation via OTP-eFuses**.
+- **Stage 1 (Updateable Engine):** Das dynamische Herz (Minimalversion ~14 KB, Full-Feature ~24-28 KB). Trägt alle Module: Update-Engine (WAL + Merkle), Crypto-HAL (Pluggable: Micro-Crypto wie `monocypher`, `chacha20`, `compact25519` oder direkte HW-Crypto), SUIT-Parser, DICE-Identity (Achtung: Update ändert CDI! Dies bedingt **Two-Way Handshake**: 1. `INTENT_TO_MIGRATE`. 2. Nach Reboot: `CURRENT_IDENTITY_CONFIRMED`. Das Backend muss ein TTL von max 72h auf Intent-Events setzen, um Hänge-Identitäten zu verhindern!), Delta-Patcher, Flash-HAL, Diagnostics, Energy-Guard.
 
 *Das zu startende OS (Application / RTOS) bestätigt den erfolgreichen Start final via eines Confirm-Flags.* Damit das OS völlig vom Bootloader-Flash entkoppelt bleibt, schreibt das OS z.B. ein flüchtiges Magic-Byte ins `uninitialisierte RTC-RAM` und führt einen **Soft-Reset** aus. Der Bootloader (Stage 1) erwacht und liest als allererste Pflicht das **Hardware-Reset-Reason Register** (z.B. `RCC_CSR`). Lautet der Grund `WATCHDOG_RESET` oder `SOFTWARE_PANIC`, wird ein "erfolgreiches" RTC-RAM Flag gnadenlos ignoriert und gelöscht (Verhindert Todes-Schleifen, falls das OS kurz nach dem Flag-Setzen abstürzt!). Andernfalls sichert er den State in den Flash-WAL, löscht RAM und bootet endgültig.
 
@@ -21,7 +21,8 @@ Ein revolutionärer, strikt entkoppelter Layer-Aufbau:
 
 **Schicht 5: Build & Config Layer (Vendor-Plugins)**
 Host-Ebene: Das `device.toml` beschreibt die Partitionsarchitektur abstrakt. Da Hersteller wie Espressif (ESP32) hochkomplexes Linken erfordern (z.B. Split auf `esp32c6.ld`, `peripherals.ld`, `rom.ld`), nutzt der Manifest-Compiler **herstellerspezifische Build-Plugins** (`vendors/esp/builder.py`). Diese abstrahieren die Vendor-spezifische Komplexität ohne KI/SVD-Analyse zur Laufzeit. Das Tool generiert `flash_layout.ld`, `boot_config.h` und einen weitreichenden **Predictive Preflight-Report** für CMake.
-**Preflight-Automatisierung:** Der Compiler berechnet aus TOML-Werten (`merkle.chunk_size`) den **minimalen Watchdog-Timeout** (`flash_erase_time_per_sector * sectors`). Zudem prüft er die extrem kritische Gleichung: `Peak_SRAM_Needed = merkle.chunk_size + (tree_depth * 32) + WAL_Sector_Buffer_RAM`. Wenn (oft genutzte) 16 KB große Chunks den limitierten `14 KB` RAM-Footprint übersteigen, bricht der Build sofort ab (Hardware-Reality-Check!). `merkle.chunk_size` bleibt damit auf 2-4 KB zwingend gedrosselt.
+**Preflight-Automatisierung:** Der Compiler berechnet (`merkle.chunk_size`) den **Watchdog-Timeout** (`flash_erase_time * sectors`). Er prüft die SRAM-Gleichung: `Peak_SRAM = merkle.chunk_size + (tree_depth * 32) + WAL_Sector_Buffer_RAM`. Wenn oft genutzte 16 KB große Chunks den limitierten `14 KB` RAM-Footprint übersteigen, bricht der Build sofort ab.
+**Multi-Core & Timing-IDS:** Das Device.toml unterstützt ab sofort Arrays (`[images.app]`, `[images.netcore]`), da SoCs (nRF5340) eigenständige Sub-Images für Radio-Cores benötigen. Zudem misst der Core die Mikrosekunden des Boot-Prozesses. Ein Hacker-Backdoor in Stage 1 reißt das Cycle-Timing sichtbar ein. Ein Flotten-Manager detektiert dieses **Timing-Log als passives Intrusion Detection System (IDS)**.
 **SUIT-Regulatorik (CRA):** Das Manifest enthält zwingend einen `sbom_digest` (Trägt den SHA-256 Hash der SPDX/CycloneDX SBOM-Datei). Der Bootloader loggt diesen beim Start in `boot_diag`. Flotten-Manager kennen so die SBOM-Integrität jeder Edge-Node, wodurch EU Cyber Resilience Act (CRA) Compliance 2027 out-of-the-box erfüllt wird.
 
 **Schicht 4a: Serial Rescue (Fallback)**
@@ -35,13 +36,13 @@ Reine Business-Logik: Update-State-Machine, Signatur-Verifikation, Journal, Merk
 **Schicht 2: OS Shim (Optional)**
 Eine ultradünne Schicht, die standardmäßig `bare-metal` (malloc-frei) läuft und exakt vier primitive Dinge abstrahiert: `Mutex` (für Multi-Core), `Timer-Tick`, `malloc/free` (nur falls die Crypto-Lib es fordert) und `assert`. Für Zephyr, FreeRTOS oder NuttX existiert hierfür jeweils ein ~50-Zeilen-Adapter.
 
-**Schicht 1: Platform HAL**
-Statt monolithischer APIs werden exakt **6 C-Structs (Traits)** definiert. *(Zwingende Systemvorgabe: Bevor ein Jump zum OS stattfindet, fordert Toob-Boot als absolute Pflicht ein `hal_deinit()`, um alle genutzten Hardware-Register wie Clocks und UART in den Reset-Default zu zwingen und OS-Driver-Crashes alias "Peripherie-Vergiftung" abzuwehren):*
+**Schicht 1: Platform HAL & Security Baseline**
+Eine ultradünne Treiberschicht. Da jedes Krypto-Konzept sofort zerfällt, wenn Speicherzugriffe nicht abgewehrt werden, ist die Architekturdirektive (**Porting-Pflicht**) zwingend: Die plattform-eigene `startup.c` MUSS JTAG/SWD-Ports sperren, BEVOR Code-Ausführung oder Flash-Aktivität gestartet wird (`security.lock_debug_port = true`). Zudem fordert Toob-Boot als absolute Pflicht ein `hal_deinit()`, um OS-Driver-Crashes ("Peripherie-Vergiftung") abzuwehren. Es werden exakt **6 C-Structs (Traits)** definiert:
 
-- [x] **`flash_hal_t`** (read · write · erase) -> PFLICHT
+- [x] **`flash_hal_t`** (read · write · erase) -> PFLICHT (Achtung OTFDEC: Bei aktiver On-the-Fly Hardware-Verschlüsselung wie auf dem ESP32/STM32 ist diese HAL strikt dafür verantwortlich, Hash-Berechnungen transparent gegen den *Plaintext* laufen zu lassen. Hashes korrelieren niemals auf Ciphertext!).
 - [x] **`confirm_hal_t`** (set_ok · check_ok · clear) -> PFLICHT (Abstrahiert das Confirm-Flag hardwareunabhängig: Ob schnelles RTC-RAM für ESP32, ein wear-leveled Flash-Sector für MCU-Kaltstarts ohne Knopfzelle oder ein Always-On-Backup-Register für STM32, entscheidet die Plattform über diesen Trait!)
 - [x] **`crypto_hal_t`** (hash · verify_ed25519 · rng) -> PFLICHT (Besitzt zudem den *optionalen PQC-Migrationspfad `verify_signature_pqc()`*. Erst wenn das Manifest `pqc_hybrid=true` signalisiert, lädt Stage 1 dynamisch z.B. ML-DSA Module – zukunftssicher ohne permanenten Footprint-Overhead).
-- [x] **`clock_hal_t`** (init · get_tick · delay) -> PFLICHT
+- [x] **`clock_hal_t`** (init · get_tick · delay · get_reset_reason) -> PFLICHT (Abstrahiert das plattform-spezifische Reset-Register wie `RCC_CSR` als generische Enum wie `RESET_WATCHDOG`. Essentiell für den Check, ob ein Confirm-Flag nur eine WDT-Illusion ist!).
 - [x] **`wdt_hal_t`** (kick · set_timeout) -> **PFLICHT für Auto-Rollback** (Ohne Hardware-Watchdog kann ein gebricktes OS nie resetten).
 - [ ] **`console_hal_t`** (putchar · getchar) -> OPTIONAL (Serieller Log)
 - [ ] **`power_hal_t`** (battery_level · sleep) -> OPTIONAL (Energy-Guard: Misst Batterie zwingend **unter Last (Dummy-Load)**, da Flachkurven an LiPos reines Verblenden sind).
@@ -62,6 +63,8 @@ Das SUIT-Manifest liefert asymmetrisch kryptografisch signiert nur den vertrauen
   - _Entry 0:_ `TXN_BEGIN | version=2.1.0 | chunks=64`
   - _Entry 1:_ `CHUNK_WRITE | page=3 | hash=0xa7f3...`
   - _Transfer-Bitmap:_ Eine effiziente Map (z.B. zeigt 60% empfangen an), perfekt für den _Transport (Layer 4a)_, falls das Gerät mitten im LoRa-Download die Verbindung verliert.
+- **WICHTIG (Anti-Bit-Rot-Zeitbombe):** Sobald ein Update 100% OS-bestätigt ist, muss die Zustandsmaschine komplett finalisiert/geleert werden. Der Boot-Status residiert fortan im Feld `Current_Primary_Slot`. Ein Bootloader darf sich nicht auf 6 Jahre alte Logs verlassen, wo kosmische Strahlung einzelne CRC-Fehler zündet und grundlose Rollbacks startet!
+  Da auch ein 2-Byte Pointer durch Strahlung (Bit-Rot) kippt, nutzen wir hier **Triple Modular Redundancy (TMR)** der Luft- und Raumfahrt: Das Flag wird 3x physikalisch auf den Flash geschrieben. Stage 1 liest via Majority-Vote (2 aus 3 gewinnen). 4 Bytes extra löschen den Single-Point-of-Failure der Architektur komplett aus.
 - **Vier-Stufige Stromausfall-Garantien (Brownout-Resilienz):**
   1. **Crash _vor_ WAL-Write:** Der Chunk wurde empfangen, aber der WAL-Intent fehlt. Beim Reboot gilt der Chunk laut WAL als unvollständig. Die Chunk-Bitmap signalisiert "verloren" -> Erneuter Download / Request. Nichts brickt.
   2. **Crash _nach_ WAL, vor Flash-Write (Kritisch):** Das System hat die Absicht ("Intent") notiert: _"Überschreibe Page 3 mit Hash 0xa7..."_. Der Strom fällt aus, Page 3 ist halb korrupt. Beim Reboot erkennt Stage 1 den fehlenden Commit im WAL, liest den Intent und führt den Schritt vollständig erneut aus (**Replay**). Das partielle Image wird geheilt. Nichts brickt.
@@ -76,12 +79,12 @@ Das SUIT-Manifest liefert asymmetrisch kryptografisch signiert nur den vertrauen
 MCUBoot nutzt Swapping und verlangt einen _Scratch-Bereich_, was den Gesamt-Overhead auf astronomische `~2.1x App-Größe` treibt.
 Toob-Boot fährt eine radikale, viel effizientere Strategie:
 
-1. **S0** (4 KB, Stage 0)
-2. **S1** (24 KB, Stage 1)
-3. **App Slot A** (Aktives Image)
+1. **S0** (~4-8 KB, Stage 0 Immutable)
+2. **S1a / S1b** (2x 24 KB, Stage 1 Dual-Bank) -> *Zwingend für Self-Updates:* Code kann sich im eXecute-In-Place (XIP) Flash physikalisch nicht während der exekution selbst überschreiben. Dieser Dual-Slot ist die zwingende Lösung für 100% stromausfallsichere S1-Updates ohne unkalkulierbare RAM-Copy Tricksereien!
+3. **App Slot A** (Aktives Image) / *Ggf. plus Sub-Slots (Network-Core) bei Multi-Image SoCs.* 
 4. **Staging** (Neues Image oder Delta-Patch)
 5. **Swap-Buffer (Max_Sector_Size)** als atomarer In-Place Rettungsanker. (Hardware-Realität: Bei asymmetrischem MCU-Flash, z.B. bei STM32, wird die Puffer-Größe physikalisch durch den größten involvierten App-Sektor diktiert, was teils 128 KB am Ende des Flashs erfordert!).
-6. **Journal** (WAL + Bitmap, ca 2-4 KB)
+6. **Journal** (WAL + Bitmap + 4-Byte Swap-Buffer Erase-Counter, ca ~4 KB). Der Counter mahnt Fleet-Manager, wenn In-Place-Puffer $>80.000$ von $100.000$ typischen Zyklen erreichen.
 
 **Ergebnis:** Keine gigantische Scratch-Partition nötig! Das Schreiben erfolgt nahezu als In-Place-Overwrite. (Da ein In-Place Delta den Sektor zerstören würde, wenn der Strom ausfällt, wird der *Swap-Buffer* genutzt: `Diff im RAM -> Puffer Sektor -> WAL Commit -> Überschreibe App Slot A`).
 _Sonderfaktor Delta-Updates:_ Da Staging winzig sein kann, ermöglicht der Delta-Patcher eine solide, **realistische 3- bis 5-fache Reduktion**. (Das oft beworbene "18x" reißt beim winzigen RAM Stack-Overflows, daher sind wir auf Micro-Dictionary Patcher wie `heatshrink` limitiert). Zwingende Architektur-Bedingung: Dieser Patcher muss **strictly Forward-Only und Non-Overlapping** abarbeiten. Zudem schützt ein obligatorischer **8-Byte Base-Fingerprint (Truncated SHA-256)** der Zielpartition im Patch-Header vor der Katastrophe, dass ein Delta (z.B. v2->v4) fälschlich an ein v3-Image genäht und das Zielgerät irreparabel gebrickt wird. Passt der Base-Fingerprint des Slot A nicht zum Base-Fingerprint des Patch-Headers, verweigert Stage 1 den Patch sofort.
@@ -97,7 +100,7 @@ Ursprünglich schien es, als müsste der Bootloader selbst komplexe Stacks wie W
 - **Im Bootloader (Schicht 4a - Serial Rescue):** Nur nackte, billige Protokolle (UART, USB-DFU) für das Werk/Labor.
 - **Das Recovery-OS Pattern (Zustandsmaschine):** Gerätehersteller, die "over-the-air" Fallbacks brauchen, flashen in einen separaten, kleinen Flash-Slot ein `Recovery-OS` (z.B. minimales Zephyr + WLAN-Stack). Toob-Boot verwaltet einen `Boot_Failure_Counter` im WAL:
   - 1 Crash: Rollback auf App Slot A.
-  - Weitere Crashes (Max-Retries erreicht, Slot A auch gebrickt): Stage 1 bootet zwangsweise in die Recovery-Partition. **WICHTIG (Anti-Lockout):** Dieser Recovery-Boot muss hardwareseitig komplett aus der Anti-Rollback/SVN-Kette entkoppelt sein. Sonst würde die SVN-Prüfung das factory-alte Recovery-OS (v1) rigoros blockieren, falls die abgestürzte App bereits v5 war (= tödlicher Brick).
+  - Weitere Crashes (Max-Retries erreicht, Slot A auch gebrickt): Stage 1 bootet zwangsweise in die Recovery-Partition. **WICHTIG (Anti-Lockout & Anti-Downgrade):** Der Recovery-Boot nutzt einen total isolierten `SVN_recovery` Counter. Flasht ein Angreifer manuell ein verwundbares, fabrikaltes v1-Recovery via lokalem SPI, fängt das Manifest es ab. Zugleich wehrt die abgetrennte App-SVN nicht mehr fälschlicherweise das rechtmäßige Recovery-OS ab.
   - Erfolgreicher Start (Confirm-Flag): Der Boot_Failure_Counter wird strikt auf `0` zurückgesetzt, um zeitlich fernliegende Crashes nicht mit alten Ausfällen zu kumulieren!
   Dieses Recovery-OS bindet via C-Bibliothek den **Toob-Boot OTA-Agenten** ein, kommuniziert über denselben sicheren Kanal (Transfer-Bitmap, WAL) und repariert das Feature-OS.
 
