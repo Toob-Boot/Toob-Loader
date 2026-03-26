@@ -58,11 +58,12 @@ toob-boot/
 │   ├── boot_swap.c                       # In-Place-Overwrite via Swap-Buffer
 │   ├── boot_delta.c                      # Forward-Only Patch-Applier
 │   ├── boot_suit.c                       # ← GENERIERT (zcbor aus CDDL)
-│   ├── boot_rollback.c                   # SVN, Failure-Counter, Recovery
+│   ├── boot_rollback.c                   # SVN, Failure-Counter, Automatisches Recovery
+│   ├── boot_panic.c                      # Schicht 4a: Offline 2FA-Handshake (Serial Rescue)
 │   ├── boot_confirm.c                    # Reset-Reason + confirm_hal
-│   ├── boot_diag.c                       # JSON Boot-Log + Timing-IDS
+│   ├── boot_diag.c                       # JSON Boot-Log + Timing-IDS (.noinit Shared-RAM)
 │   ├── boot_energy.c                     # Battery-Guard (optional)
-│   └── boot_multiimage.c                 # Atomic Update Groups
+│   └── boot_multiimage.c                 # Atomic Groups + Secondary Boot Delegation
 │
 │ # ════════════════════════════════════════════════════════
 │ # STAGE 0 — Eigenes Binary, eigener Linker-Script
@@ -264,6 +265,9 @@ toob-boot/
 │   │       ├── stm32.py
 │   │       ├── nrf.py
 │   │       └── generic.py
+│   │   └── toolchains/                   # Zero-Touch Compiler Auto-Discovery
+│   │       ├── espressif.py              # Sucht nativ nach IDF_PATH / esp-idf
+│   │       └── generic.py                # Sucht nativ nach arm-none-eabi-gcc
 │   │
 │   ├── sign_tool/
 │   │   ├── cli.py                        # $ toob-sign --key ... firmware.bin
@@ -278,7 +282,7 @@ toob-boot/
 │   │   └── renderer.py                   # Rich Terminal-Output
 │   │
 │   ├── templates/                        # Jinja2
-│   │   ├── flash_layout.ld.j2
+│   │   ├── flash_layout.ld.j2            # inkl. .noinit Handoff-Areal
 │   │   ├── boot_config.h.j2
 │   │   ├── stage0_config.h.j2
 │   │   └── platform.resc.j2
@@ -324,6 +328,10 @@ toob-boot/
 │   │   ├── test_suit.c
 │   │   ├── test_multiimage.c
 │   │   └── test_runner.c
+│   │
+│   ├── mocks/                            # Link-Time Mocking (--wrap)
+│   │   ├── mock_efuses.c                 # Dummy Root-Keys im RAM
+│   │   └── mock_crypto_policy.c          # DEV_MODE Signature Bypass
 │   │
 │   ├── fuzz/                             # AFL++/libFuzzer
 │   │   ├── fuzz_suit_parser.c
