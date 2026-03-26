@@ -52,13 +52,13 @@ toob-boot/
 │   │
 │   ├── boot_main.c                       # Entry → State-Machine → Jump
 │   ├── boot_state.c                      # IDLE/STAGING/TESTING/CONFIRMED
-│   ├── boot_journal.c                    # WAL, CRC-16, TMR, ABI-Migration
+│   ├── boot_journal.c                    # WAL, CRC-16, Checkpoints, ABI-Migration
 │   ├── boot_verify.c                     # Hash + Signatur (→ crypto_hal)
 │   ├── boot_merkle.c                     # Chunk-weise Verifikation
 │   ├── boot_swap.c                       # In-Place-Overwrite via Swap-Buffer
-│   ├── boot_delta.c                      # Forward-Only Patch-Applier
-│   ├── boot_suit.c                       # ← GENERIERT (zcbor aus CDDL)
-│   ├── boot_rollback.c                   # SVN, Failure-Counter, Automatisches Recovery
+│   ├── boot_delta.c                      # Forward-Only Patcher + WAL-Decompression-Context
+│   ├── boot_suit.c                       # ← GENERIERT (Anti-Truncation Envelope-Wrap)
+│   ├── boot_rollback.c                   # SVN, Fail-Counter, RECOVERY_RESOLVED Intent
 │   ├── boot_panic.c                      # Schicht 4a: Offline 2FA-Handshake (Serial Rescue)
 │   ├── boot_confirm.c                    # Reset-Reason + confirm_hal
 │   ├── boot_diag.c                       # JSON Boot-Log + Timing-IDS (.noinit Shared-RAM)
@@ -334,10 +334,10 @@ toob-boot/
 │   │   └── mock_crypto_policy.c          # DEV_MODE Signature Bypass
 │   │
 │   ├── fuzz/                             # AFL++/libFuzzer
-│   │   ├── fuzz_suit_parser.c
+│   │   ├── fuzz_suit_parser.c            # Testet Envelope-Wrap Malleability
 │   │   ├── fuzz_delta_decoder.c
 │   │   ├── fuzz_merkle_verify.c
-│   │   ├── fuzz_wal_recovery.c
+│   │   ├── fuzz_wal_recovery.c           # Testet Stateful Context-Recovery
 │   │   ├── corpus/
 │   │   └── Makefile
 │   │
