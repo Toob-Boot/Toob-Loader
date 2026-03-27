@@ -32,45 +32,27 @@ Die Lösung liegt im **Toobfuzzer3**, der auf zwei Ebenen exakt diese Wahrheiten
 
 ---
 
-## 2. Die neue TOML-Integration: `[hardware_profile]`
+## 2. Die neue TOML-Integration: Registry-Logik & `[hardware_profile]`
 
-Um den Toobfuzzer3 strukturell mit der `device.toml` Spec zu verheiraten, ohne beide Repositories physisch mischen zu müssen, führen wir einen neuen Block in der `device.toml` ein.
+Um den Toobfuzzer3 strukturell mit der Manifest-Pipeline zu verheiraten, ohne das `device.toml` unübersichtlich aufzublähen, nutzen wir ein **Zwei-Stufen Registry-System**:
 
-Anstatt `chip = "esp32s3"` zu deklarieren und auf die Python-DB zu hoffen, kann der User (oder ein Skript) die durch Toobfuzzer ermittelten Daten direkt injizieren:
+### A. Core-Lib (Built-in)
+Das sind die offiziellen, von uns getesteten Chips (ESP32, STM32, NRF). Sie liegen fest im Manifest-Compiler (`chip_database.py` oder interne JSONs).
+Wenn der User `chip = "esp32s3"` schreibt, wird immer diese priorisiert.
 
+### B. Custom/Community-Lib (Lokale Registry)
+Wenn ein User einen exotischen Chip hat, legt er (oder der Toobfuzzer!) eine JSON-Datei nach unserem Standard-Format in einen lokalen Projektordner ab, z.B. `.toob/chips/custom_nuvoton.json`.
+
+In der `device.toml` steht dann einfach:
 ```toml
 [device]
-chip = "custom"
-vendor = "nuvoton"
-
-# ── Dieser Block generiert sich aus dem Toobfuzzer-Output! ──
-[hardware_profile]
-arch = "riscv32"
-
-# 1. Empirisch bewiesen durch 'aggregated_scan.json'
-[hardware_profile.flash]
-sector_sizes = ["4KB", "4KB", "4KB", "64KB", "128KB"] # Ermittelt aus Scan-Blocks
-flash_origin = "0x40000000"
-write_align = 4
-
-# 2. KI-extrahiert durch 'chips.json'
-[hardware_profile.memory]
-iram_origin = "0x40800000"
-dram_origin = "0x40800000"
-ram_total = "512KB"
-
-[hardware_profile.startup]
-watchdog_kill_addr = "0x600080B4"
-watchdog_unlock_val = "0x50D83AA1"
-watchdog_disable_val = "0x00000000"
-abi_inits = [
-    "la sp, _stack_top",
-    ".option push",
-    ".option norelax",
-    "la gp, __global_pointer$",
-    ".option pop"
-]
+chip = "custom_nuvoton" # Compiler findet es in der lokalen Registry!
 ```
+
+**Alternativer Fallback:** Für absolute Edge-Cases (oder zum schnellen Ausprobieren ohne extra Datei) kann der User die Wahrheit auch weiterhin hart in die `device.toml` als `[hardware_profile]` Block schreiben. Die Priorität lautet:
+1. `[hardware_profile]` Override in der TOML
+2. Lokale Custom-Registry (`.toob/chips/`)
+3. Core-Lib Registry (Built-in)
 
 ---
 
