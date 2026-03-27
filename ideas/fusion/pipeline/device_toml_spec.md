@@ -20,6 +20,12 @@ chip = "esp32s3"
 total_size = "8MB"       
 auto_skip_holes = true   # Überspringt physikalisch kaputte Blöcke
 
+[manifest]
+# ── PFLICHTFELDER (EU-CRA & SUIT) ──
+vendor_id = "c0812be2-2cb5-455b-80a5-2964e59f48ac" 
+class_id = "0c476db8-2fcc-4589-a279-d2b512e987bf"  
+# sbom_path = "./build/sbom-cyclonedx.json" # (OPTIONAL)
+
 [partitions]
 # ── PFLICHTFELDER ──
 [partitions.stage0]
@@ -28,12 +34,15 @@ size = "4KB"
 [partitions.stage1]
 size = "24KB"            # Compiler baut daraus automatisch Slot A und B
 
-[partitions.app]
-size = "2048KB"          # App muss 64KB-aligned sein (Compiler regelt das)
+# NEU: Beliebig viele Images im Lock-Step (Atomic Update Group)
+[partitions.images.main_os]
+size = "2048KB"          # Haupt-App (Compiler baut Slot A und B)
 entry_point = "auto"
+staging_size = "512KB"   # Eigener Delta-Download Bereich
 
-[partitions.staging]
-size = "512KB"           # Reicht für Delta-Updates
+# [partitions.images.net_core] # Beispiel für asymmetrischen Dual-Core
+# size = "256KB"
+# staging_size = "128KB"
 
 [partitions.nvs]
 # ── OPTIONAL ──
@@ -129,9 +138,9 @@ size = "256B"                  # (PFLICHT wenn enabled) Wieviel RAM für Diagnos
 
 ---
 
-### 🗄️ [partitions] — Flash-Layout
+### 🗄️ [partitions] — Flash-Layout (Multi-Image)
 
-Das ist das Herzstück. Hier sagst du dem Compiler, WIE GROSS deine Slots sein sollen.
+Das ist das architektonische Herzstück. Hier konfigurierst du deine Atomic-Update-Group (Lock-Step Updates) für einen oder beliebig viele Cores.
 
 ```toml
 [partitions]
@@ -142,12 +151,28 @@ size = "8KB"              # (PFLICHT) Größe des unantastbaren Stage 0.
 [partitions.stage1]
 size = "24KB"             # (PFLICHT) Größe *eines* Slots. Der Compiler baut 2x 24KB!
 
-[partitions.app]
-size = "1536KB"           # (PFLICHT) Größe deines Main-OS (z.B. Zephyr).
+# Definition ALLER bootbaren Images (Multi-Core Support!)
+[partitions.images.main_os]
+size = "1536KB"           # (PFLICHT) Größe *eines* Slots. Compiler baut A und B.
 entry_point = "auto"      # (OPTIONAL) "auto" setzt den Offset_Header automatisch.
+staging_size = "512KB"    # (PFLICHT) Eigener Download-Bereich für diesen Core.
 
-[partitions.staging]
-size = "1536KB"           # (PFLICHT) Download-Areal für Updates.
+[partitions.images.net_core]
+size = "256KB"            # (PFLICHT) Zweites Image (z.B. Netzwerk Coprozessor). Beide Images werden als atomare Gruppe geupdatet!
+staging_size = "128KB"    # (PFLICHT) Jeder Core braucht aus Safety-Gründen sein eigenes, strikt isoliertes Download-Areal.
+```
+
+---
+
+### 📜 [manifest] — EU-CRA Regulatorik & SUIT
+
+Sämtliche Device-Bindungen und Verifikationen, die der Payload über den Kopf "gestülpt" werden.
+
+```toml
+[manifest]
+vendor_id = "c0812be2-2cb5-455b-80a5-2964e59f48ac" # (PFLICHT) RFC4122 UUID
+class_id = "0c476db8-2fcc-4589-a279-d2b512e987bf"  # (PFLICHT) Identifiziert die Produktlinie
+sbom_path = "./build/sbom-cyclonedx.json"          # (OPTIONAL) Liefert CRA-Integrität. Der Compiler schiebt den SHA-256 Hash der SBOM als 'diagnostic' in das SUIT-Manifest.
 
 [partitions.recovery]
 enabled = false           # (OPTIONAL) Default: false. Minimales Rettungs-OS.

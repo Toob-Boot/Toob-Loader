@@ -495,7 +495,7 @@ VALIDATION_RULES = [ # ── Flash-Alignment ──
         "severity": "error",
     },
 
-    # ── Sicherheit ──
+    # ── Sicherheit & Regulatorik ──
     {
         "id": "SEC_001",
         "check": "security.debug.jtag_lock != 'none'",
@@ -509,6 +509,13 @@ VALIDATION_RULES = [ # ── Flash-Alignment ──
         "message": "Serial rescue without authentication! "
                    "Enable rescue.auth for production.",
         "severity": "warning",
+    },
+    {
+        "id": "SEC_003",
+        "check": "manifest.sbom_path is None or exists_on_disk(manifest.sbom_path)",
+        "message": "SBOM path '{sbom_path}' declared but file not found. "
+                   "CRA-Compliance demands determinable SBOM hashing.",
+        "severity": "error",
     },
 
     # ── Hardware-Kompatibilität ──
@@ -543,12 +550,12 @@ VALIDATION_RULES = [ # ── Flash-Alignment ──
         "severity": "warning",
     },
 
-    # ── Multi-Core ──
+    # ── Multi-Core & Lock-Step Updates ──
     {
-        "id": "MC_001",
-        "check": "all images in same atomic_group",
-        "message": "Image '{img}' is not in an atomic_group. "
-                   "Multi-core updates MUST be atomic to prevent IPC crashes.",
+        "id": "LAYOUT_004",
+        "check": "each partition.images.* has dedicated staging_size >= delta_requirements",
+        "message": "Image '{img}' lacks sufficient dedicated Staging Area. "
+                   "Found: {staging}B. Needed: >= {size}B for isolated atomic delta updates.",
         "severity": "error",
     },
 

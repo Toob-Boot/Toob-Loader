@@ -12,8 +12,9 @@
 flowchart TD
     subgraph INPUT["① Eingabe"]
         TOML["device.toml\n(User-Deklaration)"]
+        CLI_ARGS["CLI-Flags\n(Targeted OTA Pinning)"]
         CHIPDB["chip_database.py\n(Hardcoded Architektur-Defaults)"]
-        FUZZER["Toobfuzzer3 JSONs\n(Empirische Hardware-Wahrheiten)"]
+        FUZZER["Toobfuzzer3 JSONs\n(<xyz>_chip.json & scan.json)"]
         TEMPLATES["templates/\n(Jinja2)"]
         CDDL["toob_suit.cddl\n(SUIT-Schema)"]
     end
@@ -32,8 +33,8 @@ flowchart TD
         MERKLE["Merkle-Rechner\nBaumtiefe, Sibling-RAM,\nManifest-Overhead"]
     end
 
-    subgraph PHASE3["④ Validierung"]
-        VALIDATE["validator.py\n20+ Preflight-Regeln"]
+    subgraph PHASE3["④ Validierung & Regulatorik"]
+        VALIDATE["validator.py\n20+ Preflight-Regeln\n(inkl. Multi-Core & SBOM-Hashing)"]
         PASS{Bestanden?}
         ERROR["BUILD ABBRUCH\nmit Erklärung +\nLösungsvorschlag"]
     end
@@ -393,10 +394,17 @@ sequenceDiagram
     participant Jinja as Jinja2 Renderer
     participant FS as Dateisystem
 
-    Dev->>CLI: $ toob-manifest compile\nmanifests/dabox_iot_powerbank.toml
+    Dev->>CLI: $ toob-manifest compile\nmanifests/dabox_iot_powerbank.toml\n[--target-dslc MAC]
 
     CLI->>Parser: parse(device.toml)
     Parser-->>CLI: raw_config{}
+    
+    opt SBOM aktiviert (CRA)
+        CLI->>FS: open(sbom_path)
+        FS-->>CLI: sbom_content
+        CLI->>CLI: hash(sbom_content, SHA-256)
+        Note over CLI: Injiziere Hash in Manifest
+    end
 
     CLI->>DB: lookup(chip="esp32s3")
     DB-->>CLI: chip_record{}
