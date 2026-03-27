@@ -18,6 +18,7 @@ chip = "esp32s3"
 [flash]
 # ── OPTIONAL (Überschreibt Chip-Default) ──
 total_size = "8MB"       
+auto_skip_holes = true   # Überspringt physikalisch kaputte Blöcke
 
 [partitions]
 # ── PFLICHTFELDER ──
@@ -99,6 +100,10 @@ arch = "riscv32"
 [flash]
 total_size = "8MB"        # (OPTIONAL) Wenn weggelassen, prüft der Compiler nicht ob das Layout den Chip sprengt.
 type = "external-spi"     # (OPTIONAL) internal | external-spi | external-qspi
+
+auto_skip_holes = true    # (OPTIONAL) Default: false. Wenn true, überspringt der Compiler physikalisch kaputte/gesperrte 
+                          # Flash-Sektoren automatisch, aber NUR wenn diese exakt zwischen zwei Partitionen liegen. 
+                          # Trifft eine Partition eine Lücke intern, bricht der Build sofort ab (Safety First!).
 
 # Die folgenden Felder kommen standardmäßig aus der Registry (chip="...").
 # Wenn sie hier deklariert werden, überschreiben sie das Registry-Wissen:
