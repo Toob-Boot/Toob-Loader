@@ -14,14 +14,15 @@ Das Problem: Es skaliert nicht für Custom-Boards und hunderte Microcontroller-R
 
 Die Lösung liegt im **Toobfuzzer3**, der auf zwei Ebenen exakt diese Wahrheiten ermittelt:
 
-### A. KI-gestütztes Parsing (`chips.json`)
-*   **Fokus:** CPU-Execution & Security-Rings.
+### A. KI-gestütztes Parsing (`<xyz>_chip.json`)
+*   **Fokus:** CPU-Execution, Memory-Mapping, Security-Rings & Toolchain.
 *   **Liefert:**
-    *   SRAM-Ausführungsgrenzen (`iram.origin`, `dram.origin`)
+    *   Exakte SRAM/ROM-Ausführungsgrenzen (`memory.memory_regions` inkl. Permissions)
     *   ABI-Initialisierungs-Assembly (z.B. RISC-V `__global_pointer$` Setup)
     *   Watchdog-Register (Exakte Hex-Adressen und Magic-Unlock-Werte)
     *   Security-Register (JTAG-Locks, Flash-Encryption)
-*   *Warum wertvoll:* Spart Wochen an TRM-Recherche. Liefert die Basis für das `_start.S` Assembly.
+    *   **Toolchain-Requirements** (z.B. Make-Targets, Compiler-Prefixe und `esptool.py` Flash-Scripte)
+*   *Warum wertvoll:* Spart Wochen an Recherche. Liefert nicht nur Code, sondern konfiguriert das CMake-Buildsystem des OS komplett automatisch.
 
 ### B. Empirischer Hardware-Scan (`aggregated_scan.json`)
 *   **Fokus:** Physische Speicherstruktur (Flash & RAM).
@@ -41,7 +42,7 @@ Das sind die offiziellen, von uns getesteten Chips (ESP32, STM32, NRF). Sie lieg
 Wenn der User `chip = "esp32s3"` schreibt, wird immer diese priorisiert.
 
 ### B. Custom/Community-Lib (Lokale Registry)
-Wenn ein User einen exotischen Chip hat, legt er (oder der Toobfuzzer!) eine JSON-Datei nach unserem Standard-Format in einen lokalen Projektordner ab, z.B. `.toob/chips/custom_nuvoton.json`.
+Wenn ein User einen exotischen Chip hat, legt er (oder der Toobfuzzer!) eine JSON-Datei nach unserem Standard-Format in einen lokalen Projektordner ab, z.B. `.toob/chips/custom_nuvoton.json`. **WICHTIG:** Die Quelle dafür ist das detaillierte AI-Run-Ergebnis aus dem Toobfuzzer (z.B. `esp32-c6_chip.json`).
 
 In der `device.toml` steht dann einfach:
 ```toml
@@ -62,7 +63,7 @@ Wie kommt das Wissen vom Fuzzer in den Compiler?
 
 1.  **Fuzzing-Phase (Auf dem Board):**
     Der Entwickler führt `toobfuzzer3` auf einem neuen STM32WBA Board aus.
-    Ergebnis: `chips.json` und `aggregated_scan.json` entstehen.
+    Ergebnis: `<xyz>_chip.json` (AI-Extraction Master) und `aggregated_scan.json` (Hardware-Brute-Force Ping/Pong) entstehen.
 2.  **Aggregation (Converter-Skript):**
     Wir schreiben ein kleines, eigenständiges Tool `toobfuzz2toml` (z.B. in Python oder als Teil des Manifest-Compilers).
     Das Tool liest beide JSONs ein, formatiert die Sektor-Arrays und Startup-Instruktionen und generiert den fertigen `[hardware_profile]` TOML-Block.

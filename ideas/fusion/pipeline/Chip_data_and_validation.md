@@ -1,12 +1,16 @@
 # ╔═══════════════════════════════════════════════════════════════╗
 
-# ║ chip_database.py — Hardware-Wahrheiten als Datenstruktur ║
+# ║ VALIDATION_RULES — Manifest Compiler Preflight Engine ║
 
 # ║ ║
 
-# ║ Jeder Eintrag kodifiziert die PHYSISCHEN Constraints ║
+# ║ Dieses Dokument definiert JEDE einzelne Validierungs-Regel, ║
 
-# ║ eines Chips. Keine Meinungen, nur Datenblatt-Fakten. ║
+# ║ die der Manifest-Compiler prüft, bevor er das OS baut. ║
+
+# ║ Zudem dient das CHIP_DATABASE Dict als Struktur-Referenz ║
+
+# ║ für generierte '<xyz>_chip.json' Registry-Files. ║
 
 # ╚═══════════════════════════════════════════════════════════════╝
 

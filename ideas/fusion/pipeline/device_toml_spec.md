@@ -88,7 +88,7 @@ Er ist nur als schneller "Hack" gedacht, wenn man einen völlig unbekannten Chip
 ```toml
 [hardware_profile]
 arch = "riscv32"
-# Hier würden alle Toobfuzzer-Outputs eingefügt werden.
+# Hier würden alle Toobfuzzer-Outputs (aus der <xyz>_chip.json) eingefügt werden.
 # Wenn dieser Block existiert, ignoriert der Compiler alle Registries.
 ```
 
