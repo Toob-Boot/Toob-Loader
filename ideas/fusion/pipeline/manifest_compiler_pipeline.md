@@ -12,7 +12,8 @@
 flowchart TD
     subgraph INPUT["① Eingabe"]
         TOML["device.toml\n(User-Deklaration)"]
-        CHIPDB["chip_database.py\n(Hardware-Wahrheiten)"]
+        CHIPDB["chip_database.py\n(Hardcoded Architektur-Defaults)"]
+        FUZZER["Toobfuzzer3 JSONs\n(Empirische Hardware-Wahrheiten)"]
         TEMPLATES["templates/\n(Jinja2)"]
         CDDL["toob_suit.cddl\n(SUIT-Schema)"]
     end
@@ -20,7 +21,8 @@ flowchart TD
     subgraph PHASE1["② Laden & Fusionieren"]
         PARSE["TOML Parser\n(tomllib)"]
         LOOKUP["Chip-Lookup\nchip → arch/vendor/toolchain"]
-        MERGE["Default-Merge\nTOML-Werte überschreiben\nChip-Defaults"]
+        INJECT["Fuzzer-Injection\nFür 'custom' Chips lädt der Compiler\ndas Fuzzer-Profil direkt"]
+        MERGE["Default-Merge\nTOML-Werte überschreiben\nChip-Defaults / Fuzzer-Profil"]
     end
 
     subgraph PHASE2["③ Berechnung"]
@@ -31,7 +33,7 @@ flowchart TD
     end
 
     subgraph PHASE3["④ Validierung"]
-        VALIDATE["validator.py\n18 Preflight-Regeln"]
+        VALIDATE["validator.py\n20+ Preflight-Regeln"]
         PASS{Bestanden?}
         ERROR["BUILD ABBRUCH\nmit Erklärung +\nLösungsvorschlag"]
     end
@@ -53,7 +55,9 @@ flowchart TD
     TOML --> PARSE
     PARSE --> LOOKUP
     CHIPDB --> LOOKUP
+    FUZZER --> INJECT
     LOOKUP --> MERGE
+    INJECT --> MERGE
     MERGE --> LAYOUT
     MERGE --> RAMCALC
     MERGE --> TIMING
@@ -281,6 +285,11 @@ flowchart TD
         MC["MC_001\nMulti-Core:\nAtomic Groups\nvollständig?"]
     end
 
+    subgraph CAT8["Fuzzer-Hardware-Wahrheiten"]
+        FZ1["FUZZ_001\nFlash-Bounds\nverletzen Scan?"]
+        FZ2["FUZZ_002\nSVD-Adressen\nfehlen (UART/WDT)?"]
+    end
+
     CAT1 --> COLLECT
     CAT2 --> COLLECT
     CAT3 --> COLLECT
@@ -288,6 +297,7 @@ flowchart TD
     CAT5 --> COLLECT
     CAT6 --> COLLECT
     CAT7 --> COLLECT
+    CAT8 --> COLLECT
 
     COLLECT["Ergebnisse sammeln"]
 

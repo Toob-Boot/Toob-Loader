@@ -548,4 +548,20 @@ VALIDATION_RULES = [ # ── Flash-Alignment ──
         "severity": "error",
     },
 
+    # ── Toobfuzzer-Wahrheiten ──
+    {
+        "id": "FUZZ_001",
+        "check": "partition within scan_bounds",
+        "message": "Partition '{name}' extends into an unknown or broken flash region at {offset}. "
+                   "Toobfuzzer 'aggregated_scan.json' did not confirm this sector as readable/erased.",
+        "severity": "error",
+    },
+    {
+        "id": "FUZZ_002",
+        "check": "svd_addresses_exist",
+        "message": "Hardware addresses [UART=0x{uart}, WDT=0x{wdt}] declared in hardware_profile "
+                   "do not exist in the Toobfuzzer SVD extraction.",
+        "severity": "warning",
+    },
+
 ]
