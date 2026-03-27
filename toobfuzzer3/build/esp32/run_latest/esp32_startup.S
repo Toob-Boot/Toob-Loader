@@ -2,9 +2,8 @@
 .global _start
 _start:
     movi a0, 0
-    wsr.windowstart a0
-    wsr.windowbase a0
-    rsync
+    movi a1, _stack_top
+    wsr.vecbase a0
     movi a1, _stack_top
 
     /* Watchdog Sterilization (AI Extracted) */

@@ -65,11 +65,12 @@ def generate_linker_script(spec, chip_name, out_dir):
     for reg in regions:
         # Expected e.g. {"name": "iram", "permissions": "rwx", "origin": "0x...", "length": "..."}
         name = reg.get("name", "unknown")
-        perms = reg.get("permissions", "rwx")
+        perms = reg.get("permissions", "rwx").replace("-", "").strip()
+        perm_str = f"({perms}) " if perms else ""
         origin = reg.get("origin", "0x0")
         length = reg.get("length", "0x0")
         memory_lines.append(
-            f"    {name} ({perms}) : ORIGIN = {origin}, LENGTH = {length}"
+            f"    {name} {perm_str}: ORIGIN = {origin}, LENGTH = {length}"
         )
 
     memory_block = "\n".join(memory_lines)

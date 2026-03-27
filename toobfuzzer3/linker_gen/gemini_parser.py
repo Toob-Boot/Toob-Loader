@@ -20,6 +20,51 @@ def configure_gemini(api_key):
     gemini_client = genai.Client(api_key=api_key)
 
 
+def validate_blueprint_integrity(chip_root, chip_name):
+    """
+    Acts as a mandatory Validation Layer (TÜV) to catch missing values
+    before triggering bare-metal toolchains that will fail or hang permanently.
+    """
+    def assert_key(d, key, path):
+        if key not in d:
+            raise RuntimeError(f"Validation Error: The LLM failed to extract critical key '{path}.{key}'.")
+
+    # 1. Memory Block
+    assert_key(chip_root, "memory", "")
+    mem = chip_root["memory"]
+    assert_key(mem, "memory_regions", "memory")
+    if not isinstance(mem["memory_regions"], list) or len(mem["memory_regions"]) == 0:
+        raise RuntimeError("Validation Error: 'memory.memory_regions' cannot be an empty array.")
+    assert_key(mem, "executable_segment", "memory")
+    assert_key(mem, "data_segment", "memory")
+
+    # 2. Boot Vectors
+    assert_key(chip_root, "boot_vectors", "")
+    bv = chip_root["boot_vectors"]
+    assert_key(bv, "rom_base", "boot_vectors")
+    
+    # 3. Toolchain
+    assert_key(chip_root, "toolchain_requirements", "")
+    tc = chip_root["toolchain_requirements"]
+    assert_key(tc, "packaging", "toolchain_requirements")
+    if not isinstance(tc["packaging"], list):
+        raise RuntimeError("Validation Error: 'toolchain_requirements.packaging' must be an array.")
+    assert_key(tc, "flashing", "toolchain_requirements")
+    assert_key(tc["flashing"], "write_command", "toolchain_requirements.flashing")
+
+    # 4. Watchdog List (must exist, even if functionally empty '[]' due to no watchdogs)
+    if "watchdog_kill_registers" not in chip_root:
+        raise RuntimeError("Validation Error: 'watchdog_kill_registers' must exist (at least as an empty array '[]').")
+    if not isinstance(chip_root["watchdog_kill_registers"], list):
+        raise RuntimeError("Validation Error: 'watchdog_kill_registers' must be a List/Array.")
+
+    # 5. Core Security / Mechanics
+    assert_key(chip_root, "reset_reason", "")
+    assert_key(chip_root["reset_reason"], "register_address", "reset_reason")
+    assert_key(chip_root, "survival_mechanisms", "")
+    assert_key(chip_root["survival_mechanisms"], "recommended_storage_type", "survival_mechanisms")
+
+
 def generate_chip_definition(chip_name, architecture, context_file_path=None, runs=3):
     """
     Prompts the Gemini model to act as a Datasheet Engineer, extracting precise
@@ -47,12 +92,12 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
        CRITICAL: Do NOT guess. Use the exact origins and lengths defined in the TRM. 
        CRITICAL: If a physical SRAM block described in the TRM contains a hardware Cache or reserved memory (at its base or end address), you MUST mathematically split it! Create a separate region in `memory_regions` for the cache/reserved area (e.g. `{{"name": "hardware_reserved_cache", "permissions": "-"}}`), and calculate the remaining true origin and length for the application-safe regions. Do NOT simply omit the reserved bytes from the JSON; the visualizer depends on seeing the full physical footprint mapped.
     2. Region Roles: Which of the extracted regions is meant to be the primary `executable_segment` (Instruction RAM) for bare-metal code? Which is meant to be the primary `data_segment` (Data RAM) for variables?
-       CRITICAL: If the hardware ROM bootloader actively reserves space at the bottom of the Data RAM for its own stack or variables during the boot process (e.g., Boot ROM data), output that exact reserved byte size as `bootrom_reserved_data_bytes`. If no space is reserved, output 0. Do NOT manually shrink the region lengths array for this, just provide the offset.
-    3. Architecture Vectors: What is the exact architecture-specific section name required for aligning the interrupt vector table?
+    3. Memory Offsets: Does the chip's hardware ROM bootloader persistently reserve the bottom of the data RAM block (e.g., for stack or USB descriptors)? If the manufacturer's TRM implies the ROM will crash if its internal variables are overwritten during the ELF load phase, specify the exact physical reservation size in `bootrom_reserved_data_bytes`. Do the same for `vector_table_offset_bytes` if the vector table must perfectly align.
+    4. Architecture Vectors: What is the exact architecture-specific section name required for aligning the interrupt vector table?
        Does the architecture forcibly reserve a chunk of space at the very start of the Instruction RAM for a Hardware Vector Table or Boot Header? If yes, define its exact size in logically derived bytes (e.g., the size of the required vector space) so the linker can cleanly shift the entry point. Otherwise, set it to 0.
-    4. Alignment & Bin-Headers: What alignment (e.g., 16-byte) does the ROM bootloader require for DMA transfers?
-    5. Startup Assembly: What is the optimal initial stack pointer address? Does it require specific ABI setup?
-    6. Hardware Watchdogs: What are the exact Hex addresses for the Main and RTC Watchdog Unlock & Config registers? What constants disable them?
+    5. Alignment & Bin-Headers: What alignment (e.g., 16-byte) does the ROM bootloader require for DMA transfers?
+    6. Startup Assembly: What is the optimal initial stack pointer address? Does it require specific ABI setup?
+    7. Hardware Watchdogs: What are the exact Hex addresses for the Main and RTC Watchdog Unlock & Config registers? What constants disable them?
        CRITICAL: For the 'address' field, provide the EXACT memory-mapped register address for the Write Protection Unlock Key (e.g., WDTWPROTECT_REG). Do NOT provide the base address of the entire peripheral block. Writing the unlock key to a primary config/base address will corrupt the clock matrix and trigger an immediate SW_CPU_RESET!
 
     OUTPUT ONLY VALID JSON matching this exact structure (no markdown, no explanations):
@@ -115,12 +160,12 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
     Continuing the bare-metal analysis for the {chip_name} ({architecture}), focus STRICTLY on the tooling required to compile for, sign, and flash this specific microcontroller.
     
     Address the following core areas:
-    1. Compiler Prefix: What is the standard GCC prefix used for this architecture (e.g., 'riscv32-esp-elf-', 'arm-none-eabi-', 'xtensa-esp32-elf-')?
-    2. Flashing Tool: What is the standard command-line tool used by the vendor to flash binaries to this chip over serial or SWD? Include its exact write command. 
-       CRITICAL: The deployment `flash_offset` MUST be the hardware ROM Bootloader's expected entry point for the compiled firmware. (e.g., 0x1000 or 0x0 for ESP32 bootloaders, 0x08000000 for STM32). NEVER dictate an application OTA offset like 0x10000 for a bare-metal payload! Use {{binary_path}} as a placeholder for the file.
-    3. Payload Packaging (Sequential Array!): Does the vendor require the raw `.elf` binary to be converted, wrapped in a specific header, provisioned, or signed BEFORE it can be flashed/booted? 
-       CRITICAL: If the physical ROM bootloader requires a proprietary image header (e.g., ESP32 needs 'esptool.py elf2image --flash_mode dio --flash_freq 40m --flash_size 2MB -o {{binary_path}} {{elf_path}}'), you MUST output this as a step with "condition": "ANY". Do NOT assume just objcopy is sufficient if the vendor mandates a specific header.
-       If Secure Boot requires additional steps (e.g., 'espsecure.py sign_data' or MCUboot's 'imgtool sign'), add them sequentially with "condition": "PROFILE_SECURE_BOOT_ONLY". Provide the exact CLI commands replacing variables with {{binary_path}}, {{elf_path}}, and {{private_key_path}}.
+    1. Compiler Prefix: What is the exact standard GNU/LLVM compiler prefix used for this architecture's bare-metal C-development?
+    2. Flashing Tool: What is the standard command-line tool used by the silicon vendor to flash binaries to this chip over physical UART or SWD interfaces? Provide the exact execution command. 
+       CRITICAL: The deployment `flash_offset` MUST be the absolute hardware ROM Bootloader's expected entry point mapped to physical flash. NEVER dictate an application OTA offset for a raw bare-metal payload! Use {{binary_path}} as a placeholder for the compiled image.
+    3. Payload Packaging (Sequential Array!): Does the vendor's boot infrastructure require the raw `.elf` binary to be format-converted, wrapped in a proprietary header, provisioned, or signed BEFORE it can be actively flashed or booted? 
+       CRITICAL: If the architecture demands proprietary wrapping tools instead of just standard GNU objcopy, you MUST output this exact CLI command as a step with "condition": "ANY". This command MUST strictly guarantee the generation of exactly ONE single, unified output binary at {{binary_path}} (no scattered segments or address-based file suffixes).
+       If Secure Boot algorithms dictate mandatory cryptographic wrapping (e.g., vendor signing algorithms or standard imgtool), add them sequentially with "condition": "PROFILE_SECURE_BOOT_ONLY". Provide the exact CLI scripts, binding variables precisely to {{binary_path}}, {{elf_path}}, and {{private_key_path}}.
 
     OUTPUT ONLY VALID JSON matching this exact structure (no markdown):
     {{
@@ -145,6 +190,59 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
                         "tool": "...",
                         "command": "..."
                     }}
+                ]
+            }}
+        }}
+    }}
+    """
+
+    # STAGE 4: Toob-Boot Specific Hardware Physics
+    prompt_stage4 = f"""
+    Continuing the bare-metal analysis for the {chip_name} ({architecture}), focus STRICTLY on the physical controller constraints, survival mechanisms, and asynchronous SoC topologies required for building an atomic A/B Bootloader.
+
+    Address the following core areas:
+    1. Flash Constraints: Does the flash controller mandate specific physical write boundaries (e.g., 32-byte Double-Words vs 4-byte boundaries)? Are there proprietary BootROM restrictions stating executable caching must be strictly aligned to large hardware sectors? Can the internal flash erase Bank B while actively executing code from Bank A (Read-While-Write capability)?
+    2. Reset Reason Extraction: What is the EXACT register address and specific hexadecimal Bit-Masks to detect if the MCU woke up due to a Power-On Reset (POR), a Hardware Watchdog Timer (WDT) Exception, or a Software Request? This is critical for rolling back from fatal firmware loops.
+    3. Hardware Identity & Crypto: Do any of the silicon's hardware modules natively accelerate AES, SHA256, or Ed25519 cryptography? Does the factory burn a unique identity (UID, MAC) into the permanent hardware fuses or Option Bytes, and if so, at what precise address?
+    4. Reboot Survival: Toob-Boot needs to pass a 'Boot Confirm' flag across a reboot. What is the most reliable hardware register/RAM block (RTC SRAM, 32-bit Backup Registers, Retained RAM) that survives a standard Watchdog Reset without requiring a dedicated external battery pin? The `recommended_storage_type` must be strictly one of these Enums: "rtc_ram", "backup_register", "retained_ram", "flash", or "none".
+    5. Multi-Core (Asymmetrical) Layout: If this chip hosts a separate silicon Coprocessor, does it possess an independent flash base address and divergent cache alignment bounds? What is the physical IPC bridge mechanism? The `ipc_mechanism` must be strictly one of these Enums: "shared_ram", "mailbox", or "none".
+
+    OUTPUT ONLY VALID JSON matching this exact structure (no markdown):
+    {{
+        "{chip_name}": {{
+            "flash_capabilities": {{
+                "write_alignment_bytes": 4,
+                "app_alignment_bytes": 65536,
+                "is_dual_bank": false,
+                "bank_size_bytes": 0,
+                "read_while_write_supported": false
+            }},
+            "reset_reason": {{
+                "register_address": "0x...",
+                "wdt_reset_mask": "0x...",
+                "power_on_reset_mask": "0x...",
+                "software_reset_mask": "0x..."
+            }},
+            "crypto_capabilities": {{
+                "hw_sha256": true,
+                "hw_aes": true,
+                "hw_ed25519": false,
+                "hw_rng": true,
+                "pka_present": true
+            }},
+            "survival_mechanisms": {{
+                "recommended_storage_type": "rtc_ram",
+                "needs_vbat_pin": false
+            }},
+            "factory_identity": {{
+                "has_mac_address": true,
+                "uid_address": "0x1FFF7590"
+            }},
+            "multi_core_topology": {{
+                "is_multi_core": false,
+                "ipc_mechanism": "shared_ram",
+                "coprocessors": [
+                    {{"name": "net_core", "flash_base": "0x01000000", "app_alignment_bytes": 2048}}
                 ]
             }}
         }}
@@ -299,7 +397,7 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
         return stage_data, stage_conf
 
     print(
-        f"\n[*] Launching all 3 Stages concurrently (Total {3 * runs} API Threads)..."
+        f"\n[*] Launching all 4 Stages concurrently (Total {4 * runs} API Threads)..."
     )
 
     # Determine the run folder synchronously before launching threads
@@ -309,7 +407,7 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
     while os.path.exists(os.path.join(hist_dir, f"run_{shared_run_num}")):
         shared_run_num += 1
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as stage_executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as stage_executor:
         f1 = stage_executor.submit(
             execute_prompt,
             prompt_stage1,
@@ -331,23 +429,61 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
             shared_run_num,
             runs,
         )
+        f4 = stage_executor.submit(
+            execute_prompt,
+            prompt_stage4,
+            "Stage 4: Topology & Boot Physics",
+            shared_run_num,
+            runs,
+        )
 
         stage1_data, stage1_conf = f1.result()
         stage2_data, stage2_conf = f2.result()
         stage3_data, stage3_conf = f3.result()
+        stage4_data, stage4_conf = f4.result()
 
-    if not stage1_data or not stage2_data or not stage3_data:
+    if not stage1_data or not stage2_data or not stage3_data or not stage4_data:
         raise RuntimeError("One or more pipeline stages failed comprehensively.")
 
     try:
-        # Merge Stage 1, Stage 2, and Stage 3 into a unified blueprint
+        # Merge safely to prevent LLM hallucinations from clobbering other stages
+        chip_root = stage1_data.get(chip_name, {})
+        chip_conf = stage1_conf.get(chip_name, {})
+
         if chip_name in stage2_data:
-            stage1_data[chip_name].update(stage2_data[chip_name])
-            stage1_conf[chip_name].update(stage2_conf[chip_name])
+            s2 = stage2_data[chip_name]
+            for key in ["security_registers", "boot_vectors"]:
+                if key in s2:
+                    chip_root[key] = s2[key]
+            
+            s2_c = stage2_conf[chip_name]
+            for key in ["security_registers", "boot_vectors"]:
+                if key in s2_c:
+                    chip_conf[key] = s2_c[key]
 
         if chip_name in stage3_data:
-            stage1_data[chip_name].update(stage3_data[chip_name])
-            stage1_conf[chip_name].update(stage3_conf[chip_name])
+            s3 = stage3_data[chip_name]
+            if "toolchain_requirements" in s3:
+                chip_root["toolchain_requirements"] = s3["toolchain_requirements"]
+            
+            s3_c = stage3_conf[chip_name]
+            if "toolchain_requirements" in s3_c:
+                chip_conf["toolchain_requirements"] = s3_c["toolchain_requirements"]
+            
+        if chip_name in stage4_data:
+            s4 = stage4_data[chip_name]
+            stage4_keys = ["flash_capabilities", "reset_reason", "crypto_capabilities", "survival_mechanisms", "factory_identity", "multi_core_topology"]
+            for key in stage4_keys:
+                if key in s4:
+                    chip_root[key] = s4[key]
+            
+            s4_c = stage4_conf[chip_name]
+            for key in stage4_keys:
+                if key in s4_c:
+                    chip_conf[key] = s4_c[key]
+
+        # ENFORCE SCHEMA VALIDITY BEFORE PASSING IT TO THE COMPILER
+        validate_blueprint_integrity(chip_root, chip_name)
 
         return stage1_data, stage1_conf
     except Exception as e:

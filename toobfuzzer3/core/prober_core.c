@@ -177,7 +177,7 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
 
       uint32_t sector_size =
           binary_search_sector_boundary(addr, sample_range, sampling_interval);
-      fz_log(" [size: 0x");
+      fz_log(" [size: ");
       fz_log_hex(sector_size);
       fz_log("]\n");
 
@@ -281,7 +281,7 @@ void fuzzer_scan(fz_profile_t profile) {
 
   if (profile.caps.raw_flash_rw && profile.id == PROFILE_BARE_METAL_OPEN) {
     fz_log("       Status: OPEN. Executing unrestricted sector mapping.\n");
-    full_sector_scan(profile.caps.rom_base, profile.caps.rom_base + 0x400000);
+    full_sector_scan(profile.caps.user_flash_base, profile.caps.user_flash_base + 0x400000);
 
     // Call Keelhaul Fuzzing only on completely open systems
     keelhaul_mmio_fuzz();

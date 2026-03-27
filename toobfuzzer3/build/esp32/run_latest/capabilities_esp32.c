@@ -9,17 +9,25 @@ static inline uint32_t raw_read32(uint32_t addr) {
     return *((volatile uint32_t*)addr);
 }
 
+/* Dynamic Memory Shielding Arrays */
+const fz_protect_region_t chip_protected_regions[] = {
+    { 0x400C2000, 0x40000 }, // 256KB firmware self-preservation
+    { 0x40070000, 0x10000 }, // hardware_reserved_cache
+    { 0x3FFAE000, 0x2000 }, // bootrom_reserved_dram
+};
+const uint32_t chip_protected_count = sizeof(chip_protected_regions) / sizeof(chip_protected_regions[0]);
+
 fz_caps_t chip_get_capabilities(void) {
     fz_caps_t caps = {0};
     
     // AI-Discovered Boot Vectors & Memory Mappings
-    caps.user_flash_base = 0x40142000;
+    caps.user_flash_base = 0x400C2000; // Natively aligns Fuzzer API with Physical Deployment Bounds
     caps.rom_base = 0x40000000;
     
     caps.iram_base = 0x40080000;
     caps.iram_length = 0x20000;
-    caps.dram_base = 0x3FFAE000;
-    caps.dram_length = 0x52000;
+    caps.dram_base = 0x3FFB0000;
+    caps.dram_length = 0x30000;
     
     // Physical Readout Protection (STM32, etc.)
     caps.rdp_level = 0;

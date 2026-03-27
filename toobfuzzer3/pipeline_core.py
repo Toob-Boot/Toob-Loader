@@ -235,8 +235,11 @@ class ToobfuzzerPipeline:
         ld_path, s_path = generate_toolchain_files(
             self.ctx.chip, latest_blueprint, build_dir
         )
+        # Define the Fuzzer's expected worst-case footprint for Self-Preservation & Ping-Pong Relocation
+        self.ctx.fuzzer_footprint_bytes = 0x40000  # 256KB is safer for smaller MCUs
+
         c_path = generate_chip_capabilities(
-            spec_json[self.ctx.chip], self.ctx.chip, build_dir
+            spec_json[self.ctx.chip], self.ctx.chip, build_dir, footprint_size=self.ctx.fuzzer_footprint_bytes
         )
         print(
             f"[*] Emitted: {os.path.basename(ld_path)} | {os.path.basename(s_path)} | {os.path.basename(c_path)}"
@@ -559,7 +562,7 @@ class ToobfuzzerPipeline:
                             old_base_str = bp_data[self.ctx.chip]["boot_vectors"][
                                 "user_app_base"
                             ]
-                            new_base = int(old_base_str, 16) + 0x80000
+                            new_base = int(old_base_str, 16) + self.ctx.fuzzer_footprint_bytes
                             bp_data[self.ctx.chip]["boot_vectors"][
                                 "user_app_base"
                             ] = f"0x{new_base:08X}"

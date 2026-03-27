@@ -14,6 +14,9 @@
 
 # ╚═══════════════════════════════════════════════════════════════╝
 
+# [DEPRECATED: Pending LLM Extraction Upgrade]
+# The static CHIPS database below is being formally phased out in favor of the Toobfuzzer3 Gemini output schema.
+
 CHIPS = {
 
     # ── Espressif (Xtensa) ───────────────────────────────

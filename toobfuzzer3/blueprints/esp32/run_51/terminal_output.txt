@@ -1,0 +1,499 @@
+[GENERATE] Blueprint 51 successfully persisted to C:\Users\Robin\Desktop\Toob-Loader\toobfuzzer3\blueprints\esp32\run_51\blueprint.json
+[GENERATE] Confidence matrix saved to C:\Users\Robin\Desktop\Toob-Loader\toobfuzzer3\blueprints\esp32\run_51\confidence.json
+
+[PING PHASE] [COMPILE] Invoking Universal Toolchain Runner for esp32...
+[PING PHASE] [*] Compiling JSON Blueprint to Toolchain Syntax & C Profiles...
+[*] Generated Linker Script: C:\Users\Robin\Desktop\Toob-Loader\toobfuzzer3\build\esp32\run_latest\esp32.ld
+[*] Generated Startup Assembly: C:\Users\Robin\Desktop\Toob-Loader\toobfuzzer3\build\esp32\run_latest\esp32_startup.S
+[*] Generated Capabilities Shim: C:\Users\Robin\Desktop\Toob-Loader\toobfuzzer3\build\esp32\run_latest\capabilities_esp32.c
+[*] Emitted: esp32.ld | esp32_startup.S | capabilities_esp32.c
+[*] ToolLocator loaded 81 custom paths (max_depth=6) from user_tools.json
+
+=== STAGE 1: COMPILATION ===
+[*] Preparing execution for: xtensa-esp32-elf-gcc
+[*] Tool 'xtensa-esp32-elf-gcc' not in PATH. Searching common vendor directories (Max Depth: 6)...
+    [+] Found at: C:\Espressif\tools\xtensa-esp-elf\esp-14.2.0_20251107\xtensa-esp-elf\bin\xtensa-esp32-elf-gcc.exe
+    [>] Executing: "C:\Espressif\tools\xtensa-esp-elf\esp-14.2.0_20251107\xtensa-esp-elf\bin\xtensa-esp32-elf-gcc.exe" -O2 -nostdlib -ffreestanding -mlongcalls -T build/esp32/run_latest/esp32.ld -I core/ -I arch/ -I build/esp32/run_latest/ -I build/esp32/run_latest/ -o build/esp32/run_latest/toobfuzzer.bin.elf core\detect_profile.c core\fuzzer_main.c core\logger.c core\prober_core.c  hal\hal_uart.c mocks\hal_mock.c build/esp32/run_latest/capabilities_esp32.c build/esp32/run_latest/esp32_startup.S build/esp32/run_latest/keelhaul_svd.c
+    [+] Success.
+
+=== STAGE 2: PACKAGING (Profile: BARE_METAL_OPEN) ===
+[*] Preparing execution for: esptool.py
+[*] Tool 'esptool.py' not in PATH. Searching common vendor directories (Max Depth: 6)...
+    [+] Found at: C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe
+    [>] Executing: "C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe" --chip esp32 elf2image --flash_mode dio --flash_freq 40m --flash_size 4MB -o build/esp32/run_latest/toobfuzzer.bin build/esp32/run_latest/toobfuzzer.bin.elf
+    [+] Success.
+
+[PING PHASE] [PAUSE] The Pipeline has prepared the Fuzzer binary.
+[?] Please connect your device and put it into BOOTLOADER mode (if required).
+[PING PHASE] [DEPLOY] Flashing binary to esp32 BootROM at offset 0x1000 using Data-Driven tools...
+
+=== STAGE 3: DEPLOYMENT ===
+[*] Preparing execution for: esptool.py
+[*] Tool 'esptool.py' not in PATH. Searching common vendor directories (Max Depth: 6)...
+    [+] Found at: C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe
+    [>] Executing: "C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\esptool.exe" --chip esp32 write_flash 0x1000 build/esp32/run_latest/toobfuzzer.bin
+    [+] Success.
+
+[PING PHASE] [LISTEN] Opening COM Port. Awaiting Fuzzer Oracle...
+[LISTEN] Attaching to COM3 at 115200 baud...
+[LISTEN] UART Connection Established.
+[PING PHASE] [esp32] ets Jul 29 2019 12:21:46
+[PING PHASE] [esp32] rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+[PING PHASE] [esp32] configsip: 0, SPIWP:0xee
+[PING PHASE] [esp32] clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+[PING PHASE] [esp32] mode:DIO, clock div:2
+[PING PHASE] [esp32] load:0x3ffb2000,len:3448
+[PING PHASE] [esp32] load:0x40080400,len:1788
+[PING PHASE] [esp32] entry 0x40080514
+[PING PHASE] [esp32] BOOT_OK [id:0x00000001] BARE_METAL_OPEN
+[PING PHASE] [esp32] ---OSV_ORACLE_READY---
+[PING PHASE] [LISTEN] Dispatching SCAN (0xA1) to esp32...
+[PING PHASE] [LISTEN] Awaiting Oracle Stream...
+[esp32] [CORE] Executing Memory Scan under Profile: BARE_METAL_OPEN
+[esp32] [CORE] Commencing RAM Boundary Discovery...
+[esp32] [->] Binary Search | Base: 0x0x40080000
+[esp32] [<-] Discovered Valid Boundary: 0x0x400A0000
+[esp32] [->] Binary Search | Base: 0x0x3FFB0000
+[esp32] [<-] Discovered Valid Boundary: 0x0x3FFE0000
+[esp32] [CORE] Commencing Flash Capability Probing...
+[esp32] Status: OPEN. Executing unrestricted sector mapping.
+[esp32] [->] Aggressive SPI Write/Erase Fuzzing Initiated...
+[esp32] [Flash Fuzz] Discovered Bounds: 0x400C2000 -> 0x404C2000
+[esp32] S0x400C2000 [size: 0x0x00040000]
+[esp32] [Flash Fuzz] 6% Complete (0x40102000 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102000 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102004 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102004 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102008 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102008 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010200c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010200c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102010 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102010 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102014 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102014 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102018 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102018 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010201c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010201c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102020 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102020 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102024 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102024 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102028 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102028 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010202c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010202c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102030 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102030 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102034 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102034 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102038 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102038 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010203c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010203c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102040 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102040 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102044 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102044 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102048 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102048 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010204c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010204c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102050 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102050 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102054 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102054 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102058 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102058 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010205c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010205c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102060 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102060 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102064 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102064 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102068 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102068 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010206c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010206c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102070 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102070 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102074 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102074 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102078 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102078 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010207c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010207c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102080 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102080 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102084 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102084 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102088 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102088 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010208c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010208c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102090 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102090 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102094 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102094 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102098 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102098 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010209c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010209c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020a0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020a0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020a4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020a4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020a8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020a8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020ac / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020ac / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020b0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020b0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020b4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020b4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020b8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020b8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020bc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020bc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020c0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020c0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020c4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020c4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020c8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020c8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020cc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020cc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020d0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020d0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020d4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020d4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020d8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020d8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020dc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020dc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020e0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020e0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020e4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020e4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020e8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020e8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020ec / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020ec / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020f0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020f0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020f4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020f4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020f8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020f8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401020fc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401020fc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102100 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102100 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102104 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102104 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102108 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102108 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010210c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010210c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102110 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102110 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102114 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102114 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102118 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102118 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010211c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010211c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102120 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102120 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102124 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102124 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102128 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102128 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010212c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010212c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102130 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102130 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102134 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102134 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102138 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102138 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010213c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010213c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102140 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102140 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102144 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102144 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102148 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102148 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010214c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010214c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102150 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102150 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102154 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102154 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102158 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102158 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010215c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010215c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102160 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102160 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102164 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102164 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102168 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102168 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010216c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010216c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102170 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102170 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102174 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102174 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102178 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102178 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010217c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010217c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102180 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102180 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102184 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102184 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102188 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102188 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010218c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010218c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102190 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102190 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102194 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102194 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102198 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102198 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010219c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010219c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021a0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021a0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021a4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021a4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021a8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021a8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021ac / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021ac / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021b0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021b0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021b4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021b4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021b8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021b8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021bc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021bc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021c0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021c0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021c4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021c4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021c8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021c8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021cc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021cc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021d0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021d0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021d4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021d4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021d8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021d8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021dc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021dc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021e0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021e0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021e4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021e4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021e8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021e8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021ec / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021ec / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021f0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021f0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021f4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021f4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021f8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021f8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401021fc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401021fc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102200 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102200 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102204 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102204 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102208 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102208 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010220c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010220c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102210 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102210 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102214 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102214 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102218 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102218 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010221c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010221c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102220 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102220 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102224 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102224 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102228 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102228 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010222c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010222c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102230 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102230 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102234 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102234 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102238 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102238 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010223c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010223c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102240 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102240 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102244 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102244 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102248 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102248 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010224c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010224c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102250 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102250 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102254 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102254 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102258 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102258 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010225c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010225c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102260 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102260 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102264 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102264 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102268 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102268 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010226c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010226c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102270 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102270 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102274 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102274 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102278 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102278 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010227c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010227c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102280 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102280 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102284 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102284 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102288 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102288 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010228c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010228c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102290 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102290 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102294 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102294 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102298 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102298 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010229c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010229c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022a0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022a0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022a4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022a4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022a8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022a8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022ac / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022ac / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022b0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022b0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022b4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022b4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022b8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022b8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022bc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022bc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022c0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022c0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022c4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022c4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022c8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022c8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022cc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022cc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022d0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022d0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022d4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022d4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022d8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022d8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022dc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022dc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022e0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022e0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022e4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022e4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022e8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022e8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022ec / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022ec / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022f0 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022f0 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022f4 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022f4 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022f8 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022f8 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x401022fc / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x401022fc / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102300 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102300 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102304 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102304 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102308 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102308 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010230c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010230c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102310 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102310 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102314 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102314 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102318 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102318 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010231c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010231c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102320 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102320 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102324 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102324 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102328 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102328 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010232c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010232c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102330 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102330 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102334 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102334 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102338 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102338 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010233c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010233c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102340 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102340 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102344 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102344 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102348 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102348 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010234c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010234c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102350 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102350 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102354 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102354 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102358 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102358 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x4010235c / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x4010235c / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102360 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102360 / 0x404c2000) - erased
+[esp32] [Flash Fuzz] 6% Complete (0x40102364 / 0x404c2000) - erased [measured_size: 0x4]
+[esp32] [Flash Fuzz] 6% Complete (0x40102364 / 0x404c2000) - erased
+[*] Restarting application...

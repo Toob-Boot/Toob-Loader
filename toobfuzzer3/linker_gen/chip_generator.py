@@ -2,7 +2,7 @@ import json
 import os
 
 
-def generate_chip_capabilities(spec, chip_name, out_dir):
+def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x40000):
     os.makedirs(out_dir, exist_ok=True)
 
     c_path = os.path.join(out_dir, f"capabilities_{chip_name}.c")
@@ -16,7 +16,7 @@ def generate_chip_capabilities(spec, chip_name, out_dir):
     def parse_hex_addr(val):
         if not val or str(val).lower() == "null" or val == "None":
             return "0x0"
-        return val
+        return str(val).replace("_", "")
 
     # Extract Flash Encryption
     fe = sec.get("flash_encryption", {})
@@ -73,14 +73,8 @@ def generate_chip_capabilities(spec, chip_name, out_dir):
     user_app = parse_hex_addr(boot.get("user_app_base", "0x1000"))
     rom_base = parse_hex_addr(boot.get("rom_base", "0x0"))
 
-    # Calculate True Physical Shield Base (ROM Base + Flash Flashing Offset)
-    flash_config = toolchain.get("flashing", {})
-    flash_offset = parse_hex_addr(flash_config.get("flash_offset", "0x0"))
-
-    try:
-        flash_shield_base = hex(int(rom_base, 16) + int(flash_offset, 16))
-    except:
-        flash_shield_base = user_app  # Fallback to XIP map if parsing fails
+    # True Physical Shield Base is the MMIO mapped flash address where the user app lives
+    flash_shield_base = user_app
 
     # Construct the protected arrays string
     protected_blocks_c = "\n".join(protected_blocks)
@@ -128,7 +122,7 @@ static inline uint32_t raw_read32(uint32_t addr) {{
 
 /* Dynamic Memory Shielding Arrays */
 const fz_protect_region_t chip_protected_regions[] = {{
-    {{ {flash_shield_base}, 0x80000 }}, // 512KB firmware self-preservation
+    {{ {flash_shield_base}, {hex(footprint_size)} }}, // {footprint_size//1024}KB firmware self-preservation
 {protected_blocks_c}
 }};
 const uint32_t chip_protected_count = sizeof(chip_protected_regions) / sizeof(chip_protected_regions[0]);

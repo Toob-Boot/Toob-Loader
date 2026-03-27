@@ -1,26 +1,29 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Safe read prototype (implemented in assembly to catch hardware faults)
-// Default mock implementation always succeeds
+// Real physical read prototype. On advanced architectures, this should be an assembly stub to catch LoadProhibited faults.
 bool probe_read32(uint32_t addr, uint32_t *out_val) {
   if (out_val) {
-    *out_val = 0xDEADBEEF;
+    if (addr == 0x0) return false; // Null pointer protection
+    // Perform a genuine, raw hardware memory dereference
+    *out_val = *((volatile uint32_t *)addr);
   }
   return true;
 }
 
 // Abstract Flash Sector erase prototype
+// Returns false because we do not have a bare-metal SPI Flash driver for this chip yet!
 bool chip_flash_erase(uint32_t sector_addr) {
   (void)sector_addr;
-  return true;
+  return false; // Tells the algorithm that the hardware rejected/ignored the erase command
 }
 
 // Abstract Flash Sector write prototype
+// Returns false because we cannot write bare-metal flash without a vendor SPI sequence
 bool chip_flash_write32(uint32_t addr, uint32_t val) {
   (void)addr;
   (void)val;
-  return true;
+  return false;
 }
 
 // Bare-metal GCC compiler intrinsic satisfaction
