@@ -162,6 +162,7 @@ fz_caps_t chip_get_capabilities(void) {{
     print(f"[*] Generated Capabilities Shim: {c_path}")
     return c_path
 
+
 def generate_flash_hal(spec, chip_name, out_dir):
     """
     Consumes the declarative JSON instruction array for pure bare-metal Flash operations.
@@ -170,31 +171,31 @@ def generate_flash_hal(spec, chip_name, out_dir):
     """
     flash_ctrl = spec.get("flash_controller", {})
     if not flash_ctrl or not flash_ctrl.get("erase_sector_sequence"):
-        return None # No flash generation requested/possible yet
-    
+        return None  # No flash generation requested/possible yet
+
     c_path = os.path.join(out_dir, f"hal_flash_{chip_name}.c")
-    
+
     def compile_sequence(seq):
         lines = []
         for step in seq:
             t = step.get("type")
             offset = step.get("offset", "0x0")
             desc = step.get("desc", "")
-            
+
             if desc:
                 lines.append(f"    // {desc}")
-                
+
             base_addr = flash_ctrl.get("base_address", "0x0")
             ptr_macro = f"(*((volatile uint32_t*)({base_addr} + {offset})))"
-            
+
             if t == "rom_function_call":
                 fn = step.get("function_name", "UNKNOWN_ROM_FN")
                 args = step.get("args_csv", "")
                 addr = step.get("rom_address", "0x0")
-                
+
                 # In Physical Architecture, BootROM Erase/Write sequences take 'sector_addr' blindly.
                 # No mmu_offset calculation needed. The Hardware obeys physics.
-                
+
                 proto = step.get("prototype", "void(*)()")
                 if addr != "0x0" and addr:
                     lines.append(f"    // ROM ABI: {fn} @ {addr}")
@@ -217,35 +218,40 @@ def generate_flash_hal(spec, chip_name, out_dir):
                 elif "value_source" in step:
                     val = step.get("value_source")
                     lines.append(f"    {ptr_macro} = {val};")
-            
+
         return "\n".join(lines)
-        
+
     unlock_c = compile_sequence(flash_ctrl.get("unlock_sequence", []))
     erase_c = compile_sequence(flash_ctrl.get("erase_sector_sequence", []))
     write_c = compile_sequence(flash_ctrl.get("write_word_sequence", []))
-    
+
     # -------------------------------------------------------------------------
     # DYNAMIC FLASH READ GENERATION (Hardware-Agnostic Physical Read Bypass)
     # -------------------------------------------------------------------------
     read_seq = flash_ctrl.get("read_word_sequence", [])
     if not read_seq and chip_name == "esp32":
-        # WINNING THE BET: Omnipotent Hardware MMU Seizure
         # BootROM SPIRead deadlocks the ESP32 when the cache is enabled. Virtual Pointers are shifted by esptool.
-        # Solution: At runtime, we seize direct control of the MMU table for Virtual Page 12 (0x400C0000).
-        # We manually map the requested Physical Page to it, flush the cache via BootROM, and read safely!
-        read_c = """    // ESP32 Fallback: Agnostic Physical Read via MMU Seizure
+        read_c = """    // ESP32 Fallback: Ultra-Lightweight Physical Read via MMU Seizure (No ROM Calls)
+    #define ESP32_UART0_STATUS_REG 0x3FF4001C
+    #define FZ_FLUSH() while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);
+    
+    fz_log("[R1]\\n"); FZ_FLUSH();
     uint32_t p_page = sector_addr / 0x10000;
     uint32_t p_offset = sector_addr % 0x10000;
     
-    // ESP32 PRO_MMU_TABLE: Virtual 0x400C0000 is entry 12 (offset 48)
-    *((volatile uint32_t*)(0x3FF10000 + (12 * 4))) = p_page;
+    fz_log("[R2]\\n"); FZ_FLUSH();
+    // ESP32 PRO_MMU_TABLE: Virtual 0x400D0000 (irom0) is entry 13 (offset 52)
+    // Wir schreiben die Tabelle ON-THE-FLY um, WÄHREND der Cache noch läuft!
+    // Dadurch umgehen wir die todbringende Cache_Read_Enable ROM-Funktion, die wegen gelöschtem BSS abstürzt.
+    *((volatile uint32_t*)(0x3FF10000 + (13 * 4))) = p_page;
     
-    // BootROM Cache Disable/Enable (Flushes Stale Lines from previous pages or SPIWrites)
-    ((void(*)(int))0x40004270)(0); // Cache_Read_Disable(0)
-    ((void(*)(int))0x400041B0)(0); // Cache_Read_Enable(0)
+    fz_log("[R3]\\n"); FZ_FLUSH();
     
-    // Safe Virtual Read of the dynamically pinned Physical Silicon Atom
-    if (out_val) *out_val = *((volatile uint32_t*)(0x400C0000 + p_offset));
+    // Safe Virtual Read of the dynamically pinned Physical Silicon Atom in IROM0
+    if (out_val) *out_val = *((volatile uint32_t*)(0x400D0000 + p_offset));
+    
+    fz_log("[R4]\\n"); FZ_FLUSH();
+    return true;
 """
     elif read_seq:
         read_c = compile_sequence(read_seq)
@@ -261,24 +267,42 @@ def generate_flash_hal(spec, chip_name, out_dir):
 #include <stdbool.h>
 
 extern void fz_log(const char *msg);
+#define ESP32_UART0_STATUS_REG 0x3FF4001C
+#define FZ_FLUSH() while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);
 
 void hal_print_status(void) {{
     fz_log("[HAL] Active Backend: True Physical Hardware MMU Driver\\n");
 }}
 
 bool chip_flash_erase(uint32_t sector_addr) {{
+    fz_log("[E1]\\n"); FZ_FLUSH();
+    // Hardware Arbiter Arbitration: Disconnect Cache (SPI0)
+    ((void(*)(int))0x40004270)(0); // Cache_Read_Disable(0)
+    
     // Unlock Sequence
 {unlock_c}
     // Erase Sequence
 {erase_c}
+    
+    // Yield Arbiter back to Cache (SPI0)
+    ((void(*)(int))0x400041B0)(0); // Cache_Read_Enable(0)
+    fz_log("[E2]\\n"); FZ_FLUSH();
     return true;
 }}
 
 bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {{
+    fz_log("[W1]\\n"); FZ_FLUSH();
+    // Hardware Arbiter Arbitration: Disconnect Cache (SPI0)
+    ((void(*)(int))0x40004270)(0); // Cache_Read_Disable(0)
+
     // Unlock Sequence
 {unlock_c}
     // Write Sequence
 {write_c}
+
+    // Yield Arbiter back to Cache (SPI0)
+    ((void(*)(int))0x400041B0)(0); // Cache_Read_Enable(0)
+    fz_log("[W2]\\n"); FZ_FLUSH();
     return true;
 }}
 
@@ -290,6 +314,6 @@ bool chip_flash_read32(uint32_t sector_addr, uint32_t *out_val) {{
 """
     with open(c_path, "w") as f:
         f.write(c_content)
-        
+
     print(f"[*] Generated True Physical SPI Flash HAL: {c_path}")
     return c_path
