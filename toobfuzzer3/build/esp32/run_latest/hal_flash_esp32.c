@@ -16,7 +16,12 @@ bool chip_flash_erase(uint32_t sector_addr) {
     // Erase Sequence
     // Erase Flash Sector via BootROM
     // ROM ABI: SPIEraseSector @ 0x40062CCC
-    ((void(*)())0x40062CCC)((sector_addr - 0x40000000) / 4096);
+    ((void(*)())0x40062CCC)((sector_addr - 0x400C1000) / 4096);
+    // Universal D-Cache Eviction Hook
+    volatile uint32_t dummy = 0;
+    for (uint32_t i = 0x400C2000; i < 0x400CA000; i += 32) { dummy ^= *((volatile uint32_t*)i); }
+    (void)dummy;
+
     return true;
 }
 
@@ -28,14 +33,18 @@ bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {
     // Write Sequence
     // Write Flash Word via BootROM
     // ROM ABI: SPIWrite @ 0x40062D50
-    ((void(*)())0x40062D50)((sector_addr - 0x40000000), &data_word, 4);
+    ((void(*)())0x40062D50)((sector_addr - 0x400C1000), &data_word, 4);
+    // Universal D-Cache Eviction Hook
+    volatile uint32_t dummy = 0;
+    for (uint32_t i = 0x400C2000; i < 0x400CA000; i += 32) { dummy ^= *((volatile uint32_t*)i); }
+    (void)dummy;
+
     return true;
 }
 
 bool chip_flash_read32(uint32_t sector_addr, uint32_t *out_val) {
     // Read Sequence
-    // Direct SPIRead via BootROM (MMU/Cache Bypass)
-    // ROM ABI: SPIRead @ 0x40062B18
-    ((void(*)(uint32_t, uint32_t*, int32_t))0x40062B18)((sector_addr - 0x40000000), out_val, 4);
+    if (out_val) *out_val = *((volatile uint32_t*)sector_addr);
+
     return true;
 }
