@@ -529,6 +529,15 @@ class ToobfuzzerPipeline:
                                     f"[{self.ctx.chip}] [Flash Fuzz] {pct}% Complete ({hex(addr)} / {hex(self.ctx.scan_limit)}) - {status}"
                                 )
                                 printed_clean = True
+                                
+                                # Auto-save intermediate progress JSON
+                                try:
+                                    bp_dir = os.path.join(os.path.dirname(__file__), "blueprints", self.ctx.chip, f"run_{self.ctx.run_id}")
+                                    os.makedirs(bp_dir, exist_ok=True)
+                                    with open(os.path.join(bp_dir, "aggregated_scan.json"), "w") as f:
+                                        json.dump(self.ctx.memory_map, f, indent=4)
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
 
