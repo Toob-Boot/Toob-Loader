@@ -2,7 +2,7 @@ import json
 import os
 
 
-def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x40000):
+def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x80000):
     os.makedirs(out_dir, exist_ok=True)
 
     c_path = os.path.join(out_dir, f"capabilities_{chip_name}.c")
@@ -10,7 +10,6 @@ def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x40000)
     sec = spec.get("security_registers", {})
     boot = spec.get("boot_vectors", {})
     mem = spec.get("memory", {})
-    toolchain = spec.get("toolchain_requirements", {})
 
     # Helper to safely parse AI output which might contain "null" strings
     def parse_hex_addr(val):
@@ -69,12 +68,13 @@ def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x40000)
     rdp_addr = parse_hex_addr(rdp.get("register_addr"))
     rdp_mask = parse_hex_addr(rdp.get("bit_mask"))
 
-    # Boot Vectors & Physical Flash Mapping
-    user_app = parse_hex_addr(boot.get("user_app_base", "0x1000"))
-    rom_base = parse_hex_addr(boot.get("rom_base", "0x0"))
+    # True Physical Architecture:
+    # Fuzzer ALWAYS discovers Physical Memory starting at Sector 0.
+    # Shielding the first 512KB (0x0 to 0x80000) natively protects the Bootloader AND Payload.
+    # This automatically triggers the Ping-Pong displacement oracle without shifting JSON values.
+    flash_shield_base = "0x0"
 
-    # True Physical Shield Base is the MMIO mapped flash address where the user app lives
-    flash_shield_base = user_app
+    rom_base = parse_hex_addr(boot.get("rom_base", "0x0"))
 
     # Construct the protected arrays string
     protected_blocks_c = "\n".join(protected_blocks)
@@ -85,7 +85,6 @@ def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x40000)
         rdp_block = f"""
     if ({rdp_addr} != 0x0) {{
         uint32_t val = raw_read32({rdp_addr});
-        // We assume RDP level is indicated directly by the masked value
         caps.rdp_level = (val & {rdp_mask}); 
     }}"""
 
@@ -105,11 +104,11 @@ def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x40000)
     if ({jtag_addr} != 0x0) {{
         uint32_t val = raw_read32({jtag_addr});
         if ((val & {jtag_mask}) != 0) {{
-            caps.debug_access = !{jtag_active}; // If 'jtag_disabled' is true, debug_access is false
+            caps.debug_access = !{jtag_active};
         }}
     }}"""
 
-    c_content = f"""/* Auto-Generated Bare-Metal Capabilities for {chip_name} */
+    c_content = f"""/* Auto-Generated Bare-Metal Capabilities for {chip_name} (Physical Architecture) */
 #include "fz_types.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -122,7 +121,7 @@ static inline uint32_t raw_read32(uint32_t addr) {{
 
 /* Dynamic Memory Shielding Arrays */
 const fz_protect_region_t chip_protected_regions[] = {{
-    {{ {flash_shield_base}, {hex(footprint_size)} }}, // {footprint_size//1024}KB firmware self-preservation
+    {{ {flash_shield_base}, {hex(footprint_size)} }}, // {footprint_size//1024}KB True Physical Bare-Metal Shield
 {protected_blocks_c}
 }};
 const uint32_t chip_protected_count = sizeof(chip_protected_regions) / sizeof(chip_protected_regions[0]);
@@ -131,7 +130,7 @@ fz_caps_t chip_get_capabilities(void) {{
     fz_caps_t caps = {{0}};
     
     // AI-Discovered Boot Vectors & Memory Mappings
-    caps.user_flash_base = {flash_shield_base}; // Natively aligns Fuzzer API with Physical Deployment Bounds
+    caps.user_flash_base = 0x0; // Natively aligns Fuzzer API 1:1 with True Physical Silicon
     caps.rom_base = {rom_base};
     
     caps.iram_base = {iram_base};
@@ -139,17 +138,16 @@ fz_caps_t chip_get_capabilities(void) {{
     caps.dram_base = {dram_base};
     caps.dram_length = {dram_length};
     
-    // Physical Readout Protection (STM32, etc.)
+    // Physical Readout Protection
     caps.rdp_level = 0;
     {rdp_block}
     
-    // Flash Encryption (ESP32, nRF, etc.)
+    // Flash Encryption
     {fe_block}
     
     // JTAG / Debug Interface Locks
-    caps.debug_access = true; // Default open
+    caps.debug_access = true;
     {jtag_block}
-
     
     // Baseline Capability Inference
     caps.raw_flash_rw = (caps.rdp_level == 0 && !caps.flash_encrypted);
@@ -167,7 +165,8 @@ fz_caps_t chip_get_capabilities(void) {{
 def generate_flash_hal(spec, chip_name, out_dir):
     """
     Consumes the declarative JSON instruction array for pure bare-metal Flash operations.
-    Translates literal JSON operations into raw C pointer manipulations.
+    Translates literal JSON operations into raw C pointer manipulations natively linked
+    to pure physical boundaries.
     """
     flash_ctrl = spec.get("flash_controller", {})
     if not flash_ctrl or not flash_ctrl.get("erase_sector_sequence"):
@@ -185,10 +184,6 @@ def generate_flash_hal(spec, chip_name, out_dir):
             if desc:
                 lines.append(f"    // {desc}")
                 
-            base_str = "0x0" # To be replaced with macro or hardcode if needed
-            # We assume offset includes the base address or we construct it.
-            # In our prompt, the LLM sets the base in flash_controller and offset is relative, 
-            # OR LLM provides absolute offsets. Let's do BASE + OFFSET safely.
             base_addr = flash_ctrl.get("base_address", "0x0")
             ptr_macro = f"(*((volatile uint32_t*)({base_addr} + {offset})))"
             
@@ -197,31 +192,8 @@ def generate_flash_hal(spec, chip_name, out_dir):
                 args = step.get("args_csv", "")
                 addr = step.get("rom_address", "0x0")
                 
-                # Architecture-Agnostic Memory Map Translation
-                if step.get("requires_physical_offset") and "sector_addr" in args:
-                    # Dynamically extract the flash origin mapped by Stage 1 Memory Rules
-                    mmu_offset = "0x0"
-                    
-                    # AI-Extracted 100% Agnostic Math: Virtual Origin - Physical Flash Offset = MMU Offset
-                    try:
-                        v_base_str = spec.get("boot_vectors", {}).get("user_app_base", "0x0").replace("_", "")
-                        p_base_str = spec.get("toolchain_requirements", {}).get("flashing", {}).get("flash_offset", "0x0").replace("_", "")
-                        
-                        v_base = int(v_base_str, 16)
-                        p_base = int(p_base_str, 16)
-                        
-                        if v_base > 0 and p_base > 0:
-                            mmu_offset = f"0x{(v_base - p_base):X}"
-                        else:
-                            for r in spec.get("memory", {}).get("memory_regions", []):
-                                if "rx" in r.get("permissions", "") and "w" not in r.get("permissions", ""):
-                                    mmu_offset = r.get("origin", "0x0")
-                                    break
-                    except Exception:
-                        pass
-                    
-                    # C-Compiler translates Memory-Mapped Address -> Physical 0-Indexed Offset
-                    args = args.replace("sector_addr", f"(sector_addr - {mmu_offset})")
+                # In Physical Architecture, BootROM Erase/Write sequences take 'sector_addr' blindly.
+                # No mmu_offset calculation needed. The Hardware obeys physics.
                 
                 proto = step.get("prototype", "void(*)()")
                 if addr != "0x0" and addr:
@@ -253,7 +225,7 @@ def generate_flash_hal(spec, chip_name, out_dir):
     write_c = compile_sequence(flash_ctrl.get("write_word_sequence", []))
     
     # -------------------------------------------------------------------------
-    # DYNAMIC FLASH READ GENERATION (Hardware-Agnostic MMU/Cache Bypass)
+    # DYNAMIC FLASH READ GENERATION (Hardware-Agnostic Physical Read Bypass)
     # -------------------------------------------------------------------------
     read_seq = flash_ctrl.get("read_word_sequence", [])
     if not read_seq and chip_name == "esp32":
@@ -278,43 +250,27 @@ def generate_flash_hal(spec, chip_name, out_dir):
     elif read_seq:
         read_c = compile_sequence(read_seq)
     else:
-        # 100% agnostic fallback for architectures without external MMUs (Cortex-M)
-        # For ESP32, this strictly relies on the virtual MMU mapping and D-Cache evictions below.
+        # Fallback for Cortex-M (No external SPI cache controller deadlocks)
         read_c = "    if (out_val) *out_val = *((volatile uint32_t*)sector_addr);\n"
 
-    # Universal D-Cache Eviction for Sticky XiP Architectures
-    # By reading 32KB of our own execution memory, we reliably force the hardware Cache Controller
-    # to evict deeply cached external flash buffers without utilizing vendor-specific Cache flush registers.
-    dcache_flush = ""
-    try:
-        v_base_str = spec.get("boot_vectors", {}).get("user_app_base", "0x0").replace("_", "")
-        v_base = int(v_base_str, 16)
-        if v_base > 0:
-            flush_end = v_base + (32 * 1024)
-            dcache_flush = f"""
-    // Universal D-Cache Eviction Hook
-    volatile uint32_t dummy = 0;
-    for (uint32_t i = 0x{v_base:X}; i < 0x{flush_end:X}; i += 32) {{ dummy ^= *((volatile uint32_t*)i); }}
-    (void)dummy;
-"""
-    except Exception:
-        pass
+    # Universal D-Cache Eviction Hook was removed since we use physical BootROM Cache Control
+    # or rely strictly on internal RAM boundaries for non-XiP architectures.
 
-    c_content = f"""/* Auto-Generated Bare-Metal Flash HAL for {chip_name} */
+    c_content = f"""/* Auto-Generated Bare-Metal Flash HAL for {chip_name} (Physical Architecture) */
 #include <stdint.h>
 #include <stdbool.h>
 
-extern void fz_log(const char *msg); // Ensure logger availability
+extern void fz_log(const char *msg);
 
 void hal_print_status(void) {{
-    fz_log("[HAL] Active Backend: Real Hardware SPI Driver (AI Generated)\\n");
+    fz_log("[HAL] Active Backend: True Physical Hardware MMU Driver\\n");
 }}
 
 bool chip_flash_erase(uint32_t sector_addr) {{
     // Unlock Sequence
 {unlock_c}
     // Erase Sequence
-{erase_c}{dcache_flush}
+{erase_c}
     return true;
 }}
 
@@ -322,7 +278,7 @@ bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {{
     // Unlock Sequence
 {unlock_c}
     // Write Sequence
-{write_c}{dcache_flush}
+{write_c}
     return true;
 }}
 
@@ -335,5 +291,5 @@ bool chip_flash_read32(uint32_t sector_addr, uint32_t *out_val) {{
     with open(c_path, "w") as f:
         f.write(c_content)
         
-    print(f"[*] Generated True SPI Flash HAL: {c_path}")
+    print(f"[*] Generated True Physical SPI Flash HAL: {c_path}")
     return c_path

@@ -483,3 +483,103 @@
 [esp32] [~] SUCCESS: Sector Erased!
 [esp32] [Flash Fuzz] 6% Complete (0x40102068 / 0x404c2000) - erased [measured_size: 0x1000]
 [esp32] [Flash Fuzz] 6% Complete (0x40102068 / 0x404c2000) - erased
+[esp32] [~] Initiating Binary Boundary Search...
+[esp32] [~] Entering Phase 1 (Coarse Search)...
+[esp32] [~] Phase 1 Complete. Coarse Boundary: 0x0x40102068
+[esp32] [~] Entering Phase 2 (Fine Search)...
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020E8
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020A4
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102084
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102074
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x4010206C
+[esp32] [~] Phase 2 Complete. Exact Boundary: 0x0x40102068
+[esp32] [size: 0x00000004]
+[esp32] [~] Skipping Markers (Sector Unerased or Shielded)
+[esp32] [~] Firing BootROM Sector Erase...
+[esp32] [~] SUCCESS: Sector Erased!
+[esp32] [Flash Fuzz] 6% Complete (0x4010206c / 0x404c2000) - erased [measured_size: 0x1000]
+[esp32] [Flash Fuzz] 6% Complete (0x4010206c / 0x404c2000) - erased
+[esp32] [~] Initiating Binary Boundary Search...
+[esp32] [~] Entering Phase 1 (Coarse Search)...
+[esp32] [~] Phase 1 Complete. Coarse Boundary: 0x0x4010206C
+[esp32] [~] Entering Phase 2 (Fine Search)...
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020EC
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020A8
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102088
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102078
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102070
+[esp32] [~] Phase 2 Complete. Exact Boundary: 0x0x4010206C
+[esp32] [size: 0x00000004]
+[esp32] [~] Skipping Markers (Sector Unerased or Shielded)
+[esp32] [~] Firing BootROM Sector Erase...
+[esp32] [~] SUCCESS: Sector Erased!
+[esp32] [Flash Fuzz] 6% Complete (0x40102070 / 0x404c2000) - erased [measured_size: 0x1000]
+[esp32] [Flash Fuzz] 6% Complete (0x40102070 / 0x404c2000) - erased
+[esp32] [~] Initiating Binary Boundary Search...
+[esp32] [~] Entering Phase 1 (Coarse Search)...
+[esp32] [~] Phase 1 Complete. Coarse Boundary: 0x0x40102070
+[esp32] [~] Entering Phase 2 (Fine Search)...
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020F0
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020AC
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x4010208C
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x4010207C
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102074
+[esp32] [~] Phase 2 Complete. Exact Boundary: 0x0x40102070
+[esp32] [size: 0x00000004]
+[esp32] [~] Skipping Markers (Sector Unerased or Shielded)
+[esp32] [~] Firing BootROM Sector Erase...
+[esp32] [~] SUCCESS: Sector Erased!
+[esp32] [Flash Fuzz] 6% Complete (0x40102074 / 0x404c2000) - erased [measured_size: 0x1000]
+[esp32] [Flash Fuzz] 6% Complete (0x40102074 / 0x404c2000) - erased
+[esp32] [~] Initiating Binary Boundary Search...
+[esp32] [~] Entering Phase 1 (Coarse Search)...
+[esp32] [~] Phase 1 Complete. Coarse Boundary: 0x0x40102074
+[esp32] [~] Entering Phase 2 (Fine Search)...
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020F4
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020B0
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102090
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102080
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102078
+[esp32] [~] Phase 2 Complete. Exact Boundary: 0x0x40102074
+[esp32] [size: 0x00000004]
+[esp32] [~] Skipping Markers (Sector Unerased or Shielded)
+[esp32] [~] Firing BootROM Sector Erase...
+[esp32] [~] SUCCESS: Sector Erased!
+[esp32] [Flash Fuzz] 6% Complete (0x40102078 / 0x404c2000) - erased [measured_size: 0x1000]
+[esp32] [Flash Fuzz] 6% Complete (0x40102078 / 0x404c2000) - erased
+[esp32] [~] Initiating Binary Boundary Search...
+[esp32] [~] Entering Phase 1 (Coarse Search)...
+[esp32] [~] Phase 1 Complete. Coarse Boundary: 0x0x40102078
+[esp32] [~] Entering Phase 2 (Fine Search)...
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020F8
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020B4
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102094
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102084
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x4010207C
+[esp32] [~] Phase 2 Complete. Exact Boundary: 0x0x40102078
+[esp32] [size: 0x00000004]
+[esp32] [~] Skipping Markers (Sector Unerased or Shielded)
+[esp32] [~] Firing BootROM Sector Erase...
+[esp32] [~] SUCCESS: Sector Erased!
+[esp32] [Flash Fuzz] 6% Complete (0x4010207c / 0x404c2000) - erased [measured_size: 0x1000]
+[esp32] [Flash Fuzz] 6% Complete (0x4010207c / 0x404c2000) - erased
+[esp32] [~] Initiating Binary Boundary Search...
+[esp32] [~] Entering Phase 1 (Coarse Search)...
+[esp32] [~] Phase 1 Complete. Coarse Boundary: 0x0x4010207C
+[esp32] [~] Entering Phase 2 (Fine Search)...
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020FC
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x401020B8
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102098
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102088
+[esp32] [~] Phase 2: Testing fine_mid = 0x0x40102080
+[esp32] [~] Phase 2 Complete. Exact Boundary: 0x0x4010207C
+[esp32] [size: 0x00000004]
+[esp32] [~] Skipping Markers (Sector Unerased or Shielded)
+[esp32] [~] Firing BootROM Sector Erase...
+[esp32] [~] SUCCESS: Sector Erased!
+[esp32] [Flash Fuzz] 6% Complete (0x40102080 / 0x404c2000) - erased [measured_size: 0x1000]
+[esp32] [Flash Fuzz] 6% Complete (0x40102080 / 0x404c2000) - erased
+[esp32] [~] Initiating Binary Boundary Search...
+[esp32] [~] Entering Phase 1 (Coarse Search)...
+[esp32] [~] Phase 1 Complete. Coarse Boundary: 0x0x40102080
+[*] Restarting application...

@@ -131,6 +131,15 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
   fz_log("\n");
 
   uint32_t ret = (exact_boundary - start_addr) + 4;
+  
+  // Hardware-Fault Tolerance: If the Virtual-to-Physical translation is hopelessly desynced 
+  // (e.g. by Bootloader ELF segment packing shifting the MMU footprint), the search will collapse
+  // to start_addr. We must enforce a minimum traversal bound of 4KB to prevent infinite 4-byte 
+  // deadlock loops across the entire multi-megabyte Flash architecture.
+  if (ret <= 4) {
+      ret = 4096; // Standard Flash Sector size fallback
+  }
+  
   return ret;
 }
 

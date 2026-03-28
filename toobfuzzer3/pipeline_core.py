@@ -230,12 +230,12 @@ class ToobfuzzerPipeline:
             spec_json = json.load(f)
 
         import linker_gen.ld_generator
-        import linker_gen.chip_generator
+        import linker_gen.chip_generator2
         importlib.reload(linker_gen.ld_generator)
-        importlib.reload(linker_gen.chip_generator)
+        importlib.reload(linker_gen.chip_generator2)
         
         from linker_gen.ld_generator import generate_toolchain_files
-        from linker_gen.chip_generator import generate_chip_capabilities, generate_flash_hal
+        from linker_gen.chip_generator2 import generate_chip_capabilities, generate_flash_hal
 
         print(
             f"[{phase_name}] [*] Compiling JSON Blueprint to Toolchain Syntax & C Profiles..."
