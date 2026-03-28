@@ -200,14 +200,28 @@ def generate_flash_hal(spec, chip_name, out_dir):
                 # Architecture-Agnostic Memory Map Translation
                 if step.get("requires_physical_offset") and "sector_addr" in args:
                     # Dynamically extract the flash origin mapped by Stage 1 Memory Rules
-                    flash_origin = "0x0"
-                    for r in spec.get("memory", {}).get("memory_regions", []):
-                        if "rx" in r.get("permissions", "") and "w" not in r.get("permissions", ""):
-                            flash_origin = r.get("origin", "0x0")
-                            break
+                    mmu_offset = "0x0"
+                    
+                    # AI-Extracted 100% Agnostic Math: Virtual Origin - Physical Flash Offset = MMU Offset
+                    try:
+                        v_base_str = spec.get("boot_vectors", {}).get("user_app_base", "0x0").replace("_", "")
+                        p_base_str = spec.get("toolchain_requirements", {}).get("flashing", {}).get("flash_offset", "0x0").replace("_", "")
+                        
+                        v_base = int(v_base_str, 16)
+                        p_base = int(p_base_str, 16)
+                        
+                        if v_base > 0 and p_base > 0:
+                            mmu_offset = f"0x{(v_base - p_base):X}"
+                        else:
+                            for r in spec.get("memory", {}).get("memory_regions", []):
+                                if "rx" in r.get("permissions", "") and "w" not in r.get("permissions", ""):
+                                    mmu_offset = r.get("origin", "0x0")
+                                    break
+                    except Exception:
+                        pass
                     
                     # C-Compiler translates Memory-Mapped Address -> Physical 0-Indexed Offset
-                    args = args.replace("sector_addr", f"(sector_addr - {flash_origin})")
+                    args = args.replace("sector_addr", f"(sector_addr - {mmu_offset})")
                 
                 proto = step.get("prototype", "void(*)()")
                 if addr != "0x0" and addr:
@@ -242,23 +256,30 @@ def generate_flash_hal(spec, chip_name, out_dir):
     # DYNAMIC FLASH READ GENERATION (Hardware-Agnostic MMU/Cache Bypass)
     # -------------------------------------------------------------------------
     read_seq = flash_ctrl.get("read_word_sequence", [])
-    if not read_seq and chip_name == "esp32":
-        # Temporary declarative inject for ESP32 MMU bypass until LLM Prompt 5 is updated
-        read_seq = [{
-            "args_csv": "(sector_addr - 0x40000000), out_val, 4",
-            "desc": "Direct SPIRead via BootROM (MMU/Cache Bypass)",
-            "function_name": "SPIRead",
-            "requires_physical_offset": False, # We handled the -0x40000000 manually above
-            "rom_address": "0x40062B18",
-            "type": "rom_function_call",
-            "prototype": "void(*)(uint32_t, uint32_t*, int32_t)"
-        }]
-    
     if read_seq:
         read_c = compile_sequence(read_seq)
     else:
         # 100% agnostic fallback for architectures without external MMUs (Cortex-M)
+        # For ESP32, this strictly relies on the virtual MMU mapping and D-Cache evictions below.
         read_c = "    if (out_val) *out_val = *((volatile uint32_t*)sector_addr);\n"
+
+    # Universal D-Cache Eviction for Sticky XiP Architectures
+    # By reading 32KB of our own execution memory, we reliably force the hardware Cache Controller
+    # to evict deeply cached external flash buffers without utilizing vendor-specific Cache flush registers.
+    dcache_flush = ""
+    try:
+        v_base_str = spec.get("boot_vectors", {}).get("user_app_base", "0x0").replace("_", "")
+        v_base = int(v_base_str, 16)
+        if v_base > 0:
+            flush_end = v_base + (32 * 1024)
+            dcache_flush = f"""
+    // Universal D-Cache Eviction Hook
+    volatile uint32_t dummy = 0;
+    for (uint32_t i = 0x{v_base:X}; i < 0x{flush_end:X}; i += 32) {{ dummy ^= *((volatile uint32_t*)i); }}
+    (void)dummy;
+"""
+    except Exception:
+        pass
 
     c_content = f"""/* Auto-Generated Bare-Metal Flash HAL for {chip_name} */
 #include <stdint.h>
@@ -274,7 +295,7 @@ bool chip_flash_erase(uint32_t sector_addr) {{
     // Unlock Sequence
 {unlock_c}
     // Erase Sequence
-{erase_c}
+{erase_c}{dcache_flush}
     return true;
 }}
 
@@ -282,7 +303,7 @@ bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {{
     // Unlock Sequence
 {unlock_c}
     // Write Sequence
-{write_c}
+{write_c}{dcache_flush}
     return true;
 }}
 
