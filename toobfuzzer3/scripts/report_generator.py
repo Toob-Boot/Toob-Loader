@@ -32,7 +32,21 @@ def generate_soc_report(run_dir):
     flash_regions = []
 
     if scan_data:
-        sorted_addrs = sorted(scan_data.keys())
+        sorted_addrs = sorted([k for k in scan_data.keys() if k != "metadata"], key=lambda x: int(x))
+        
+        if sorted_addrs:
+            first_addr = int(sorted_addrs[0])
+            if first_addr > 0:
+                flash_regions.append({
+                    "start": 0,
+                    "end": first_addr - 1,
+                    "size_kb": first_addr / 1024.0,
+                    "status": "SKIPPED",
+                    "fallback": False,
+                    "type": "Hardware / Bootloader Reserved",
+                    "verification": "AI-Extracted / Datasheet Inferred"
+                })
+
         for idx in range(len(sorted_addrs)):
             addr = sorted_addrs[idx]
             stats = scan_data[addr]
@@ -47,7 +61,7 @@ def generate_soc_report(run_dir):
 
             # Adopt true dynamically discovered sector size if available, fallback to 4KB
             sector_bytes = stats.get("size", 4096)
-            end_addr = start_addr + sector_bytes
+            end_addr = stats.get("end_addr", start_addr + sector_bytes)
 
             size_kb = sector_bytes / 1024.0
 
@@ -59,8 +73,19 @@ def generate_soc_report(run_dir):
                     "status": effective,
                     "fallback": stats.get("fallback", False),
                     "type": "Flash Sector",
+                    "verification": stats.get("verification_method", "BootROM / SVD Inferred")
                 }
             )
+
+    # Extract RAM Fuzzed Boundaries for matching
+    verified_ram = set()
+    if "metadata" in scan_data and "ram_fuzzed_boundaries" in scan_data["metadata"]:
+        for rb in scan_data["metadata"]["ram_fuzzed_boundaries"]:
+            try:
+                verified_ram.add(int(rb, 16))
+            except:
+                pass
+
 
     # Load Blueprint SRAM
     ram_regions = []
@@ -82,12 +107,17 @@ def generate_soc_report(run_dir):
                     or ("reserved" in region.get("name", "").lower())
                 )
 
+                # Check verification
+                is_verified = (origin in verified_ram)
+
                 # Exclude massive invalid blocks
                 if length > 0 and length < 10 * 1024 * 1024:
                     if origin in unique_ram:
                         unique_ram[origin]["name"] += f" / {region['name'].upper()}"
                         if is_skipped:
                             unique_ram[origin]["status"] = "SKIPPED"
+                        if is_verified:
+                            unique_ram[origin]["verification"] = "Physical Fuzzing (Bare-Metal)"
                     else:
                         unique_ram[origin] = {
                             "name": region["name"].upper(),
@@ -95,6 +125,7 @@ def generate_soc_report(run_dir):
                             "size_kb": length / 1024.0,
                             "type": "RAM/CACHE" if is_skipped else "RAM",
                             "status": "SKIPPED" if is_skipped else "OK",
+                            "verification": "Physical Fuzzing (Bare-Metal)" if is_verified else "SVD / Blueprint Inferred"
                         }
 
     ram_regions = list(unique_ram.values())
@@ -571,12 +602,20 @@ def generate_soc_report(run_dir):
                 const endAddr = item.end || (item.start + (item.size_kb * 1024));
                 const rangeTextLong = `${{formatHex(item.start)}} -> ${{formatHex(endAddr-1)}}`;
 
+                let badgeHtml = "";
+                if (item.verification && item.verification.includes("Physical Fuzzing")) {{
+                    badgeHtml = `<div style="background-color: #9b59b6; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.65rem; font-weight: bold; margin-top: 4px; display: inline-block; box-shadow: 0 2px 4px rgba(155,89,182,0.3);">Verified (Physical Fuzzing) \u2713</div>`;
+                }} else if (item.verification) {{
+                    badgeHtml = `<div style="background-color: #e67e22; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.65rem; font-weight: bold; margin-top: 4px; display: inline-block; box-shadow: 0 2px 4px rgba(230,126,34,0.3);">AI-Extracted (Unverified) \u26A0</div>`;
+                }}
+
                 block.innerHTML = `
                     <div class="block-top">
                         <div class="block-label">${{title}}</div>
                         <div class="block-sub">${{item.size_kb.toFixed(1)}} KB</div>
                     </div>
                     <div class="block-hex">${{rangeTextLong}}</div>
+                    ${{badgeHtml}}
                 `;
                 
                 stack.appendChild(block);

@@ -453,6 +453,20 @@ class ToobfuzzerPipeline:
                                     printed_clean = True
                         except Exception:
                             pass
+                    
+                    if "Discovered Valid Boundary:" in line:
+                        if not hasattr(self.ctx, "ram_fuzzed_boundaries"):
+                            self.ctx.ram_fuzzed_boundaries = []
+                        parts = line.split("Boundary: 0x")
+                        if len(parts) > 1:
+                            addr_str = parts[1].strip()
+                            try:
+                                if addr_str.startswith("0x"):
+                                    addr_str = addr_str[2:]
+                                self.ctx.ram_fuzzed_boundaries.append("0x" + addr_str)
+                            except Exception:
+                                pass
+
                     elif line.startswith(("+0x", "-0x", "S0x")):
                         try:
                             # Handle dynamic " [size: 0x...]" suffixes
@@ -503,8 +517,13 @@ class ToobfuzzerPipeline:
 
                                 if addr not in self.ctx.memory_map:
                                     self.ctx.memory_map[addr] = {
+                                        "start_addr": addr,
+                                        "end_addr": addr + sector_size - 1,
+                                        "start_hex": hex(addr),
+                                        "end_hex": hex(addr + sector_size - 1),
                                         "size": sector_size,
                                         "fallback": is_fallback,
+                                        "verification_method": "Physical Fuzzing (Bare-Metal)",
                                     }
                                 else:
                                     # Always keep the most accurate (largest known) sector measurement
@@ -512,10 +531,13 @@ class ToobfuzzerPipeline:
                                         "size", 4096
                                     ):
                                         self.ctx.memory_map[addr]["size"] = sector_size
+                                        self.ctx.memory_map[addr]["end_addr"] = addr + sector_size - 1
+                                        self.ctx.memory_map[addr]["end_hex"] = hex(addr + sector_size - 1)
 
                                     # If any run succeeded (no fallback), mark it as such
                                     if not is_fallback:
                                         self.ctx.memory_map[addr]["fallback"] = False
+                                        self.ctx.memory_map[addr]["verification_method"] = "Physical Fuzzing (Bare-Metal)"
 
                                 run_key = (
                                     "run_pong"
@@ -534,8 +556,15 @@ class ToobfuzzerPipeline:
                                 try:
                                     bp_dir = os.path.join(os.path.dirname(__file__), "blueprints", self.ctx.chip, f"run_{self.ctx.run_id}")
                                     os.makedirs(bp_dir, exist_ok=True)
+                                    
+                                    export_map = dict(self.ctx.memory_map)
+                                    if hasattr(self.ctx, "ram_fuzzed_boundaries"):
+                                        export_map["metadata"] = {
+                                            "ram_fuzzed_boundaries": self.ctx.ram_fuzzed_boundaries
+                                        }
+                                        
                                     with open(os.path.join(bp_dir, "aggregated_scan.json"), "w") as f:
-                                        json.dump(self.ctx.memory_map, f, indent=4)
+                                        json.dump(export_map, f, indent=4)
                                 except Exception:
                                     pass
                         except Exception:
