@@ -10,20 +10,6 @@ extern void fz_log(const char *msg); // Ensure logger availability
 // a volatile pointer dereference successfully reads the memory-mapped flash.
 bool probe_read32(uint32_t addr, uint32_t *out_val) {
   if (out_val) {
-#ifdef HAS_TRUE_SPI_HAL
-    // ESP32 XTENSA ARCHITECTURE SPECIFIC BYPASS:
-    // Virtual Pointer Dereferencing (addr) goes through the MMU and the D-Cache.
-    // But chip_flash_erase() and chip_flash_write32() both operate directly
-    // on Physical Flash (addr - 0x40000000) via BootROM.
-    // To prevent total misalignment and stale D-Cache, we align probe_read32
-    // to strictly use the same Physical BootROM driver!
-    if (addr >= 0x40000000 && addr < 0x40800000) {
-        uint32_t phys_addr = addr - 0x40000000;
-        // ROM ABI: SPIRead @ 0x40062B18 (Direct Metal Read)
-        ((void(*)(uint32_t, uint32_t*, int32_t))0x40062B18)(phys_addr, out_val, 4);
-        return true;
-    }
-#endif
     *out_val = *((volatile uint32_t *)addr); 
   }
   return true;

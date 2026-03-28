@@ -209,9 +209,10 @@ def generate_flash_hal(spec, chip_name, out_dir):
                     # C-Compiler translates Memory-Mapped Address -> Physical 0-Indexed Offset
                     args = args.replace("sector_addr", f"(sector_addr - {flash_origin})")
                 
+                proto = step.get("prototype", "void(*)()")
                 if addr != "0x0" and addr:
                     lines.append(f"    // ROM ABI: {fn} @ {addr}")
-                    lines.append(f"    ((void(*)()){addr})({args});")
+                    lines.append(f"    (({proto}){addr})({args});")
                 else:
                     lines.append(f"    // ERROR: Missing rom_address for {fn}!")
             elif t == "poll_bit_clear":
@@ -237,6 +238,28 @@ def generate_flash_hal(spec, chip_name, out_dir):
     erase_c = compile_sequence(flash_ctrl.get("erase_sector_sequence", []))
     write_c = compile_sequence(flash_ctrl.get("write_word_sequence", []))
     
+    # -------------------------------------------------------------------------
+    # DYNAMIC FLASH READ GENERATION (Hardware-Agnostic MMU/Cache Bypass)
+    # -------------------------------------------------------------------------
+    read_seq = flash_ctrl.get("read_word_sequence", [])
+    if not read_seq and chip_name == "esp32":
+        # Temporary declarative inject for ESP32 MMU bypass until LLM Prompt 5 is updated
+        read_seq = [{
+            "args_csv": "(sector_addr - 0x40000000), out_val, 4",
+            "desc": "Direct SPIRead via BootROM (MMU/Cache Bypass)",
+            "function_name": "SPIRead",
+            "requires_physical_offset": False, # We handled the -0x40000000 manually above
+            "rom_address": "0x40062B18",
+            "type": "rom_function_call",
+            "prototype": "void(*)(uint32_t, uint32_t*, int32_t)"
+        }]
+    
+    if read_seq:
+        read_c = compile_sequence(read_seq)
+    else:
+        # 100% agnostic fallback for architectures without external MMUs (Cortex-M)
+        read_c = "    if (out_val) *out_val = *((volatile uint32_t*)sector_addr);\n"
+
     c_content = f"""/* Auto-Generated Bare-Metal Flash HAL for {chip_name} */
 #include <stdint.h>
 #include <stdbool.h>
@@ -260,6 +283,12 @@ bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {{
 {unlock_c}
     // Write Sequence
 {write_c}
+    return true;
+}}
+
+bool chip_flash_read32(uint32_t sector_addr, uint32_t *out_val) {{
+    // Read Sequence
+{read_c}
     return true;
 }}
 """

@@ -7,9 +7,10 @@
 // Safe read prototype (implemented in assembly to catch hardware faults)
 extern bool probe_read32(uint32_t addr, uint32_t *out_val);
 
-// Abstract Flash Sector writes/erases
+// Abstract Flash Sector writes/erases/reads
 extern bool chip_flash_erase(uint32_t sector_addr);
 extern bool chip_flash_write32(uint32_t addr, uint32_t val);
+extern bool chip_flash_read32(uint32_t addr, uint32_t *out_val);
 
 static void memory_bin_search(uint32_t start_addr, uint32_t max_range) {
   uint32_t low = 0;
@@ -54,7 +55,7 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
           (((mid - start_addr) / sampling_interval) * sampling_interval);
 
     uint32_t val = 0;
-    if (!probe_read32(mid, &val)) {
+    if (!chip_flash_read32(mid, &val)) {
       if (mid < start_addr + sampling_interval)
         break;
       high = mid - sampling_interval;
@@ -91,7 +92,7 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
     fz_log("\n");
 
     uint32_t pre_val = 0;
-    if (probe_read32(fine_mid, &pre_val) && pre_val != 0xFFFFFFFF) {
+    if (chip_flash_read32(fine_mid, &pre_val) && pre_val != 0xFFFFFFFF) {
       if (fine_mid <= start_addr + 4)
         break;
       fine_high = fine_mid - 4;
@@ -108,7 +109,7 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
 
     fz_log("        [~] Phase 2: Interrogating Marker Survival...\n");
     uint32_t val = 0;
-    if (!probe_read32(fine_mid, &val)) {
+    if (!chip_flash_read32(fine_mid, &val)) {
       if (fine_mid <= start_addr + 4)
         break;
       fine_high = fine_mid - 4;
@@ -187,9 +188,10 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
     // 1. Write the probing marker ahead of us to find the wall later
     // CRITICAL: We MUST NOT write to unerased flash to prevent SPI Deadlocks.
     // We check only the starting address to prevent tight D-Cache/BootROM 
-    // bus interleaving which can silently crash the ESP32 silicon.
+    // 2. Pre-Check for completely empty flash. If empty, inject markers to 
+    //    observe mathematical boundaries
     uint32_t start_val = 0;
-    if (probe_read32(addr, &start_val) && start_val == 0xFFFFFFFF) {
+    if (chip_flash_read32(addr, &start_val) && start_val == 0xFFFFFFFF) {
       fz_log("      [~] Empty Sector! Injecting 256KB Probe Markers...\n");
       for (uint32_t i = 0; i < sample_range; i += sampling_interval) {
         chip_flash_write32(addr + i, 0xAAAAAAAA);

@@ -31,3 +31,11 @@ bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {
     ((void(*)())0x40062D50)((sector_addr - 0x40000000), &data_word, 4);
     return true;
 }
+
+bool chip_flash_read32(uint32_t sector_addr, uint32_t *out_val) {
+    // Read Sequence
+    // Direct SPIRead via BootROM (MMU/Cache Bypass)
+    // ROM ABI: SPIRead @ 0x40062B18
+    ((void(*)(uint32_t, uint32_t*, int32_t))0x40062B18)((sector_addr - 0x40000000), out_val, 4);
+    return true;
+}
