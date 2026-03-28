@@ -5,6 +5,9 @@
 extern void fz_log(const char *msg);
 #define ESP32_UART0_STATUS_REG 0x3FF4001C
 #define FZ_FLUSH() while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);
+#define DPORT_PRO_CACHE_CTRL_REG 0x3FF00040
+#define HW_CACHE_DISABLE() (*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) &= ~(1<<3));
+#define HW_CACHE_ENABLE()  (*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) |= (1<<3));
 
 void hal_print_status(void) {
     fz_log("[HAL] Active Backend: True Physical Hardware MMU Driver\n");
@@ -12,9 +15,9 @@ void hal_print_status(void) {
 
 bool chip_flash_erase(uint32_t sector_addr) {
     fz_log("[E1]\n"); FZ_FLUSH();
-    // Hardware Arbiter Arbitration: Disconnect Cache (SPI0)
-    ((void(*)(int))0x40004270)(0); // Cache_Read_Disable(0)
-    
+    // HW Arbiter Bypass: Deaktiviere Cache auf tiefster Transistor-Ebene (Bypass ROM Bugs)
+    HW_CACHE_DISABLE();
+
     // Unlock Sequence
     // Unlock SPI Flash via BootROM
     // ROM ABI: SPIUnlock @ 0x40062738
@@ -24,16 +27,14 @@ bool chip_flash_erase(uint32_t sector_addr) {
     // ROM ABI: SPIEraseSector @ 0x40062CCC
     ((void(*)())0x40062CCC)(sector_addr / 4096);
     
-    // Yield Arbiter back to Cache (SPI0)
-    ((void(*)(int))0x400041B0)(0); // Cache_Read_Enable(0)
+    HW_CACHE_ENABLE();
     fz_log("[E2]\n"); FZ_FLUSH();
     return true;
 }
 
 bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {
     fz_log("[W1]\n"); FZ_FLUSH();
-    // Hardware Arbiter Arbitration: Disconnect Cache (SPI0)
-    ((void(*)(int))0x40004270)(0); // Cache_Read_Disable(0)
+    HW_CACHE_DISABLE();
 
     // Unlock Sequence
     // Unlock SPI Flash via BootROM
@@ -44,8 +45,7 @@ bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {
     // ROM ABI: SPIWrite @ 0x40062D50
     ((void(*)())0x40062D50)(sector_addr, &data_word, 4);
 
-    // Yield Arbiter back to Cache (SPI0)
-    ((void(*)(int))0x400041B0)(0); // Cache_Read_Enable(0)
+    HW_CACHE_ENABLE();
     fz_log("[W2]\n"); FZ_FLUSH();
     return true;
 }
@@ -55,6 +55,11 @@ bool chip_flash_read32(uint32_t sector_addr, uint32_t *out_val) {
     // ESP32 Fallback: Ultra-Lightweight Physical Read via MMU Seizure (No ROM Calls)
     #define ESP32_UART0_STATUS_REG 0x3FF4001C
     #define FZ_FLUSH() while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);
+    
+    // ESP32 DPORT Hardware Cache Control
+    #define DPORT_PRO_CACHE_CTRL_REG 0x3FF00040
+    #define HW_CACHE_DISABLE() (*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) &= ~(1<<3));
+    #define HW_CACHE_ENABLE()  (*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) |= (1<<3));
     
     fz_log("[R1]\n"); FZ_FLUSH();
     uint32_t p_page = sector_addr / 0x10000;

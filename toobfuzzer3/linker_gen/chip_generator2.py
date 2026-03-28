@@ -235,6 +235,11 @@ def generate_flash_hal(spec, chip_name, out_dir):
     #define ESP32_UART0_STATUS_REG 0x3FF4001C
     #define FZ_FLUSH() while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);
     
+    // ESP32 DPORT Hardware Cache Control
+    #define DPORT_PRO_CACHE_CTRL_REG 0x3FF00040
+    #define HW_CACHE_DISABLE() (*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) &= ~(1<<3));
+    #define HW_CACHE_ENABLE()  (*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) |= (1<<3));
+    
     fz_log("[R1]\\n"); FZ_FLUSH();
     uint32_t p_page = sector_addr / 0x10000;
     uint32_t p_offset = sector_addr % 0x10000;
@@ -269,6 +274,9 @@ def generate_flash_hal(spec, chip_name, out_dir):
 extern void fz_log(const char *msg);
 #define ESP32_UART0_STATUS_REG 0x3FF4001C
 #define FZ_FLUSH() while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);
+#define DPORT_PRO_CACHE_CTRL_REG 0x3FF00040
+#define HW_CACHE_DISABLE() (*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) &= ~(1<<3));
+#define HW_CACHE_ENABLE()  (*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) |= (1<<3));
 
 void hal_print_status(void) {{
     fz_log("[HAL] Active Backend: True Physical Hardware MMU Driver\\n");
@@ -276,32 +284,29 @@ void hal_print_status(void) {{
 
 bool chip_flash_erase(uint32_t sector_addr) {{
     fz_log("[E1]\\n"); FZ_FLUSH();
-    // Hardware Arbiter Arbitration: Disconnect Cache (SPI0)
-    ((void(*)(int))0x40004270)(0); // Cache_Read_Disable(0)
-    
+    // HW Arbiter Bypass: Deaktiviere Cache auf tiefster Transistor-Ebene (Bypass ROM Bugs)
+    HW_CACHE_DISABLE();
+
     // Unlock Sequence
 {unlock_c}
     // Erase Sequence
 {erase_c}
     
-    // Yield Arbiter back to Cache (SPI0)
-    ((void(*)(int))0x400041B0)(0); // Cache_Read_Enable(0)
+    HW_CACHE_ENABLE();
     fz_log("[E2]\\n"); FZ_FLUSH();
     return true;
 }}
 
 bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {{
     fz_log("[W1]\\n"); FZ_FLUSH();
-    // Hardware Arbiter Arbitration: Disconnect Cache (SPI0)
-    ((void(*)(int))0x40004270)(0); // Cache_Read_Disable(0)
+    HW_CACHE_DISABLE();
 
     // Unlock Sequence
 {unlock_c}
     // Write Sequence
 {write_c}
 
-    // Yield Arbiter back to Cache (SPI0)
-    ((void(*)(int))0x400041B0)(0); // Cache_Read_Enable(0)
+    HW_CACHE_ENABLE();
     fz_log("[W2]\\n"); FZ_FLUSH();
     return true;
 }}
