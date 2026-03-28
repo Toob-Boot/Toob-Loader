@@ -43,15 +43,13 @@ static void memory_bin_search(uint32_t start_addr, uint32_t max_range) {
 static uint32_t binary_search_sector_boundary(uint32_t start_addr,
                                               uint32_t max_search_range,
                                               uint32_t sampling_interval) {
-  // PHASE 1: Coarse Grid Search (Find the coarse window from pre-injected
-  // markers)
+  fz_log("      [~] Entering Phase 1 (Coarse Search)...\n");
   uint32_t low = start_addr;
   uint32_t high = start_addr + max_search_range - sampling_interval;
   uint32_t coarse_boundary = start_addr;
 
   while (low <= high) {
     uint32_t mid = low + ((high - low) / 2);
-    // Align strictly to the sampling interval grid
     mid = start_addr +
           (((mid - start_addr) / sampling_interval) * sampling_interval);
 
@@ -73,7 +71,10 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
     }
   }
 
-  // PHASE 2: True-Precision Re-Erase Binary Search (4-Byte Exact Precision)
+  fz_log("      [~] Phase 1 Complete. Coarse Boundary: 0x");
+  fz_log_hex(coarse_boundary);
+  fz_log("\n      [~] Entering Phase 2 (Fine Search)...\n");
+
   uint32_t fine_low = coarse_boundary;
   uint32_t fine_high = coarse_boundary + sampling_interval;
   if (fine_high > start_addr + max_search_range)
@@ -85,12 +86,27 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
     uint32_t fine_mid = fine_low + ((fine_high - fine_low) / 2);
     fine_mid = fine_mid & ~0x3; // Align to 4-byte word boundary
 
-    // Inject exact probe marker
+    fz_log("        [~] Phase 2: Testing fine_mid = 0x");
+    fz_log_hex(fine_mid);
+    fz_log("\n");
+
+    uint32_t pre_val = 0;
+    if (probe_read32(fine_mid, &pre_val) && pre_val != 0xFFFFFFFF) {
+      if (fine_mid <= start_addr + 4)
+        break;
+      fine_high = fine_mid - 4;
+      continue;
+    }
+
+    fz_log("        [~] Phase 2: Injecting probe marker 0xDEADBEEF...\n");
     chip_flash_write32(fine_mid, 0xDEADBEEF);
 
-    // Re-Erase the sector to test if the marker is swept away
+    fz_log("        [~] Phase 2: Re-Erasing Sector 0x");
+    fz_log_hex(start_addr);
+    fz_log("...\n");
     chip_flash_erase(start_addr);
 
+    fz_log("        [~] Phase 2: Interrogating Marker Survival...\n");
     uint32_t val = 0;
     if (!probe_read32(fine_mid, &val)) {
       if (fine_mid <= start_addr + 4)
@@ -100,19 +116,21 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
     }
 
     if (val == 0xFFFFFFFF) {
-      // The erase was large enough to reach fine_mid and wipe it
       exact_boundary = fine_mid;
       fine_low = fine_mid + 4;
     } else {
-      // The marker survived; the erase fell short of fine_mid
       if (fine_mid <= start_addr + 4)
         break;
       fine_high = fine_mid - 4;
     }
   }
 
-  // True Sector Size = (Absolute Final Erased Byte - Start Address) + 4 Bytes
-  return (exact_boundary - start_addr) + 4;
+  fz_log("      [~] Phase 2 Complete. Exact Boundary: 0x");
+  fz_log_hex(exact_boundary);
+  fz_log("\n");
+
+  uint32_t ret = (exact_boundary - start_addr) + 4;
+  return ret;
 }
 
 static void full_sector_scan(uint32_t base, uint32_t limit) {
@@ -167,14 +185,27 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
       sample_range = sampling_interval;
 
     // 1. Write the probing marker ahead of us to find the wall later
-    for (uint32_t i = 0; i < sample_range; i += sampling_interval) {
-      chip_flash_write32(addr + i, 0xAAAAAAAA);
+    // CRITICAL: We MUST NOT write to unerased flash to prevent SPI Deadlocks.
+    // We check only the starting address to prevent tight D-Cache/BootROM 
+    // bus interleaving which can silently crash the ESP32 silicon.
+    uint32_t start_val = 0;
+    if (probe_read32(addr, &start_val) && start_val == 0xFFFFFFFF) {
+      fz_log("      [~] Empty Sector! Injecting 256KB Probe Markers...\n");
+      for (uint32_t i = 0; i < sample_range; i += sampling_interval) {
+        chip_flash_write32(addr + i, 0xAAAAAAAA);
+      }
+    } else {
+      fz_log("      [~] Skipping Markers (Sector Unerased or Shielded)\n");
     }
 
+    fz_log("      [~] Firing BootROM Sector Erase...\n");
     if (chip_flash_erase(addr)) {
+      fz_log("      [~] SUCCESS: Sector Erased!\n");
       fz_log("+");
       fz_log_hex(addr);
+      fz_log("\n"); // Force flush
 
+      fz_log("      [~] Initiating Binary Boundary Search...\n");
       uint32_t sector_size =
           binary_search_sector_boundary(addr, sample_range, sampling_interval);
       fz_log(" [size: ");

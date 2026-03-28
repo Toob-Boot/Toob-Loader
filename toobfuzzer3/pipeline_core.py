@@ -7,8 +7,14 @@ import tkinter.messagebox as messagebox
 from dotenv import load_dotenv
 
 import sys
+import importlib
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "linker_gen"))
+import linker_gen.gemini_parser
+import linker_gen.ld_generator
+importlib.reload(linker_gen.gemini_parser)
+importlib.reload(linker_gen.ld_generator)
+
 from linker_gen.gemini_parser import generate_chip_definition, configure_gemini
 from linker_gen.ld_generator import generate_toolchain_files
 
@@ -223,8 +229,13 @@ class ToobfuzzerPipeline:
         with open(latest_blueprint, "r") as f:
             spec_json = json.load(f)
 
+        import linker_gen.ld_generator
+        import linker_gen.chip_generator
+        importlib.reload(linker_gen.ld_generator)
+        importlib.reload(linker_gen.chip_generator)
+        
         from linker_gen.ld_generator import generate_toolchain_files
-        from linker_gen.chip_generator import generate_chip_capabilities
+        from linker_gen.chip_generator import generate_chip_capabilities, generate_flash_hal
 
         print(
             f"[{phase_name}] [*] Compiling JSON Blueprint to Toolchain Syntax & C Profiles..."
@@ -241,6 +252,11 @@ class ToobfuzzerPipeline:
         c_path = generate_chip_capabilities(
             spec_json[self.ctx.chip], self.ctx.chip, build_dir, footprint_size=self.ctx.fuzzer_footprint_bytes
         )
+        
+        hal_path = generate_flash_hal(
+            spec_json[self.ctx.chip], self.ctx.chip, build_dir
+        )
+
         print(
             f"[*] Emitted: {os.path.basename(ld_path)} | {os.path.basename(s_path)} | {os.path.basename(c_path)}"
         )
@@ -345,7 +361,7 @@ class ToobfuzzerPipeline:
         print(f"[LISTEN] Attaching to {target_port} at 115200 baud...")
 
         try:
-            with serial.Serial(target_port, 115200, timeout=10) as ser:
+            with serial.Serial(target_port, 115200, timeout=120) as ser:
                 print("[LISTEN] UART Connection Established.")
 
                 # Wait for BOOT_OK

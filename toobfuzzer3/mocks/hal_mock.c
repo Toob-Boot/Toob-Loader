@@ -1,15 +1,35 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Safe read prototype (implemented in assembly to catch hardware faults)
-// In a Mock environment, we act as purely "filler code" if hardware SPI isn't generated yet.
+extern void fz_log(const char *msg); // Ensure logger availability
+#include <stdint.h>
+
+// Real hardware read prototype.
+// In a fully fault-tolerant fuzzer, this uses an assembly shim (setjmp) 
+// to catch invalid load exceptions. For our flash boundary scanner, 
+// a volatile pointer dereference successfully reads the memory-mapped flash.
 bool probe_read32(uint32_t addr, uint32_t *out_val) {
   if (out_val) {
-    *out_val = 0xFFFFFFFF; // Mimic an erased flash cell so binary search maximizes sector scope!
+#ifdef HAS_TRUE_SPI_HAL
+    // ESP32 XTENSA ARCHITECTURE SPECIFIC BYPASS:
+    // Virtual Pointer Dereferencing (addr) goes through the MMU and the D-Cache.
+    // But chip_flash_erase() and chip_flash_write32() both operate directly
+    // on Physical Flash (addr - 0x40000000) via BootROM.
+    // To prevent total misalignment and stale D-Cache, we align probe_read32
+    // to strictly use the same Physical BootROM driver!
+    if (addr >= 0x40000000 && addr < 0x40800000) {
+        uint32_t phys_addr = addr - 0x40000000;
+        // ROM ABI: SPIRead @ 0x40062B18 (Direct Metal Read)
+        ((void(*)(uint32_t, uint32_t*, int32_t))0x40062B18)(phys_addr, out_val, 4);
+        return true;
+    }
+#endif
+    *out_val = *((volatile uint32_t *)addr); 
   }
   return true;
 }
 
+#ifndef HAS_TRUE_SPI_HAL
 // Abstract Flash Sector erase prototype
 // Returns true to satisfy the algorithm's fast-forward path
 bool chip_flash_erase(uint32_t sector_addr) {
@@ -23,6 +43,13 @@ bool chip_flash_write32(uint32_t addr, uint32_t val) {
   (void)val;
   return true;
 }
+
+void hal_print_status(void) {
+    fz_log("[HAL] Active Backend: Mock Simulation (Filler Code)\n");
+}
+#else
+// When HAS_TRUE_SPI_HAL is 1, hal_print_status is provided by the generated hal_flash.c instead.
+#endif
 
 // Bare-metal GCC compiler intrinsic satisfaction
 void *memcpy(void *dest, const void *src, uint32_t n) {

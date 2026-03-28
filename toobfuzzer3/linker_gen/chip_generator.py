@@ -163,3 +163,108 @@ fz_caps_t chip_get_capabilities(void) {{
 
     print(f"[*] Generated Capabilities Shim: {c_path}")
     return c_path
+
+def generate_flash_hal(spec, chip_name, out_dir):
+    """
+    Consumes the declarative JSON instruction array for pure bare-metal Flash operations.
+    Translates literal JSON operations into raw C pointer manipulations.
+    """
+    flash_ctrl = spec.get("flash_controller", {})
+    if not flash_ctrl or not flash_ctrl.get("erase_sector_sequence"):
+        return None # No flash generation requested/possible yet
+    
+    c_path = os.path.join(out_dir, f"hal_flash_{chip_name}.c")
+    
+    def compile_sequence(seq):
+        lines = []
+        for step in seq:
+            t = step.get("type")
+            offset = step.get("offset", "0x0")
+            desc = step.get("desc", "")
+            
+            if desc:
+                lines.append(f"    // {desc}")
+                
+            base_str = "0x0" # To be replaced with macro or hardcode if needed
+            # We assume offset includes the base address or we construct it.
+            # In our prompt, the LLM sets the base in flash_controller and offset is relative, 
+            # OR LLM provides absolute offsets. Let's do BASE + OFFSET safely.
+            base_addr = flash_ctrl.get("base_address", "0x0")
+            ptr_macro = f"(*((volatile uint32_t*)({base_addr} + {offset})))"
+            
+            if t == "rom_function_call":
+                fn = step.get("function_name", "UNKNOWN_ROM_FN")
+                args = step.get("args_csv", "")
+                addr = step.get("rom_address", "0x0")
+                
+                # Architecture-Agnostic Memory Map Translation
+                if step.get("requires_physical_offset") and "sector_addr" in args:
+                    # Dynamically extract the flash origin mapped by Stage 1 Memory Rules
+                    flash_origin = "0x0"
+                    for r in spec.get("memory", {}).get("memory_regions", []):
+                        if "rx" in r.get("permissions", "") and "w" not in r.get("permissions", ""):
+                            flash_origin = r.get("origin", "0x0")
+                            break
+                    
+                    # C-Compiler translates Memory-Mapped Address -> Physical 0-Indexed Offset
+                    args = args.replace("sector_addr", f"(sector_addr - {flash_origin})")
+                
+                if addr != "0x0" and addr:
+                    lines.append(f"    // ROM ABI: {fn} @ {addr}")
+                    lines.append(f"    ((void(*)()){addr})({args});")
+                else:
+                    lines.append(f"    // ERROR: Missing rom_address for {fn}!")
+            elif t == "poll_bit_clear":
+                mask = step.get("bit_mask", "0x0")
+                lines.append(f"    while( {ptr_macro} & {mask} );")
+            elif t == "set_bit":
+                mask = step.get("bit_mask", "0x0")
+                lines.append(f"    {ptr_macro} |= {mask};")
+            elif t == "clear_bit":
+                mask = step.get("bit_mask", "0x0")
+                lines.append(f"    {ptr_macro} &= ~({mask});")
+            elif t == "write_addr":
+                if "value_hex" in step:
+                    val = step.get("value_hex")
+                    lines.append(f"    {ptr_macro} = {val};")
+                elif "value_source" in step:
+                    val = step.get("value_source")
+                    lines.append(f"    {ptr_macro} = {val};")
+            
+        return "\n".join(lines)
+        
+    unlock_c = compile_sequence(flash_ctrl.get("unlock_sequence", []))
+    erase_c = compile_sequence(flash_ctrl.get("erase_sector_sequence", []))
+    write_c = compile_sequence(flash_ctrl.get("write_word_sequence", []))
+    
+    c_content = f"""/* Auto-Generated Bare-Metal Flash HAL for {chip_name} */
+#include <stdint.h>
+#include <stdbool.h>
+
+extern void fz_log(const char *msg); // Ensure logger availability
+
+void hal_print_status(void) {{
+    fz_log("[HAL] Active Backend: Real Hardware SPI Driver (AI Generated)\\n");
+}}
+
+bool chip_flash_erase(uint32_t sector_addr) {{
+    // Unlock Sequence
+{unlock_c}
+    // Erase Sequence
+{erase_c}
+    return true;
+}}
+
+bool chip_flash_write32(uint32_t sector_addr, uint32_t data_word) {{
+    // Unlock Sequence
+{unlock_c}
+    // Write Sequence
+{write_c}
+    return true;
+}}
+"""
+    with open(c_path, "w") as f:
+        f.write(c_content)
+        
+    print(f"[*] Generated True SPI Flash HAL: {c_path}")
+    return c_path

@@ -113,6 +113,7 @@ class ToobfuzzerBuilder:
         )
         generated_s = f"build/{self.chip_name}/run_latest/{self.chip_name}_startup.S"
         keelhaul_c = f"build/{self.chip_name}/run_latest/keelhaul_svd.c"
+        hal_flash_c = f"build/{self.chip_name}/run_latest/hal_flash_{self.chip_name}.c"
         keelhaul_inc = f"build/{self.chip_name}/run_latest/"
 
         # Hyphen-resilient fallback: If the user named the SVD esp32c6 but the run esp32-c6 (or vice versa)
@@ -130,6 +131,12 @@ class ToobfuzzerBuilder:
             all_src_files += f" {generated_s}"
         if os.path.exists(keelhaul_c):
             all_src_files += f" {keelhaul_c}"
+        
+        has_true_hal = False
+        if os.path.exists(hal_flash_c):
+            all_src_files += f" {hal_flash_c}"
+            has_true_hal = True
+
 
         all_src_files = all_src_files.strip()
 
@@ -139,6 +146,9 @@ class ToobfuzzerBuilder:
             "esp32-h"
         )
         arch_flags = "" if is_riscv else "-mlongcalls "
+        if has_true_hal:
+            arch_flags += "-DHAS_TRUE_SPI_HAL=1 "
+
 
         compile_cmd = (
             f"-O2 -nostdlib -ffreestanding {arch_flags}"

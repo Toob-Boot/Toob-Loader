@@ -5,6 +5,7 @@
 
 // External prototypes
 extern void fuzzer_scan(fz_profile_t profile);
+extern void hal_print_status(void);
 
 // This is the universal entry point called by the `_startup.S` assembly after
 // BSS init
@@ -31,6 +32,8 @@ int main(void) {
   fz_log("\n");
 
   fz_log("\n---OSV_ORACLE_READY---\n");
+  hal_print_status();
+
 
   // Enter Interactive Oracle Mode (Phase 10)
   while (1) {

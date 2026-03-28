@@ -25,16 +25,21 @@ def validate_blueprint_integrity(chip_root, chip_name):
     Acts as a mandatory Validation Layer (TÜV) to catch missing values
     before triggering bare-metal toolchains that will fail or hang permanently.
     """
+
     def assert_key(d, key, path):
         if key not in d:
-            raise RuntimeError(f"Validation Error: The LLM failed to extract critical key '{path}.{key}'.")
+            raise RuntimeError(
+                f"Validation Error: The LLM failed to extract critical key '{path}.{key}'."
+            )
 
     # 1. Memory Block
     assert_key(chip_root, "memory", "")
     mem = chip_root["memory"]
     assert_key(mem, "memory_regions", "memory")
     if not isinstance(mem["memory_regions"], list) or len(mem["memory_regions"]) == 0:
-        raise RuntimeError("Validation Error: 'memory.memory_regions' cannot be an empty array.")
+        raise RuntimeError(
+            "Validation Error: 'memory.memory_regions' cannot be an empty array."
+        )
     assert_key(mem, "executable_segment", "memory")
     assert_key(mem, "data_segment", "memory")
 
@@ -42,27 +47,37 @@ def validate_blueprint_integrity(chip_root, chip_name):
     assert_key(chip_root, "boot_vectors", "")
     bv = chip_root["boot_vectors"]
     assert_key(bv, "rom_base", "boot_vectors")
-    
+
     # 3. Toolchain
     assert_key(chip_root, "toolchain_requirements", "")
     tc = chip_root["toolchain_requirements"]
     assert_key(tc, "packaging", "toolchain_requirements")
     if not isinstance(tc["packaging"], list):
-        raise RuntimeError("Validation Error: 'toolchain_requirements.packaging' must be an array.")
+        raise RuntimeError(
+            "Validation Error: 'toolchain_requirements.packaging' must be an array."
+        )
     assert_key(tc, "flashing", "toolchain_requirements")
     assert_key(tc["flashing"], "write_command", "toolchain_requirements.flashing")
 
     # 4. Watchdog List (must exist, even if functionally empty '[]' due to no watchdogs)
     if "watchdog_kill_registers" not in chip_root:
-        raise RuntimeError("Validation Error: 'watchdog_kill_registers' must exist (at least as an empty array '[]').")
+        raise RuntimeError(
+            "Validation Error: 'watchdog_kill_registers' must exist (at least as an empty array '[]')."
+        )
     if not isinstance(chip_root["watchdog_kill_registers"], list):
-        raise RuntimeError("Validation Error: 'watchdog_kill_registers' must be a List/Array.")
+        raise RuntimeError(
+            "Validation Error: 'watchdog_kill_registers' must be a List/Array."
+        )
 
     # 5. Core Security / Mechanics
     assert_key(chip_root, "reset_reason", "")
     assert_key(chip_root["reset_reason"], "register_address", "reset_reason")
     assert_key(chip_root, "survival_mechanisms", "")
-    assert_key(chip_root["survival_mechanisms"], "recommended_storage_type", "survival_mechanisms")
+    assert_key(
+        chip_root["survival_mechanisms"],
+        "recommended_storage_type",
+        "survival_mechanisms",
+    )
 
 
 def generate_chip_definition(chip_name, architecture, context_file_path=None, runs=3):
@@ -249,6 +264,43 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
     }}
     """
 
+    # STAGE 5: Declarative Flash HAL Generation
+    prompt_stage5 = f"""
+    Continuing the bare-metal analysis for the {chip_name} ({architecture}), your final task is to extract the EXACT procedural register sequence required to unlock, erase, and write the internal Flash memory, outputting it as a declarative instruction array.
+
+    Address the following core areas:
+    1. Flash Controller Base Address: What is the main memory-mapped peripheral base address for the hardware Flash Controller?
+    2. Unlock Sequence: Which specific register offsets require magic keys to be written before erasing or programming is permitted?
+    3. Sector Erase Sequence: What is the exact sequence of register writes/bit-sets/bit-clears to execute a single physical sector erase? Include the logically required `poll_bit_clear` steps to wait for busy flags. If the hardware STRICTLY dictates the use of BootROM APIs (like ESP32), you may use the "rom_function_call" type, BUT you must provide the exact numeric 32-bit BootROM memory address for the function pointer.
+
+    Define the sequence items strictly using one of these Enums for the `type` field:
+    - `"poll_bit_clear"`: A `while (REG & bit_mask)` blocking loop. Provide `offset` (hex string) and `bit_mask` (hex string).
+    - `"set_bit"`: A `REG |= bit_mask` operation. Provide `offset` and `bit_mask`.
+    - `"clear_bit"`: A `REG &= ~bit_mask` operation. Provide `offset` and `bit_mask`.
+    - `"write_addr"`: A `REG = value` operation. Provide `offset`. Provide `value_hex` if writing a constant magic number, OR `value_source` if the value is a dynamic runtime variable (strictly enum: `"sector_addr"` or `"data_word"`).
+    - `"rom_function_call"`: Invoke a hardware ROM pointer directly. You MUST provide `function_name` (for logging), `args_csv` (like `"sector_addr / 4096"`), AND crucially `rom_address` (exact hex memory address, e.g., `"0x40062CCC"`). If the ROM strictly requires an absolute 0-indexed physical offset instead of the CPU memory-mapped address (like ESP32), set `"requires_physical_offset": true`. DO NOT omit `rom_address`, as our linker cannot resolve names.
+
+    OUTPUT ONLY VALID JSON matching this exact structure (no markdown):
+    {{
+        "{chip_name}": {{
+            "flash_controller": {{
+                "base_address": "0x...",
+                "unlock_sequence": [
+                    {{"type": "write_addr", "offset": "0x...", "value_hex": "0x...", "desc": "Write Key 1"}}
+                ],
+                "erase_sector_sequence": [
+                    {{"type": "poll_bit_clear", "offset": "0x...", "bit_mask": "0x...", "desc": "Wait BSY"}},
+                    {{"type": "set_bit", "offset": "0x...", "bit_mask": "0x...", "desc": "Set SER"}},
+                    {{"type": "write_addr", "offset": "0x...", "value_source": "sector_addr", "desc": "Write Addr"}},
+                    {{"type": "set_bit", "offset": "0x...", "bit_mask": "0x...", "desc": "Start"}},
+                    {{"type": "rom_function_call", "function_name": "SPIEraseSector", "rom_address": "0x40062CCC", "args_csv": "...", "requires_physical_offset": true, "desc": "Or ROM Call Instead"}}
+                ],
+                "write_word_sequence": []
+            }}
+        }}
+    }}
+    """
+
     # Document Understanding: Handle File Upload with Caching Strategy
     gemini_file = None
     if context_file_path and os.path.exists(context_file_path):
@@ -397,7 +449,7 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
         return stage_data, stage_conf
 
     print(
-        f"\n[*] Launching all 4 Stages concurrently (Total {4 * runs} API Threads)..."
+        f"\n[*] Launching all 5 Stages concurrently (Total {5 * runs} API Threads)..."
     )
 
     # Determine the run folder synchronously before launching threads
@@ -407,7 +459,7 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
     while os.path.exists(os.path.join(hist_dir, f"run_{shared_run_num}")):
         shared_run_num += 1
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as stage_executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as stage_executor:
         f1 = stage_executor.submit(
             execute_prompt,
             prompt_stage1,
@@ -436,13 +488,27 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
             shared_run_num,
             runs,
         )
+        f5 = stage_executor.submit(
+            execute_prompt,
+            prompt_stage5,
+            "Stage 5: Declarative Flash Sequences",
+            shared_run_num,
+            runs,
+        )
 
         stage1_data, stage1_conf = f1.result()
         stage2_data, stage2_conf = f2.result()
         stage3_data, stage3_conf = f3.result()
         stage4_data, stage4_conf = f4.result()
+        stage5_data, stage5_conf = f5.result()
 
-    if not stage1_data or not stage2_data or not stage3_data or not stage4_data:
+    if (
+        not stage1_data
+        or not stage2_data
+        or not stage3_data
+        or not stage4_data
+        or not stage5_data
+    ):
         raise RuntimeError("One or more pipeline stages failed comprehensively.")
 
     try:
@@ -455,7 +521,7 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
             for key in ["security_registers", "boot_vectors"]:
                 if key in s2:
                     chip_root[key] = s2[key]
-            
+
             s2_c = stage2_conf[chip_name]
             for key in ["security_registers", "boot_vectors"]:
                 if key in s2_c:
@@ -465,22 +531,38 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
             s3 = stage3_data[chip_name]
             if "toolchain_requirements" in s3:
                 chip_root["toolchain_requirements"] = s3["toolchain_requirements"]
-            
+
             s3_c = stage3_conf[chip_name]
             if "toolchain_requirements" in s3_c:
                 chip_conf["toolchain_requirements"] = s3_c["toolchain_requirements"]
-            
+
         if chip_name in stage4_data:
             s4 = stage4_data[chip_name]
-            stage4_keys = ["flash_capabilities", "reset_reason", "crypto_capabilities", "survival_mechanisms", "factory_identity", "multi_core_topology"]
+            stage4_keys = [
+                "flash_capabilities",
+                "reset_reason",
+                "crypto_capabilities",
+                "survival_mechanisms",
+                "factory_identity",
+                "multi_core_topology",
+            ]
             for key in stage4_keys:
                 if key in s4:
                     chip_root[key] = s4[key]
-            
+
             s4_c = stage4_conf[chip_name]
             for key in stage4_keys:
                 if key in s4_c:
                     chip_conf[key] = s4_c[key]
+
+        if chip_name in stage5_data:
+            s5 = stage5_data[chip_name]
+            if "flash_controller" in s5:
+                chip_root["flash_controller"] = s5["flash_controller"]
+
+            s5_c = stage5_conf[chip_name]
+            if "flash_controller" in s5_c:
+                chip_conf["flash_controller"] = s5_c["flash_controller"]
 
         # ENFORCE SCHEMA VALIDITY BEFORE PASSING IT TO THE COMPILER
         validate_blueprint_integrity(chip_root, chip_name)
