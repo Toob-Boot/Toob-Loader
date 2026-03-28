@@ -9,13 +9,9 @@
  * Generated organically at link-time from AI Model extraction (TRM PDF).
  */
 typedef struct {
-  uint32_t user_flash_base; // Base of user executable (e.g. 0x42000000 on
-                            // encrypted C6)
+  uint32_t user_flash_base; // Base of user executable
   uint32_t rom_base;        // Internal ROM hardware base
-  uint32_t iram_base;       // Internal Instruction RAM base
-  uint32_t iram_length;     // Internal Instruction RAM length
-  uint32_t dram_base;       // Internal Data RAM base
-  uint32_t dram_length;     // Internal Data RAM length
+
   uint8_t rdp_level;        // STM32 Opt-Bytes readout protection (0, 1, 2)
   bool flash_encrypted;     // ESP/nRF flash encryption active
   bool debug_access;        // JTAG/SWD unlocked vs disabled
@@ -47,6 +43,18 @@ typedef struct {
 
 extern const fz_protect_region_t chip_protected_regions[];
 extern const uint32_t chip_protected_count;
+
+/**
+ * Dynamic Application RAM Targeting
+ * Open writable memory sections that should be aggressively scanned.
+ */
+typedef struct {
+  uint32_t base;
+  uint32_t size;
+} fz_ram_region_t;
+
+extern const fz_ram_region_t chip_testable_ram_regions[];
+extern const uint32_t chip_testable_ram_count;
 
 /**
  * Memory-Optimized MMIO Fuzzing Structure (Keelhaul Methodology)

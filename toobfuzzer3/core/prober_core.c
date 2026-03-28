@@ -309,13 +309,8 @@ void fuzzer_scan(fz_profile_t profile) {
   // 1. Always attempt RAM mathematical boundary discovery
   fz_log("[CORE] Commencing RAM Boundary Discovery...\n");
 
-  if (profile.caps.iram_base != 0) {
-    memory_bin_search(profile.caps.iram_base, profile.caps.iram_length);
-  }
-
-  if (profile.caps.dram_base != 0 &&
-      profile.caps.dram_base != profile.caps.iram_base) {
-    memory_bin_search(profile.caps.dram_base, profile.caps.dram_length);
+  for (uint32_t i = 0; i < chip_testable_ram_count; i++) {
+    memory_bin_search(chip_testable_ram_regions[i].base, chip_testable_ram_regions[i].size);
   }
 
   // 2. Profile-Directed Flash Scanning

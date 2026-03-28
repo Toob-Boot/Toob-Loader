@@ -26,35 +26,35 @@ def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x40000)
 
     # Extract RAM Layouts from new memory_regions format
     regions = mem.get("memory_regions", [])
-    exec_seg_name = mem.get("executable_segment", "iram")
-    data_seg_name = mem.get("data_segment", "dram")
-
-    iram_base = "0x0"
-    iram_length = "0x10000"
-    dram_base = "0x0"
-    dram_length = "0x10000"
-
+    
     protected_blocks = []
+    testable_ram_blocks = []
 
     for r in regions:
-        if r.get("name") == exec_seg_name:
-            iram_base = parse_hex_addr(r.get("origin"))
-            iram_length = parse_hex_addr(r.get("length"))
-        elif r.get("name") == data_seg_name:
-            dram_base = parse_hex_addr(r.get("origin"))
-            dram_length = parse_hex_addr(r.get("length"))
+        origin = parse_hex_addr(r.get("origin"))
+        length = parse_hex_addr(r.get("length"))
+        
+        # Check if RAM region
+        is_ram = (
+            "ram" in str(r.get("name", "")).lower()
+            or "data" in str(r.get("name", "")).lower()
+        )
 
         # Register Hardware Skips (BootROM, Caches, Reserved)
         is_skipped = (
-            ("-" in r.get("permissions", ""))
-            or ("cache" in r.get("name", "").lower())
-            or ("reserved" in r.get("name", "").lower())
+            ("-" in str(r.get("permissions", "")))
+            or ("cache" in str(r.get("name", "")).lower())
+            or ("reserved" in str(r.get("name", "")).lower())
         )
+        
         if is_skipped:
-            origin = parse_hex_addr(r.get("origin"))
-            length = parse_hex_addr(r.get("length"))
             if origin != "0x0" and length != "0x0":
                 protected_blocks.append(
+                    f"    {{ {origin}, {length} }}, // {r.get('name')}"
+                )
+        elif is_ram:
+            if origin != "0x0" and length != "0x0":
+                testable_ram_blocks.append(
                     f"    {{ {origin}, {length} }}, // {r.get('name')}"
                 )
 
@@ -78,6 +78,7 @@ def generate_chip_capabilities(spec, chip_name, out_dir, footprint_size=0x40000)
 
     # Construct the protected arrays string
     protected_blocks_c = "\n".join(protected_blocks)
+    testable_ram_c = "\n".join(testable_ram_blocks)
 
     # Generate C Blocks for Security Reads conditionally
     rdp_block = f"// [AI] Mask not provided for RDP"
@@ -127,17 +128,18 @@ const fz_protect_region_t chip_protected_regions[] = {{
 }};
 const uint32_t chip_protected_count = sizeof(chip_protected_regions) / sizeof(chip_protected_regions[0]);
 
+/* Dynamic Application RAM Array */
+const fz_ram_region_t chip_testable_ram_regions[] = {{
+{testable_ram_c}
+}};
+const uint32_t chip_testable_ram_count = sizeof(chip_testable_ram_regions) / sizeof(chip_testable_ram_regions[0]);
+
 fz_caps_t chip_get_capabilities(void) {{
     fz_caps_t caps = {{0}};
     
     // AI-Discovered Boot Vectors & Memory Mappings
     caps.user_flash_base = {flash_shield_base}; // Natively aligns Fuzzer API with Physical Deployment Bounds
     caps.rom_base = {rom_base};
-    
-    caps.iram_base = {iram_base};
-    caps.iram_length = {iram_length};
-    caps.dram_base = {dram_base};
-    caps.dram_length = {dram_length};
     
     // Physical Readout Protection (STM32, etc.)
     caps.rdp_level = 0;
