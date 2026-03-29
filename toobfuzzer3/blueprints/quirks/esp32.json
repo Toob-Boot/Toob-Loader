@@ -3,15 +3,24 @@
         "read_word_sequence": [
             { 
                 "type": "raw_c", 
-                "code": "#define ESP32_UART0_STATUS_REG 0x3FF4001C\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    fz_log(\"[R1]\\n\");\n    uint32_t p_page = sector_addr / 0x10000;\n    uint32_t p_offset = sector_addr % 0x10000;\n    \n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    fz_log(\"[R2]\\n\");\n    /* PRO_MMU_TABLE Virtual 0x400D0000 mapped dynamically */\n    *((volatile uint32_t*)(0x3FF10000 + (13 * 4))) = p_page;\n    \n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    fz_log(\"[R3]\\n\");\n    \n    if (out_val) *out_val = *((volatile uint32_t*)(0x400D0000 + p_offset));\n    \n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    fz_log(\"[R4]\\n\");",
+                "code": "#define ESP32_UART0_STATUS_REG 0x3FF4001C\n    fz_log(\"[R1]\\n\");\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    uint32_t p_page = sector_addr / 0x10000;\n    uint32_t p_offset = sector_addr % 0x10000;\n    \n    fz_log(\"[R2]\\n\");\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    /* PRO_MMU_TABLE Virtual 0x400D0000 mapped dynamically */\n    *((volatile uint32_t*)(0x3FF10000 + (13 * 4))) = p_page;\n    \n    fz_log(\"[R3]\\n\");\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    \n    if (out_val) *out_val = *((volatile uint32_t*)(0x400D0000 + p_offset));\n    \n    fz_log(\"[R4]\\n\");\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);",
                 "desc": "MMU Seizure Physical Silicon Atom By-pass"
             }
         ],
+        "unlock_sequence": [],
         "erase_sector_sequence": [
             {
                 "type": "raw_c",
-                "code": "#define ESP32_UART0_STATUS_REG 0x3FF4001C\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    fz_log(\"[E1]\\n\");\n    #define DPORT_PRO_CACHE_CTRL_REG 0x3FF00040\n    *((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) &= ~(1<<3); // DPORT_HW_CACHE_DISABLE",
+                "code": "#define ESP32_UART0_STATUS_REG 0x3FF4001C\n    fz_log(\"[E1]\\n\");\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    #define DPORT_PRO_CACHE_CTRL_REG 0x3FF00040\n    *((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) &= ~(1<<3); // DPORT_HW_CACHE_DISABLE",
                 "desc": "Kill Hardware DPORT Prefetch Pipeline to prevent SPI Arbiter Collisions"
+            },
+            {
+                "type": "rom_function_call",
+                "function_name": "SPIUnlock",
+                "rom_address": "0x40062738",
+                "args_csv": "",
+                "requires_physical_offset": true,
+                "desc": "Hardware BootROM Unlock"
             },
             { 
                 "type": "rom_function_call", 
@@ -23,15 +32,23 @@
             },
             {
                 "type": "raw_c",
-                "code": "*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) |= (1<<3); // DPORT_HW_CACHE_ENABLE\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    fz_log(\"[E2]\\n\");",
+                "code": "*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) |= (1<<3); // DPORT_HW_CACHE_ENABLE\n    fz_log(\"[E2]\\n\");\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);",
                 "desc": "Restore Hardware DPORT Pipeline"
             }
         ],
         "write_word_sequence": [
             {
                 "type": "raw_c",
-                "code": "#define ESP32_UART0_STATUS_REG 0x3FF4001C\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    fz_log(\"[W1]\\n\");\n    #define DPORT_PRO_CACHE_CTRL_REG 0x3FF00040\n    *((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) &= ~(1<<3);",
+                "code": "#define ESP32_UART0_STATUS_REG 0x3FF4001C\n    fz_log(\"[W1]\\n\");\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    #define DPORT_PRO_CACHE_CTRL_REG 0x3FF00040\n    *((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) &= ~(1<<3);",
                 "desc": "Kill Hardware DPORT Prefetch Pipeline"
+            },
+            {
+                "type": "rom_function_call",
+                "function_name": "SPIUnlock",
+                "rom_address": "0x40062738",
+                "args_csv": "",
+                "requires_physical_offset": true,
+                "desc": "Hardware BootROM Unlock"
             },
             {
                 "type": "rom_function_call",
@@ -43,7 +60,7 @@
             },
             {
                 "type": "raw_c",
-                "code": "*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) |= (1<<3);\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);\n    fz_log(\"[W2]\\n\");",
+                "code": "*((volatile uint32_t*)DPORT_PRO_CACHE_CTRL_REG) |= (1<<3);\n    fz_log(\"[W2]\\n\");\n    while (((*((volatile uint32_t*)ESP32_UART0_STATUS_REG) >> 16) & 0xFF) > 0);",
                 "desc": "Restore Hardware DPORT Pipeline"
             }
         ]
