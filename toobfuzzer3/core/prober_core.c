@@ -44,7 +44,7 @@ static void memory_bin_search(uint32_t start_addr, uint32_t max_range) {
 static uint32_t binary_search_sector_boundary(uint32_t start_addr,
                                               uint32_t max_search_range,
                                               uint32_t sampling_interval) {
-  fz_log("      [~] Entering Phase 1 (Coarse Search)...\n");
+  FZ_LOG_DEBUG("      [~] Entering Phase 1 (Coarse Search)...\n");
   uint32_t low = start_addr;
   uint32_t high = start_addr + max_search_range - sampling_interval;
   uint32_t coarse_boundary = start_addr;
@@ -72,9 +72,9 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
     }
   }
 
-  fz_log("      [~] Phase 1 Complete. Coarse Boundary: 0x");
-  fz_log_hex(coarse_boundary);
-  fz_log("\n      [~] Entering Phase 2 (Fine Search)...\n");
+  FZ_LOG_DEBUG("      [~] Phase 1 Complete. Coarse Boundary: 0x");
+  FZ_LOG_HEX_DEBUG(coarse_boundary);
+  FZ_LOG_DEBUG("\n      [~] Entering Phase 2 (Fine Search)...\n");
 
   uint32_t fine_low = coarse_boundary;
   uint32_t fine_high = coarse_boundary + sampling_interval;
@@ -87,9 +87,9 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
     uint32_t fine_mid = fine_low + ((fine_high - fine_low) / 2);
     fine_mid = fine_mid & ~0x3; // Align to 4-byte word boundary
 
-    fz_log("        [~] Phase 2: Testing fine_mid = 0x");
-    fz_log_hex(fine_mid);
-    fz_log("\n");
+    FZ_LOG_DEBUG("        [~] Phase 2: Testing fine_mid = 0x");
+    FZ_LOG_HEX_DEBUG(fine_mid);
+    FZ_LOG_DEBUG("\n");
 
     uint32_t pre_val = 0;
     if (chip_flash_read32(fine_mid, &pre_val) && pre_val != 0xFFFFFFFF) {
@@ -99,15 +99,15 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
       continue;
     }
 
-    fz_log("        [~] Phase 2: Injecting probe marker 0xDEADBEEF...\n");
+    FZ_LOG_DEBUG("        [~] Phase 2: Injecting probe marker 0xDEADBEEF...\n");
     chip_flash_write32(fine_mid, 0xDEADBEEF);
 
-    fz_log("        [~] Phase 2: Re-Erasing Sector 0x");
-    fz_log_hex(start_addr);
-    fz_log("...\n");
+    FZ_LOG_DEBUG("        [~] Phase 2: Re-Erasing Sector 0x");
+    FZ_LOG_HEX_DEBUG(start_addr);
+    FZ_LOG_DEBUG("...\n");
     chip_flash_erase(start_addr);
 
-    fz_log("        [~] Phase 2: Interrogating Marker Survival...\n");
+    FZ_LOG_DEBUG("        [~] Phase 2: Interrogating Marker Survival...\n");
     uint32_t val = 0;
     if (!chip_flash_read32(fine_mid, &val)) {
       if (fine_mid <= start_addr + 4)
@@ -126,9 +126,9 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
     }
   }
 
-  fz_log("      [~] Phase 2 Complete. Exact Boundary: 0x");
-  fz_log_hex(exact_boundary);
-  fz_log("\n");
+  FZ_LOG_DEBUG("      [~] Phase 2 Complete. Exact Boundary: 0x");
+  FZ_LOG_HEX_DEBUG(exact_boundary);
+  FZ_LOG_DEBUG("\n");
 
   uint32_t ret = (exact_boundary - start_addr) + 4;
   
@@ -201,19 +201,19 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
     //    observe mathematical boundaries
     uint32_t start_val = 0;
     if (chip_flash_read32(addr, &start_val) && start_val == 0xFFFFFFFF) {
-      fz_log("      [~] Empty Sector! Injecting 256KB Probe Markers...\n");
+      FZ_LOG_DEBUG("      [~] Empty Sector! Injecting 256KB Probe Markers...\n");
       for (uint32_t i = 0; i < sample_range; i += sampling_interval) {
         chip_flash_write32(addr + i, 0xAAAAAAAA);
       }
     } else {
-      fz_log("      [~] Skipping Markers (Sector Unerased or Shielded)\n");
+      FZ_LOG_DEBUG("      [~] Skipping Markers (Sector Unerased or Shielded)\n");
     }
 
-    fz_log("      [~] Firing BootROM Sector Erase...\n");
+    FZ_LOG_DEBUG("      [~] Firing BootROM Sector Erase...\n");
     if (chip_flash_erase(addr)) {
-      fz_log("      [~] SUCCESS: Sector Erased!\n");
+      FZ_LOG_DEBUG("      [~] SUCCESS: Sector Erased!\n");
 
-      fz_log("      [~] Initiating Binary Boundary Search...\n");
+      FZ_LOG_DEBUG("      [~] Initiating Binary Boundary Search...\n");
       uint32_t sector_size =
           binary_search_sector_boundary(addr, sample_range, sampling_interval);
           

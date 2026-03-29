@@ -246,7 +246,7 @@ def generate_flash_hal(spec, chip_name, out_dir):
 #include <stdint.h>
 #include <stdbool.h>
 
-extern void fz_log(const char *msg);
+#include "logger.h"
 
 void hal_print_status(void) {{
     fz_log("[HAL] Active Backend: True Physical Hardware MMU Driver\\n");

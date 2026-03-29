@@ -15,6 +15,14 @@ void fz_log(const char *str);
 // Profile-aware hexadecimal logging
 void fz_log_hex(uint32_t val);
 
+#ifdef FZ_DEBUG_MODE
+#define FZ_LOG_DEBUG(x) fz_log(x)
+#define FZ_LOG_HEX_DEBUG(x) fz_log_hex(x)
+#else
+#define FZ_LOG_DEBUG(x) do {} while(0)
+#define FZ_LOG_HEX_DEBUG(x) do {} while(0)
+#endif
+
 // Profile-aware UART read (returns true if byte received)
 bool fz_uart_rx_byte(uint8_t *c);
 

@@ -204,6 +204,16 @@ Ready for Datasheet ingestion.
         )
         self.runs_entry.grid(row=11, column=0, padx=20, pady=(5, 20), sticky="w")
 
+        # Verbose Debug Logs
+        self.debug_mode_var = ctk.BooleanVar(value=False)
+        self.debug_checkbox = ctk.CTkCheckBox(
+            self.sidebar_frame,
+            text="Verbose Debug Logs",
+            variable=self.debug_mode_var,
+            font=ctk.CTkFont(size=12)
+        )
+        self.debug_checkbox.grid(row=12, column=0, padx=20, pady=(0, 20), sticky="w")
+
         # Start Button
         self.start_btn = ctk.CTkButton(
             self.sidebar_frame,
@@ -683,6 +693,7 @@ Ready for Datasheet ingestion.
 
             ctx = StateContext(chip, arch, self.trm_path, runs)
             ctx.run_id = expected_run_id
+            ctx.debug_mode = self.debug_mode_var.get()
 
             pipeline = ToobfuzzerPipeline(
                 context=ctx,
@@ -848,6 +859,7 @@ Ready for Datasheet ingestion.
             from pipeline_core import StateContext, ToobfuzzerPipeline, PipelineState
 
             ctx = StateContext(chip, arch, self.trm_path, runs)
+            ctx.debug_mode = self.debug_mode_var.get()
 
             # Instantiate the State Machine, passing our GUI progress updater
             pipeline = ToobfuzzerPipeline(

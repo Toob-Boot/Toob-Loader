@@ -291,7 +291,7 @@ class ToobfuzzerPipeline:
 
         # We start by testing the most permissive profile
         self.builder = ToobfuzzerBuilder(
-            self.ctx.chip, latest_blueprint, profile="BARE_METAL_OPEN"
+            self.ctx.chip, latest_blueprint, profile="BARE_METAL_OPEN", debug_mode=getattr(self.ctx, "debug_mode", False)
         )
 
         if not self.builder.stage_1_compile():

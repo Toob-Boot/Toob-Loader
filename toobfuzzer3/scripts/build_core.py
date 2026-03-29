@@ -19,11 +19,13 @@ class ToobfuzzerBuilder:
         blueprint_path,
         profile="BARE_METAL_OPEN",
         private_key_path=None,
+        debug_mode=False,
     ):
         self.chip_name = chip_name
         self.blueprint_path = blueprint_path
         self.profile = profile
         self.private_key_path = private_key_path
+        self.debug_mode = debug_mode
         self.blueprint = self._load_blueprint()
         self.toolchain_reqs = self.blueprint.get("toolchain_requirements", {})
 
@@ -148,6 +150,9 @@ class ToobfuzzerBuilder:
         arch_flags = "" if is_riscv else "-mlongcalls "
         if has_true_hal:
             arch_flags += "-DHAS_TRUE_SPI_HAL=1 "
+            
+        if self.debug_mode:
+            arch_flags += "-DFZ_DEBUG_MODE=1 "
 
 
         compile_cmd = (
