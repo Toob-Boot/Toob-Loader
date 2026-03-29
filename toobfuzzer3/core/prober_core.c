@@ -165,7 +165,7 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
         uint32_t jump_size = (p_base + p_size) - addr;
         fz_log("S");
         fz_log_hex(addr);
-        fz_log(" [size: 0x");
+        fz_log(" [size: ");
         fz_log_hex(jump_size);
         fz_log("]\n");
         addr += jump_size;
@@ -212,13 +212,13 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
     fz_log("      [~] Firing BootROM Sector Erase...\n");
     if (chip_flash_erase(addr)) {
       fz_log("      [~] SUCCESS: Sector Erased!\n");
-      fz_log("+");
-      fz_log_hex(addr);
-      fz_log("\n"); // Force flush
 
       fz_log("      [~] Initiating Binary Boundary Search...\n");
       uint32_t sector_size =
           binary_search_sector_boundary(addr, sample_range, sampling_interval);
+          
+      fz_log("+");
+      fz_log_hex(addr);
       fz_log(" [size: ");
       fz_log_hex(sector_size);
       fz_log("]\n");
@@ -227,7 +227,7 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
     } else {
       fz_log("-");
       fz_log_hex(addr);
-      fz_log("\n");
+      fz_log(" [size: 0x00001000]\n");
       addr += 4096; // Fallback if erase failed
     }
   }

@@ -447,6 +447,7 @@ class ToobfuzzerPipeline:
                                 self.ctx.scan_total_size = (
                                     self.ctx.scan_limit - self.ctx.scan_base
                                 )
+                                self.ctx.scan_start_time = time.time()
                                 print(
                                     f"[{self.ctx.chip}] [Flash Fuzz] Discovered Bounds: {scan_data['base']} -> {scan_data['limit']}"
                                 )
@@ -525,13 +526,43 @@ class ToobfuzzerPipeline:
                                     is_fallback = False
                                     self.ctx.ping_pong_triggered = True
 
+                                if not hasattr(self.ctx, "scanned_bytes_accumulated"):
+                                    self.ctx.scanned_bytes_accumulated = 0
+                                self.ctx.scanned_bytes_accumulated += sector_size
+
                                 fallback_str = (
                                     " (FALLBACK APPLIED)" if is_fallback else ""
                                 )
-                                print(
-                                    f"[{self.ctx.chip}] [Flash Fuzz] {pct}% Complete ({hex(addr)} / {hex(self.ctx.scan_limit)}) - {status} [measured_size: {hex(sector_size)}]{fallback_str}"
-                                )
-                                printed_clean = True
+                                
+                                if status != "skipped":
+                                    if not hasattr(self.ctx, "eta_first_time"):
+                                        # Anchor the start of physical measuring
+                                        self.ctx.eta_first_time = time.time()
+                                        
+                                        # Subtract this first sector from accumulated base
+                                        # so our processed bytes correctly represent the elapsed time
+                                        self.ctx.eta_first_bytes = self.ctx.scanned_bytes_accumulated - sector_size
+
+                                eta_str = ""
+                                if hasattr(self.ctx, "eta_first_time"):
+                                    elapsed = time.time() - self.ctx.eta_first_time
+                                    bytes_processed = self.ctx.scanned_bytes_accumulated - self.ctx.eta_first_bytes
+                                    
+                                    # Wait at least a few seconds to gather a realistic average
+                                    if elapsed > 2.0 and bytes_processed > 0:
+                                        bytes_per_sec = bytes_processed / elapsed
+                                        bytes_left = self.ctx.scan_total_size - self.ctx.scanned_bytes_accumulated
+                                        
+                                        if bytes_left > 0 and bytes_per_sec > 0:
+                                            eta_secs = int(bytes_left / bytes_per_sec)
+                                            mins, secs = divmod(eta_secs, 60)
+                                            eta_str = f" [ETA: {mins:02d}m {secs:02d}s]"
+
+                                if status != "skipped":
+                                    print(
+                                        f"[{self.ctx.chip}] [Flash Fuzz] {pct}% Complete ({hex(addr)} / {hex(self.ctx.scan_limit)}) - {status} [measured_size: {hex(sector_size)}]{fallback_str}{eta_str}"
+                                    )
+                                    printed_clean = True
 
                                 if not hasattr(self.ctx, "memory_map"):
                                     self.ctx.memory_map = {}
