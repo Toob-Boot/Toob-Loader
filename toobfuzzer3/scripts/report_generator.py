@@ -32,7 +32,14 @@ def generate_soc_report(run_dir):
     flash_regions = []
 
     if scan_data:
-        sorted_addrs = sorted([k for k in scan_data.keys() if k != "metadata"], key=lambda x: int(x))
+        valid_keys = []
+        for k in scan_data.keys():
+            try:
+                int(k)
+                valid_keys.append(k)
+            except ValueError:
+                pass
+        sorted_addrs = sorted(valid_keys, key=lambda x: int(x))
         
         if sorted_addrs:
             first_addr = int(sorted_addrs[0])
@@ -107,8 +114,8 @@ def generate_soc_report(run_dir):
                     or ("reserved" in region.get("name", "").lower())
                 )
 
-                # Check verification
-                is_verified = (origin in verified_ram)
+                # Check verification (The hardware fuzzer returns the discovered END boundary)
+                is_verified = ((origin + length) in verified_ram) or (origin in verified_ram)
 
                 # Exclude massive invalid blocks
                 if length > 0 and length < 10 * 1024 * 1024:
@@ -158,10 +165,28 @@ def generate_soc_report(run_dir):
         r.get("size_kb", 0) for r in flash_regions if r.get("status") == "SKIPPED"
     )
 
+    scan_target_kb = 0
+    if "metadata" in scan_data and "scan_total_bytes" in scan_data["metadata"]:
+        scan_target_kb = scan_data["metadata"]["scan_total_bytes"] / 1024.0
+    if scan_target_kb == 0:
+        scan_target_kb = total_flash_kb
+
+    flash_progress_pct = 0
+    if scan_target_kb > 0:
+        flash_progress_pct = min(100, int((erased_kb / scan_target_kb) * 100))
+
     total_ram_kb = sum(r["size_kb"] for r in ram_regions)
     reserved_ram_kb = sum(
         r.get("size_kb", 0) for r in ram_regions if r.get("status") == "SKIPPED"
     )
+
+    verifiable_ram_kb = sum(r["size_kb"] for r in ram_regions if r.get("status") != "SKIPPED")
+    verified_ram_kb = sum(r["size_kb"] for r in ram_regions if r.get("status") != "SKIPPED" and r.get("verification") == "Physical Fuzzing (Bare-Metal)")
+
+    ram_progress_pct = 0
+    if verifiable_ram_kb > 0:
+        ram_progress_pct = min(100, int((verified_ram_kb / verifiable_ram_kb) * 100))
+
     periph_count = len(peripherals)
 
     # Build Javascript Embedded Data
@@ -174,8 +199,13 @@ def generate_soc_report(run_dir):
             "flash_kb": total_flash_kb,
             "erased_kb": erased_kb,
             "reserved_flash_kb": reserved_flash_kb,
+            "scan_target_kb": scan_target_kb,
+            "flash_progress_pct": flash_progress_pct,
             "ram_kb": total_ram_kb,
             "reserved_ram_kb": reserved_ram_kb,
+            "verifiable_ram_kb": verifiable_ram_kb,
+            "verified_ram_kb": verified_ram_kb,
+            "ram_progress_pct": ram_progress_pct,
             "periph_count": periph_count,
         },
     }
@@ -416,6 +446,10 @@ def generate_soc_report(run_dir):
     <div class="dashboard">
         <div class="column" id="col-flash">
             <h2>SPI Flash Memory</h2>
+            <div style="font-size: 0.95rem; margin-bottom: 10px; color: #555; background: #fff; padding: 5px 10px; border-radius: 4px; border: 1px solid #ddd; text-align: center;">
+                <b>Progress:</b> <span style="font-weight:bold; color: #c48dfc;">{flash_progress_pct}%</span> 
+                <span style="font-size: 0.85rem;">({erased_kb:.1f} / {scan_target_kb:.1f} KB Target)</span>
+            </div>
             <div class="legend">
                 <div class="legend-item"><div class="legend-color" style="background: var(--accent-green);"></div> Erased</div>
                 <div class="legend-item" title="Hardware Reserved / Protected by Bootloader"><div class="legend-color" style="background: #f0f0f0; border-style: dashed;"></div> Skipped - reserved by Hardware/Bootloader</div>
@@ -425,6 +459,10 @@ def generate_soc_report(run_dir):
         
         <div class="column" id="col-ram">
             <h2>Internal SRAM</h2>
+            <div style="font-size: 0.95rem; margin-bottom: 10px; color: #555; background: #fff; padding: 5px 10px; border-radius: 4px; border: 1px solid #ddd; text-align: center;">
+                <b>Verification:</b> <span style="font-weight:bold; color: #c48dfc;">{ram_progress_pct}%</span> 
+                <span style="font-size: 0.85rem;">({verified_ram_kb:.1f} / {verifiable_ram_kb:.1f} KB Target)</span>
+            </div>
             <div class="legend">
                 <div class="legend-item"><div class="legend-color" style="background: var(--bg-primary); border: 1px solid #ccc;"></div> Application RAM</div>
                 <div class="legend-item" title="Hardware Caches / Reserved RAM"><div class="legend-color" style="background: #f0f0f0; border-style: dashed;"></div> Hardware Reserved / Cache</div>

@@ -17,17 +17,23 @@ const fz_protect_region_t chip_protected_regions[] = {
 };
 const uint32_t chip_protected_count = sizeof(chip_protected_regions) / sizeof(chip_protected_regions[0]);
 
+/* Dynamic Application RAM Array */
+const fz_ram_region_t chip_testable_ram_regions[] = {
+    { 0x40080000, 0x20000 }, // iram0
+    { 0x3FFB0000, 0x30000 }, // dram0
+    { 0x3FFE0000, 0x20000 }, // dram1
+    { 0x3FF80000, 0x2000 }, // rtc_fast_dram
+    { 0x400C0000, 0x2000 }, // rtc_fast_iram
+    { 0x50000000, 0x2000 }, // rtc_slow_dram
+};
+const uint32_t chip_testable_ram_count = sizeof(chip_testable_ram_regions) / sizeof(chip_testable_ram_regions[0]);
+
 fz_caps_t chip_get_capabilities(void) {
     fz_caps_t caps = {0};
     
     // AI-Discovered Boot Vectors & Memory Mappings
     caps.user_flash_base = 0x0; // Natively aligns Fuzzer API 1:1 with True Physical Silicon
     caps.rom_base = 0x40000000;
-    
-    caps.iram_base = 0x40080000;
-    caps.iram_length = 0x20000;
-    caps.dram_base = 0x3FFB0000;
-    caps.dram_length = 0x30000;
     
     // Physical Readout Protection
     caps.rdp_level = 0;

@@ -9,7 +9,8 @@ md = {
     "ram_fuzzed_boundaries": [
         "0x400A0000",
         "0x3FFE0000"
-    ]
+    ],
+    "scan_total_bytes": 0x3C0000
 }
 
 new_d = {"metadata": md}

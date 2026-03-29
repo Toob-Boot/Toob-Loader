@@ -558,10 +558,16 @@ class ToobfuzzerPipeline:
                                     os.makedirs(bp_dir, exist_ok=True)
                                     
                                     export_map = dict(self.ctx.memory_map)
+                                    metadata = {}
+                                    
                                     if hasattr(self.ctx, "ram_fuzzed_boundaries"):
-                                        export_map["metadata"] = {
-                                            "ram_fuzzed_boundaries": self.ctx.ram_fuzzed_boundaries
-                                        }
+                                        metadata["ram_fuzzed_boundaries"] = self.ctx.ram_fuzzed_boundaries
+                                        
+                                    if hasattr(self.ctx, "scan_total_size"):
+                                        metadata["scan_total_bytes"] = self.ctx.scan_total_size
+                                        
+                                    if metadata:
+                                        export_map["metadata"] = metadata
                                         
                                     with open(os.path.join(bp_dir, "aggregated_scan.json"), "w") as f:
                                         json.dump(export_map, f, indent=4)

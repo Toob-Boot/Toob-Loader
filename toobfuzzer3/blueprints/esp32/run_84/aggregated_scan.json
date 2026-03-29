@@ -3,7 +3,8 @@
         "ram_fuzzed_boundaries": [
             "0x400A0000",
             "0x3FFE0000"
-        ]
+        ],
+        "scan_total_bytes": 3932160
     },
     "262144": {
         "size": 4096,
