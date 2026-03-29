@@ -229,6 +229,27 @@ class ToobfuzzerPipeline:
         with open(latest_blueprint, "r") as f:
             spec_json = json.load(f)
 
+        # Apply Architectural Quirks (Hardware Hack Overrides)
+        quirk_path = os.path.join(
+            os.path.dirname(__file__), "blueprints", "quirks", f"{self.ctx.chip}.json"
+        )
+        if os.path.exists(quirk_path):
+            print(f"[{phase_name}] [*] Applying Hardware Quirks Profile for {self.ctx.chip}...")
+            with open(quirk_path, "r") as f:
+                quirks = json.load(f)
+            
+            # Deep merge the quirks into the chip's definition
+            chip_def = spec_json.get(self.ctx.chip, {})
+            
+            def deep_update(d, u):
+                for k, v in u.items():
+                    if isinstance(v, dict) and k in d and isinstance(d[k], dict):
+                        deep_update(d[k], v)
+                    else:
+                        d[k] = v
+                        
+            deep_update(chip_def, quirks)
+
         import linker_gen.ld_generator
         import linker_gen.chip_generator2
         importlib.reload(linker_gen.ld_generator)

@@ -1,0 +1,143 @@
+{
+    "262144": {
+        "start_addr": 262144,
+        "end_addr": 266239,
+        "start_hex": "0x40000",
+        "end_hex": "0x40fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "266240": {
+        "start_addr": 266240,
+        "end_addr": 270335,
+        "start_hex": "0x41000",
+        "end_hex": "0x41fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "270336": {
+        "start_addr": 270336,
+        "end_addr": 274431,
+        "start_hex": "0x42000",
+        "end_hex": "0x42fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "274432": {
+        "start_addr": 274432,
+        "end_addr": 278527,
+        "start_hex": "0x43000",
+        "end_hex": "0x43fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "278528": {
+        "start_addr": 278528,
+        "end_addr": 282623,
+        "start_hex": "0x44000",
+        "end_hex": "0x44fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "282624": {
+        "start_addr": 282624,
+        "end_addr": 286719,
+        "start_hex": "0x45000",
+        "end_hex": "0x45fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "286720": {
+        "start_addr": 286720,
+        "end_addr": 290815,
+        "start_hex": "0x46000",
+        "end_hex": "0x46fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "290816": {
+        "start_addr": 290816,
+        "end_addr": 294911,
+        "start_hex": "0x47000",
+        "end_hex": "0x47fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "294912": {
+        "start_addr": 294912,
+        "end_addr": 299007,
+        "start_hex": "0x48000",
+        "end_hex": "0x48fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "299008": {
+        "start_addr": 299008,
+        "end_addr": 303103,
+        "start_hex": "0x49000",
+        "end_hex": "0x49fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "303104": {
+        "start_addr": 303104,
+        "end_addr": 307199,
+        "start_hex": "0x4a000",
+        "end_hex": "0x4afff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "307200": {
+        "start_addr": 307200,
+        "end_addr": 311295,
+        "start_hex": "0x4b000",
+        "end_hex": "0x4bfff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "311296": {
+        "start_addr": 311296,
+        "end_addr": 315391,
+        "start_hex": "0x4c000",
+        "end_hex": "0x4cfff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "metadata": {
+        "ram_fuzzed_boundaries": [
+            "0x400A0000",
+            "0x3FFE0000",
+            "0x40000000",
+            "0x3FF82000",
+            "0x400C2000",
+            "0x50002000"
+        ],
+        "scan_total_bytes": 4194304
+    }
+}
