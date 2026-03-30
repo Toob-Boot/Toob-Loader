@@ -136,9 +136,12 @@ size_t (*get_sector_size)(uint32_t addr);
 | **Uniforme Chips**                            | Kann einfach `return sector_size;` sein.                                                                                                                                                                                                                                |
 | **Rückgabe**                                  | Sektorgröße in Bytes. 0 wenn `addr` außerhalb des Flash liegt.                                                                                                                                                                                                          |
 
-### Metadaten-Felder (Toobfuzzer Integration)
+### Metadaten-Felder & Hybride HAL-Architektur (Toobfuzzer Integration)
 
-Die folgenden Felder werden **nicht** hardcodiert! Wie in `docs/toobfuzzer_integration.md` beschrieben, generiert der Manifest-Compiler diese Werte *automatisch* aus den Fuzzer-Scans (`aggregated_scan.json` und `blueprint.json`) und webt sie als `#define` Makros in die `chip_config.h` ein. Das erlaubt dem C-Code, mit variablen Hardware-Grenzen zu rechnen.
+Die Bereitstellung der HAL-Parameter folgt der hybriden Zero-Bloat Architektur (siehe `docs/concept_fusion.md`).
+Die folgenden Felder sowie kritische Registeradressen (Watchdog-Kick `REG_WDT_FEED`, Reset `REG_RESET_REASON`, BootROM-Pointer wie `ROM_PTR_FLASH_ERASE`) werden **nicht** hardcodiert! 
+
+Wie in `docs/toobfuzzer_integration.md` beschrieben, generiert der Manifest-Compiler diese Werte *automatisch* aus den Fuzzer-Scans (z.B. `blueprint.json`) und webt sie als `#define` Makros in die `chip_config.h` ein. Das erlaubt dem C-Code, mit variablen Hardware-Grenzen und Raw-Pointern zu arbeiten, ohne Hersteller-SDKs wie ESP-IDF unnötig einbinden zu müssen.
 
 | Feld           | Typ        | Wer setzt es / Datenquelle                                                                                       | Wer liest es                                                                               |
 | -------------- | ---------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |

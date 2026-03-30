@@ -40,7 +40,7 @@ Reine Business-Logik: Update-State-Machine, Signatur-Verifikation, Journal, Merk
 Eine ultradünne Schicht, die standardmäßig `bare-metal` (malloc-frei) läuft und exakt vier primitive Dinge abstrahiert: `Mutex` (für Multi-Core), `Timer-Tick`, `malloc/free` (nur falls die Crypto-Lib es fordert) und `assert`. Für Zephyr, FreeRTOS oder NuttX existiert hierfür jeweils ein ~50-Zeilen-Adapter.
 
 **Schicht 1: Platform HAL & Security Baseline**
-Eine ultradünne Treiberschicht. Krypto erstickt, wenn physischer Speicher auslesbar bleibt. WICHTIGE Porting-Direktive: Eine Software-Sperre gegen Debug-Ports in `startup.c` gleicht einem Race-Condition-Spielzeug, das leichtem Hard-Reset-Glitching unterliegt. Toob-Boot verlangt daher zwingend den physischen **JTAG/SWD-Lockdown über Hardware-eFuses oder stählerne Option Bytes (z.B. STM32 RDP2)** durch die Hersteller! Die `startup.c` Software-Sperre fungiert ab sofort nur als Defense-in-Depth Netz. Zudem fordert der Core vor App-Start ein striktes `hal_deinit()`, um "Peripherie-Vergiftungen" für das OS auszumerzen. Es gibt exakt **6 C-Struct Traits**:
+Eine ultradünne Treiberschicht. Krypto erstickt, wenn physischer Speicher auslesbar bleibt. WICHTIGE Porting-Direktive: Eine Software-Sperre gegen Debug-Ports in `startup.c` gleicht einem Race-Condition-Spielzeug, das leichtem Hard-Reset-Glitching unterliegt. Toob-Boot verlangt daher zwingend den physischen **JTAG/SWD-Lockdown über Hardware-eFuses oder stählerne Option Bytes (z.B. STM32 RDP2)** durch die Hersteller! Die `startup.c` Software-Sperre fungiert ab sofort nur als Defense-in-Depth Netz. Zudem fordert der Core vor App-Start ein striktes `hal_deinit()`, um "Peripherie-Vergiftungen" für das OS auszumerzen. Es gibt exakt **7 C-Struct Traits**, die zwingend der hybriden Architektur (siehe Kap. 6) folgen:
 
 - [x] **`flash_hal_t`** (read · write · erase) -> PFLICHT (Achtung OTFDEC: Bei aktiver On-the-Fly Hardware-Verschlüsselung wie auf dem ESP32/STM32 ist diese HAL strikt dafür verantwortlich, Hash-Berechnungen transparent gegen den *Plaintext* laufen zu lassen. Hashes korrelieren niemals auf Ciphertext!).
 - [x] **`confirm_hal_t`** (set_ok · check_ok · clear) -> PFLICHT (Abstrahiert das Confirm-Flag hardwareunabhängig: Ob schnelles RTC-RAM für ESP32, ein wear-leveled Flash-Sector für MCU-Kaltstarts ohne Knopfzelle oder ein Always-On-Backup-Register für STM32, entscheidet die Plattform über diesen Trait!)
@@ -127,3 +127,45 @@ Features, die den Konkurrenzsystemen fehlen und die Entwicklerproduktivität max
 - **Auto-generierte Renode (Emulator) Configs:** Der Manifest-Compiler parst das `device.toml` und generiert daraus automatisch eine exakte `.resc` Datei für den Renode-Simulator. Hardware-Tests in der CI laufen immer deckungsgleich zur physikalischen Flash-Map, ohne manuelle Konfiguration.
 - **Der Preflight-Report:** Statt kryptischer C-Fehler erhält der Entwickler _vor_ dem C-Compile einen Report: `Alignment check passed`, `Swap-Move kompatibel`, `Power Guard aktiv: min 3300mV`.
 - **Deterministische Fault-Injection:** Über einen speziellen HAL-Mock (`hal_fault_inject.c`) lässt sich in der Sandbox sagen: _"Simuliere einen Brownout exakt nach dem 47. Sektor"_. Die WAL-Heilung kann so innerhalb von Sekunden 1000-fach in CI geprüft werden.
+
+## 6. Toobfuzzer Integration & Hybride HAL-Architektur
+
+Die Architektur beantwortet die älteste Frage der Bootloader-Entwicklung ("Reines Bare-Metal vs. Bloatige Hersteller-SDKs?") durch einen **hybriden Weg**:
+
+Wir trennen die HAL-Abstraktionen strikt in zwei Welten. Das Tooling (der `manifest_compiler`, gefüttert durch die `blueprint.json` des Toobfuzzers) bildet die Brücke und generiert 90 % der Konstanten automatisch:
+
+1. **Bare-Metal (Zero Overhead) für Status-Systeme:** 
+   Für einfache Operationen wie Watchdog füttern, Reset-Reason auslesen oder das `Confirm-Flag` ins RTC-RAM schreiben, binden wir niemals das SDK des Herstellers (z.B. ESP-IDF) ein. Der Toobfuzzer liefert uns die nackten Hex-Registeradressen. Wir greifen direkt auf `(volatile uint32_t*)0x3FF48034` zu. Kein Overhead.
+2. **Chip-Spezifisch (Vendor-SDK/ROM) für komplexe Peripherie:** 
+   Wir schreiben *niemals* eigene Bare-Metal SPI-Flash-Treiber. Das Risiko, Multi-Core MMU-Caches bei Schreibvorgängen zu korrumpieren, ist astronomisch. Für Flash-Timing und Hardware-Krypto triggern wir offizielle Hersteller-Funktionen, nutzen aber in der BootROM festgebackene Pointer (z.B. `0x40062CCC` für `SPIEraseSector` beim ESP32), um den C-Code-Bloat extrem gering zu halten.
+
+### 6.1 Abhängigkeiten vom Toobfuzzer (Stage 4 / blueprint.json)
+
+Damit der C17-Core perfekt zu den 7 HAL-Traits aus `docs/hals.md` passt, müssen die Toobfuzzer-Scripte (siehe Beispiele [blueprint.json](file:///c:/Users/Robin/Desktop/Toob-Loader/docs/blueprint.json) und [aggregated_scan.json](file:///c:/Users/Robin/Desktop/Toob-Loader/docs/aggregated_scan.json)) die folgenden Hardware-Limits und ROM-Pointer zwingend aufdecken:
+
+- **Für die `flash_hal_t`:** `sector_size`, `write_align`, `app_alignment`, Flash Base Address (Mapping Start), ROM-Pointer für `SPIEraseSector`, ROM-Pointer für `SPIWrite` und etwaige Unlock-Routinen.
+- **Für die `clock_hal_t`:** Hex-Adresse für das Reset-Reason Register (inkl. Bit-Masken für WDT, SOFTWARE, BROWNOUT-Erkennung) und den fortlaufenden internen Hardware-Tick-Counter für Timing.
+- **Für die `wdt_hal_t`:** Das Feed/Kick Register (Hex-Adresse) sowie der erforderliche "Magic-Value", der geschrieben werden muss, um den System-Watchdog am Leben zu halten.
+- **Für die `confirm_hal_t`:** Die Hex-Adresse im Survival-Storage (z.B. RTC-Reset-Resilient RAM), wo das 2FA-Handoff-Flag gefahrlos abgelegt werden darf.
+- **Für die `crypto_hal_t`:** Sofern `hw_sha256` existiert, zwingend die drei ROM-Pointer für `init`, `update` und `finish`, um Hardware-Acceleration bare-metal nutzen zu können.
+
+### 6.2 Resultat: Die generierte `chip_config.h`
+
+Hat der Toobfuzzer diese Daten extrahiert, erstellt der Manifest-Compiler vor dem eigentlichen GNU GCC Lauf vollautomatisch eine `chip_config.h`:
+
+```c
+/* ========================================================
+ * AUTO-GENERATED WIRING - TARGET: ESP32-S3
+ * ======================================================== */
+#define CHIP_FLASH_BASE_ADDR        0x42000000
+#define CHIP_FLASH_WRITE_ALIGN      4
+#define ROM_PTR_FLASH_ERASE         ((int (*)(uint32_t))0x40062CCC)
+#define ROM_PTR_FLASH_WRITE         ((int (*)(uint32_t, const void*, size_t))0x40062D00)
+#define REG_RESET_REASON            ((volatile uint32_t*)0x3FF48034)
+#define MASK_RESET_WDT              0x08
+#define REG_WDT_FEED                ((volatile uint32_t*)0x3FF48060)
+#define VAL_WDT_KICK                0x80000000
+#define ADDR_CONFIRM_RTC_RAM        ((volatile uint32_t*)0x3FF80000)
+```
+
+Mit exakt diesen Makros wird die HAL-Ebene im Bare-Metal `core/` Code verbunden, völlig ohne IDF. Diese Philosophie rettet die 14-KB-Grenze und bündelt sämtliches Chip-Komplexitätswissen sicher im externen Python-Tooling.
