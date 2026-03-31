@@ -11,6 +11,9 @@ Hier ist ein nach Themen gruppierter Überblick über alle Spezifikationsdokumen
 *   **[`concept_fusion.md`](concept_fusion.md)**
     Die zentrale **Architektur-Bibel**. Beschreibt die 5-Schichten Struktur (S0-S4), das Triple Modular Redundancy (TMR) System, das Flash-Agnostic Write-Ahead-Log (WAL), sowie die State-Machine und Anti-Glitch-Sicherungen. *Startpunkt für jeden neuen Entwickler.*
 
+*   **[`structure_plan.md`](structure_plan.md)**
+    Der **Repository-Blueprint**. Zeigt die Verzeichnisstruktur (`core/`, `hal/`, `libtoob/`) und definiert die dreischichtige HAL-Wiederverwendung (Architektur → Vendor → Chip). Es sichert die P10-Regeln auf Source-Code-Ebene ab.
+
 *   **[`hals.md`](hals.md)**
     Die Hardware Abstraction Layer Spezifikation. Dokumentiert, welche **C-Traits** (`flash_hal_t`, `crypto_hal_t`, `wdt_hal_t`, etc.) exakt implementiert werden müssen, welche Limits es gibt und wie die Hardware-Abstraktionen mit dem WDT agieren müssen.
 
@@ -56,12 +59,6 @@ Hier ist ein nach Themen gruppierter Überblick über alle Spezifikationsdokumen
 ---
 
 ## 📉 5. Planung & Historie / Veraltet
-
-*   **[`structure_plan.md`](structure_plan.md)**
-    *Status: Potenziell veraltet.* Früheres Planungsdokument zur Modulstruktur und OS-Architektur. Teile davon sind bereits in `concept_fusion.md` abgebildet worden.
-
-*   **[`request.md`](request.md)**
-    *Status: Erledigt / Veraltet.* Der anfängliche Spezifikationswunsch (Requirements Gathering). Dient inzwischen eher als historische Referenz der ersten Architekturanforderungen.
 
 *   **`analysis/` (Ordner)**
     Enthält die verschiedenen Iterationen von Gap-Analysen (wie z.B. `big_gap_analysis_v2.md`), über die wir die finalen 50 Produktions-Gaps eliminiert haben.

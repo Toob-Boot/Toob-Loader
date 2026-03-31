@@ -74,8 +74,8 @@ toob_status_t toob_confirm_boot(void);
 toob_status_t toob_set_next_update(uint32_t manifest_flash_addr);
 ```
 
-### 3. `toob_get_boot_logs()`
-**Zweck:** Liest das Timing-IDS und die Crash-Historie aus der Bootloader Diagnostik-Sektion. Anstelle eines rohen String-Buffers (GAP-16) parst die Bibliothek exakt in eine strukturierte `toob_boot_diag_t` Repräsentation für maschinenlesbare Flotten-Auswertungen (CBOR-Extraction).
+### 3. `toob_get_boot_diag()`
+**Zweck:** Liest das Timing-IDS und die Crash-Historie aus der Bootloader Diagnostik-Sektion. Anstelle eines rohen String-Buffers (GAP-16) parst die Bibliothek exakt in eine strukturierte `toob_boot_diag_t` Repräsentation für maschinenlesbare Flotten-Auswertungen (CBOR-Extraction). **(GAP-F29 Harmonisierung)**
 
 ```c
 typedef struct {
@@ -90,5 +90,5 @@ typedef struct {
  * @param diag Zeiger auf die vom OS bereitgestellte Struct.
  * @return TOOB_OK bei Erfolg, TOOB_ERR_NOT_FOUND wenn keine Daten vorliegen.
  */
-toob_status_t toob_get_boot_logs(toob_boot_diag_t* diag);
+toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
 ```

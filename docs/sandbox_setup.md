@@ -20,6 +20,8 @@ sudo apt-get install gcc cmake libasan6 libfuzzer-8-dev afl++
 
 Wir kompilieren Toob-Boot als Host-Binary (`sandbox` Target). Der Kernel der State-Machine läuft so in Bruchteilen einer Millisekunde durch und generiert Gcov Code-Coverage.
 
+**(GAP-F19 Sandbox Mocking):** Die Sandbox greift standardmäßig auf simulierte, statisch definierte Fuzzer-Fallback-Daten (`chip_config_sandbox.h`) zurück (z.B. uniform 4 KB Sector Size), benötigt also zwingend **keinen** echten dynamischen Toobfuzzer-Lauf. Falls HIL-Crossover-Tests auf PC laufen sollen, kann eine echte Fuzzer-JSON explizit per CLI Flag als Inject übergeben werden.
+
 ```bash
 # Erstellt den CMake Build für den eigenen PC
 toob build --target sandbox --build-type Debug

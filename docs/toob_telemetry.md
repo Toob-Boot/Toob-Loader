@@ -8,7 +8,7 @@ Damit Fleet-Manager in IoT-Anwendungen proaktiv Anomalien erkennen können, gene
 
 Um wertvollen MCU RAM zu schonen (und keine String-Verkettungen `sprintf` vornehmen zu müssen), rendert Toob-Boot die Datenpakete als binäres CBOR (Concise Binary Object Representation) mittels `zcbor`.
 
-Das OS-Programm (Feature-App) kann dieses Paket (Typ `toob_telemetry_t`) über die `libtoob` aus der passiven Shared-RAM Sektion extrahieren und an den Cloud-Broker per MQTT/CoAP streamen.
+Das OS-Programm (Feature-App) kann dieses Paket (als Typ `toob_boot_diag_t` in C) über die `libtoob` aus der passiven Shared-RAM Sektion extrahieren und an den Cloud-Broker per MQTT/CoAP streamen.
 
 Die CBOR Struktur (CDDL) sieht wie folgt aus:
 
@@ -41,9 +41,9 @@ Die Funktion dekodiert nicht blind, sondern liest den Byte-Stream sicher als C-S
 /**
  * @brief Extrahiert die strukturierte Boot-Diagnostik ins RAM.
  * @param out_diag Pointer auf die C-Struct für die App-Verwendung.
- * @return BOOT_OK bei Erfolg.
+ * @return TOOB_OK bei Erfolg.
  */
-boot_status_t toob_get_boot_diag(toob_telemetry_t *out_diag);
+toob_status_t toob_get_boot_diag(toob_boot_diag_t *out_diag);
 ```
 
 Sobald diese Daten in der Cloud ankommen, können Alarme ausgelöst werden (z.B. `swap_buffer_erase_count > 80.000` = MCU nähert sich Flash-Tod, Gerät vorzeitig autark deaktivieren).

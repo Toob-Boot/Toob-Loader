@@ -9,6 +9,7 @@ Ein monolithischer Hash über ein 4MB großes Image erfordert, dass man 4MB am S
 
 ## 2. Die Lösung: Chunk-Hashes (Merkle-Liste)
 Das `toob-sign` Host-Tool teilt das OS-Image in feste Blöcke (typisch 4 KB oder 8 KB) auf. Das SUIT-Manifest enthält nicht nur den Gesamthash, sondern ein Array der Einzel-Hashes für jeden Chunk. 
+**(GAP-F17 Chunk-Size Constraint):** Die `chunk_size` MUSS zwingend `≤ kleinste sector_size` aus dem `aggregated_scan.json` betragen und durch das Page-Alignment teilbar sein, da Sektor-weise Verifikation (bspw. nach Delta-Patch-Rollback) sonst asynchron zum Flash-Layout verläuft! Der Manifest-Compiler blockiert Builds bei Zuwiderhandlung.
 
 ```json
 {

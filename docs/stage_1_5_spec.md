@@ -22,6 +22,8 @@ bool is_authorized = platform->crypto->verify_ed25519(
 );
 ```
 
+**(GAP-C06 Mitigation): Um DoS-Angriffe via UART Ed25519-Signatur-Spamming (~15ms CPU-Lock pro Fehlertoken) zu verhindern, MUSS `boot_panic.c` bei fehlschlagenden Authentifizierungen einen exponentiellen Penalty-Sleep ($T_{penalty} = 2^{failures} \times 100\text{ms}$) implementieren, bevor der RX-Buffer wieder abgefragt wird. Der WDT muss während des Sleeps zwingend gefüttert werden!**
+
 ## 3. COBS Framing & Ping-Pong
 Da serielle Ports oft rauschen oder 0x00 Bits im Leerlauf produzieren, wird der gesamte Stream via **COBS (Consistent Overhead Byte Stuffing)** kodiert.
 - Jedes Paket wird sauber mit `0x00` separiert.

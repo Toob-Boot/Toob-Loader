@@ -13,7 +13,8 @@ Um die gesamte Logik (WAL, TMR, State-Machine) von `Toob-Boot` auf dem Host (`x8
 - Abbruch des Updates bei 0%, 50%, 99% → Sicherstellung, dass WAL-Rollbacks greifen.
 - Injektion von "0x00" oder "0xFF" Bytes in das OS-Image (Bit-Rot Simulator) → Sicherstellung, dass `boot_verify` anschlägt.
 - Erschöpfung des Exponential Backoffs → Recovery-OS Einstieg bestätigen.
-- GAP-24: Multi-Image State-Machine Tests → Simulation von Multi-Komponenten-Updates (z.B. OS + Modem Firmware) mit partiellen Fehlern (z.B. Modem Flash klappt, OS Flash schlägt fehl -> Komplett-Rollback beider Slots sicherstellen).
+- GAP-24: Multi-Image State-Machine Tests → Simulation von Multi-Komponenten-Updates mit partiellen Fehlern.
+- **(GAP-F20)** Manifest-Compiler-Validation: SIL-Tests mocken mutwillig defekte `chip_config.h` Werte (z.B. fließkommabasierte, zu große oder missaligned C-Macros aus manipuliertem `blueprint.json`), um zu verifizieren, dass der C-Core diese per pre-compiler `#error` Pragma sicher abfängt und den Build strikt terminiert!
 
 ## 2. HIL Fault-Injection (Hardware In Loop)
 Neben SIL muss Toob-Boot in einem physischen Test-Rack validiert werden.
