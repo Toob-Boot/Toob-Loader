@@ -1,0 +1,10 @@
+# ==============================================================================
+# Continuous Integration Pipeline
+# 
+# Relevant Specs: 
+# - docs/structure_plan.md (CI Matrix, Fuzzing)
+# - docs/testing_requirements.md (NASA P10 Compliance, SIL Lauf)
+# - docs/sandbox_setup.md (AFL++ und Fuzzer Aufrufe)
+# ==============================================================================
+
+# TODO: Implement CI steps

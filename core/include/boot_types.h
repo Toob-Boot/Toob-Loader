@@ -6,6 +6,12 @@
  * diagnostic structures shared between the Bootloader, HAL, and Feature OS
  * (libtoob). Adheres strictly to NASA P10 coding rules (statically verifiable,
  * no floats, strong typing).
+ *
+ * Relevant Specifications:
+ * - docs/concept_fusion.md (Magic Headers, RAM-Handoff CRC & Session ID)
+ * - docs/libtoob_api.md (ABI definition for toob_handoff_t)
+ * - docs/toob_telemetry.md (Diagnostics and toob_boot_diag_t)
+ * - docs/dev_plan.md (Phase 5 Wear-Counters context)
  */
 
 #ifndef TOOB_BOOT_TYPES_H
@@ -21,18 +27,29 @@
  * Uses high-hamming-distance constants to prevent 0x00 / 0x01 glitching.
  */
 typedef enum {
-  BOOT_OK = 0x55AA55AA,       /**< Clean success */
-  BOOT_ERR_NOT_FOUND = -1,    /**< Erwartetes Image/Metadata nicht gefunden */
-  BOOT_ERR_FLASH = -2,        /**< Physikalischer Fehler auf HAL-Ebene */
-  BOOT_ERR_FLASH_ALIGN = -3,  /**< Flash-Payload verletzt Hardware-Alignment */
-  BOOT_ERR_FLASH_BOUNDS = -4, /**< Out-Of-Bounds Flash Zugriff blockiert */
-  BOOT_ERR_VERIFY = -5, /**< Merkle-Verifikation oder Ed25519 gescheitert */
-  BOOT_ERR_WDT_TRIGGER = -6, /**< Watchdog Timeout simuliert/registriert */
-  BOOT_ERR_INVALID_STATE =
-      -7, /**< State-Machine Fehler (z.B. Delta base_mismatch) */
-  BOOT_ERR_WAL_FULL = -8,      /**< Journal Ring blockiert/voll */
-  BOOT_ERR_WAL_LOCKED = -9,    /**< Transaktion über WAL-Grenzen verboten */
-  BOOT_ERR_NOT_SUPPORTED = -10 /**< Hardware/HAL Feature existiert nicht */
+    BOOT_OK = 0x55AA55AA,             /**< Clean success (AUTOSAR Anti-Glitch) */
+    
+    /* HAL Errors (from hals.md) */
+    BOOT_ERR_FLASH = 1,               /**< Flash-Operation fehlgeschlagen */
+    BOOT_ERR_FLASH_ALIGN = 2,         /**< Adresse/Länge nicht aligned */
+    BOOT_ERR_FLASH_BOUNDS = 3,        /**< Adresse außerhalb des Flashs */
+    BOOT_ERR_CRYPTO = 4,              /**< Kryptografische Operation fehlgeschlagen */
+    BOOT_ERR_VERIFY = 5,              /**< Signatur/Hash ungültig */
+    BOOT_ERR_TIMEOUT = 6,             /**< Operation hat Zeitlimit überschritten */
+    BOOT_ERR_POWER = 7,               /**< Batteriespannung zu niedrig */
+    BOOT_ERR_NOT_SUPPORTED = 8,       /**< Feature auf diesem Chip nicht verfügbar */
+    BOOT_ERR_INVALID_ARG = 9,         /**< Ungültiger Parameter (NULL, 0-Länge, etc.) */
+    BOOT_ERR_STATE = 10,              /**< Ungültiger Zustand (z.B. init nicht aufgerufen) */
+    BOOT_ERR_FLASH_NOT_ERASED = 11,   /**< Zielsektor wurde vor Write nicht gelöscht */
+    BOOT_ERR_COUNTER_EXHAUSTED = 12,  /**< OTP/eFuse Counter am Limit */
+    BOOT_ERR_ECC_HARDFAULT = 13,      /**< FATAL: NMI Unkorrigierbarer Bit-Rot (hals.md Z.47) */
+    
+    /* Core State-Machine Errors */
+    BOOT_ERR_NOT_FOUND = 14,          /**< Erwartetes Image/Metadata nicht gefunden */
+    BOOT_ERR_WDT_TRIGGER = 15,        /**< Watchdog Timeout simuliert/registriert */
+    BOOT_ERR_INVALID_STATE = 16,      /**< State-Machine Fehler (z.B. Delta base_mismatch) */
+    BOOT_ERR_WAL_FULL = 17,           /**< Journal Ring blockiert/voll */
+    BOOT_ERR_WAL_LOCKED = 18          /**< Transaktion über WAL-Grenzen verboten */
 } boot_status_t;
 
 /* --- 2. Hardware Reset Reasons --- */
@@ -89,20 +106,46 @@ typedef struct {
 typedef struct __attribute__((aligned(8))) {
   uint32_t magic;          /**< Always 0x55AA55AA */
   uint32_t struct_version; /**< ABI-Version (z.B. 0x01000000) */
-  uint64_t
-      boot_nonce; /**< Deterministische Anti-Replay Nonce für Verify-Call */
+  uint64_t boot_nonce;     /**< Deterministische Anti-Replay Nonce für Verify-Call */
   uint32_t active_slot;        /**< 0 = Slot A, 1 = Slot B */
   uint32_t reset_reason;       /**< Gemappter Grund aus reset_reason_t */
   uint32_t boot_failure_count; /**< Aktueller Stand des Recovery-Counters */
-  uint32_t _padding;           /**< Padding für 32-Byte Alignment */
+  
+  /* Wear-Counters (vorab allokiert um Segfaults auf alten Images zu verhindern) */
+  uint32_t ext_health_app_erasures;     /**< Flash-Erasures auf der App-Partition */
+  uint32_t ext_health_staging_erasures; /**< Verschleiß des Staging-Bereichs */
+  uint32_t ext_health_wal_erasures;     /**< Verschleiß des Ringpuffers */
+  uint32_t ext_health_swap_erasures;    /**< Verschleiß der Swap-Sektoren */
+
+  /* Session & Integrity (GAP-F14 / Schicht 4b) */
+  uint32_t boot_session_id;    /**< Boot-Session Vektor für OS-Tracking */
+  uint16_t crc16_trailer;      /**< CRC-16 Validierung gegen Handoff-RAM Garbage nach WDT-Resets */
+  uint8_t  _padding[6];        /**< Padding für striktes 56-Byte Alignment (NASA P10 GAP-39) */
 } toob_handoff_t;
 
 /* P10 Size-Safety Asserts auf Handoff-ABI - Bricht bei inkompatiblen
  * Compiler-Packs */
-_Static_assert(sizeof(toob_handoff_t) == 32,
+_Static_assert(sizeof(toob_handoff_t) == 56,
                "toob_handoff_t ABI Size Mismatch!");
 _Static_assert(sizeof(toob_handoff_t) % 8 == 0,
                "toob_handoff_t Alignment Failure!");
+
+/**
+ * @brief Telemetrie & Boot-Diagnostics (gem. toob_telemetry.md)
+ * Bildet exakt die 8 CBOR-Felder ab. Wird via libtoob in das OS 
+ * projiziert (Zero-Allocation).
+ */
+typedef struct {
+  uint32_t boot_duration_ms;       /**< Dauer des letzten Bootvorgangs */
+  uint32_t edge_recovery_events;   /**< Anzahl an Auto-Rollbacks */
+  uint32_t hardware_fault_record;  /**< Hard-Fault Register/Flags */
+  uint32_t vendor_error;           /**< HAL spezifischer Error Code */
+  uint32_t wdt_kicks;              /**< Summe der generierten Watchdog-Kicks */
+  uint8_t  active_key_index;       /**< Genutzter eFuse Key-Slot */
+  bool     fallback_occurred;      /**< Wahrheitswert für OS-Panic Auslösung */
+  uint8_t  sbom_digest[32];        /**< SHA-256 Digest des aktiven OS-Images */
+  uint8_t  _padding[2];            /**< P10 Alignment für den 32-Bit Frame */
+} toob_boot_diag_t;
 
 /* --- 5. P10 Defense Macros --- */
 
