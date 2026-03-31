@@ -88,3 +88,41 @@ include(cmake/toob_core.cmake)
 include(cmake/toob_crypto.cmake)
 include(cmake/toob_stage0.cmake)
 include(cmake/toob_libtoob.cmake)
+
+# ------------------------------------------------------------------------------
+# 5. Final Executable & Post-Build Hooks (TODO)
+# ------------------------------------------------------------------------------
+# TODO: [Phase 3 / M-BUILD-Post] Include directory for generated headers
+#       Add include_directories(${CMAKE_BINARY_DIR}/generated) so that features
+#       like '#include "chip_config.h"' can be resolved by the C-Compiler!
+
+# TODO: [Phase 3 / M-BUILD-Post] Auto-Generation Custom Target
+#       Add add_custom_command() to automatically invoke 'toob-manifest compile'
+#       if the generated headers or toob_config.cmake are missing/outdated.
+
+# TODO: [Phase 3 / M-BUILD-Post] Define CMAKE_BUILD_TYPE fallback logic
+#       Set a default build type (Release/Debug) if none is provided via CLI.
+
+# TODO: [Phase 3 / M-BUILD-Post] Define the final bootloader executable target (toob_stage1)
+#       This will link against toob_core, toob_chip, and toob_crypto.
+#       Example: add_executable(toob_stage1 src/boot_main.c)
+
+# TODO: [Phase 3 / M-BUILD-Post] Linker script integration
+#       Apply the manifest-compiler generated flash_layout.ld to the final executable:
+#       target_link_options(toob_stage1 PRIVATE -T${CMAKE_BINARY_DIR}/generated/flash_layout.ld)
+
+# TODO: [Phase 3 / M-BUILD-Post] Firmware Image Generation (.elf -> .bin/.hex)
+#       Add custom commands to run arm-none-eabi-objcopy or esptool.py (elf2image)
+#       to generate the raw binaries required for flashing.
+
+# ------------------------------------------------------------------------------
+# 6. Software Integration Testing / SIL (TODO)
+# ------------------------------------------------------------------------------
+# TODO: [Phase 4 / M-SANDBOX] Enable testing and add test subdirectories for
+#       Link-Time Mocking environment validation.
+#       Example: enable_testing() 
+#                add_subdirectory(test)
+
+# TODO: [Phase 4 / M-SANDBOX] Link-Time Mocking Flags
+#       Apply linker flags like '-Wl,--wrap=flash_hal_read' globally for the test 
+#       executable to wrap hardware calls into test/mocks/mock_flash.c

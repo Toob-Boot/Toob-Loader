@@ -49,3 +49,27 @@ Ein tiefgreifendes Code-Audit der `boot_hal.h` und `boot_types.h` gegen unsere M
 
 **Lessons Learned:**
 - **Spezifikations-Drift:** Bei der Übersetzung von konzeptionellen Markdown-Tabellen in harte C-Signaturen gehen schnell essenzielle Meta-Anforderungen (wie Pointer-Arithmetik oder Rückgabe-Typen) verloren. Eine Spec im Nachgang nochmals granular per Audit-Workflow gegen den generierten Code abzugleichen, hat uns vor monatelangen Debug-Sessions mit abstürzenden Hardware-Mocks gerettet.
+
+### 5. M-BUILD & Toolchain Architektur (`CMakeLists.txt`, `toolchains`)
+
+**Was wurde getan?**
+Das Fundament des Build-Systems wurde hochgezogen. Die root `CMakeLists.txt` verankert globale C17 Limitierungen. Die Sandbox-Toolchain (`toolchain-host.cmake`) ermöglicht native P10-Testausführungen (ASAN, Coverage, mmap). Die erste Cross-Compiler Pipeline (`cmake/toolchain-arm-none-eabi.cmake` für Cortex-M) wurde rigoros gemäß unseren Bare-Metal Limits konfiguriert.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Sichere Flag-Isolierung (`toob_apply_strict_flags`):** Wir injizieren unsere -Werror / C17 / -fstack-protector-strong Flags NICHT über das globale `add_compile_options()`, sondern via dedizierter CMake-Function per `target_compile_options`. Das verhindert, dass Third-Party Bibliotheken (wie Monocypher oder zcbor) im Root unseren strikten NASA-Regeln unterworfen werden und den Compile töten.
+- **Zero-Allocation Limitierung auf Root-Ebene:** Das `#define malloc=MALLOC_FORBIDDEN` etc. wurde hart für das Gesamtprojekt in `CMakeLists.txt` geankert. Niemand kann ab jetzt dynamischen Speicher nutzen, ohne dass der C-Präprozessor sofort eskaliert.
+- **Bare-Metal Try-Compile Bypass:** Bei Cross-Compilern wie `arm-none-eabi` prüft CMake zur Initialisierung, ob es ein lauffähiges `.out` Executable mit dem Compiler linken kann. Auf Bare-Metal ohne fertige `.ld` Flash-Map crasht dies immer ("Compiler is not able to compile a simple test program"). Wir zwingen CMake mit `set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)` dazu, lediglich statische Archiv-Integrität zu prüfen.
+
+**Lessons Learned / Gaps:**
+- **Cross-Compiler Host-Bleed:** Während unserer Gap-Analyse fiel auf, dass der `STATIC_LIBRARY` Bypass fatale Folgen haben kann. Ohne manuelles Definieren von `CMAKE_AR` und `CMAKE_RANLIB` als `arm-none-eabi-ar` versuchen einige Host-Maschinen, das Bare-Metal-Objekt mit ihrem `/usr/bin/ar` (Host-Archiver) zu verpacken. **Ergebnis:** Abbruch wegen Formatfehlern. *Lesson learned:* Jeder noch so kleine Teil einer Toolchain muss explizit geprefixed gemappt werden.
+- **HAL-Separation für Hardware-Flags:** Man ist schnell versucht, ein `-mcpu=cortex-m4` in die arm-Toolchain zu werfen. Da ein STM32H7 aber Cortex-M7 ist, wurde konsequent entschieden: Die Toolchain definiert *nur* den Compiler und das Bare-Metal Environment (nosys/nano.specs). Hardwarespezifische CPU/FPU-Flags kommen streng in die Ebene 1 abstrakte `toob_hal.cmake`.
+
+### 6. M-BUILD Toolchain Matrix Komplettierung (RISC-V & Xtensa)
+
+**Was wurde getan?**
+Die Bare-Metal Toolchains für RISC-V (`toolchain-riscv32.cmake`) und Xtensa (`toolchain-xtensa-esp.cmake`) wurden finalisiert, wodurch die M-BUILD Toolchain-Matrix vollflächig abgeschlossen ist. 
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Sichere XIP/Flash Addressierungen (RISC-V `medany`):** Bei ESP32-C3/C6 Chips liegt der Flash oft bei absoluten Adressen wie `0x4000_0000`, was das standardmäßige RISC-V `medlow` Code-Modell (limitiert auf +/- 2GB) beim Linken sofort sprengt. Wir haben hier harte TODOs gesetzt, zwingend `-mcmodel=medany` in der HAL zu setzen!
+- **Isolierter C-Footprint (`nodefaultlibs`):** Im Kontext des "malloc_forbidden"-Paradigmas musste bei beiden Toolchains zwingend `-nodefaultlibs` parallel zu `-nostartfiles` gesetzt werden, da besonders generische Toolchains sonst heimlich implizite libc Stubs in das statische Binary pressen.
+- **Xtensa Toolchain Präfixe & Longcalls:** Xtensa (ESP32-S2/S3) Compiler sind extrem Hardware-gebunden, weshalb der Präfix (Default `xtensa-esp32s3-elf-`) per GUI/CLI überschreibbar blieb. Zwingende Warnungen fordern zudem in der HAL `-mlongcalls` für weite Jumps aus dem SPI-Flash/XIP ins BootROM sowie `-mtext-section-literals` für das Pooling der Konstanten!
