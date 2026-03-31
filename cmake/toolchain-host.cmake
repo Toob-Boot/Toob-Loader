@@ -58,11 +58,11 @@ add_compile_definitions(
 )
 
 # ------------------------------------------------------------------------------
-# 5. LibFuzzer Architektur (TODO)
+# 5. LibFuzzer Architektur (NOTE)
 # ------------------------------------------------------------------------------
 option(TOOB_ENABLE_LIBFUZZER "Enable LLVM libFuzzer (-fsanitize=fuzzer) for fuzz targets" OFF)
 
-# TODO: [Phase 4 / Fuzzing] LibFuzzer Linkage Implementierung
+# NOTE: [Phase 4 / Fuzzing] LibFuzzer Linkage Implementierung
 #       Wenn TOOB_ENABLE_LIBFUZZER ON ist, darf -fsanitize=fuzzer NICHT global 
 #       angewendet werden, da es eine eigene main() injiziert und die regulären 
 #       SIL-Tests zerstören würde. 

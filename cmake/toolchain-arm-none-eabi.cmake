@@ -51,9 +51,9 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 # ------------------------------------------------------------------------------
 # 4. Architektur-unabhängige Bare-Metal Compiler/Linker Flags
 # ------------------------------------------------------------------------------
-# TODO: Chip-spezifische Flags wie "-mcpu=cortex-m4" und "-mthumb" MÜSSEN in 
+# NOTE: Chip-spezifische Flags wie "-mcpu=cortex-m4" und "-mthumb" MÜSSEN in 
 # der `cmake/toob_hal.cmake` injiziert werden! (Abhängig vom Target).
-# TODO: FPU (Floating Point Unit) Konfiguration ("-mfloat-abi=hard" / "-mfpu=...") 
+# NOTE: FPU (Floating Point Unit) Konfiguration ("-mfloat-abi=hard" / "-mfpu=...") 
 # muss ebenfalls in der HAL Ebene konfiguriert werden, da ein STM32L4 eine
 # fpv4-sp-d16 hat, ein STM32H7 aber evtl. dp-fpu. Fehlt dies, crasht der Linker!
 

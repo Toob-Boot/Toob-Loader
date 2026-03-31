@@ -90,39 +90,43 @@ include(cmake/toob_stage0.cmake)
 include(cmake/toob_libtoob.cmake)
 
 # ------------------------------------------------------------------------------
-# 5. Final Executable & Post-Build Hooks (TODO)
+# 5. Final Executable & Post-Build Hooks
 # ------------------------------------------------------------------------------
-# TODO: [Phase 3 / M-BUILD-Post] Include directory for generated headers
-#       Add include_directories(${CMAKE_BINARY_DIR}/generated) so that features
-#       like '#include "chip_config.h"' can be resolved by the C-Compiler!
 
-# TODO: [Phase 3 / M-BUILD-Post] Auto-Generation Custom Target
-#       Add add_custom_command() to automatically invoke 'toob-manifest compile'
-#       if the generated headers or toob_config.cmake are missing/outdated.
+# 5.1 CMAKE_BUILD_TYPE Build Fallback Logic
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    message(STATUS "No build type selected, defaulting to Release.")
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
+endif()
 
-# TODO: [Phase 3 / M-BUILD-Post] Define CMAKE_BUILD_TYPE fallback logic
-#       Set a default build type (Release/Debug) if none is provided via CLI.
+# 5.2 Define the final bootloader Target (toob_stage1)
+add_executable(toob_stage1 core/boot_main.c)
 
-# TODO: [Phase 3 / M-BUILD-Post] Define the final bootloader executable target (toob_stage1)
-#       This will link against toob_core, toob_chip, and toob_crypto.
-#       Example: add_executable(toob_stage1 src/boot_main.c)
+# 5.3 Architektur-Spezifische P10 Limitierungen und Globale Libraries
+toob_apply_strict_flags(toob_stage1 TRUE)
+target_link_libraries(toob_stage1 PRIVATE toob_core)
 
-# TODO: [Phase 3 / M-BUILD-Post] Linker script integration
-#       Apply the manifest-compiler generated flash_layout.ld to the final executable:
-#       target_link_options(toob_stage1 PRIVATE -T${CMAKE_BINARY_DIR}/generated/flash_layout.ld)
+if(TARGET toob_chip)
+    target_link_libraries(toob_stage1 PRIVATE toob_chip)
+endif()
 
-# TODO: [Phase 3 / M-BUILD-Post] Firmware Image Generation (.elf -> .bin/.hex)
-#       Add custom commands to run arm-none-eabi-objcopy or esptool.py (elf2image)
-#       to generate the raw binaries required for flashing.
+if(TARGET toob_crypto_upstream)
+    target_link_libraries(toob_stage1 PRIVATE toob_crypto_upstream)
+endif()
+
+# 5.4 Linker Script Integration
+if(NOT TOOB_ARCH STREQUAL "host")
+    target_link_options(toob_stage1 PRIVATE -T${CMAKE_BINARY_DIR}/generated/flash_layout.ld)
+
+    # 5.5 Firmware Image Generation (.elf -> .bin)
+    add_custom_command(
+        TARGET toob_stage1 POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_stage1> $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin
+        COMMENT "Generating flashable RAW binary toob_stage1.bin..."
+    )
+endif()
 
 # ------------------------------------------------------------------------------
 # 6. Software Integration Testing / SIL (TODO)
 # ------------------------------------------------------------------------------
-# TODO: [Phase 4 / M-SANDBOX] Enable testing and add test subdirectories for
-#       Link-Time Mocking environment validation.
-#       Example: enable_testing() 
-#                add_subdirectory(test)
-
-# TODO: [Phase 4 / M-SANDBOX] Link-Time Mocking Flags
-#       Apply linker flags like '-Wl,--wrap=flash_hal_read' globally for the test 
-#       executable to wrap hardware calls into test/mocks/mock_flash.c
+# TODO: [Phase 4 / M-SANDBOX] HIL / SIL Unit Testing via toob-test-runner

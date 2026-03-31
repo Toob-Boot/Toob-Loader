@@ -41,11 +41,11 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 # ------------------------------------------------------------------------------
 # 3. Architektur-unabhängige Bare-Metal Compiler/Linker Flags
 # ------------------------------------------------------------------------------
-# TODO: Architektur-Flags wie "-march=rv32imc" und "-mabi=ilp32" DÜRFEN NICHT hier
+# NOTE: Architektur-Flags wie "-march=rv32imc" und "-mabi=ilp32" DÜRFEN NICHT hier
 # konfiguriert werden! Sie müssen zwingend in `cmake/toob_hal.cmake` injiziert 
 # werden, da ein ESP32-C6 z.B. andere Extensions nutzt als ein eckiger GD32V.
 
-# TODO: Code-Model -mcmodel=medany MUSS zwingend evaluiert werden! 
+# NOTE: Code-Model -mcmodel=medany MUSS zwingend evaluiert werden! 
 # ESP32-Chips (wie der C3) mappen Flash und RAM oft oberhalb von 2GB (z.B. 0x4000_0000). 
 # Das standardmäßig genutzte `medlow` Model crasht den Linker bei solchen Adressen!
 # Dies muss architekturspezifisch in der HAL gesetzt werden.

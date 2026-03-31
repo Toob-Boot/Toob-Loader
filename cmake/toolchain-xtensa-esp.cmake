@@ -43,16 +43,7 @@ set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 # 3. Architektur-unabhängige Bare-Metal Compiler/Linker Flags
 # ------------------------------------------------------------------------------
 
-# TODO: Xtensa PFLICHT für `cmake/toob_hal.cmake`:
-# 1. `-mlongcalls` MUSS vergeben werden. Ohne das crasht der Linker auf ESP32
-#    sofort bei Jumps > 24-Bit über Flash-Grenzen (Call0/Window-ABI).
-# 2. `-mtext-section-literals` MUSS für XIP Execution vergeben werden!
-# 3. Chip-Flags wie `-mcpu=esp32s3` MÜSSEN in toob_hal geladen werden.
-# 4. FPU Konfiguration: Der ESP32-S3 besitzt eine FPU & PIE, der ESP32-S2 NICHT. 
-#    Hier muss zwingend `-mhard-float` vs `-msoft-float` auf HAL-Ebene separiert werden!
-# 5. ABI Selektion: Bootloader nutzen aus RAM- und Trap-Handling-Gründen oft
-#    `-mcall0` (Call0 ABI) anstelle der Xtensa-typischen Windowed-ABI (`-mwindowed`).
-#    Dies muss evaluiert und in der Ebene 1 HAL verankert werden.
+
 
 set(TOOB_XTENSA_C_FLAGS 
     "-ffunction-sections" 

@@ -1,10 +1,123 @@
 # ==============================================================================
 # Continuous Integration Pipeline
-# 
-# Relevant Specs: 
+#
+# Relevant Specs:
 # - docs/structure_plan.md (CI Matrix, Fuzzing)
 # - docs/testing_requirements.md (NASA P10 Compliance, SIL Lauf)
 # - docs/sandbox_setup.md (AFL++ und Fuzzer Aufrufe)
 # ==============================================================================
 
-# TODO: Implement CI steps
+name: Toob-Boot CI
+
+on:
+  push:
+    branches: ["main", "dev/*"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # JOB 1: Sandbox SIL Validation & Testing
+  # ----------------------------------------------------------------------------
+  sandbox-sil:
+    name: "SIL: Sandbox & Integration Tests"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc cmake llvm python3 python3-pip
+
+      - name: Bootstrap Python Tooling
+        run: pip install -e tools/
+
+      - name: Build Sandbox Target (Debug)
+        run: toob build --target sandbox --build-type Debug
+
+      - name: Execute Test Runner (State-Machine & WAL-Recovery)
+        # TODO(GAP-Doublecheck): Missing test coverage generation
+        # sandbox_setup.md states the sandbox generates Gcov Code-Coverage.
+        # We need a step here to export/upload the .gcov files (e.g., via Codecov or artifact).
+        run: ./build/sandbox/toob-test-runner
+
+      # TODO(GAP-Doublecheck): Missing Python Integration Tests
+      # testing_requirements.md and structure_plan.md dictate testing 0/50/99% Brownouts,
+      # Bit-Rot Simulation, and GAP-F20 (Manifest-Compiler Validation using defective chip_config.h).
+      # These must be run via `pytest test/integration/`.
+      # - run: pytest test/integration/
+
+  # ----------------------------------------------------------------------------
+  # JOB 2: Static Analysis (NASA P10 Compliance Prep)
+  # ----------------------------------------------------------------------------
+  static-analysis:
+    name: "Code Quality: Clang-Format"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Clang-Format & Tidy
+        run: sudo apt-get install -y clang-format clang-tidy
+
+      - name: Run Clang-Format Check
+        # Prüft alle C-Sourcen gegen die LLVM-Stilrichtlinien aus der .clang-format
+        run: find core hal stage0 libtoob -name "*.[ch]" | xargs clang-format --Werror --dry-run
+
+      # TODO(GAP-Doublecheck): Missing P10 Static Analysis (OSVisualizer / Clang-Tidy)
+      # testing_requirements.md mandates checking for dynamic allocation (malloc/free),
+      # unbounded loops, and return-value enforcement (escalating boot_status_t).
+      # We need an explicit step to run `clang-tidy` with P10 rulesets or the Repowatt OSVisualizer python tool.
+
+  # ----------------------------------------------------------------------------
+  # JOB 3: Hardware Cross-Compilation (ARM Cortex-M)
+  # ----------------------------------------------------------------------------
+  cross-compile-arm:
+    name: "Build: ${{ matrix.target }} (${{ matrix.build_type }})"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [stm32l4, stm32h7, stm32u5, nrf52840, nrf5340]
+        build_type: [Release, Debug]
+      fail-fast: false
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM GNU Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi cmake python3 python3-pip
+
+      - name: Bootstrap Python Tooling
+        run: pip install -e tools/
+
+      - name: Build Target
+        run: toob build --target ${{ matrix.target }} --build-type ${{ matrix.build_type }}
+
+  # ----------------------------------------------------------------------------
+  # JOB 4: Hardware Cross-Compilation (Espressif RISC-V & Xtensa)
+  # ----------------------------------------------------------------------------
+  cross-compile-esp:
+    name: "Build: ${{ matrix.target }} (${{ matrix.build_type }})"
+    runs-on: ubuntu-latest
+    # Wir delegieren die extreme Toolchain-Last direkt an das offizielle Docker Image
+    container:
+      image: espressif/idf:latest
+    strategy:
+      matrix:
+        target: [esp32s3, esp32c3, esp32c6]
+        build_type: [Release, Debug]
+      fail-fast: false
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Bootstrap Python Tooling
+        # IDF Image hat bereits Python, wir injizieren nur unsere Manifest-Tools
+        run: pip install -e tools/
+
+      - name: Build Target
+        run: toob build --target ${{ matrix.target }} --build-type ${{ matrix.build_type }}

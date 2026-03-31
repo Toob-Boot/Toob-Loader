@@ -73,3 +73,65 @@ Die Bare-Metal Toolchains für RISC-V (`toolchain-riscv32.cmake`) und Xtensa (`t
 - **Sichere XIP/Flash Addressierungen (RISC-V `medany`):** Bei ESP32-C3/C6 Chips liegt der Flash oft bei absoluten Adressen wie `0x4000_0000`, was das standardmäßige RISC-V `medlow` Code-Modell (limitiert auf +/- 2GB) beim Linken sofort sprengt. Wir haben hier harte TODOs gesetzt, zwingend `-mcmodel=medany` in der HAL zu setzen!
 - **Isolierter C-Footprint (`nodefaultlibs`):** Im Kontext des "malloc_forbidden"-Paradigmas musste bei beiden Toolchains zwingend `-nodefaultlibs` parallel zu `-nostartfiles` gesetzt werden, da besonders generische Toolchains sonst heimlich implizite libc Stubs in das statische Binary pressen.
 - **Xtensa Toolchain Präfixe & Longcalls:** Xtensa (ESP32-S2/S3) Compiler sind extrem Hardware-gebunden, weshalb der Präfix (Default `xtensa-esp32s3-elf-`) per GUI/CLI überschreibbar blieb. Zwingende Warnungen fordern zudem in der HAL `-mlongcalls` für weite Jumps aus dem SPI-Flash/XIP ins BootROM sowie `-mtext-section-literals` für das Pooling der Konstanten!
+
+## Phase 3: Modul-Assemblierung (Das CMake-Skelett)
+
+### 7. Die Drei-Ebenen Firmware-HAL (`toob_hal.cmake`)
+
+**Was wurde getan?**
+Die Übersetzung der architektonischen Philosophie ("Architektur -> Vendor -> Chip") in ein physikalisches `CMakeLists`-Manifest. Drei aufeinander aufbauende statische Libraries (`toob_arch`, `toob_vendor`, `toob_chip`), die via `target_link_libraries` transitiv gekoppelt wurden.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Sicherer GLOB (P10):** Statt jede `.c` Datei fest in CMake zu verankern (was zu permanenten Merge-Konflikten bei neuen Ports führt), nutzt CMake `file(GLOB)`. Allerdings injizieren wir strikt `CONFIGURE_DEPENDS`, damit CMake Änderungen am Verzeichnisbaum über reines Parsen erkennt und P10 Build-Reproduzierbarkeit für CI/CD beibehält.
+- **Xtensa Hardware-Schutz (ABI & FPU):** Der Xtensa-Chip (ESP32-S3) wurde auf unterster CMake-Ebene gehärtet. `-mcall0` (Windowed ABI Abschaltung) rettet extrem wertvollen RAM in Interrupt-Handlern, die keine Window-Exits überleben. Das strikte Separieren der Floating-Point-Unit per Software-Float (`-msoft-float`), wenn kein Hardware-Single-Float vorliegt, stoppt tödliche Kernel-Panics bei simplen Divisionen.
+
+### 8. PQC Hardware-Isolation (`toob_crypto.cmake`)
+
+**Was wurde getan?**
+Eine scharfe Build-Achtungstrennung zwischen dem Toob-Boot Code (`crypto_monocypher.c`), der strengste `-Werror` Anforderungen befolgen MUSS, und den Third-Party Upstream-Libraries, die fehlerhafte Legacy-Syntax haben könnten.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Constant-Time Execution (-O3):** Einer der gefährlichsten Fehler bei eingebetteter Kryptografie ist Compiler-Optimierung für ROM-Size (`-Os`), da GCC dabei häufig zeitaufwändige Branching-Tricks (wie Loops statt unrolled Instructions) nutzt und damit massive Timing-Sidechannels in Monocypher öffnet! Wir haben `toob_crypto_upstream` gnadenlos von LTO befreit und `-O3` erzwungen, um Ed25519 Side-Channels Hardware-seitig auszumerzen. 
+- **Verbot dynamischer Arenas:** Das PQC ML-DSA-65 System bedarf ~30 KB Arbeitsspeicher. Diese Buffer wurden hart in den statischen Bereich gezwungen (über den `crypto_arena` Array-Zeiger). Niemand dar jemals den Stack in S1 derart belasten!
+
+### 9. Das Immutable Binary (`toob_stage0.cmake`)
+
+**Was wurde getan?**
+Die Konfiguration des isolierten, hochkritischen `stage0` (Immutable Core). Dieses Binary wurde vollkommen vom `toob_core` (Update-Engine) getrennt und als atomares `add_executable` definiert.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Stack-Protector-Verbot (GAP-Fix):** Der Footprint-Report spezifiziert hart ein 4-8 KB Limit für die Stage 0 Sektion. Globale Flags wie `-fstack-protector-strong` würden diesen winzigen Platz vernichten. Daher haben wir dieses System sicher via `-fno-stack-protector` ausschließlich für dieses eine Target abgeschaltet, um nicht in eine ROM-Falle zu geraten.
+- **Dead-Code Beseitigung (Architectural Slop):** Nach einem dedizierten `@check-code` Audit wurde für `toob_stage0` strikt `-Wl,--gc-sections` erzwungen. So kann S0 die mächtigen C-Kapseln der `toob_chip` (Hardware-Abstraktion) erben (etwa RTC RAM Reads für den Retry-Counter), reißt aber nicht versehentlich 12 KB Flash-Erase-Routinen in sein Mini-Binary!
+- **Startup C-Kollision gelöst:** Da S0 auf Base+0 und S1 auf Base+N liegt, erben initial beide Binaries dieselbe Vektortabelle. Durch die dynamische `SCB->VTOR` Relokation auf der `startup.c` (Cortex-M) springt S0 direkt in sein Segment, während S1 sauber autark relokalisiert. Eine architektonische Meisterleistung, ohne Assembler-Scripts verdoppeln zu müssen!
+- **Crypto-Agility in Stage 0:** Optionale Integration (`TOOB_STAGE0_ED25519_SW`) des Ed25519-Softwarestacks eingeführt, um den Bootpointer-Hash für Hochsicherheitsanwendungen direkt per Signatur zu prüfen.
+- **Raw-Binary Objekt-Extraktion:** Das `add_executable` liefert per se nur `.elf`-Dateien. Wir haben den nötigen POST-BUILD Command vermerkt, der per `objcopy -O binary` das rein physische `.bin` Image abzieht, welches der Manifest-Compiler am Ende auswirft.
+
+### 10. OS Boundary Library (`toob_libtoob.cmake` & `libtoob_api.h`)
+
+**Was wurde getan?**
+Die Definition der C-Library `toob_libtoob`, die dem Feature-OS assembliert überreicht wird (inklusive Telemetrie-Zcbor-Parser).
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Sicherheits-Entkopplung (Zero-Bloat):** Die Library darf *unter keinen Umständen* die `toob_hal` oder `toob_chip` linken. Würde sie das tun, zöge sie hunderte Kilobyte Bootloader-Treiber in das OS-Binary des Kunden.
+- **Der `weak` Flash Shim:** Um der Library dennoch zu erlauben, WAL-Einträge in den Flash zu schreiben, wurde in `libtoob_api.h` die API-Signatur `__attribute__((weak)) toob_os_flash_write` eingeführt. Das Kunden-OS biegt diese Funktion auf seine eigenen Treiber (z.B. Zephyr NVS/Flash) um.
+
+### 11. CI/CD Pipeline & Hardware Matrix (`ci.yml`)
+
+**Was wurde getan?**
+Eine feingranulare GitHub Actions Pipeline, die den Host-Sandbox Testrunner (SIL) und eine breite Cross-Compile Hardware-Matrix (Espressif + ARM) vereint.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Split-Environments (Docker vs. APT):** Die Espressif IDF Toolchains (Xtensa/RISC-V) umfassen Gigabytes. Um die CI nicht lahmzulegen, läuft der ESP-Job direkt in offiziellen `espressif/idf` Docker-Containern. Die ARM-Cortex-M Compiler hingegen werden ressourcenschonend via `apt-get` nativ auf den Ubuntu-Runnern installiert.
+- **P10 Double-Check & Gaps:** Ein strenges Audit der Test-Vorgaben deckte auf, dass der reine C-Unit-Test nicht reicht. Um das "Bit-Rot" und "0/50/99% Brownout" zu verifizieren, fordert die CI jetzt via TODOs dediziert Python (`pytest`) an, was die Host-Sandbox auf HIL-Ebene massakriert.
+
+### 12. M-BUILD Blocker-Resolution (CMake "Zero-Slop")
+
+**Was wurde getan?**
+Vor dem Start in die reine C-Implementierung (Phase 5) wurden alle "No rule to make target" CMake-Blocker ausgemerzt. 
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Custom-Command Manifest Injection:** `toob_core.cmake` erwartet nun strikt das globale Target `generate_manifest`. Hierdurch wird das (noch aufzubauende) `suit/generate.sh` getriggert, welches den CDDL/Zephyr Parser und die Headers on-the-fly vor dem C-Compile generiert. Ein Bash-Stub hält das System lauffähig.
+- **Die x86_64 Sandbox-Rettung (`boot_secure_zeroize_host.c`):** Da wir auf dem Host (Mac/Linux) kompilieren, kollidieren unsere `boot_secure_zeroize.S` (ARM/Xtensa Assembler) Dateien gravierend mit dem GCC des Betriebssystems. Der Host-Mock löst dieses Problem mit einer simplen, GCC-Optimierungs-sicheren `volatile` Pointer-Schleife.
+- **Binary-Extraction (`objcopy`):** Bare-Metal Chips laden keine `.elf` Dateien. In `toob_stage0.cmake` greift nun direkt ein `POST_BUILD` Command ein, der den Strip und Dump zum fertigen `.bin` automatisiert.
+
+**Phase 3 & 4: Abgeschlossen!** Wir weiten das Arbeitsfeld von der Infrastruktur nun direkt in die C-Header und Sourcen (Phase 5) aus.

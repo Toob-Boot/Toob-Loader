@@ -1,0 +1,28 @@
+# CMake Build Directories & Files
+build/
+build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+compile_commands.json
+
+# Tooling & Editor Cache
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Python (Manifest Compiler / Scripts)
+__pycache__/
+*.pyc
+
+# Third Party / Fetch Content (Optional if we use ccache or external downloads)
+_deps/
+.cache/
+
+# Test Artifacts / Coverage
+coverage/
+*.gcda
+*.gcno
