@@ -13,8 +13,8 @@
 
 ```c
 typedef enum {
-    BOOT_OK = 0,
-    BOOT_ERR_FLASH,          /* Flash-Operation fehlgeschlagen */
+    BOOT_OK = 0x55AA55AA,    /* AUTOSAR-kompatibel: Anti-Glitch Pattern statt 0x00 */
+    BOOT_ERR_FLASH = 1,      /* Flash-Operation fehlgeschlagen */
     BOOT_ERR_FLASH_ALIGN,    /* Adresse/Länge nicht aligned */
     BOOT_ERR_FLASH_BOUNDS,   /* Adresse außerhalb des Flash */
     BOOT_ERR_CRYPTO,         /* Kryptografische Operation fehlgeschlagen */
@@ -42,16 +42,23 @@ typedef enum {
 
 ---
 
+## 0. HardFault & ECC Guard
+
+Bevor eine HAL initialisiert werden darf, verlangt die Toob-Boot Spezifikation die Definition eines asynchronen **`HardFault_Handler`** in `startup.c`. Moderne Flash-Speicher mit ECC (z.B. STM32G4/U5) werfen bei unkorrigierbaren Bit-Rot Lesefehlern direkt eine NMI/HardFault-Exception. Die C-HAL hat hierbei keine Chance auf Fehler-Rückgabe. Der Handler MUSS existieren, das `ECC_NMI` Flag abfangen und als Fallback zwingend das System über das Watchdog-Reset-Register neustarten, um einen Dauer-Brick durch Exception-Deadlock abzuwenden.
+
+---
+
 ## 1. `flash_hal_t` — Flash-Speicher
 
 ```c
 typedef struct {
+    uint32_t      version;     /* Zwingende ABI-Version, z.B. 0x01000000 */
     boot_status_t (*init)(void);
     void          (*deinit)(void);
     boot_status_t (*read)(uint32_t addr, void *buf, size_t len);
     boot_status_t (*write)(uint32_t addr, const void *buf, size_t len);
     boot_status_t (*erase_sector)(uint32_t addr);
-    size_t        (*get_sector_size)(uint32_t addr);
+    boot_status_t (*get_sector_size)(uint32_t addr, size_t *size_out);
     boot_status_t (*set_otfdec_mode)(bool enable);
     uint32_t      (*get_last_vendor_error)(void);
 
@@ -129,17 +136,18 @@ boot_status_t (*erase_sector)(uint32_t addr);
 | **Rückgabe**             | `BOOT_OK`, `BOOT_ERR_FLASH`, `BOOT_ERR_FLASH_ALIGN`, `BOOT_ERR_FLASH_BOUNDS`.                                                                                                                                                                                   |
 | **Sandbox**              | `memset(addr, erased_value, sector_size)` auf der mmap'd Datei. Optional: Fault-Injection simuliert Stromausfall mitten im Erase.                                                                                                                               |
 
-### `get_sector_size(addr)`
+### `get_sector_size(addr, size_out)`
 
 ```c
-size_t (*get_sector_size)(uint32_t addr);
+boot_status_t (*get_sector_size)(uint32_t addr, size_t *size_out);
 ```
 
 | Aspekt                                        | Detail                                                                                                                                                                                                                                                                  |
 | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Aufgabe**                                   | Gibt die Sektorgröße an der gegebenen Adresse zurück. Für Chips mit uniformen Sektoren ist das immer `sector_size`. Für Chips mit variablen Sektoren (STM32F4: 16/64/128 KB gemischt) gibt diese Funktion die tatsächliche Größe des Sektors zurück der `addr` enthält. |
+| **Aufgabe**                                   | Schreibt die Sektorgröße an der gegebenen Adresse in `size_out`. Für Chips mit uniformen Sektoren ist das immer `sector_size`. Für Chips mit variablen Sektoren (STM32F4: 16/64/128 KB gemischt) gibt diese Funktion die tatsächliche Größe des Sektors zurück der `addr` enthält. |
 | **Aufgerufen von**                            | `boot_swap.c` (um zu wissen wie groß der aktuelle Swap-Schritt ist), `boot_journal.c` (Ring-Sektor-Größe).                                                                                                                                                              |
 | **Warum nicht einfach `sector_size` nutzen?** | Weil STM32F4/F7 Sektoren von 16 KB bis 128 KB haben — gemischt im gleichen Flash. Ein Swap über den 16KB-Bereich darf nur 16KB auf einmal kopieren, auch wenn der Swap-Buffer 128KB groß ist.                                                                           |
+| **Rückgabe**                                  | `BOOT_OK` bei Erfolg. `BOOT_ERR_FLASH_BOUNDS` wenn `addr` außerhalb des Flashs liegt. |
 
 ### `set_otfdec_mode(enable)`
 
@@ -162,9 +170,8 @@ uint32_t (*get_last_vendor_error)(void);
 | Aspekt               | Detail                                                                                                                                                                   |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Aufgabe**          | Plattformspezifisches HW-Error-Register auslesen (z.B. STM32 FLASH_SR), um aussagekräftige Telemetrie bei `BOOT_ERR_FLASH` ans OS zu reporten.                           |
-| **Rückgabe**         | 32-Bit Vendor-Code. 0 = kein Fehler. Die Funktion ist Read-only und modifiziert den Fehler-State nicht.                                                                  |
-| **Uniforme Chips**                            | Kann einfach `return sector_size;` sein.                                                                                                                                                                                                                                |
-| **Rückgabe**                                  | Sektorgröße in Bytes. 0 wenn `addr` außerhalb des Flash liegt.                                                                                                                                                                                                          |
+| **Cache & Clear Verhalten** | Das Vendor-Error Register MUSS beim Auslesen von der HAL gecached und in der Hardware via Reset-Bit gelöscht werden (Clear-on-Read), um nachfolgende Transaktionen nicht mit antiken Fehlern zu belegen.          |
+| **Rückgabe**         | 32-Bit Vendor-Code. 0 = kein Fehler. |
 
 ### Metadaten-Felder & Hybride HAL-Architektur (Toobfuzzer Integration)
 
@@ -186,9 +193,10 @@ Wie in `docs/toobfuzzer_integration.md` beschrieben, generiert der Manifest-Comp
 
 ```c
 typedef struct {
+    uint32_t      version;
     boot_status_t (*init)(void);
     void          (*deinit)(void);
-    bool          (*check_ok)(uint32_t expected_nonce);
+    bool          (*check_ok)(uint64_t expected_nonce);
     boot_status_t (*clear)(void);
 } confirm_hal_t;
 ```
@@ -206,10 +214,10 @@ boot_status_t (*init)(void);
 | **Rückgabe**       | `BOOT_OK`. `BOOT_ERR_STATE` wenn die RTC-Domain nicht aktiviert werden kann.                                            |
 
 
-### `check_ok()`
+### `check_ok(expected_nonce)`
 
 ```c
-bool (*check_ok)(uint32_t expected_nonce);
+bool (*check_ok)(uint64_t expected_nonce);
 ```
 
 | Aspekt                    | Detail                                                                                                                                                                                                                                                                                                                               |
@@ -230,7 +238,7 @@ boot_status_t (*clear)(void);
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Aufgabe**        | Das Confirm-Flag löschen.                                                                                                                                                                                        |
 | **Aufgerufen von** | `boot_confirm.c` in zwei Situationen: (1) VOR dem Jump zum OS — damit das neue OS das Flag selbst setzen muss. (2) Nach einem Watchdog-Reset — um das (möglicherweise fälschlich gesetzte) Flag zu invalidieren. |
-| **Mechanismus**    | Löscht die hinterlegte Nonce (Überschreiben mit `0x00` oder `erased_value`). Bei Flash-basiert: Erase des dedizierten Sektors.                                                                                                    |
+| **Mechanismus**    | Löscht die hinterlegte Nonce (Überschreiben mit `0x00` oder `erased_value`). Nach dem Überschreiben MUSS die HAL die Speicherzelle direkt zurücklesen und per Assert verifizieren, dass die Nullung physikalisch erfolgreich war (Zero-Verification-Read).                                                                                                    |
 | **Rückgabe**       | `BOOT_OK`.                                                                                                                                                                                                       |
 
 ### `deinit()`
@@ -241,7 +249,7 @@ void (*deinit)(void);
 
 | Aspekt                 | Detail                                                                                                                                                                                                                                   |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Aufgabe**            | Hardware-Locks wiederherstellen. Sperrt z.B. auf STM32 die Backup-Domain wieder (`PWR->CR1 &= ~PWR_CR1_DBP`). Auf ESP32 ist es ein No-Op. Verhindert, dass das Feature-OS unerlaubten Zugriff auf Bootloader-Secrets behält.                                                          |
+| **Aufgabe**            | Hardware-Locks wiederherstellen. OTFDEC Re-Enable: Hat der Bootloader zuvor `set_otfdec_mode(false)` gerufen um Ciphertexts zu hashen, MUSS die `deinit` Funktion die Hardware-Decryption zwingend wieder aktivieren.                                                          |
 | **Aufgerufen von**     | `boot_main.c`, in umgekehrter Init-Reihenfolge vor OS-Jump.                                                                                                                                                                              |
 
 ### Besonderheit: OS-seitiger Direct-Write (`libtoob`)
@@ -253,6 +261,7 @@ Die Funktion `set_ok(nonce)` existiert absichtlich *nicht* im Bootloader-Interfa
 
 ```c
 typedef struct {
+    uint32_t      version;
     boot_status_t (*init)(void);
     void          (*deinit)(void);
     boot_status_t (*hash_init)(void *ctx, size_t ctx_size);
@@ -278,7 +287,7 @@ typedef struct {
     boot_status_t (*advance_monotonic_counter)(void);
 
     bool has_hw_acceleration;
-    bool supports_pqc;
+    /* supports_pqc wurde entfernt. Existenz wird alleinig durch (verify_pqc != NULL) geprueft. */
 } crypto_hal_t;
 ```
 
@@ -290,9 +299,9 @@ boot_status_t (*init)(void);
 
 | Aspekt             | Detail                                                                                                                                                                        |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Aufgabe**        | Crypto-Engine starten. Bei nRF52: CC310 Power-On + Clock aktivieren. Bei ESP32: SHA/AES-Peripheral Clock. Bei Software-only (Monocypher): kein Init nötig (return `BOOT_OK`). |
+| **Aufgabe**        | Crypto-Engine starten. Wenn ein HW-RNG existiert, MUSS `init()` zwingend einen TRNG Seed-Quality Health Check ausführen. Schlägt dieser fehl, blockiert die Init. |
 | **Aufgerufen von** | `boot_main.c`, nach Flash-Init, vor Verify.                                                                                                                                   |
-| **Rückgabe**       | `BOOT_OK`. `BOOT_ERR_CRYPTO` wenn HW-Engine nicht antwortet.                                                                                                                  |
+| **Rückgabe**       | `BOOT_OK`. `BOOT_ERR_CRYPTO` wenn HW-Engine nicht antwortet oder TRNG schwache Entropie liefert.                                                                                                                  |
 
 ### `hash_init(ctx, ctx_size)`
 
@@ -369,8 +378,8 @@ boot_status_t (*verify_pqc)(
 | Aspekt               | Detail                                                                                                                                                                   |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Aufgabe**          | Post-Quantum-Signatur verifizieren (z.B. ML-DSA-65).                                                                                                                     |
-| **Option**           | Dieser Funktionspointer ist standardmäßig `NULL`. Wird nur gesetzt wenn das Crypto-Backend PQC unterstützt UND `pqc_hybrid = true` im TOML.                              |
-| **Kritischer Guard** | Der Core MUSS vor dem Aufruf zwingend den Metadaten-Bool `platform->crypto->supports_pqc` prüfen! Ein Aufruf bei `supports_pqc == false` (`NULL`) ist undefiniertes Verhalten. Das boolesche Feld ist der Gate-Guard, nicht der Pointer. |
+| **Option**           | Dieser Funktionspointer ist standardmäßig `NULL`. Wird nur gesetzt wenn das Crypto-Backend PQC unterstützt.                              |
+| **Kritischer Guard** | Der Core prüft via `verify_pqc != NULL`, woraufhin `verify_pqc()` sicher verwendet wird. Ein extra State-Bool entfällt. |
 | **Hybrid-Modus**     | Der Core ruft ERST `verify_ed25519`, DANN `verify_pqc`. Beide müssen bestehen. Ein Angreifer der nur den klassischen Algorithmus bricht, scheitert an PQC und umgekehrt. |
 | **Parameter-Größen** | ML-DSA-65: `sig_len` = 3.309 Bytes, `pubkey_len` = 1.952 Bytes. Deutlich größer als Ed25519!                                                                             |
 | **RAM-Impact**       | ML-DSA-65 Verify braucht ~10-30 KB Stack (je nach Implementierung). Der Manifest-Compiler prüft ob `bootloader_budget` das hergibt.                                      |
@@ -427,7 +436,7 @@ void (*deinit)(void);
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Aufgabe**          | Lese und erhöhe den Anti-Replay Timestamp des Devices um Replay-Angriffe auf das Recovery-OS abzuwehren. Darf *niemals* in zirkulärem WAL liegen (Amnesie-Gefahr!).      |
 | **Exhaustion-Check** | Vor dem Advance MUSS die Funktion gegen die physikalische Puffer-Obergrenze (z.B. begrenzte Anzahl eFuses) prüfen. Wenn alle aufgebraucht: `BOOT_ERR_COUNTER_EXHAUSTED`. |
-| **Atomizität**       | Das Brennen einer eFuse oder OTP-Bits ist physikalisch inherent atomar und immun gegen Power-Cycle-Abbrüche.                                                             |
+| **Atomizität**       | Das Brennen einer eFuse ist physikalisch inherent atomar (Partial Atomicity). Für einen auf dem Data-Flash emulierten OTP-Bereich MUSS der Increment-Schritt jedoch mittels XOR-Masking / TMR pseudo-atomar abgesichert sein. |
 
 ### `get_last_vendor_error()`
 
@@ -441,7 +450,6 @@ void (*deinit)(void);
 | Feld                  | Typ    | Bedeutung                                                                                                                                                       |
 | --------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `has_hw_acceleration` | `bool` | `true` wenn SHA-256 oder Ed25519 in Hardware laufen. Für Timing-IDS: HW-Verify ist ~5x schneller als SW, der Fleet-Baseline-Vergleich muss das berücksichtigen. |
-| `supports_pqc`        | `bool` | `true` wenn `verify_pqc` nicht `NULL` ist.                                                                                                                      |
 
 ---
 
@@ -449,6 +457,7 @@ void (*deinit)(void);
 
 ```c
 typedef struct {
+    uint32_t        version;
     boot_status_t   (*init)(void);
     void            (*deinit)(void);
     uint32_t        (*get_tick_ms)(void);
@@ -494,8 +503,8 @@ void (*delay_ms)(uint32_t ms);
 | Aspekt              | Detail                                                                                                                                                                                                              |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Aufgabe**         | Blockierend warten.                                                                                                                                                                                                 |
-| **Aufgerufen von**  | `boot_main.c` (Boot-Timeout: Warte auf Recovery-Pin oder Serial-Eingabe), `boot_journal.c` (Exponential-Backoff: Warte N ms bevor erneuter Update-Versuch nach Brownout).                                           |
-| **Implementierung** | Busy-Wait basierend auf `get_tick_ms()`: `while (get_tick_ms() - start < ms) {}`. KEIN Sleep/WFI — der Bootloader hat kein Interrupt-System das ihn aufwecken würde.                                                |
+| **Aufgerufen von**  | `boot_main.c` (Boot-Timeout: Warte auf Recovery-Pin oder Serial-Eingabe).                                           |
+| **Verbot für Timeouts** | DARF NICHT für große Edge-Recovery Exponential Backoffs (1-24h) genutzt werden, da die Busy-Wait Schleife die Batterie leersaugt. Hierfür ist zwingend `soc_hal.enter_low_power` vorgesehen. |
 | **WDT-Interaktion** | Wenn `ms` größer als der WDT-Timeout ist, MUSS der Core den WDT zwischendurch kicken. Das ist NICHT die Aufgabe der HAL — der Core in `boot_main.c` wickelt den `delay_ms()`-Aufruf in eine Schleife mit WDT-Kicks. |
 | **Sandbox**         | `usleep(ms * 1000)`.                                                                                                                                                                                                |
 
@@ -511,7 +520,7 @@ reset_reason_t (*get_reset_reason)(void);
 | **Aufgerufen von**                  | `boot_confirm.c`, einmal pro Boot. DAS existenzkritische Feature für Auto-Rollback.                                                                                                                                                                                                                                                                                                                                      |
 | **Seiteneffekt — Register löschen** | Bei STM32: Die Reset-Flags im `RCC_CSR` bleiben über Resets hinweg stehen. Die HAL MUSS die Flags nach dem ersten Lesen löschen (RMVF-Bit setzen). Sonst sieht der nächste normale Boot einen falschen Watchdog-Reset. Bei nRF52: `RESETREAS`-Register muss ebenfalls nach Lesen gelöscht werden (Bits auf 0 schreiben). Bei ESP32: `RTC_CNTL_RESET_CAUSE` wird automatisch aktualisiert (kein manuelles Löschen nötig). |
 | **Priorität bei mehreren Flags**    | Es können mehrere Reset-Flags gleichzeitig gesetzt sein (z.B. WDT + Software auf STM32). Prioritätsreihenfolge: `WATCHDOG > BROWNOUT > SOFTWARE > PIN > POWER_ON`. Der schlimmste Grund gewinnt.                                                                                                                                                                                                                         |
-| **Idempotenz**                      | DARF nur EINMAL pro Boot aufgerufen werden (weil die Funktion die Register löscht). Der Core ruft sie genau einmal auf und cached das Ergebnis.                                                                                                                                                                                                                                                                          |
+| **Idempotenz (Caching Pflicht)**| Da das Auslesen Registern oft die Hardware-Clear-Bits triggert, MUSS die HAL-Implementierung den initial ausgelesenen Wert intern in einer statischen Variable cachen (`static reset_reason_t cached_reason;`). Jeder Folgeaufruf gibt nur noch den Cache zurück. Der Core darf beliebig oft pollen. |
 | **Rückgabe**                        | Einer der `reset_reason_t` Enum-Werte. `RESET_UNKNOWN` wenn kein bekanntes Flag gesetzt ist.                                                                                                                                                                                                                                                                                                                             |
 
 ### `deinit()`
@@ -531,6 +540,7 @@ void (*deinit)(void);
 
 ```c
 typedef struct {
+    uint32_t      version;
     boot_status_t (*init)(uint32_t timeout_ms);
     void          (*deinit)(void);
     void          (*kick)(void);
@@ -580,9 +590,9 @@ void (*resume)(void);
 | Aspekt             | Detail                                                                                                                                                         |
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Aufgabe**        | Watchdog temporär deaktivieren oder den Prescaler signifikant hochskalieren. Erforderlich für Vendor-ROM Erase-Makros, die in C nicht iterativ pausierbar sind. |
+| **WICHTIG (Keine völlige Deaktivierung)** | Auf produktionskritischen Systemen DARF die HAL den WDT hier nicht stumpf mit `0` (Disable) abschalten, sondern MUSS lediglich den dynamischen Hardware-Prescaler maximal hochskalieren (z.B. auf 26 Sekunden). |
 | **Aufgerufen von** | `boot_swap.c` ODER `boot_delta.c` NUR unmittelbar vor monolithischen Flash-Operationen, die das WDT-Limit sprengen. Danach folgt strikt `resume`. |
-| **nRF52**          | Da der nRF52 WDT starr blockt und ROM-Routinen das Device kurz stoppen, MUSS die HAL hier asynchrone Events abhandeln oder eine Dummy-No-Op einhängen (wenn Timeouts ausreichen).  |
-| **Reentrancy**     | **NICHT REENTRANT!** Der Core garantiert, dass diese Methoden niemals iterativ verschachtelt aufgerufen werden. Ein Verstoß ist ein harter Programmierfehler im Core. Die HAL muss kein Referenz-Counting pflegen. |
+| **Reentrancy**     | **NICHT REENTRANT!** Der Core garantiert, dass diese Methoden niemals iterativ verschachtelt aufgerufen werden. |
 
 ### `deinit()`
 
@@ -593,6 +603,7 @@ void (*deinit)(void);
 | Aspekt               | Detail                                                                                                                                                                   |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Aufgabe**          | Watchdog deaktivieren oder in Hardware-Default-State überführen, bevor das OS startet.                                                                                   |
+| **Handoff (.noinit)**| Der aktive Watchdog-Status und Parameter MÜSSEN zwingend über die `.noinit` Sektion an das Feature-OS übergeben werden, damit dieses beim Boot lückenlos weiter füttern kann! |
 | **Aufgerufen von**   | `boot_main.c`, in der Deinit-Kaskade.                                                                                                                                    |
 | **Ausnahmen**        | Auf Hardware, die den Watchdog nicht stoppen kann (nRF52, STM32 IWDG), ist dies zwingend ein **No-Op**. Das OS erbt in diesem Fall einen laufenden Watchdog und muss diesen zeitnah kicken oder übernehmen! Bei konfigurierbarem ESP32 RWDT wird der Timer deaktiviert. |
 
@@ -602,6 +613,7 @@ void (*deinit)(void);
 
 ```c
 typedef struct {
+    uint32_t      version;
     boot_status_t (*init)(uint32_t baudrate);
     void          (*deinit)(void);
     void          (*putchar)(char c);
@@ -634,7 +646,7 @@ void (*putchar)(char c);
 | --------------------- | -------------------------------------------------------------------------------------------------------------- |
 | **Aufgabe**           | Ein einzelnes Zeichen senden. Blockiert bis das UART-TX-Register frei ist.                                     |
 | **Aufgerufen von**    | `boot_diag.c` (JSON Boot-Log Zeichen für Zeichen ausgeben).                                                    |
-| **Performance**       | Bei 115200 Baud: ~87µs pro Zeichen. Ein 200-Zeichen Boot-Log dauert ~17ms. Für die Boot-Zeit vernachlässigbar. |
+| **WDT-Kicking Pflicht**| Da bei starkem Log-Aufkommen (z.B. >1 KB) das Blockieren über Dutzende Millisekunden kumuliert, MUSS `putchar` intern ein `wdt->kick()` einweben, um TMG-Resets zu blockieren. |
 | **Kein Rückgabewert** | Kann nicht fehlschlagen (blockiert bis fertig).                                                                |
 
 ### `getchar(timeout_ms)`
@@ -648,7 +660,8 @@ int (*getchar)(uint32_t timeout_ms);
 | **Aufgabe**         | Ein Zeichen empfangen, als non-blocking Polling implementiert.                                                                                                                         |
 | **Aufgerufen von**  | Serial Rescue (4a): Wartet auf Auth-Token vom Techniker (104 Bytes über UART).                                                                             |
 | **Parameter**       | `timeout_ms`: Maximale Wartezeit. 0 = sofort zurückkehren wenn nichts da.                                                                                  |
-| **Rückgabe**        | Empfangenes Byte (0-255) als native `int`. `-1` (bzw. `BOOT_UART_NO_DATA`) wenn noch kein Byte im RX-Buffer liegt. Keine Vermischung mit `boot_status_t` Enumerationswerten! |
+| **Integer Cast Warnung** | Ein nativer `int` Rückgabewert ist zwingend, da ein impliziter Cast auf `uint8_t` den `-1` Fehlercode (0xFF) sofort als valides Payload-Byte tarnen würde! |
+| **Rückgabe**        | Empfangenes Byte (0-255) als native `int`. `-1` (bzw. `BOOT_UART_NO_DATA`) wenn noch kein Byte im RX-Buffer liegt. |
 | **WDT-Interaktion** | Da die Funktion sofort zurückkehrt, blockiert sie die CPU nicht. Die Recovery-Schleife ruft die Funktion beständig auf und kann im gleichen Zug sicher `wdt->kick()` antriggern! |
 
 ### `flush()`
@@ -680,6 +693,7 @@ void (*deinit)(void);
 
 ```c
 typedef struct {
+    uint32_t      version;
     boot_status_t (*init)(void);
     void          (*deinit)(void);
     uint32_t      (*battery_level_mv)(void);
@@ -730,8 +744,8 @@ bool (*can_sustain_update)(void);
 | Aspekt             | Detail                                                                                                                                                            |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Aufgabe**        | Abschätzung ob die Batterie genug Energie für einen vollständigen Flash-Update-Zyklus hat. Evaluator der Metadaten-Grenze `min_battery_mv`.                       |
+| **Dummy-Load Penalty** | Wenn die Hardware keinen steuerbaren Dummy-Load anlegen kann, MUSS die HAL das `min_battery_mv` Target als Penalty künstlich um z.B. 400mV erhöhen, um blinden Brownouts aus Leerlaufmessungen vorzubeugen. |
 | **Aufgerufen von** | `boot_energy.c`, einmal VOR dem Start eines Updates. Wenn `false` → Update wird abgelehnt, Gerät wartet auf Ladung.                                               |
-| **Logik**          | `battery_level_mv() > (min_battery_mv + 200)`. Die 200mV Sicherheitsmarge kompensiert den Spannungsabfall während des Flash-Erase (200mA Spitzenstrom auf ESP32). |
 | **Rückgabe**       | `true` wenn Update sicher durchführbar. `false` wenn Risiko eines Brownout besteht.                                                                               |
 
 ### `enter_low_power(wakeup_s)`
@@ -761,6 +775,7 @@ void (*flush_bus_matrix)(void);
 | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Aufgabe**           | Physische Isolierung von Multi-Core/DMA-Nebenwirkungen vor dem OS-Einleseprozess oder Schreibvorgängen auf geteilten Speicher-Bussen.                                                                                                                                               |
 | **Aufgerufen von**    | `boot_main.c`, VOR der restlichen HAL-Init Kaskade (sehr früh), um Bus-Traffic zu eliminieren. Zudem `flush_bus_matrix` direkt vor OS-Jump.                                                                                                                                         |
+| **Bus-Timeout Limit** | Die `flush_bus_matrix` Funktion MUSS zwingend als Bounded-Loop (z.B. max 5.000 Zyklen) implementiert sein, da blockierte DMAs sonst einen endlosen Hänger auf dem Haupt-Bus-Matrix Reset verursachen. |
 | **Mechanismus**       | `assert_secondary_cores_reset`: Hält Netzwerk/Radio-Cores (z.B. Cortex-M0+ auf STM32WB) permanent im Hardware-Reset-Hold fest, damit Bootloader-Speicher nicht von DMA-Attacken unterbrochen werden. `flush_bus_matrix`: Löscht AHB/APB Pipeline-Verzögerungen für den ungetrübten OS-Kaltstart (Sanitization).  |
 
 ### `deinit()`
@@ -793,6 +808,15 @@ const boot_platform_t *boot_platform_init(void);
 ```
 
 ### Init-Reihenfolge und Begründung
+
+```c
+/* Vollständige boot_platform_init() Routine inkl. Fallback SOS-Signalisierung */
+const boot_platform_t *boot_platform_init(void) {
+    /* Hardcoded Populate-Pattern. 
+     * Wenn ein PFLICHT-HAL init() fehlschlaegt, muss der Bootloader atomar panicken.
+     * Nutzt z.B. Fallback_SOS_LED Toggle, falls kein UART verfuegbar ist. */
+}
+```
 
 ```
 boot_platform_init()          ← Chip-Startup (Clocks, JTAG-Lock)
