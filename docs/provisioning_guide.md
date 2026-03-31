@@ -7,10 +7,10 @@ Um P10 und CRA Compliance zu garantieren, ist Code-Sicherheit alleine nutzlos, w
 ## 1. Hardware Lifecycle Management (eFuses / OTP)
 Bevor `Toob-Boot` auf den Chip (MCU) geschrieben wird, müssen die Hardware-Sicherungen der MCU permanent (unwiderruflich) durchgebrannt werden:
 
-1. **JTAG / SWD Deaktivierung**: Der Debug-Port MUSS physikalisch getrennt oder per Passwort im BootROM gelockt werden.
+1. **JTAG / SWD Deaktivierung**: Der Debug-Port MUSS physikalisch getrennt oder per Passwort im BootROM gelockt werden. GAP-23: Die eFuse-Brennvorgänge sind extrem power-sensibel. Der Flasher-Client MUSS zwingend eine Retry/Rollback Logik mit Zero-Verification implementieren, um halb gebrannte (partial atomicity failure) Key-Bits auf der Produktionslinie sofort zu erkennen und zu markieren (Binning/Ausschuss).
 2. **Flash Readout Protection (RDP)**: STM32 RDP Level 1 (besser Level 2). Die interne Firmware darf nicht mehr dumpbar sein.
 3. **Burn Public Key**: Der primäre Ed25519 Public Key (32 Byte) wird in das Hardware-OTP Field eingebrannt. Er dient als unerschütterlicher Anker.
-4. **Burn DSLC**: Ein "Device Specific Lock Code" (Zufallswert, Factor 1) wird eingebrannt, den nur der Hersteller im Fleet-Management speichert. Nötig für das Serial-Rescue Auth-Token.
+4. **Burn DSLC**: Ein "Device Specific Lock Code" (Zufallswert, Factor 1) wird eingebrannt, den nur der Hersteller im Fleet-Management speichert. Nötig für das Serial-Rescue Auth-Token. GAP-45: Zusätzlich kann über das gleiche Ed25519 Auth-Token ein persistenter RMA-Mode (Return Merchandise Authorization) freigeschaltet werden, welcher die JTAG-eFuses logisch (via OTP-Lock) für den einmaligen OEM-Refurbishment-Prozess temporär wieder entriegelt (sofern die MCU Hardware das unterstützt).
 
 ## 2. Toobfuzzer3 Kalibrierung
 Bevor das Bootloader-Binary final kompiliert wird, durchläuft die Zielhardware die `toobfuzzer3` Pipeline:

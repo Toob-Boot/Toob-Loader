@@ -25,9 +25,9 @@ Das `toob-sign` Host-Tool teilt das OS-Image in feste Blöcke (typisch 4 KB oder
 
 ### Der Verifizierungs-Ablauf im Core (`boot_verify.c`):
 1. **Envelope Check**: Der Bootloader verifiziert *zuerst* die Ed25519-Signatur über das gesamte Manifest (Sign-then-Hash).
-2. **Chunk Loop**: In einer gebundenen `for`-Schleife liest der Bootloader exakt 4 KB in den RAM (Swap-Buffer).
-3. **Chunk Hash**: Er berechnet via `crypto_hal.hash_update()` den SHA-256 über die 4 KB.
-4. **Vergleich**: Der berechnete Hash wird direkt gegen den `chunk_hashes[i]` Slot validiert.
+2. **Chunk Loop / GAP-08 Stream-Hashing**: In einer gebundenen `for`-Schleife liest der Bootloader exakt Chunk-weise (z.B. 4 KB) aus dem physischen SPI-Flash via `flash_hal.read()` direkt in einen Ring-Buffer im SRAM. Das Manifest selbst (und sein riesiges `chunk_hashes`-Array) verbleibt im Flash (wir verbieten strikt das Laden ins SRAM, O(n) Limit!).
+3. **Chunk Hash**: Er berechnet via `crypto_hal.hash_update()` den SHA-256 über die gelesenen 4 KB im RAM.
+4. **Vergleich**: Der berechnete Hash wird Stream-weise gegen den aktuellen Slot im speicherabgebildeten Flash-Manifest (`chunk_hashes[i]`) validiert.
 5. **Watchdog**: Vor dem nächsten Loop-Durchlauf resettet der Core den Hardware-Watchdog via `wdt_hal.kick()`.
 
 ## 3. Vorteile für die Delta-Patching Architektur

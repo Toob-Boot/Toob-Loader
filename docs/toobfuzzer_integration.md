@@ -21,16 +21,17 @@ Der Toobfuzzer generiert nach einem erfolgreichen Scan-Zyklus auf echter Zielhar
 ### A. `aggregated_scan.json` (Der physische Speicher-Beweis)
 Der Fuzzer verlässt sich nicht auf das Datenblatt, sondern schreibt, liest und löscht hart auf dem Silizium. Das Ergebnis ist eine auf das Byte genaue Map der tatsächlich funktionierenden und löschbaren Speicherblöcke:
 ```json
-// Beispiel-Extrakt für den ESP32 Flash
+// GAP-46: Spezifiziertes Schema für aggregated_scan.json Segmente
 "262144": {
-    "start_addr": 262144,
-    "end_addr": 266239,
-    "start_hex": "0x40000",
-    "end_hex": "0x40fff",
-    "size": 4096,
-    "fallback": false,
-    "verification_method": "Physical Fuzzing (Bare-Metal)",
-    "run_ping": "erased"
+    "start_addr": 262144,                 // Int: Absolute Start-Adresse
+    "end_addr": 266239,                   // Int: Absolute End-Adresse (inclusive)
+    "start_hex": "0x40000",               // String: Lesbare Start-Adresse
+    "end_hex": "0x40fff",                 // String: Lesbare End-Adresse
+    "size": 4096,                         // Int: Sektor-Größe in Bytes
+    "fallback": false,                    // Bool: Wurde auf logische Fallbacks ausgewichen?
+    "verification_method": "Physical...", // String: Validierungs-Methode
+    "run_ping": "erased",                 // String: Standard Erase-Muster ("erased" = 0xFF, "zeroed" = 0x00)
+    "max_erase_time_us": 45000            // Int: Gemessene physikalische Max-Erase-Time (GAP-40 Basis)
 }
 ```
 *Nutzen:* Garantiert uns vor dem C-Compile auf Sektor-Ebene exakt die kleinste funktionierende Lösch-Einheit (Page Size vs. Sector Size vs. Bank Size) und identifiziert defekte Speicherbereiche out-of-the-box.
@@ -38,15 +39,17 @@ Der Fuzzer verlässt sich nicht auf das Datenblatt, sondern schreibt, liest und 
 ### B. `blueprint.json` (Die Logik- & ROM-Landkarte)
 Generiert durch die **Stage 4 Injection**. Hier stehen die Architektur-Grenzwerte und extrem wertvolle ROM-Pointer, die es Toob-Boot ermöglichen, den SDK-Bloatware-Treiber komplett zu umgehen:
 ```json
+// GAP-46: Spezifiziertes Schema für blueprint.json
 "flash_capabilities": {
-    "write_alignment_bytes": 4,
-    "app_alignment_bytes": 65536
+    "write_alignment_bytes": 4,           // Int: Nötiges RAM-Alignment für Payload-Buffer
+    "app_alignment_bytes": 65536,         // Int: Nötiges Flash-Alignment für Execute-In-Place (XIP) Vector-Tables
+    "timing_safety_factor": 2.0           // Float: Multiplikator für max_erase_time_us zur WDT-Kalkulation (GAP-40)
 },
 "flash_controller": {
     "erase_sector_sequence": [
         {
-            "function_name": "SPIEraseSector",
-            "rom_address": "0x40062CCC"
+            "function_name": "SPIEraseSector",  // String: ABI Name der Vendor-ROM Funktion
+            "rom_address": "0x40062CCC"         // String: Absolute Hex-Adresse des Entry-Points
         }
     ]
 }

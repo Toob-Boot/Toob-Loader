@@ -44,7 +44,7 @@ typedef enum {
 
 ## 0. HardFault & ECC Guard
 
-Bevor eine HAL initialisiert werden darf, verlangt die Toob-Boot Spezifikation die Definition eines asynchronen **`HardFault_Handler`** in `startup.c`. Moderne Flash-Speicher mit ECC (z.B. STM32G4/U5) werfen bei unkorrigierbaren Bit-Rot Lesefehlern direkt eine NMI/HardFault-Exception. Die C-HAL hat hierbei keine Chance auf Fehler-Rückgabe. Der Handler MUSS existieren, das `ECC_NMI` Flag abfangen und als Fallback zwingend das System über das Watchdog-Reset-Register neustarten, um einen Dauer-Brick durch Exception-Deadlock abzuwenden.
+Bevor eine HAL initialisiert werden darf, verlangt die Toob-Boot Spezifikation die Definition eines asynchronen **`HardFault_Handler`** in `startup.c`. Moderne Flash-Speicher mit ECC (z.B. STM32G4/U5) werfen bei unkorrigierbaren Bit-Rot Lesefehlern direkt eine NMI/HardFault-Exception. Die C-HAL hat hierbei keine Chance auf Fehler-Rückgabe. Der Handler MUSS existieren, das `ECC_NMI` Flag abfangen und zwingend das System asynchron über das Watchdog-Reset-Register neustarten. Zuvor MUSS der Handler (falls RAM/Bus noch intakt) ein `BOOT_ERR_ECC_HARDFAULT` Status-Bit/Intent im Survival-RAM setzen, damit Stage 1 nach dem Power-Cycle explizit einen Boot-Recovery-Zyklus einleiten kann, um einen Dauer-Brick durch Exception-Deadlock abzuwenden.
 
 ---
 
@@ -112,7 +112,7 @@ boot_status_t (*write)(uint32_t addr, const void *buf, size_t len);
 | **Aufgabe**            | `len` Bytes aus `buf` an Adresse `addr` im Flash schreiben.                                                                                                                                                                               |
 | **Aufgerufen von**     | `boot_journal.c` (WAL-Entries), `boot_swap.c` (Sektor-Writes), `boot_rollback.c` (TMR-Flags).                                                                                                                                             |
 | **Alignment-PFLICHT**  | `addr` MUSS ein Vielfaches von `write_align` sein. `len` MUSS ein Vielfaches von `write_align` sein. Bei Verletzung → `BOOT_ERR_FLASH_ALIGN`. Der Core garantiert Alignment — aber die HAL muss defensiv prüfen.                          |
-| **Erase-Vorbedingung** | Der Zielbereich MUSS vorher gelöscht sein (alle Bytes == `erased_value`). NOR-Flash kann nur Bits 1→0 setzen. Schreiben auf nicht-gelöschten Bereich korrumpiert Daten still. Die HAL MUSS vor dem Schreiben (als **32-Bit Aligned Word-Check** für O(1) Geschwindigkeit) prüfen ob das Target-Medium auf `erased_value` genullt ist. Auf Chips mit Hardware-ECC (STM32L4+) kann der Controller selbst einen Fehler melden → Blank-Check entfällt. Wenn nicht, bricht sie strikt mit `BOOT_ERR_FLASH_NOT_ERASED` ab, um Shadow-Bricking zu durchkreuzen. |
+| **Erase-Vorbedingung** | Der Zielbereich MUSS vorher gelöscht sein (alle Bytes == `erased_value`). NOR-Flash kann nur Bits 1→0 setzen. Schreiben auf nicht-gelöschten Bereich korrumpiert Daten still. Die HAL MUSS vor dem Schreiben (als **32-Bit Aligned Word-Check** für O(1) Geschwindigkeit) prüfen ob das Target-Medium auf `erased_value` genullt ist. Auf Chips mit Hardware-ECC (STM32L4+) kann der Controller selbst einen Fehler melden → Blank-Check entfällt. Wenn nicht, bricht sie strikt mit `BOOT_ERR_FLASH_NOT_ERASED` ab, um Shadow-Bricking zu durchkreuzen. Um bei gigantischen Images (O(n) Komplexität) keine Boot-Zeit zu opfern, MUSS der Check via Build-Macro `TOOB_FLASH_DISABLE_BLANK_CHECK` exakt opt-in abschaltbar sein. |
 | **Flash-Encryption**   | Bei aktiver HW-Encryption: Die HAL flasht den verschlüsselten oder rohen Payload exakt so, wie ihn die Architektur definiert. Keine transparenten Voodoo-Verschlüsselungen während des Writes durch die Bootloader-HAL!                                                                                                                                                                                                                                                                                       |
 | **Atomizität**         | Nicht atomar! Ein Stromausfall mitten im Write hinterlässt einen halb-geschriebenen Bereich. Das WAL-Journal im Core handhabt das (Replay bei fehlgeschlagenem Commit).                                                                   |
 | **Rückgabe**           | `BOOT_OK`, `BOOT_ERR_FLASH`, `BOOT_ERR_FLASH_ALIGN`, `BOOT_ERR_FLASH_BOUNDS`, `BOOT_ERR_FLASH_NOT_ERASED`.                                                                                                                                                             |
@@ -361,7 +361,7 @@ boot_status_t (*verify_ed25519)(
 | **Parameter**      | `message`/`msg_len`: Die signierten Daten (typisch: der SHA-256 Digest des SUIT-Manifests, also 32 Bytes). `sig`: 64-Byte Ed25519-Signatur. `pubkey`: 32-Byte Ed25519 Public Key (im Bootloader-Binary eingebrannt oder aus OTP geladen). |
 | **Aufgerufen von** | `boot_verify.c` (SUIT-Manifest Envelope verifizieren), Serial Rescue (Auth-Token verifizieren).                                                                                                                                           |
 | **Rückgabe**       | `BOOT_OK` wenn Signatur valide. `BOOT_ERR_VERIFY` wenn invalide. `BOOT_ERR_CRYPTO` bei HW-Fehler.                                                                                                                                         |
-| **Timing**         | Software (Monocypher): ~720.000 Zyklen auf Cortex-M4 ≈ 9ms @ 80 MHz. HW (CC310): ~200.000 Zyklen ≈ 2.5ms. HW (STM32U5 PKA): ~150.000 Zyklen ≈ 1.9ms.                                                                                      |
+| **Timing**         | Software (Monocypher): ~720.000 Zyklen auf Cortex-M4 ≈ 9ms @ 80 MHz. RISC-V (RV32IMC): ~950.000 Zyklen ≈ 15ms @ 64 MHz. HW (CC310): ~200.000 Zyklen ≈ 2.5ms. HW (STM32U5 PKA): ~150.000 Zyklen ≈ 1.9ms. |
 | **Constant-Time**  | Die Implementierung MUSS constant-time sein (keine datenabhängigen Branches oder Speicherzugriffe). Monocypher garantiert das. HW-Engines sind inherent constant-time.                                                                    |
 | **Envelope-First** | Der Core ruft `verify_ed25519` BEVOR er irgendein Manifest-Feld auswertet oder Daten schreibt. Kein einziges Byte aus dem Manifest wird interpretiert bevor die Signatur bestanden ist (Anti-Truncation).                                 |
 
@@ -408,7 +408,7 @@ void (*deinit)(void);
 
 | Aspekt               | Detail                                                                                                                                                                   |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Aufgabe**          | HW-Crypto-Engine abschalten. **Kritisch:** Zeroize der `crypto_arena` (Memset zu 0), um Key-Material-Residuen aus dem SRAM zu tilgen bevor das OS bootet.             |
+| **Aufgabe**          | HW-Crypto-Engine abschalten. **Kritisch:** Zeroize der `crypto_arena`, um Key-Material-Residuen aus dem SRAM zu tilgen bevor das OS bootet. Es darf niemals ein einfaches `memset(0)` verwendet werden (wird oft vom Compiler wegoptimiert)! Hier MUSS zwingend die O(1) Assembly-Funktion `boot_secure_zeroize()` genutzt werden. |
 | **Aufgerufen von**   | `boot_main.c`, nach Verify-Phase in der Deinit-Kaskade vor dem Jump.                                                                                                     |
 | **Sandbox**          | No-Op (Software-Krypto hat keinen persistenten Hardware-State, Arena wird dennoch generisch vom Core gelöscht).                                                          |
 
@@ -475,8 +475,8 @@ boot_status_t (*init)(void);
 | Aspekt             | Detail                                                                                                                                                                                                                                                                  |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Aufgabe**        | System-Timer starten. Bei Cortex-M: SysTick konfigurieren (Reload-Wert basierend auf CPU-Frequenz). Bei RISC-V: `mtime`/`mtimecmp` konfigurieren. Bei Xtensa: CCOUNT nutzen (zählt automatisch).                                                                        |
-| **Aufgerufen von** | `boot_main.c`, als ERSTER HAL-Aufruf überhaupt. Alles andere braucht eine Zeitbasis.                                                                                                                                                                                    |
-| **CPU-Frequenz**   | Die Init-Funktion muss die CPU-Frequenz kennen (aus `chip_config.h` oder Hardware-Register). Bei ESP32 ist die Frequenz nach dem ROM-Bootloader bereits gesetzt. Bei STM32 muss der `startup.c` die Clocks konfiguriert haben BEVOR `clock_hal.init()` aufgerufen wird. |
+| **Aufgerufen von** | `boot_main.c`, als ERSTER HAL-Aufruf überhaupt. Alles andere braucht eine Zeitbasis. `clock_hal.init` konfiguriert AUSSCHLIESSLICH den SysTick/Zähler. Die Kern-PLLs / High-Speed-Clocks werden strikt VOR dem call in der C-Laufzeitumgebung (`startup.c` / `SystemInit()`) hochgefahren. |
+| **CPU-Frequenz**   | Die Init-Funktion muss die CPU-Frequenz kennen (aus `chip_config.h` oder Hardware-Register). Bei ESP32 ist die Frequenz nach dem ROM-Bootloader bereits gesetzt. |
 | **Rückgabe**       | `BOOT_OK`. Praktisch kann diese Funktion nicht fehlschlagen (Timer-Hardware ist immer vorhanden).                                                                                                                                                                       |
 
 ### `get_tick_ms()`
@@ -505,7 +505,7 @@ void (*delay_ms)(uint32_t ms);
 | **Aufgabe**         | Blockierend warten.                                                                                                                                                                                                 |
 | **Aufgerufen von**  | `boot_main.c` (Boot-Timeout: Warte auf Recovery-Pin oder Serial-Eingabe).                                           |
 | **Verbot für Timeouts** | DARF NICHT für große Edge-Recovery Exponential Backoffs (1-24h) genutzt werden, da die Busy-Wait Schleife die Batterie leersaugt. Hierfür ist zwingend `soc_hal.enter_low_power` vorgesehen. |
-| **WDT-Interaktion** | Wenn `ms` größer als der WDT-Timeout ist, MUSS der Core den WDT zwischendurch kicken. Das ist NICHT die Aufgabe der HAL — der Core in `boot_main.c` wickelt den `delay_ms()`-Aufruf in eine Schleife mit WDT-Kicks. |
+| **WDT-Interaktion** | Wenn `ms` größer als der WDT-Timeout ist, MUSS der Core den WDT zwischendurch kicken. Das ist NICHT die Aufgabe der HAL — der Core in `boot_main.c` wickelt den `delay_ms()`-Aufruf in eine Schleife (die nun als standardisiertes `boot_delay_with_wdt` Hilfsfunktion in der Core API liegt) mit WDT-Kicks. |
 | **Sandbox**         | `usleep(ms * 1000)`.                                                                                                                                                                                                |
 
 ### `get_reset_reason()`
@@ -646,7 +646,7 @@ void (*putchar)(char c);
 | --------------------- | -------------------------------------------------------------------------------------------------------------- |
 | **Aufgabe**           | Ein einzelnes Zeichen senden. Blockiert bis das UART-TX-Register frei ist.                                     |
 | **Aufgerufen von**    | `boot_diag.c` (JSON Boot-Log Zeichen für Zeichen ausgeben).                                                    |
-| **WDT-Kicking Pflicht**| Da bei starkem Log-Aufkommen (z.B. >1 KB) das Blockieren über Dutzende Millisekunden kumuliert, MUSS `putchar` intern ein `wdt->kick()` einweben, um TMG-Resets zu blockieren. |
+| **WDT-Kicking Pflicht**| Da bei starkem Log-Aufkommen (z.B. >1 KB) das Blockieren über Dutzende Millisekunden kumuliert, verzichtet Toob-Boot als strikte Architekturregel auf das Kicken innerhalb von `console.putchar` (Architektur-Bloat) und zwingt stattdessen den aufrufenden diagnostischen Core, den WDT über non-blocking Batch-Ausgaben in der Aufrufschleife selbst zu füttern. |
 | **Kein Rückgabewert** | Kann nicht fehlschlagen (blockiert bis fertig).                                                                |
 
 ### `getchar(timeout_ms)`
@@ -762,7 +762,7 @@ void (*enter_low_power)(uint32_t wakeup_s);
 | **Aufgerufen von**    | `boot_energy.c` im Edge-Recovery Pfad: Ist der `edge_unattended_mode` aktiv und crasht das System, nutzt S1 anstelle eines Hard-Locks einen stufenweisen Exponential Backoff-Sleep (1h, 4h, 12h, 24h). Die CPU taucht tiefgehend ab, um der Umgebung Marge für spontane Reparaturen (Netzwerk/Strom) zu gewähren. Fällt die Spannung primär *während* des Updates, wird nicht mehr endlos geschlafen, sondern extrem aggressiv für einen sofortigen Rollback das Journal versiegelt. |
 | **Implementierung**   | ESP32: `esp_light_sleep_start()` (GPIO oder Timer Wakeup). STM32: `HAL_PWR_EnterSTOPMode()`. nRF52: `__WFE()` (Wait-for-Event). Sandbox: `sleep(timeout_s)`.                                                                                                                        |
 | **WDT**               | Der WDT bleibt aktiv im Low-Power-Mode! Er ist das Aufweck-Signal. Bei ESP32 RWDT und STM32 IWDG laufen die WDT-Timer auch im Sleep/Stop-Mode (eigene RC-Oszillatoren).                                                                                                             |
-| **Kein Rückgabewert** | Die Funktion kehrt erst zurück wenn das Gerät aufwacht (WDT-Timeout oder externer Interrupt). Danach macht der Core normal mit `boot_main` weiter.                                                                                                                                  |
+| **Return-Sicherheit** | Bei Light-Sleep (RAM wird gehalten) kehrt die Funktion nach Wake-up linear zurück (Code läuft weiter). Bei regulärem Deep-Sleep löst das Aufwachen hingegen zwingend einen asynchronen Hard-Reset aus. Der Aufruf muss nach dem Deep-Sleep-Trigger folgend zwingend durch eine unendliche `while(1);` Trap im C-Code gesichert werden. |
 
 ### `assert_secondary_cores_reset()` & `flush_bus_matrix()`
 

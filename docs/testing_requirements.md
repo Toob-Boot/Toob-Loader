@@ -13,6 +13,7 @@ Um die gesamte Logik (WAL, TMR, State-Machine) von `Toob-Boot` auf dem Host (`x8
 - Abbruch des Updates bei 0%, 50%, 99% → Sicherstellung, dass WAL-Rollbacks greifen.
 - Injektion von "0x00" oder "0xFF" Bytes in das OS-Image (Bit-Rot Simulator) → Sicherstellung, dass `boot_verify` anschlägt.
 - Erschöpfung des Exponential Backoffs → Recovery-OS Einstieg bestätigen.
+- GAP-24: Multi-Image State-Machine Tests → Simulation von Multi-Komponenten-Updates (z.B. OS + Modem Firmware) mit partiellen Fehlern (z.B. Modem Flash klappt, OS Flash schlägt fehl -> Komplett-Rollback beider Slots sicherstellen).
 
 ## 2. HIL Fault-Injection (Hardware In Loop)
 Neben SIL muss Toob-Boot in einem physischen Test-Rack validiert werden.

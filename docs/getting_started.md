@@ -47,8 +47,10 @@ int main(void) {
     // ...
     
     // 4. Update-Prozess (Download via WiFi)
-    download_os_to_flash(SLOT_B_ADDR);
-    toob_set_next_update(SLOT_B_ADDR);
+    // GAP-10: Der active_slot entscheidet das Target! Wir flashen immer in den inaktiven Slot.
+    uint32_t target_slot = (toob_handoff_state.active_slot == 0) ? SLOT_B_ADDR : SLOT_A_ADDR;
+    download_os_to_flash(target_slot);
+    toob_set_next_update(target_slot);
     reboot();
 }
 ```
@@ -56,3 +58,18 @@ int main(void) {
 ## 5. Deployment / Signing
 Um dein Feature-OS hochzuladen, musst du es per `toob-sign` verpacken und im SUIT-Format signieren. 
 Nur so wird Toob-Boot das Update nach dem Neustart akzeptieren.
+
+GAP-31: Lokales Dev-Signing Pipeline Snippet:
+```bash
+# 1. Dev-Key generieren (Einmalig)
+toob-keygen --out-priv dev_key.pem --out-pub dev_pub.bin
+
+# 2. Toob-Boot mit Dev-Key kompilieren
+toob build --component bootloader --pubkey dev_pub.bin
+
+# 3. Feature-OS kompilieren und signieren
+toob-sign --in my_os.bin --key dev_key.pem --out my_os.suit
+
+# 4. OTA Upload oder lokaler Flash
+toob flash --file my_os.suit --target inactive_slot
+```
