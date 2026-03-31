@@ -58,7 +58,13 @@ Hier ist ein nach Themen gruppierter Überblick über alle Spezifikationsdokumen
 
 ---
 
-## 📉 5. Planung & Historie / Veraltet
+## 📉 5. Planung, Historie & Entwicklung
+
+*   **[`dev_plan.md`](dev_plan.md)**
+    Der Master-Implementierungsplan. Unterteilt die gesamte Entwicklung von Phase 0 (Fundament) bis Phase 6 (Vendor Ports) in greifbare C-Pakete mit strikten P10-Compliance-Prüfungen.
+
+*   **[`dev_diary.md`](dev_diary.md)**
+    Das fortlaufende Entwickler-Tagebuch. Dokumentiert Design-Entscheidungen, Lessons-Learned und technische Hindernisse während der Implementierung des Bootloaders ("Warum wurde es so gebaut?").
 
 *   **`analysis/` (Ordner)**
     Enthält die verschiedenen Iterationen von Gap-Analysen (wie z.B. `big_gap_analysis_v2.md`), über die wir die finalen 50 Produktions-Gaps eliminiert haben.
