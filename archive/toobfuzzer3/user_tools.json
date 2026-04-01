@@ -1,8 +1,0 @@
-{
-    "max_depth": 6,
-    "custom_search_paths": [
-        "C:\\Espressif\\tools",
-        "C:\\Espressif\\python_env\\idf5.5_py3.11_env\\Scripts",
-        "%PATH%"
-    ]
-}
