@@ -24,9 +24,8 @@ static uint32_t write_count_limit = 0;
 static uint32_t simulated_writes = 0;
 static uint32_t simulated_vendor_error = 0;
 
-/* [TODO] (GAP-F20): Bit-Rot Simulator. Implementiere Umgebungsvariablen wie TOOB_BITROT_ADDR 
- * und TOOB_BITROT_VALUE, um bei mock_flash_read absichtliche Fehler (0x00 / 0xFF Injektion) 
- * für SIL-Verifizierungs-Checks zu provozieren (laut testing_requirements.md). */
+static uint32_t bitrot_addr = 0xFFFFFFFF;
+static uint8_t  bitrot_value = 0x00;
 
 static void check_fault_injection(void) {
     if (write_count_limit > 0 && simulated_writes >= write_count_limit) {
@@ -45,6 +44,16 @@ static boot_status_t mock_flash_init(void) {
     const char *env_fail = getenv("TOOB_FAIL_AFTER_WRITES");
     if (env_fail != NULL) {
         write_count_limit = (uint32_t)strtoul(env_fail, NULL, 10);
+    }
+
+    const char *env_bitrot_addr = getenv("TOOB_BITROT_ADDR");
+    if (env_bitrot_addr != NULL) {
+        bitrot_addr = (uint32_t)strtoul(env_bitrot_addr, NULL, 16);
+    }
+
+    const char *env_bitrot_val = getenv("TOOB_BITROT_VALUE");
+    if (env_bitrot_val != NULL) {
+        bitrot_value = (uint8_t)strtoul(env_bitrot_val, NULL, 16);
     }
 
     flash_file = fopen(sim_filename, "rb+");
@@ -86,6 +95,12 @@ static boot_status_t mock_flash_read(uint32_t addr, void *buf, size_t len) {
     if (fseek(flash_file, addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
     if (fread(buf, 1, len, flash_file) != len) return BOOT_ERR_FLASH;
 
+    /* Bit-Rot Simulator Injection (GAP-F20) */
+    if (bitrot_addr >= addr && bitrot_addr < (addr + len)) {
+        uint8_t *byte_buf = (uint8_t *)buf;
+        byte_buf[bitrot_addr - addr] = bitrot_value;
+    }
+
     return BOOT_OK;
 }
 
@@ -97,19 +112,23 @@ static boot_status_t mock_flash_write(uint32_t addr, const void *buf, size_t len
     if (addr + len > CHIP_FLASH_TOTAL_SIZE) return BOOT_ERR_FLASH_BOUNDS;
 
 #ifndef TOOB_FLASH_DISABLE_BLANK_CHECK
-    /* [TODO]: Die Spec hals.md fordert aus Performancegründen einen "32-Bit Aligned Word-Check" 
-     * anstatt des hier genutzten Byte-per-Byte Checks. Muss auf uint32_t Casting optimiert werden. */
-    uint8_t existing[256];
+    /* O(1) Erase-Verify Check via 32-Bit Aligned Word-Check */
+    uint32_t existing[64]; /* 256 Bytes Puffer statisch */
     size_t remaining = len;
     uint32_t current_addr = addr;
+    const uint32_t erased_word = (CHIP_FLASH_ERASURE_MAPPING << 24) |
+                                 (CHIP_FLASH_ERASURE_MAPPING << 16) |
+                                 (CHIP_FLASH_ERASURE_MAPPING << 8)  |
+                                  CHIP_FLASH_ERASURE_MAPPING;
 
     while (remaining > 0) {
         size_t chunk = (remaining > sizeof(existing)) ? sizeof(existing) : remaining;
         if (fseek(flash_file, current_addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
         if (fread(existing, 1, chunk, flash_file) != chunk) return BOOT_ERR_FLASH;
 
-        for (size_t i = 0; i < chunk; i++) {
-            if (existing[i] != CHIP_FLASH_ERASURE_MAPPING) {
+        size_t words = chunk / 4;
+        for (size_t i = 0; i < words; i++) {
+            if (existing[i] != erased_word) {
                 return BOOT_ERR_FLASH_NOT_ERASED;
             }
         }
@@ -119,21 +138,28 @@ static boot_status_t mock_flash_write(uint32_t addr, const void *buf, size_t len
 #endif
 
     /* Simuliere NOR-Flash Physik: Man kann Bits nur auf 0 ziehen (Logisches AND) */
-    /* [TODO]: KRITISCHE P10 VERLETZUNG! uint8_t buffer_to_write[len] ist ein 
-     * Variable Length Array (VLA) und verstößt gegen NASA P10 Regeln (Keine laufzeitabhängigen Stack-Allokationen). 
-     * Dies muss zwingend als Chunked-Loop (z.B. 256 Bytes max) umgeschrieben werden! */
-    uint8_t buffer_to_write[len];
+    /* P10 Chunked-Loop (Kein VLA): Lese Blockweise, manipuliere und schreibe zurück */
+    size_t remain_write = len;
+    uint32_t wr_addr = addr;
     const uint8_t *src = (const uint8_t *)buf;
 
-    if (fseek(flash_file, addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
-    if (fread(buffer_to_write, 1, len, flash_file) != len) return BOOT_ERR_FLASH;
+    while (remain_write > 0) {
+        uint8_t buffer_chunk[256];
+        size_t chunk = (remain_write > sizeof(buffer_chunk)) ? sizeof(buffer_chunk) : remain_write;
 
-    for (size_t i = 0; i < len; i++) {
-        buffer_to_write[i] &= src[i];
+        if (fseek(flash_file, wr_addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
+        if (fread(buffer_chunk, 1, chunk, flash_file) != chunk) return BOOT_ERR_FLASH;
+
+        for (size_t i = 0; i < chunk; i++) {
+            buffer_chunk[i] &= *src++;
+        }
+
+        if (fseek(flash_file, wr_addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
+        if (fwrite(buffer_chunk, 1, chunk, flash_file) != chunk) return BOOT_ERR_FLASH;
+
+        remain_write -= chunk;
+        wr_addr += chunk;
     }
-
-    if (fseek(flash_file, addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
-    if (fwrite(buffer_to_write, 1, len, flash_file) != len) return BOOT_ERR_FLASH;
 
     fflush(flash_file);
 
@@ -198,6 +224,11 @@ void mock_flash_reset_to_factory(void) {
 void mock_flash_set_fail_limit(uint32_t limit) {
     write_count_limit = limit;
     simulated_writes = 0;
+}
+
+void mock_flash_set_bitrot(uint32_t addr, uint8_t value) {
+    bitrot_addr = addr;
+    bitrot_value = value;
 }
 
 /* --- Export --- */

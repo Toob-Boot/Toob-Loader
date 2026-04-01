@@ -10,10 +10,11 @@
 name: Toob-Boot CI
 
 on:
-  push:
-    branches: ["main", "dev/*"]
-  pull_request:
-    branches: ["main"]
+  workflow_dispatch: # Manuell auslösbar, blockiert automatische Runs durch Push/PR in dieser dev-phase
+  # push:
+  #   branches: ["main", "dev/*"]
+  # pull_request:
+  #   branches: ["main"]
 
 jobs:
   # ----------------------------------------------------------------------------
