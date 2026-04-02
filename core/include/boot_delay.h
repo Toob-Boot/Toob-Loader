@@ -7,8 +7,8 @@
  * @brief Führt eine blockierende Verzögerung aus und füttert den Watchdog.
  * 
  * @param platform Pointer auf die Boot Platform
- * @param ms       Wartezeit in Millisekunden
+ * @return BOOT_OK bei Erfolg, BOOT_ERR_TIMEOUT wenn die MCU/Clock festhängt
  */
-void boot_delay_with_wdt(const boot_platform_t *platform, uint32_t ms);
+boot_status_t boot_delay_with_wdt(const boot_platform_t *platform, uint32_t ms);
 
 #endif /* BOOT_DELAY_H */

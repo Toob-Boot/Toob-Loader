@@ -231,6 +231,14 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     return BOOT_OK;
 }
 
+boot_status_t boot_journal_get_tmr(const boot_platform_t *platform, wal_tmr_payload_t *out_tmr) {
+    if (!platform || !out_tmr) return BOOT_ERR_INVALID_ARG;
+    if (!wal_initialized) return BOOT_ERR_STATE;
+
+    *out_tmr = current_active_header.tmr_data;
+    return BOOT_OK;
+}
+
 boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_entry_payload_t *new_entry) {
     if (!platform || !platform->flash || !new_entry) return BOOT_ERR_INVALID_ARG;
     if (!wal_initialized) return BOOT_ERR_STATE;

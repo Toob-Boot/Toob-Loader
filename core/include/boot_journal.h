@@ -30,7 +30,7 @@ typedef enum {
     WAL_INTENT_RECOVERY_RESOLVED = 5,
     WAL_INTENT_TXN_ROLLBACK = 6,
     
-    /* TODO (Doublecheck-Fix): Missing Intents extracted from concept_fusion.md */
+    /* FIX (Doublecheck): Missing Intents extracted from concept_fusion.md */
     WAL_INTENT_NONCE_INTENT = 7,       /**< Sichert den 64-Bit Boot-Handoff gegen Brute-Force Wraparounds */
     WAL_INTENT_NET_SEARCH_ACCUM = 8,   /**< Anti-Lagerhaus Lockout: Persistiert die akkumulierte Netz-Suchzeit */
     WAL_INTENT_SLEEP_BACKOFF = 9       /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
@@ -87,7 +87,7 @@ typedef struct {
     uint32_t delta_chunk_id;     /**< Aktueller Checkpoint für Delta-Patches */
     uint32_t offset;             /**< Generisches Offset (z.B. für Net-Search Accumulator) */
     
-    /* TODO (Doublecheck-Fix): Missing 64-bit Nonce required for Anti-Replay Handoff */
+    /* FIX (Doublecheck): Missing 64-bit Nonce required for Anti-Replay Handoff */
     uint64_t expected_nonce;  /**< Sichert EXPECTED_NONCE vor dem OS-Jump */
     
     uint32_t crc32_trailer;   /**< CRC-32 Trailer über den Entry */
@@ -111,6 +111,11 @@ _Static_assert(sizeof(wal_entry_aligned_t) % 8 == 0,
  * @brief Initialisiert das WAL (Scannt Sliding Window & lädt TMR via Majority Vote)
  */
 boot_status_t boot_journal_init(const boot_platform_t *platform);
+
+/**
+ * @brief Retrieves the current TMR payload as established during init (Majority Vote).
+ */
+boot_status_t boot_journal_get_tmr(const boot_platform_t *platform, wal_tmr_payload_t *out_tmr);
 
 /**
  * @brief Updated die TMR-Werte sicher.
