@@ -1,0 +1,53 @@
+ninja: Entering directory `build'
+[0/2] Re-checking globbed directories...
+[1/20] Building C object CMakeFiles/toob_stage0.dir/stage0/stage0_main.c.obj
+FAILED: [code=1] CMakeFiles/toob_stage0.dir/stage0/stage0_main.c.obj 
+C:\Users\Robin\Desktop\gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt\bin\gcc.exe -Dcalloc=CALLOC_FORBIDDEN -Dfree=FREE_FORBIDDEN -Dmalloc=MALLOC_FORBIDDEN -Drealloc=REALLOC_FORBIDDEN -IC:/Users/Robin/Desktop/Toob-Loader/stage0/include -IC:/Users/Robin/Desktop/Toob-Loader/core/include -IC:/Users/Robin/Desktop/Toob-Loader/build/generated -IC:/Users/Robin/Desktop/Toob-Loader/hal/chips/sandbox -IC:/Users/Robin/Desktop/Toob-Loader/test/mocks -g -std=c17 -Wall -Wextra -Werror -Wconversion -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -fno-stack-protector -Os -MD -MT CMakeFiles/toob_stage0.dir/stage0/stage0_main.c.obj -MF CMakeFiles\toob_stage0.dir\stage0\stage0_main.c.obj.d -o CMakeFiles/toob_stage0.dir/stage0/stage0_main.c.obj -c C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_main.c
+C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_main.c:6:6: error: no previous prototype for 'stage0_main_dummy' [-Werror=missing-prototypes]
+    6 | void stage0_main_dummy(void) {}
+      |      ^~~~~~~~~~~~~~~~~
+cc1.exe: all warnings being treated as errors
+[2/20] Building C object CMakeFiles/toob_stage0.dir/stage0/stage0_hash.c.obj
+FAILED: [code=1] CMakeFiles/toob_stage0.dir/stage0/stage0_hash.c.obj 
+C:\Users\Robin\Desktop\gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt\bin\gcc.exe -Dcalloc=CALLOC_FORBIDDEN -Dfree=FREE_FORBIDDEN -Dmalloc=MALLOC_FORBIDDEN -Drealloc=REALLOC_FORBIDDEN -IC:/Users/Robin/Desktop/Toob-Loader/stage0/include -IC:/Users/Robin/Desktop/Toob-Loader/core/include -IC:/Users/Robin/Desktop/Toob-Loader/build/generated -IC:/Users/Robin/Desktop/Toob-Loader/hal/chips/sandbox -IC:/Users/Robin/Desktop/Toob-Loader/test/mocks -g -std=c17 -Wall -Wextra -Werror -Wconversion -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -fno-stack-protector -Os -MD -MT CMakeFiles/toob_stage0.dir/stage0/stage0_hash.c.obj -MF CMakeFiles\toob_stage0.dir\stage0\stage0_hash.c.obj.d -o CMakeFiles/toob_stage0.dir/stage0/stage0_hash.c.obj -c C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_hash.c
+C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_hash.c:6:6: error: no previous prototype for 'stage0_hash_dummy' [-Werror=missing-prototypes]
+    6 | void stage0_hash_dummy(void) {}
+      |      ^~~~~~~~~~~~~~~~~
+cc1.exe: all warnings being treated as errors
+[3/20] Building C object CMakeFiles/toob_stage0.dir/stage0/stage0_otp.c.obj
+FAILED: [code=1] CMakeFiles/toob_stage0.dir/stage0/stage0_otp.c.obj 
+C:\Users\Robin\Desktop\gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt\bin\gcc.exe -Dcalloc=CALLOC_FORBIDDEN -Dfree=FREE_FORBIDDEN -Dmalloc=MALLOC_FORBIDDEN -Drealloc=REALLOC_FORBIDDEN -IC:/Users/Robin/Desktop/Toob-Loader/stage0/include -IC:/Users/Robin/Desktop/Toob-Loader/core/include -IC:/Users/Robin/Desktop/Toob-Loader/build/generated -IC:/Users/Robin/Desktop/Toob-Loader/hal/chips/sandbox -IC:/Users/Robin/Desktop/Toob-Loader/test/mocks -g -std=c17 -Wall -Wextra -Werror -Wconversion -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -fno-stack-protector -Os -MD -MT CMakeFiles/toob_stage0.dir/stage0/stage0_otp.c.obj -MF CMakeFiles\toob_stage0.dir\stage0\stage0_otp.c.obj.d -o CMakeFiles/toob_stage0.dir/stage0/stage0_otp.c.obj -c C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_otp.c
+C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_otp.c:6:6: error: no previous prototype for 'stage0_otp_dummy' [-Werror=missing-prototypes]
+    6 | void stage0_otp_dummy(void) {}
+      |      ^~~~~~~~~~~~~~~~
+cc1.exe: all warnings being treated as errors
+[4/20] Building C object CMakeFiles/toob_stage0.dir/stage0/stage0_verify.c.obj
+FAILED: [code=1] CMakeFiles/toob_stage0.dir/stage0/stage0_verify.c.obj 
+C:\Users\Robin\Desktop\gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt\bin\gcc.exe -Dcalloc=CALLOC_FORBIDDEN -Dfree=FREE_FORBIDDEN -Dmalloc=MALLOC_FORBIDDEN -Drealloc=REALLOC_FORBIDDEN -IC:/Users/Robin/Desktop/Toob-Loader/stage0/include -IC:/Users/Robin/Desktop/Toob-Loader/core/include -IC:/Users/Robin/Desktop/Toob-Loader/build/generated -IC:/Users/Robin/Desktop/Toob-Loader/hal/chips/sandbox -IC:/Users/Robin/Desktop/Toob-Loader/test/mocks -g -std=c17 -Wall -Wextra -Werror -Wconversion -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -fno-stack-protector -Os -MD -MT CMakeFiles/toob_stage0.dir/stage0/stage0_verify.c.obj -MF CMakeFiles\toob_stage0.dir\stage0\stage0_verify.c.obj.d -o CMakeFiles/toob_stage0.dir/stage0/stage0_verify.c.obj -c C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_verify.c
+C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_verify.c:6:6: error: no previous prototype for 'stage0_verify_dummy' [-Werror=missing-prototypes]
+    6 | void stage0_verify_dummy(void) {}
+      |      ^~~~~~~~~~~~~~~~~~~
+cc1.exe: all warnings being treated as errors
+[5/20] Building C object CMakeFiles/toob_stage0.dir/stage0/stage0_boot_pointer.c.obj
+FAILED: [code=1] CMakeFiles/toob_stage0.dir/stage0/stage0_boot_pointer.c.obj 
+C:\Users\Robin\Desktop\gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt\bin\gcc.exe -Dcalloc=CALLOC_FORBIDDEN -Dfree=FREE_FORBIDDEN -Dmalloc=MALLOC_FORBIDDEN -Drealloc=REALLOC_FORBIDDEN -IC:/Users/Robin/Desktop/Toob-Loader/stage0/include -IC:/Users/Robin/Desktop/Toob-Loader/core/include -IC:/Users/Robin/Desktop/Toob-Loader/build/generated -IC:/Users/Robin/Desktop/Toob-Loader/hal/chips/sandbox -IC:/Users/Robin/Desktop/Toob-Loader/test/mocks -g -std=c17 -Wall -Wextra -Werror -Wconversion -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -fno-stack-protector -Os -MD -MT CMakeFiles/toob_stage0.dir/stage0/stage0_boot_pointer.c.obj -MF CMakeFiles\toob_stage0.dir\stage0\stage0_boot_pointer.c.obj.d -o CMakeFiles/toob_stage0.dir/stage0/stage0_boot_pointer.c.obj -c C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_boot_pointer.c
+C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_boot_pointer.c:6:6: error: no previous prototype for 'stage0_boot_pointer_dummy' [-Werror=missing-prototypes]
+    6 | void stage0_boot_pointer_dummy(void) {}
+      |      ^~~~~~~~~~~~~~~~~~~~~~~~~
+cc1.exe: all warnings being treated as errors
+[6/20] Building C object CMakeFiles/toob_stage0.dir/stage0/stage0_tentative.c.obj
+FAILED: [code=1] CMakeFiles/toob_stage0.dir/stage0/stage0_tentative.c.obj 
+C:\Users\Robin\Desktop\gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt\bin\gcc.exe -Dcalloc=CALLOC_FORBIDDEN -Dfree=FREE_FORBIDDEN -Dmalloc=MALLOC_FORBIDDEN -Drealloc=REALLOC_FORBIDDEN -IC:/Users/Robin/Desktop/Toob-Loader/stage0/include -IC:/Users/Robin/Desktop/Toob-Loader/core/include -IC:/Users/Robin/Desktop/Toob-Loader/build/generated -IC:/Users/Robin/Desktop/Toob-Loader/hal/chips/sandbox -IC:/Users/Robin/Desktop/Toob-Loader/test/mocks -g -std=c17 -Wall -Wextra -Werror -Wconversion -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -fno-stack-protector -Os -MD -MT CMakeFiles/toob_stage0.dir/stage0/stage0_tentative.c.obj -MF CMakeFiles\toob_stage0.dir\stage0\stage0_tentative.c.obj.d -o CMakeFiles/toob_stage0.dir/stage0/stage0_tentative.c.obj -c C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_tentative.c
+C:/Users/Robin/Desktop/Toob-Loader/stage0/stage0_tentative.c:6:6: error: no previous prototype for 'stage0_tentative_dummy' [-Werror=missing-prototypes]
+    6 | void stage0_tentative_dummy(void) {}
+      |      ^~~~~~~~~~~~~~~~~~~~~~
+cc1.exe: all warnings being treated as errors
+[7/20] Building C object CMakeFiles/toob_core.dir/core/boot_secure_zeroize_host.c.obj
+FAILED: [code=1] CMakeFiles/toob_core.dir/core/boot_secure_zeroize_host.c.obj 
+C:\Users\Robin\Desktop\gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt\bin\gcc.exe -DHEATSHRINK_DYNAMIC_ALLOC=0 -Dcalloc=CALLOC_FORBIDDEN -Dfree=FREE_FORBIDDEN -Dmalloc=MALLOC_FORBIDDEN -Drealloc=REALLOC_FORBIDDEN -IC:/Users/Robin/Desktop/Toob-Loader/core/include -IC:/Users/Robin/Desktop/Toob-Loader/build/generated -IC:/Users/Robin/Desktop/Toob-Loader/lib/zcbor/include -IC:/Users/Robin/Desktop/Toob-Loader/lib/heatshrink -g -std=c17 -Wall -Wextra -Werror -Wconversion -Wshadow -Wformat=2 -Wstrict-prototypes -Wmissing-prototypes -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong -MD -MT CMakeFiles/toob_core.dir/core/boot_secure_zeroize_host.c.obj -MF CMakeFiles\toob_core.dir\core\boot_secure_zeroize_host.c.obj.d -o CMakeFiles/toob_core.dir/core/boot_secure_zeroize_host.c.obj -c C:/Users/Robin/Desktop/Toob-Loader/core/boot_secure_zeroize_host.c
+C:/Users/Robin/Desktop/Toob-Loader/core/boot_secure_zeroize_host.c:12:32: error: no previous prototype for 'boot_secure_zeroize' [-Werror=missing-prototypes]
+   12 | __attribute__((noinline)) void boot_secure_zeroize(void* ptr, size_t len) {
+      |                                ^~~~~~~~~~~~~~~~~~~
+cc1.exe: all warnings being treated as errors
+[8/20] Linking C static library libtoob_crypto_upstream.a
+ninja: build stopped: subcommand failed.

@@ -139,6 +139,21 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
                 (c0->svn_recovery_counter == c1->svn_recovery_counter) ? c0->svn_recovery_counter :
                 (c2 != NULL && c0->svn_recovery_counter == c2->svn_recovery_counter) ? c0->svn_recovery_counter :
                 (c2 != NULL && c1->svn_recovery_counter == c2->svn_recovery_counter) ? c1->svn_recovery_counter : c0->svn_recovery_counter;
+
+            current_active_header.tmr_data.app_slot_erase_counter = 
+                (c0->app_slot_erase_counter == c1->app_slot_erase_counter) ? c0->app_slot_erase_counter :
+                (c2 != NULL && c0->app_slot_erase_counter == c2->app_slot_erase_counter) ? c0->app_slot_erase_counter :
+                (c2 != NULL && c1->app_slot_erase_counter == c2->app_slot_erase_counter) ? c1->app_slot_erase_counter : c0->app_slot_erase_counter;
+                
+            current_active_header.tmr_data.staging_slot_erase_counter = 
+                (c0->staging_slot_erase_counter == c1->staging_slot_erase_counter) ? c0->staging_slot_erase_counter :
+                (c2 != NULL && c0->staging_slot_erase_counter == c2->staging_slot_erase_counter) ? c0->staging_slot_erase_counter :
+                (c2 != NULL && c1->staging_slot_erase_counter == c2->staging_slot_erase_counter) ? c1->staging_slot_erase_counter : c0->staging_slot_erase_counter;
+
+            current_active_header.tmr_data.swap_buffer_erase_counter = 
+                (c0->swap_buffer_erase_counter == c1->swap_buffer_erase_counter) ? c0->swap_buffer_erase_counter :
+                (c2 != NULL && c0->swap_buffer_erase_counter == c2->swap_buffer_erase_counter) ? c0->swap_buffer_erase_counter :
+                (c2 != NULL && c1->swap_buffer_erase_counter == c2->swap_buffer_erase_counter) ? c1->swap_buffer_erase_counter : c0->swap_buffer_erase_counter;
         } else {
             /* Falls extreme Korruption 2 von 3 Headern zerstört hat, nutzen wir den letzten überlebenden Stand (Highest Sequence). */
             current_active_header.tmr_data = tmr_candidates[0];
@@ -164,6 +179,10 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
                          ((uint32_t)platform->flash->erased_value << 16) | ((uint32_t)platform->flash->erased_value << 24);
 
     while (current_offset + sizeof(wal_entry_aligned_t) <= sec_size) {
+        /* WDT Kick implantiert: 128KB / 64B = O(2048) blockierende Reads.
+         * Verhindert asynchrone Starvation beim Brownout Boot-Resume. */
+        platform->wdt->kick();
+        
         uint32_t magic = 0;
         platform->flash->read(wal_sector_addrs[active_wal_index] + current_offset, &magic, sizeof(magic));
         
@@ -188,6 +207,18 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
     if (target_offset == 0 || target_offset + sizeof(wal_entry_aligned_t) > sec_size) {
         uint32_t new_idx = (active_wal_index + 1) % TOOB_WAL_SECTORS;
         
+        #ifndef CHIP_FLASH_MAX_ERASE_CYCLES
+        #define CHIP_FLASH_MAX_ERASE_CYCLES 100000 /* Default EOL limit */
+        #endif
+
+        if (current_active_header.erase_count >= CHIP_FLASH_MAX_ERASE_CYCLES) {
+            /* Das WAL-Volume hat das physische Lebensende der Silizium-Gates erreicht.
+             * Ein weiteres `erase_sector` führt statistisch zum Flash-Error / Short-Circuit.
+             * Wir brechen ab und das Core wertet BOOT_ERR_COUNTER_EXHAUSTED aus,
+             * was eine dauerhafte STATE_READ_ONLY Sperrung veranlasst. */
+            return BOOT_ERR_COUNTER_EXHAUSTED;
+        }
+
         platform->wdt->kick();
         boot_status_t status = platform->flash->erase_sector(wal_sector_addrs[new_idx]);
         if (status != BOOT_OK) return status;
@@ -234,6 +265,13 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
      * Mathematischer TMR-Beweis: Fällt der Strom nach [n+1], verliert [n+1] den Majority-Vote gegen [n] und [n-1].
      * Erst nach erfolgreichem Write von [n+2] gewinnt der neue Status die Mehrheit (2 von 3).
      * Absolut Brownout sicheres State-Commit!
+     * 
+     * ARCHITEKTUR-REGEL: STATEFUL SLIDE ABANDONMENT
+     * Da diese Operation das WAL-Window um 3 physikalische Sektoren verschiebt,
+     * gehen in der aktuellen Transaktion offene Appends für `reconstruct_txn` verloren.
+     * Dies ist by-design ABSICHT: TMR-Updates (`svn_recovery`, `primary_slot`)
+     * werden in Toob-Boot ausschließlich OUTSIDE einer aktiven Update-Streaming 
+     * Transaktion getätigt. Es überschneidet sich niemals logisch.
      */
      
     uint32_t active_seq = current_active_header.sequence_id;
@@ -243,6 +281,15 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
         new_idx = (active_wal_index + step) % TOOB_WAL_SECTORS;
         active_seq++; /* Increment Sequence per Sector to maintain O(1) Sliding Window */
         
+        #ifndef CHIP_FLASH_MAX_ERASE_CYCLES
+        #define CHIP_FLASH_MAX_ERASE_CYCLES 100000 /* Default EOL limit */
+        #endif
+
+        if (current_active_header.erase_count >= CHIP_FLASH_MAX_ERASE_CYCLES) {
+            /* Schutz vor physikalischem Flash-Burnout während TMR Übertragungen */
+            return BOOT_ERR_COUNTER_EXHAUSTED;
+        }
+
         /* WDT Kick zwingend vor schwerem Block-Erase (GAP-02) */
         platform->wdt->kick();
         

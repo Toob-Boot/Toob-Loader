@@ -3,4 +3,5 @@
  * Relevant Spec-Dateien:
  * - docs/concept_fusion.md (Ed25519)
  */
-void stage0_verify_dummy(void) {}
+static void stage0_verify_dummy(void) __attribute__((used));
+static void stage0_verify_dummy(void) {}

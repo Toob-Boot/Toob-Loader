@@ -3,4 +3,5 @@
  * Relevant Spec-Dateien:
  * - docs/concept_fusion.md
  */
-void stage0_tentative_dummy(void) {}
+static void stage0_tentative_dummy(void) __attribute__((used));
+static void stage0_tentative_dummy(void) {}

@@ -3,4 +3,5 @@
  * Relevant Spec-Dateien:
  * - docs/concept_fusion.md (SHA-256 Software)
  */
-void stage0_hash_dummy(void) {}
+static void stage0_hash_dummy(void) __attribute__((used));
+static void stage0_hash_dummy(void) {}

@@ -3,4 +3,5 @@
  * Relevant Spec-Dateien:
  * - docs/concept_fusion.md (Immutable Core)
  */
-void stage0_main_dummy(void) {}
+static void stage0_main_dummy(void) __attribute__((used));
+static void stage0_main_dummy(void) {}

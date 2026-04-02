@@ -44,6 +44,9 @@ typedef struct {
     uint32_t primary_slot_id;
     uint32_t boot_failure_counter;
     uint32_t svn_recovery_counter;
+    uint32_t app_slot_erase_counter;
+    uint32_t staging_slot_erase_counter;
+    uint32_t swap_buffer_erase_counter;
 } wal_tmr_payload_t;
 
 /**
