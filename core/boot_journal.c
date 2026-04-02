@@ -6,24 +6,6 @@
  */
 
 #include "boot_journal.h"
-#include <string.h>
-
-/**
- * @brief O(1) P10-compliant Table-less CRC-32 
- */
-static uint32_t compute_wal_crc32(const uint8_t *data, size_t length) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < length; i++) {
-        crc ^= data[i];
-        for (uint8_t j = 0; j < 8; j++) {
-/*
- * Toob-Boot Core File: boot_journal.c
- * Relevant Spec-Dateien:
- * - docs/wal_internals.md (WAL, CRC-32)
- * - docs/structure_plan.md
- */
-
-#include "boot_journal.h"
 #include "boot_config_mock.h"
 #include <string.h>
 
@@ -69,8 +51,8 @@ static bool is_newer_sequence(uint32_t new_seq, uint32_t old_seq) {
 }
 
 boot_status_t boot_journal_init(const boot_platform_t *platform) {
-    if (!platform || !platform->flash || !platform->wdt) return BOOT_ERR_INVALID_PARAM;
-    if (TOOB_WAL_SECTORS < 4 || TOOB_WAL_SECTORS > 8) return BOOT_ERR_INVALID_PARAM;
+    if (!platform || !platform->flash || !platform->wdt) return BOOT_ERR_INVALID_ARG;
+    if (TOOB_WAL_SECTORS < 4 || TOOB_WAL_SECTORS > 8) return BOOT_ERR_INVALID_ARG;
 
     /* 1. Calculate boundaries dynamically to support asymmetric flash (GAP-C01) */
     uint32_t current_addr = TOOB_WAL_BASE_ADDR;
@@ -79,7 +61,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
         size_t sec_size = 0;
         boot_status_t status = platform->flash->get_sector_size(current_addr, &sec_size);
         if (status != BOOT_OK) return status;
-        current_addr += sec_size;
+        current_addr += (uint32_t)sec_size;
     }
 
     /* 2. Scan all sectors for valid Headers to find highest sequence (O(1) Discovery) */
@@ -95,7 +77,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
         if (verify_header_crc(&headers[i])) {
             if (highest_idx == -1 || is_newer_sequence(headers[i].data.sequence_id, highest_seq)) {
                 highest_seq = headers[i].data.sequence_id;
-                highest_idx = i;
+                highest_idx = (int32_t)i;
             }
         }
     }
@@ -122,7 +104,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
         platform->flash->write(wal_sector_addrs[0], &write_hdr, sizeof(write_hdr));
     } else {
         /* Active Index Restored */
-        active_wal_index = highest_idx;
+        active_wal_index = (uint32_t)highest_idx;
         current_active_header = headers[highest_idx].data;
         
         /* GAP-C01 Majority Vote TMR */
@@ -131,9 +113,9 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
         
         /* Walk backwards from highest_idx to collect recent states */
         for (uint32_t step = 0; step < TOOB_WAL_SECTORS && num_candidates < 3; step++) {
-            uint32_t idx = (highest_idx - step + TOOB_WAL_SECTORS) % TOOB_WAL_SECTORS;
-            if (verify_header_crc(&headers[idx])) {
-                tmr_candidates[num_candidates++] = headers[idx].data.tmr_data;
+            uint32_t temp_idx = ((uint32_t)highest_idx - step + TOOB_WAL_SECTORS) % TOOB_WAL_SECTORS;
+            if (verify_header_crc(&headers[temp_idx])) {
+                tmr_candidates[num_candidates++] = headers[temp_idx].data.tmr_data;
             }
         }
         
@@ -168,18 +150,18 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
 }
 
 boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_entry_payload_t *new_entry) {
-    if (!platform || !platform->flash || !new_entry) return BOOT_ERR_INVALID_PARAM;
+    if (!platform || !platform->flash || !new_entry) return BOOT_ERR_INVALID_ARG;
     if (!wal_initialized) return BOOT_ERR_STATE;
 
     size_t sec_size = 0;
     platform->flash->get_sector_size(wal_sector_addrs[active_wal_index], &sec_size);
 
-    uint32_t current_offset = sizeof(wal_sector_header_aligned_t);
+    uint32_t current_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
     uint32_t target_offset = 0;
 
     /* O(N) Suche nach der unbeschriebenen Front ("Erased Frontier") */
-    uint32_t erased_32 = platform->flash->erased_value | (platform->flash->erased_value << 8) | 
-                         (platform->flash->erased_value << 16) | (platform->flash->erased_value << 24);
+    uint32_t erased_32 = (uint32_t)platform->flash->erased_value | ((uint32_t)platform->flash->erased_value << 8) | 
+                         ((uint32_t)platform->flash->erased_value << 16) | ((uint32_t)platform->flash->erased_value << 24);
 
     while (current_offset + sizeof(wal_entry_aligned_t) <= sec_size) {
         uint32_t magic = 0;
@@ -199,7 +181,7 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
             target_offset = 0;
             break;
         }
-        current_offset += sizeof(wal_entry_aligned_t);
+        current_offset += (uint32_t)sizeof(wal_entry_aligned_t);
     }
 
     /* Sliding Window Rotation: Sektor voll oder durch Brownout kontaminiert */
@@ -228,7 +210,7 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
         active_wal_index = new_idx;
         current_active_header.sequence_id++;
         current_active_header.erase_count++;
-        target_offset = sizeof(wal_sector_header_aligned_t);
+        target_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
     }
 
     /* Sicheres Schreiben des neuen Intents */
@@ -245,14 +227,10 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
 }
 
 boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal_tmr_payload_t *new_tmr) {
-    if (!platform || !platform->flash || !platform->wdt || !new_tmr) return BOOT_ERR_INVALID_PARAM;
+    if (!platform || !platform->flash || !platform->wdt || !new_tmr) return BOOT_ERR_INVALID_ARG;
     if (!wal_initialized) return BOOT_ERR_STATE;
 
-    /* TODO (Doublecheck-Fix): GAP-C01 TMR Strided Write
-     * 1. Ermittle den aktuellsten Sektor [n] (active_wal_index).
-     * 2. Rotiere iterativ auf [n+1, n+2, n+3].
-     * 3. Mache WDT Kick -> Erase -> Write Header.
-     * 
+    /* GAP-C01 TMR Strided Write
      * Mathematischer TMR-Beweis: Fällt der Strom nach [n+1], verliert [n+1] den Majority-Vote gegen [n] und [n-1].
      * Erst nach erfolgreichem Write von [n+2] gewinnt der neue Status die Mehrheit (2 von 3).
      * Absolut Brownout sicheres State-Commit!
@@ -277,13 +255,8 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
         write_hdr.data.sector_magic = WAL_ABI_VERSION_MAGIC;
         write_hdr.data.sequence_id  = active_seq;
         
-        /* Wir bewahren den Erase Count, um das Wear-Leveling akkurat fortzuführen.
-         * Da wir den Sektor gerade physikalisch löschen, simulieren wir `+1` 
-         * (Wenn er vorher nicht existierte, lesen wir Müll, daher sollten wir den alten Read nutzen 
-         * oder einen globalen Counter. In der Base-Architektur erbt er den Count der letzten Runde 
-         * plus 1, oder wir binden es ans Sector-Level. Um Wear auszubalancieren bewahren wir den Count vom aktiven). */
+        /* Wir bewahren den Erase Count, um das Wear-Leveling akkurat fortzuführen. */
         write_hdr.data.erase_count  = current_active_header.erase_count + 1;
-        
         write_hdr.data.tmr_data = *new_tmr;
         
         /* Safe Trailer */
@@ -305,7 +278,7 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
 }
 
 boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform, wal_entry_payload_t *out_state) {
-    if (!platform || !platform->flash || !out_state) return BOOT_ERR_INVALID_PARAM;
+    if (!platform || !platform->flash || !out_state) return BOOT_ERR_INVALID_ARG;
     if (!wal_initialized) return BOOT_ERR_STATE;
     
     memset(out_state, 0, sizeof(wal_entry_payload_t));
@@ -313,11 +286,11 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform, wal_
     size_t sec_size = 0;
     platform->flash->get_sector_size(wal_sector_addrs[active_wal_index], &sec_size);
 
-    uint32_t current_offset = sizeof(wal_sector_header_aligned_t);
+    uint32_t current_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
     bool read_success = false;
 
-    uint32_t erased_32 = platform->flash->erased_value | (platform->flash->erased_value << 8) | 
-                         (platform->flash->erased_value << 16) | (platform->flash->erased_value << 24);
+    uint32_t erased_32 = (uint32_t)platform->flash->erased_value | ((uint32_t)platform->flash->erased_value << 8) | 
+                         ((uint32_t)platform->flash->erased_value << 16) | ((uint32_t)platform->flash->erased_value << 24);
 
     while (current_offset + sizeof(wal_entry_aligned_t) <= sec_size) {
         wal_entry_aligned_t entry;
@@ -346,7 +319,7 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform, wal_
         memcpy(out_state, &entry.data, sizeof(wal_entry_payload_t));
         read_success = true;
 
-        current_offset += sizeof(wal_entry_aligned_t);
+        current_offset += (uint32_t)sizeof(wal_entry_aligned_t);
     }
 
     if (read_success) {
