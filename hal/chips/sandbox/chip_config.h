@@ -44,6 +44,9 @@
 /* --- Hardware Watchdog Limits (Host-Mock) --- */
 #define BOOT_WDT_TIMEOUT_MS 5000 /* Inkl. timing_safety_factor */
 
+/* --- Battery Guard (Host-Mock) --- */
+#define CHIP_MIN_BATTERY_MV 3300 /* Aus Sandbox-Metadaten / device.toml */
+
 /* --- ROM-Pointer / Hardware-Register (In Sandbox nicht existent) --- */
 /* (Der Mock greift nicht darauf zu, da er direkt POSIX/stdlib benutzt) */
 

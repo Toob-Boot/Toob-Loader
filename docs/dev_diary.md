@@ -135,3 +135,19 @@ Vor dem Start in die reine C-Implementierung (Phase 5) wurden alle "No rule to m
 - **Binary-Extraction (`objcopy`):** Bare-Metal Chips laden keine `.elf` Dateien. In `toob_stage0.cmake` greift nun direkt ein `POST_BUILD` Command ein, der den Strip und Dump zum fertigen `.bin` automatisiert.
 
 **Phase 3 & 4: Abgeschlossen!** Wir weiten das Arbeitsfeld von der Infrastruktur nun direkt in die C-Header und Sourcen (Phase 5) aus.
+
+## Phase 5: Hardware-Virtualisierung & "Zero Code Slop" Testability
+
+### 13. M-SANDBOX SIL-Testing & Hardware-Mocks
+
+**Was wurde getan?**
+Die Übersetzung der gesamten physischen MCU-Peripherie auf Host-native C17 Mocks für das "M-SANDBOX" Software-in-the-Loop Environment (`test/mocks/`). Umgesetzt wurden `mock_flash`, `mock_rtc_ram`, `mock_wdt`, `mock_clock`, `mock_efuses`, `mock_console` und der `--wrap` Interceptor `mock_crypto_policy`.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Deterministisches Fault-Injection Fuzzing:** Jedes HAL-Modul wurde hardwarenah mit der globalen Fehler-Injection `chip_fault_inject.c` gekoppelt. Anstatt C-Code via unübersichtlicher `#ifdef TEST_MODE` Makros (Architektur-Slop) zu verunreinigen, liest die Sandbox zur Laufzeit Umgebungsvariablen (wie `TOOB_FLASH_FAULT`, `TOOB_EFUSE_LIMIT`, `TOOB_WDT_DISABLE_FORBIDDEN` oder `TOOB_UART_RX_FILE`). Ein Fuzzer-Runner (Python) kann somit jeden beliebigen Hardware-Fehler bis zum Brownout auf Register-Ebene reproduzierbar feuern, indem er schlicht den Environment-Kontext des Subprocesses kippt.
+- **Zeiterfassung vs. Host CPU-Locking:** Ein 500MHz Host-PC rennt zehntausendfach schneller durch Polling-Loops als eine 48MHz Cortex-M MCU. `mock_console` implementiert auf das leere Polling von Bytes hin einen harten Sleep (`sandbox_clock_hal.delay_ms()`), um eine 100% CPU Auslastung zu unterbinden (welche ansonsten Fuzzing-Timeouts drastisch sabotieren würde), erfüllt aber gleichzeitig die P10 Hard-Timing Specs.
+- **GNU Linker Interceptors (`--wrap`):** Um die extrem teuren Ed25519 und ML-DSA Krypto-Operationen im CI-Runner zu umgehen (welche Hochgeschwindigkeits-Fuzzing komplett ausbremsen würden), greifen wir auf das `-Wl,--wrap` Flag des GCC Linkers zurück. Validierung kann umgeleitet oder mit `BOOT_ERR_CRYPTO` abgebrochen werden. Das wahrt das *Zero Code Slop* Entwicklungsgebot: Der Original C17 Quellcode bleibt unangetastet.
+- **Sichere File-Pointer-Resets:** Um "State Leaks" (offene File-Handles, weiterzählende Dummy-Watchdogs etc.) bei tausenden aufeinanderfolgenden Testläufen des Fuzzers zu eliminieren, bietet jeder Mock einen `_reset_state()` Bailout, der zwischen Tests den Puffer knallhart leer fegt.
+
+**Lessons Learned / Gaps:**
+- **Pointer-Safety rettet SIL-Systeme:** In C ist ein fehlender `NULL`-Pointer Check besonders in Mocks gefährlich. Greift `fopen` auf ein undefiniertes Environment (`NULL`) File zu, killt das den gesamten Bootloader Test-Prozess mit einem Segfault. Die konsequente P10 Boundary-Prüfung (`if (*len < 16) return BOOT_ERR_INVALID_ARG;`) an den Eintrittskanten (z.B. in `mock_efuses.c`) ist auf dem PC Host genauso überlebenswichtig wie später auf dem Silizium.

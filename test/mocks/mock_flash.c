@@ -1,74 +1,29 @@
-/**
- * ==============================================================================
- * Toob-Boot M-SANDBOX: Mapped Flash Implementation (POSIX/Windows via stdio)
- * ==============================================================================
- * 
- * REFERENCED SPECIFICATIONS & GAPS:
- * 1. docs/hals.md (Flash HAL Backend)
- * 2. docs/concept_fusion.md (In-Place Swap Buffer)
- * 3. docs/merkle_spec.md (GAP-08: Stream-Hashing)
- * 4. docs/sandbox_setup.md & docs/testing_requirements.md
- */
-
 #include "mock_flash.h"
 #include "chip_config.h"
+#include "chip_fault_inject.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define DEFAULT_SIM_FILE "flash_sim.bin"
-
 static FILE *flash_file = NULL;
-static const char *sim_filename = DEFAULT_SIM_FILE;
-static uint32_t write_count_limit = 0;
-static uint32_t simulated_writes = 0;
 static uint32_t simulated_vendor_error = 0;
 
-static uint32_t bitrot_addr = 0xFFFFFFFF;
-static uint8_t  bitrot_value = 0x00;
-
-static void check_fault_injection(void) {
-    if (write_count_limit > 0 && simulated_writes >= write_count_limit) {
-        printf("[M-SANDBOX] BROWNOUT SIMULATED! Power loss after %u writes.\n", simulated_writes);
-        fflush(stdout);
-        exit(1); /* Crash! */
-    }
-}
-
 static boot_status_t mock_flash_init(void) {
-    const char *env_file = getenv("TOOB_FLASH_SIM_FILE");
-    if (env_file != NULL) {
-        sim_filename = env_file;
-    }
+    /* Zentrale Environment-Parser via Fault-Engine */
+    fault_inject_init();
 
-    const char *env_fail = getenv("TOOB_FAIL_AFTER_WRITES");
-    if (env_fail != NULL) {
-        write_count_limit = (uint32_t)strtoul(env_fail, NULL, 10);
-    }
-
-    const char *env_bitrot_addr = getenv("TOOB_BITROT_ADDR");
-    if (env_bitrot_addr != NULL) {
-        bitrot_addr = (uint32_t)strtoul(env_bitrot_addr, NULL, 16);
-    }
-
-    const char *env_bitrot_val = getenv("TOOB_BITROT_VALUE");
-    if (env_bitrot_val != NULL) {
-        bitrot_value = (uint8_t)strtoul(env_bitrot_val, NULL, 16);
-    }
-
-    flash_file = fopen(sim_filename, "rb+");
+    flash_file = fopen(g_fault_config.flash_sim_file, "rb+");
     if (!flash_file) {
-        /* File doesn't exist, create it */
-        flash_file = fopen(sim_filename, "wb+");
+        flash_file = fopen(g_fault_config.flash_sim_file, "wb+");
         if (!flash_file) {
             return BOOT_ERR_STATE;
         }
 
-        /* Initialisieren mit 0xFF (Erase Data) */
         uint8_t buffer[CHIP_FLASH_PAGE_SIZE];
         memset(buffer, CHIP_FLASH_ERASURE_MAPPING, sizeof(buffer));
 
         uint32_t pages = CHIP_FLASH_TOTAL_SIZE / CHIP_FLASH_PAGE_SIZE;
+        /* P10 Rule 2: Bound loop with max static pages limit */
         for (uint32_t i = 0; i < pages; i++) {
             if (fwrite(buffer, 1, sizeof(buffer), flash_file) != sizeof(buffer)) {
                 fclose(flash_file);
@@ -90,16 +45,13 @@ static void mock_flash_deinit(void) {
 
 static boot_status_t mock_flash_read(uint32_t addr, void *buf, size_t len) {
     if (!flash_file) return BOOT_ERR_STATE;
-    if (addr + len > CHIP_FLASH_TOTAL_SIZE) return BOOT_ERR_FLASH_BOUNDS;
+    if (addr + len > CHIP_FLASH_TOTAL_SIZE || addr + len < addr) return BOOT_ERR_FLASH_BOUNDS;
 
     if (fseek(flash_file, addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
     if (fread(buf, 1, len, flash_file) != len) return BOOT_ERR_FLASH;
 
-    /* Bit-Rot Simulator Injection (GAP-F20) */
-    if (bitrot_addr >= addr && bitrot_addr < (addr + len)) {
-        uint8_t *byte_buf = (uint8_t *)buf;
-        byte_buf[bitrot_addr - addr] = bitrot_value;
-    }
+    /* Bitrot via globale Engine anwenden */
+    fault_inject_apply_bitrot(addr, buf, len);
 
     return BOOT_OK;
 }
@@ -109,26 +61,23 @@ static boot_status_t mock_flash_write(uint32_t addr, const void *buf, size_t len
     if (addr % CHIP_FLASH_WRITE_ALIGNMENT != 0 || len % CHIP_FLASH_WRITE_ALIGNMENT != 0) {
         return BOOT_ERR_FLASH_ALIGN;
     }
-    if (addr + len > CHIP_FLASH_TOTAL_SIZE) return BOOT_ERR_FLASH_BOUNDS;
+    if (addr + len > CHIP_FLASH_TOTAL_SIZE || addr + len < addr) return BOOT_ERR_FLASH_BOUNDS;
 
 #ifndef TOOB_FLASH_DISABLE_BLANK_CHECK
-    /* O(1) Erase-Verify Check via 32-Bit Aligned Word-Check */
-    uint32_t existing[64]; /* 256 Bytes Puffer statisch */
     size_t remaining = len;
     uint32_t current_addr = addr;
-    const uint32_t erased_word = (CHIP_FLASH_ERASURE_MAPPING << 24) |
-                                 (CHIP_FLASH_ERASURE_MAPPING << 16) |
-                                 (CHIP_FLASH_ERASURE_MAPPING << 8)  |
-                                  CHIP_FLASH_ERASURE_MAPPING;
-
-    while (remaining > 0) {
+    uint8_t existing[256];
+    
+    /* P10 Rule 2: Upper Bound = Total Size / Minimum Align */
+    size_t max_iters = CHIP_FLASH_TOTAL_SIZE; 
+    for (size_t iter = 0; iter < max_iters && remaining > 0; iter++) {
         size_t chunk = (remaining > sizeof(existing)) ? sizeof(existing) : remaining;
         if (fseek(flash_file, current_addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
         if (fread(existing, 1, chunk, flash_file) != chunk) return BOOT_ERR_FLASH;
 
-        size_t words = chunk / 4;
-        for (size_t i = 0; i < words; i++) {
-            if (existing[i] != erased_word) {
+        /* GAP-WriteAlign: Byte-weise iterieren, um Rest-Bytes akkurat zu prüfen */
+        for (size_t i = 0; i < chunk; i++) {
+            if (existing[i] != CHIP_FLASH_ERASURE_MAPPING) {
                 return BOOT_ERR_FLASH_NOT_ERASED;
             }
         }
@@ -137,22 +86,30 @@ static boot_status_t mock_flash_write(uint32_t addr, const void *buf, size_t len
     }
 #endif
 
-    /* Simuliere NOR-Flash Physik: Man kann Bits nur auf 0 ziehen (Logisches AND) */
-    /* P10 Chunked-Loop (Kein VLA): Lese Blockweise, manipuliere und schreibe zurück */
     size_t remain_write = len;
     uint32_t wr_addr = addr;
     const uint8_t *src = (const uint8_t *)buf;
 
-    while (remain_write > 0) {
+    /* P10 Rule 2: Upper Bound loop */
+    size_t max_write_iters = CHIP_FLASH_TOTAL_SIZE;
+    for (size_t iter = 0; iter < max_write_iters && remain_write > 0; iter++) {
         uint8_t buffer_chunk[256];
         size_t chunk = (remain_write > sizeof(buffer_chunk)) ? sizeof(buffer_chunk) : remain_write;
 
         if (fseek(flash_file, wr_addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
         if (fread(buffer_chunk, 1, chunk, flash_file) != chunk) return BOOT_ERR_FLASH;
 
+        /* GAP-F07: NOR-Flash vs Data-Flash Emulation */
         for (size_t i = 0; i < chunk; i++) {
-            buffer_chunk[i] &= *src++;
+            if (CHIP_FLASH_ERASURE_MAPPING == 0xFF) {
+                buffer_chunk[i] &= *src++;
+            } else {
+                buffer_chunk[i] |= *src++;
+            }
         }
+
+        /* Torn-Write Fault-Injection DIREKT vor dem fwrite! */
+        fault_inject_point_flash(flash_file, buffer_chunk, chunk);
 
         if (fseek(flash_file, wr_addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
         if (fwrite(buffer_chunk, 1, chunk, flash_file) != chunk) return BOOT_ERR_FLASH;
@@ -162,10 +119,6 @@ static boot_status_t mock_flash_write(uint32_t addr, const void *buf, size_t len
     }
 
     fflush(flash_file);
-
-    simulated_writes++;
-    check_fault_injection();
-
     return BOOT_OK;
 }
 
@@ -177,16 +130,14 @@ static boot_status_t mock_flash_erase_sector(uint32_t addr) {
     uint8_t erased_block[CHIP_FLASH_PAGE_SIZE];
     memset(erased_block, CHIP_FLASH_ERASURE_MAPPING, sizeof(erased_block));
 
+    fault_inject_point_flash(flash_file, erased_block, sizeof(erased_block));
+
     if (fseek(flash_file, addr, SEEK_SET) != 0) return BOOT_ERR_FLASH;
     if (fwrite(erased_block, 1, sizeof(erased_block), flash_file) != sizeof(erased_block)) {
         return BOOT_ERR_FLASH;
     }
 
     fflush(flash_file);
-
-    simulated_writes++;
-    check_fault_injection();
-
     return BOOT_OK;
 }
 
@@ -199,42 +150,41 @@ static boot_status_t mock_flash_get_sector_size(uint32_t addr, size_t *size_out)
 }
 
 static boot_status_t mock_flash_set_otfdec_mode(bool enable) {
-    /* Sandbox emuliert keine On-The-Fly Entschlüsselung in Software */
     (void)enable;
     return BOOT_ERR_NOT_SUPPORTED;
 }
 
 static uint32_t mock_flash_get_last_vendor_error(void) {
     uint32_t err = simulated_vendor_error;
-    simulated_vendor_error = 0; /* Clear on read */
+    simulated_vendor_error = 0; 
     return err;
 }
-
-/* --- Public Utilities --- */
 
 void mock_flash_reset_to_factory(void) {
     if (flash_file) {
         fclose(flash_file);
         flash_file = NULL;
     }
-    remove(sim_filename);
-    simulated_writes = 0;
+    if (g_fault_config.flash_sim_file) {
+        remove(g_fault_config.flash_sim_file);
+    } else {
+        remove("flash_sim.bin");
+    }
+    g_fault_config.simulated_writes = 0;
 }
 
 void mock_flash_set_fail_limit(uint32_t limit) {
-    write_count_limit = limit;
-    simulated_writes = 0;
+    g_fault_config.write_count_limit = limit;
+    g_fault_config.simulated_writes = 0;
 }
 
 void mock_flash_set_bitrot(uint32_t addr, uint8_t value) {
-    bitrot_addr = addr;
-    bitrot_value = value;
+    g_fault_config.bitrot_addr = addr;
+    g_fault_config.bitrot_value = value;
 }
 
-/* --- Export --- */
-
 const flash_hal_t sandbox_flash_hal = {
-    .version = 0x01000000,
+    .abi_version = 0x01000000,
     .init = mock_flash_init,
     .deinit = mock_flash_deinit,
     .read = mock_flash_read,

@@ -52,7 +52,7 @@ Bevor eine HAL initialisiert werden darf, verlangt die Toob-Boot Spezifikation d
 
 ```c
 typedef struct {
-    uint32_t      version;     /* Zwingende ABI-Version, z.B. 0x01000000 */
+    uint32_t      abi_version;     /* Zwingende ABI-Version, z.B. 0x01000000 */
     boot_status_t (*init)(void);
     void          (*deinit)(void);
     boot_status_t (*read)(uint32_t addr, void *buf, size_t len);
@@ -193,7 +193,7 @@ Wie in `docs/toobfuzzer_integration.md` beschrieben, generiert der Manifest-Comp
 
 ```c
 typedef struct {
-    uint32_t      version;
+    uint32_t      abi_version;
     boot_status_t (*init)(void);
     void          (*deinit)(void);
     bool          (*check_ok)(uint64_t expected_nonce);
@@ -263,7 +263,7 @@ Die Funktion `set_ok(nonce)` existiert absichtlich *nicht* im Bootloader-Interfa
 
 ```c
 typedef struct {
-    uint32_t      version;
+    uint32_t      abi_version;
     boot_status_t (*init)(void);
     void          (*deinit)(void);
     boot_status_t (*hash_init)(void *ctx, size_t ctx_size);
@@ -459,7 +459,7 @@ void (*deinit)(void);
 
 ```c
 typedef struct {
-    uint32_t        version;
+    uint32_t        abi_version;
     boot_status_t   (*init)(void);
     void            (*deinit)(void);
     uint32_t        (*get_tick_ms)(void);
@@ -542,7 +542,7 @@ void (*deinit)(void);
 
 ```c
 typedef struct {
-    uint32_t      version;
+    uint32_t      abi_version;
     boot_status_t (*init)(uint32_t timeout_ms);
     void          (*deinit)(void);
     void          (*kick)(void);
@@ -615,7 +615,7 @@ void (*deinit)(void);
 
 ```c
 typedef struct {
-    uint32_t      version;
+    uint32_t      abi_version;
     boot_status_t (*init)(uint32_t baudrate);
     void          (*deinit)(void);
     void          (*putchar)(char c);
@@ -695,7 +695,7 @@ void (*deinit)(void);
 
 ```c
 typedef struct {
-    uint32_t      version;
+    uint32_t      abi_version;
     boot_status_t (*init)(void);
     void          (*deinit)(void);
     uint32_t      (*battery_level_mv)(void);
