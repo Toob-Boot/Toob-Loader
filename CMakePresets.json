@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "sandbox",
+      "displayName": "Toob-Boot Sandbox (MinGW GCC)",
+      "description": "Nativer Windows Build mit dem externen GCC 15.2 und Ninja",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "C:/Users/Robin/Desktop/gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "C:/Users/Robin/Desktop/gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt/bin/g++.exe",
+        "CMAKE_MAKE_PROGRAM": "C:/Users/Robin/Desktop/gcc-15.2.0-gdb-16.3.90.20250511-binutils-2.45-mingw-w64-v13.0.0-ucrt/bin/ninja.exe",
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    }
+  ]
+}

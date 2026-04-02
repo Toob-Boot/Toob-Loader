@@ -59,6 +59,9 @@ if(CHIP_SOURCES)
         core/include
         ${CMAKE_BINARY_DIR}/generated
     )
+    if(TOOB_CHIP STREQUAL "sandbox")
+        target_include_directories(toob_chip PUBLIC test/mocks)
+    endif()
 
     if(TARGET toob_vendor)
         target_link_libraries(toob_chip PUBLIC toob_vendor)

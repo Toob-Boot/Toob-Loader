@@ -49,9 +49,11 @@ add_custom_command(
            ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
            ${CMAKE_BINARY_DIR}/generated/chip_config.h
            ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
-    COMMAND bash ${CMAKE_SOURCE_DIR}/suit/generate.sh ${CMAKE_BINARY_DIR}/generated
-    DEPENDS ${CMAKE_SOURCE_DIR}/suit/generate.sh
-    COMMENT "Generating SUIT Manifest Parser and Preflight config files..."
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
+    COMMAND ${CMAKE_COMMAND} -E touch ${GENERATED_SUIT_C}
+    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
+    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/generated/chip_config.h
+    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
 )
 
 # Dieses Target wird von toob_chip und toob_stage0 erwartet!
@@ -64,6 +66,7 @@ add_custom_target(generate_manifest
 
 
 add_library(toob_core STATIC
+    core/boot_main.c
     core/boot_state.c
     core/boot_journal.c
     core/boot_verify.c

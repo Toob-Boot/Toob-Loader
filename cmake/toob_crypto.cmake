@@ -61,9 +61,7 @@ endif()
 
 # WICHTIGE GAP-DEFENSE: Upstream-Code GANZ BEWUSST von unseren strikten P10-Regeln befreien!
 # Das verhindert, dass Warnungen durch Drittanbieter-Code den Build bricken.
-if(COMMAND toob_apply_strict_flags)
-    toob_apply_strict_flags(toob_crypto_upstream FALSE)
-endif()
+# Deshalb rufen wir toob_apply_strict_flags() hier absichtlich NICHT auf!
 
 # ------------------------------------------------------------------------------
 # 2. Target: toob_crypto (Toob-Boot Wrapper / HAL Adapter)

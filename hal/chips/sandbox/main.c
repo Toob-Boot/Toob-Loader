@@ -15,7 +15,7 @@
  * TODO: main() Funktion, Fehler Codes OS-gerecht wandeln.
  */
 
-int main(int argc, char** argv) {
+int main(void) {
     // TODO: Init Platform, Run boot_main(), return Boot State
     return 0;
 }
