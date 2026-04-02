@@ -6,6 +6,7 @@
 
 #include "boot_types.h"
 #include "boot_merkle.h"
+#include <string.h>
 #include "boot_secure_zeroize.h"
 /**
  * @brief Führt einen speichersicheren, konstanten Zeit-Vergleich durch.

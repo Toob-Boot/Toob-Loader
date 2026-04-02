@@ -141,10 +141,12 @@ typedef struct {
   uint32_t hardware_fault_record;  /**< Hard-Fault Register/Flags */
   uint32_t vendor_error;           /**< HAL spezifischer Error Code */
   uint32_t wdt_kicks;              /**< Summe der generierten Watchdog-Kicks */
+  uint32_t current_svn;            /**< Doublecheck Fix: SVN an das OS weiterleiten */
   uint8_t  active_key_index;       /**< Genutzter eFuse Key-Slot */
   bool     fallback_occurred;      /**< Wahrheitswert für OS-Panic Auslösung */
+  uint8_t  schema_version;         /**< CDDL Review Fix: Broker Abwärtskompatibilität */
   uint8_t  sbom_digest[32];        /**< SHA-256 Digest des aktiven OS-Images */
-  uint8_t  _padding[2];            /**< P10 Alignment für den 32-Bit Frame */
+  uint8_t  _padding[5];            /**< P10 Alignment für den 64-Bit Frame (59 active bytes) */
 } toob_boot_diag_t;
 
 /* --- 5. P10 Defense Macros --- */

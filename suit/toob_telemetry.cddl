@@ -1,0 +1,43 @@
+; ==============================================================================
+; Toob-Boot Telemetrie CDDL Schema (Single Source of Truth)
+;
+; Relevant Specs:
+; - docs/toob_telemetry.md (Ur-Konzept für Cloud-Broker Parsing)
+; - core/include/boot_types.h (Phase 5 C-Struct `toob_boot_diag_t` als Master)
+; - docs/concept_fusion.md (Schicht 4b: Diagnostics OS-Handoff)
+;
+; TODO (Architektur-Kalibrierung):
+; 1. [x] C-Struct Mapping: Das CDDL Map muss haargenau die Member von `toob_boot_diag_t` abbilden.
+; 2. [x] Typen-Striktion: Nutze, wenn möglich, .size Limits um RAM-Sicherheit in zcbor zu garantieren.
+; 3. [x] BSTR Size-Lock: Den `sbom_digest` auf `.size 32` zwingen, da es immer ein SHA-256 sein MUSS!
+; 4. [x] Alignment Padding: Padding Bytes (`_padding`) haben im über-die-Luft-Protokoll nichts verloren -> ignorieren.
+; ==============================================================================
+
+; Hier folgt das eigentliche Map. Im nächsten Schritt füllen!
+toob_telemetry = {
+    0: uint .size 1,      ; uint8_t  schema_version (Für Abwärtskompatibilität im Cloud-Broker)
+    1: uint .size 4,      ; uint32_t boot_duration_ms
+    2: uint .size 4,      ; uint32_t edge_recovery_events
+    3: uint .size 4,      ; uint32_t hardware_fault_record
+    4: uint .size 4,      ; uint32_t vendor_error (Hinweis: Negative HAL-Errors werden als Two's Complement uint gesendet)
+    5: uint .size 4,      ; uint32_t wdt_kicks
+    6: uint .size 4,      ; uint32_t current_svn (Doublecheck Fix)
+    7: uint .size 1,      ; uint8_t  active_key_index
+    8: bool,              ; bool     fallback_occurred (CBOR nativ immer 1-Byte encoded)
+    9: bstr .size 32,     ; uint8_t  sbom_digest[32]
+    ; 10: reserved        ; Reserviert für künftige C-Level Diagnostics um Fragmentierung zu vermeiden
+    11: uint .size 4,     ; uint32_t boot_session_id (Monotoner Boot-Counter aus toob_handoff_t für chronologische Ordnung)
+    ? 20: ext_health,     ; Wear-Counters vom WAL (Absent = Factory-Boot / Keine Daten. Bedeutet explizit NICHT "0" Erasures!)
+}
+
+; GAP-C07 & Cloud-Broker Alarm-System für Flash-Verschleiß.
+; Diese Daten werden von toob_diag.c aus dem toob_handoff_t Struct
+; gezogen und in das OS CBOR-Paket injiziert.
+; Um Key-Space Kollisionen bei einem späteren Flattening der Maps zu 
+; vermeiden, sind die Keys jenseits von 100 angesiedelt.
+ext_health = {
+    101: uint .size 4,    ; ext_health_wal_erasures
+    102: uint .size 4,    ; ext_health_app_erasures
+    103: uint .size 4,    ; ext_health_staging_erasures
+    104: uint .size 4,    ; ext_health_swap_erasures
+}

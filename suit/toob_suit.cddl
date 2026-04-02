@@ -1,0 +1,72 @@
+; ==============================================================================
+; Toob-Boot SUIT Update Manifest CDDL (Single Source of Truth)
+;
+; Relevant Specs:
+; - docs/concept_fusion.md (PQC-Hybrid, CRA-SBOM-Digest, SVN Rollback-Defense)
+; - core/include/boot_verify.h (Envelope Validation, PQC-Structs, SRAM-Bounds)
+; - core/include/boot_merkle.h (Streaming-Hashes Array-Logik, num_chunks)
+;
+; TODO (Architektur-Kalibrierung):
+; 1. [x] Envelope-First Modell: Envelope-Map bauen (Signaturen, Key_Index, PQC-Hybride).
+; 2. [x] PQC Size-Bounds: `signature_pqc` und `pubkey_pqc` zwingend auf max. 4096 Bytes deckeln.
+; 3. [x] Condition-Gate: Condition-Map konstruieren (SVN, Hardware-Identifier, Required_Key_Epoch).
+; 4. [x] Payload-Definitions: Das Image-Array mappen (image_size, chunk_size, num_chunks, chunk_hashes).
+; 5. [x] Merkle-BSTR RAM-Schutz: Die `chunk_hashes` im Payload sind strengstens auf `8192 Bytes` limitiert, um den `crypto_arena` Buffer im Stack/BSS beim ZCBOR-Decoding nicht zu vernichten!
+; 6. [x] Namespace-Keys: Aus `toob_telemetry.cddl` gelernt -> Nested Maps operieren in Key-Ebenen (100+, 200+) um Kollisionen bei künftigen Flattening-Szenarien auszuschließen.
+; ==============================================================================
+
+toob_suit = {
+    0: uint .size 1,         ; schema_version (Für Abwärtskompatibilität des Edge-Parsers)
+    1: suit_envelope,        ; Envelope-Schild (Krypto-Authentifizierung)
+    2: suit_conditions,      ; Flash-Gate Bedingungen (Regulatorik)
+    3: suit_payload          ; Die Merkle-Root Chunks und Payload-Metadaten
+}
+
+suit_envelope = {
+    ; WICHTIGE SIGNATUR-GRENZE (BOUNDARY):
+    ; signature_ed25519 signiert NICHT dieses `toob_suit` Top-Level Struct,
+    ; sondern verifiziert mathematisch ausschließlich die bitgenaue CBOR-Konkatenation aus:
+    ; `suit_conditions` + `suit_payload`. Der C-Parser muss diesen Puffer nativ extrahieren!
+    101: bstr .size 64,             ; signature_ed25519 (Muss exakt 64 Bytes sein)
+    102: uint .size 1,              ; key_index (Slot des eFuse-Keys 0-255)
+    103: bool,                      ; pqc_hybrid_active (True = ML-DSA Migration zwingend)
+    ? 104: bstr .size (1..4096),    ; signature_pqc (Optional, max 4 KB für sicheres SRAM-Handling)
+    ? 105: bstr .size (1..4096),    ; pubkey_pqc (Optional, max 4 KB)
+}
+
+suit_conditions = {
+    201: bstr .size 32,             ; device_identifier (O(1) SHA-256 Digest aus Hardware-MAC/DSLC)
+    202: uint .size 4,              ; required_key_epoch (Epoch für eFuse-Revocation Cycle)
+    203: uint .size 4,              ; svn (Minor-Version für Anti-Rollback State-Check)
+    204: uint .size 2,              ; max_resume_attempts (Physischer WAL-Error-Counter statt RTC UNIX-Time Illusion)
+    205: uint .size 2,              ; min_parser_version (Wehrt veraltete Bootloader ab, erzwingt Erkennung neuer Felder)
+}
+
+suit_payload = {
+    301: bstr .size 32,             ; sbom_digest (CRA Pflicht: exakt 32 Byte SHA-256 des SBOMs)
+    302: [ 1..4 * toob_image ],     ; Array der Images: Mindestens 1, maximal 4 (Array-Overhead Limitierung für OOM-Schutz)
+}
+
+toob_image = toob_image_raw / toob_image_delta
+
+; Standard Image ohne Delta-Abhängigkeiten
+toob_image_raw = {
+    400: false,                     ; is_delta (Expliziter Diskriminator für schnelles zcbor-Union Branching)
+    401: uint .size 1,              ; image_type (0=App, 1=NetCore, 2=Recovery)
+    402: uint .size 4,              ; image_size (Exakte Partition-Schreibkapazität in Bytes)
+    403: uint .size 4,              ; chunk_size (Blockgröße des Streames, i.d.R. 4096)
+    404: uint .size 4,              ; num_chunks (OOB Bounds-Check: MUSS ceil(image_size/chunk_size) sein gem. boot_merkle.c)
+    ; Die unteren 32 Bytes sind fest gekoppelt an BOOT_MERKLE_HASH_LEN aus boot_merkle.h!
+    405: bstr .size (32..8192),     ; chunk_hashes (Flat Merkle-Stream: 8 KB Cap limitiert das SRAM. Reicht für 4MB OS)
+}
+
+; Delta-Kapsel mit ZWINGENDEM Laufzeit-Beweis des Base-Images zur Brick-Prevention!
+toob_image_delta = {
+    400: true,                      ; is_delta (Zwingendes True, erzwingt den Polymorphismus in ZCBOR als 1. Map-Key)
+    401: uint .size 1,              ; image_type
+    402: uint .size 4,              ; image_size (Größe des Delta-Patches)
+    403: uint .size 4,              ; chunk_size
+    404: uint .size 4,              ; num_chunks
+    405: bstr .size (32..8192),     ; chunk_hashes
+    407: bstr .size 8,              ; base_fingerprint (PFLICHTFELD: 8-Byte Truncated SHA-256 des zwingenden Base-Images)
+}
