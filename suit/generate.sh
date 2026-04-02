@@ -39,6 +39,7 @@ if [ "$must_mock_zcbor" -eq 1 ]; then
         echo "[SUIT CodeGen] Python zcbor >= 0.8.0 found. Generating strict parsers..."
         python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_suit.cddl" --decode --type toob_suit --output-c "$OUTPUT_DIR/boot_suit.c" --output-h "$OUTPUT_DIR/boot_suit.h"
         python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_telemetry.cddl" --decode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_decode.c" --output-h "$OUTPUT_DIR/toob_telemetry_decode.h"
+        python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_telemetry.cddl" --encode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_encode.c" --output-h "$OUTPUT_DIR/toob_telemetry_encode.h"
     else
         echo "[SUIT CodeGen] WARNING: Valid Python zcbor not found! Injecting CI Mock Stubs (Fail-Secure)..."
         
@@ -113,12 +114,33 @@ extern bool cbor_decode_toob_telemetry(const uint8_t *payload, size_t payload_le
 #endif
 EOF
 
+        cat << 'EOF' > "$OUTPUT_DIR/toob_telemetry_encode.h"
+#ifndef TOOB_TELEMETRY_ENCODE_MOCK_H
+#define TOOB_TELEMETRY_ENCODE_MOCK_H
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include "toob_telemetry_decode.h"
+
+extern bool cbor_encode_toob_telemetry(uint8_t *payload, size_t payload_len, const struct toob_telemetry *input, size_t *payload_len_out);
+#endif
+EOF
+
         cat << 'EOF' > "$OUTPUT_DIR/toob_telemetry_decode.c"
 #include "toob_telemetry_decode.h"
 
 bool cbor_decode_toob_telemetry(const uint8_t *payload, size_t payload_len, struct toob_telemetry *result, size_t *payload_len_out) {
     (void)payload; (void)payload_len; (void)result; (void)payload_len_out;
     return false; /* Mocks lehnen Parsing stets ab! */
+}
+EOF
+
+        cat << 'EOF' > "$OUTPUT_DIR/toob_telemetry_encode.c"
+#include "toob_telemetry_encode.h"
+
+bool cbor_encode_toob_telemetry(uint8_t *payload, size_t payload_len, const struct toob_telemetry *input, size_t *payload_len_out) {
+    (void)payload; (void)payload_len; (void)input; (void)payload_len_out;
+    return false; /* Mocks erzeugen keinen Output! */
 }
 EOF
     fi

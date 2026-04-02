@@ -20,6 +20,7 @@
 add_library(toob_zcbor STATIC 
     lib/zcbor/src/zcbor_decode.c
     lib/zcbor/src/zcbor_common.c
+    lib/zcbor/src/zcbor_encode.c
 )
 target_include_directories(toob_zcbor PUBLIC lib/zcbor/include)
 
