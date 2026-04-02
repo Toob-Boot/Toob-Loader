@@ -19,7 +19,6 @@
 # zcbor (Apache-2.0)
 add_library(toob_zcbor STATIC 
     lib/zcbor/src/zcbor_decode.c
-    lib/zcbor/src/zcbor_encode.c
     lib/zcbor/src/zcbor_common.c
 )
 target_include_directories(toob_zcbor PUBLIC lib/zcbor/include)
@@ -60,6 +59,7 @@ add_custom_command(
     # `stage0_layout.ld` Dummy-File, um Windows-Linker Abstürze zu verhindern.
     # -------------------------------------------------------------------------
     COMMAND bash ${CMAKE_SOURCE_DIR}/suit/generate.sh ${CMAKE_BINARY_DIR}/generated
+    COMMENT "Executing SUIT ZCBOR CodeGen & Config-Bridge..."
 )
 
 # Dieses Target wird von toob_chip und toob_stage0 erwartet!
@@ -88,16 +88,22 @@ add_library(toob_core STATIC
     core/boot_multiimage.c
     core/boot_delay.c
     ${GENERATED_SUIT_C}
-    ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
 )
+
+# Harte Abhängigkeits-Schranke: Schützt vor Race-Conditions bei parallelen Builds (ninja -j8)!
+# toob_core MUSS zwingend warten, bis die generate.sh alle Header & Mocks abgeworfen hat.
+add_dependencies(toob_core generate_manifest)
 
 # Architektur-bedingter Ausschluss: In der Sandbox (x86 host) können wir 
 # keine Bare-Metal (ARM/Xtensa) Assembler-Anweisungen ausführen.
 if(NOT TOOB_ARCH STREQUAL "host")
     target_sources(toob_core PRIVATE core/boot_secure_zeroize.S)
 else()
-    # M-BUILD GAP-Fix: Sandbox Host-Mock für Assembler-Dateien.
-    target_sources(toob_core PRIVATE core/boot_secure_zeroize_host.c)
+    # M-BUILD GAP-Fix: Sandbox Host-Mock für Assembler-Dateien und Hardware Pointers!
+    target_sources(toob_core PRIVATE 
+        core/boot_secure_zeroize_host.c
+        ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
+    )
 endif()
 
 # ------------------------------------------------------------------------------
