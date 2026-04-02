@@ -1,0 +1,7 @@
+# Force GitHub Linguist to treat all C/C++ header files and source files as pure C
+*.h linguist-language=C
+*.c linguist-language=C
+
+# Ignore third-party folders from language statistics to keep the repo clean
+vendor/** linguist-vendored
+crypto/monocypher/** linguist-vendored

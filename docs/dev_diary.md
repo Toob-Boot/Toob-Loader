@@ -149,5 +149,16 @@ Die Übersetzung der gesamten physischen MCU-Peripherie auf Host-native C17 Mock
 - **GNU Linker Interceptors (`--wrap`):** Um die extrem teuren Ed25519 und ML-DSA Krypto-Operationen im CI-Runner zu umgehen (welche Hochgeschwindigkeits-Fuzzing komplett ausbremsen würden), greifen wir auf das `-Wl,--wrap` Flag des GCC Linkers zurück. Validierung kann umgeleitet oder mit `BOOT_ERR_CRYPTO` abgebrochen werden. Das wahrt das *Zero Code Slop* Entwicklungsgebot: Der Original C17 Quellcode bleibt unangetastet.
 - **Sichere File-Pointer-Resets:** Um "State Leaks" (offene File-Handles, weiterzählende Dummy-Watchdogs etc.) bei tausenden aufeinanderfolgenden Testläufen des Fuzzers zu eliminieren, bietet jeder Mock einen `_reset_state()` Bailout, der zwischen Tests den Puffer knallhart leer fegt.
 
-**Lessons Learned / Gaps:**
 - **Pointer-Safety rettet SIL-Systeme:** In C ist ein fehlender `NULL`-Pointer Check besonders in Mocks gefährlich. Greift `fopen` auf ein undefiniertes Environment (`NULL`) File zu, killt das den gesamten Bootloader Test-Prozess mit einem Segfault. Die konsequente P10 Boundary-Prüfung (`if (*len < 16) return BOOT_ERR_INVALID_ARG;`) an den Eintrittskanten (z.B. in `mock_efuses.c`) ist auf dem PC Host genauso überlebenswichtig wie später auf dem Silizium.
+
+### 14. Native Integration-Verifikation & Compiler-Matrix (GCC 15)
+
+**Was wurde getan?**
+Um die funktionale Integrität von M-SANDBOX final zu prüfen, wurde ein natives Test-Binary (`test_sandbox.c`) erstellt, welches das `boot_platform_t` M-SANDBOX Layout direkt auf dem Host kompiliert und ausführt. Parallel dazu wurde das GitHub C++ Misclassification Problem behoben (`.gitattributes`).
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Sicherstellung des HAL-Contracts (`BOOT_STATUS_T`):** Die isolierte Kompilierung brachte zutage, dass die ursprünglichen Monocypher Crypto-Wrapper `void` anstatt `boot_status_t` zurückgaben, was durch den strict-typing Compiler (GCC 15.2) hart abgefangen wurde. GCC 15.2 (UCRT) für Windows wurde absichtlich als Referenzcompiler gewählt, da dessen statische Checks unter `-std=c17 -Werror` exzellent auf subtile Struct- und Typisierungs-Fehler reagieren (so wie auch `.abi_version` statt `.version` entdeckt wurde).
+- **GitHub Linguist Fix (`.gitattributes`):** Repositories mit generischen `.h` Headern oder Submodulen (wie externem Code mit `#ifdef __cplusplus`) bewirken, dass GitHub das Projekt als "C++" flaggt, was fälschlicherweise OOP-Müll impliziert. Durch ein explizites `*.h linguist-language=C` und `linguist-vendored` in `.gitattributes` stellen wir glasklar sicher, dass die Welt Toob-Loader als das anerkennt, was es ist: Pures, ultra-abgespecktes C17.
+
+**Lessons Learned:**
+- **Der Wert von Standalone-Kompilaten:** Wenn man ein großes CMake-Skelett für physische Chips vor sich hat, lässt man sich leicht dazu verleiten, kleine Zwischenstände nicht zu testen, weil "der Cross-Compiler noch nicht eingerichtet ist". Durch das isolierte Zusammenziehen der Sandbox-Mocks und Crypto-Files in ein einzelnes GCC-Kommando (`gcc test_*.c hal_*.c mock_*.c -o test.exe`) entlarvt man Pointer-Fehler sofort. Das bewahrt uns davor, solche Bugs später auf den Kern des State-Machines (WAL/Boot main) zurückzuführen.
