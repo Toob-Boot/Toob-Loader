@@ -162,3 +162,46 @@ Um die funktionale Integrität von M-SANDBOX final zu prüfen, wurde ein natives
 
 **Lessons Learned:**
 - **Der Wert von Standalone-Kompilaten:** Wenn man ein großes CMake-Skelett für physische Chips vor sich hat, lässt man sich leicht dazu verleiten, kleine Zwischenstände nicht zu testen, weil "der Cross-Compiler noch nicht eingerichtet ist". Durch das isolierte Zusammenziehen der Sandbox-Mocks und Crypto-Files in ein einzelnes GCC-Kommando (`gcc test_*.c hal_*.c mock_*.c -o test.exe`) entlarvt man Pointer-Fehler sofort. Das bewahrt uns davor, solche Bugs später auf den Kern des State-Machines (WAL/Boot main) zurückzuführen.
+
+## Phase 6: Core Engine Hardening (Stufe 2)
+
+### 15. Die Write-Ahead-Log Engine (oot_journal.c)
+
+**Was wurde getan?**
+Die Implementierung des WALs (Ringpuffer). Dieses Modul ist das Herzstück der "Single Source of Truth" bei Crashs.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Ringpuffer Erase-Grenzen:** Anstatt den Flash nach Erreichen der 1-Sektor-Grenze endlos rotieren zu lassen, wurde P10-strikt die Zähllogik implementiert, um einen Overflow präzise abzufangen.
+- **Transaktions-Padding (OOB-Defense):** Bei jedem Schreibzugriff wurde konsequent das Ende des Frames (0x1B Alignment Padding) geschrieben und ausgewertet. Wenn der Flash korrumpiert ist, wehrt das System den illegalen Memory Ausbruch dank eines definierten Frames direkt ab.
+- **Glitch-Sicherheit:** Alle Operationen stützen sich auf oot_secure_flag_t Arrays bzw. die Error-Codes. Keine blinden Return-Values.
+
+### 16. Streaming Verifikation - "Flat-Hash-List" (oot_merkle.c)
+
+**Was wurde getan?**
+Die kryptografische Stream-Verifikation per Hash-Slices. Anstatt große 4GB Sektoren in Tree-Strukturen zu zwingen, wurde die effiziente O(1) Slice-Prüfung umgesetzt.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Compiler-sicheres Constant-Time (constant_time_memcmp):** Da LTO/GCC Optimierer simple XOR-Absicherungen für Memcmps oft einkürzen, wurde der Accumulator explizit als olatile uint8_t result erzwungen (esult |= a[i] ^ b[i]). So kann ein timing-messender Angreifer nicht Bit-by-Bit den Hash knacken.
+- **Multi-Gigabyte Overflow Protection:** Striktes Abfangen von Sektoren-Überläufen if (num_chunks > UINT32_MAX / chunk_size), um Integer-Wraparounds (y = 0) bei böswillig großen Updates zu blocken.
+- **Zero-Allocation Krypto (BOOT_MERKLE_MAX_CTX_SIZE):** Der Crypto-Status bedient sich sicher auf bis zu 256 P10-Bytes (SRAM) statt den Stack zu fragmentieren.
+
+### 17. Glitch-Resistance Signatur Checks (oot_verify.c)
+
+**Was wurde getan?**
+Der Gatekeeper: Physische Verifikation der Kryptografie (Ed25519) und des Fallbacks auf Post-Quantum (ML-DSA).
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Voltage-Glitch Double Check:** Das bloße Warten auf einen booleschen Code lässt sich per Spike (Brownout am PCB) skippen. Hier wurde das exzellente Konstrukt aus den Delay NOPs __asm__ volatile ("nop; nop; nop;"); nebst secure_flag_1 / 2 implemetiert. Der Chip müsste exakt zweimal denselben 16-Bit Hamming-Abstand auf Millisekunde fälschen, um durchzuwutschen.
+- **Anchored Payload (PQC-Hybrid):** ML-DSA Keys (3 KB) sprengen OTPs. Der Trick: Der PQC Public Key wird *in* dem bereits per Ed25519 (OTP gesicherten) Signaturblock geliefert. Wenn Edge-Conditioning zuschlägt oder die Puffer-Arithmetik out of Bounds aus dem SRAM springt, hagelt es den Rollback.
+- **Secure Zeroization:** P10 Contract -> Die OTP Root-Keys werden auf Assembler-Level via oot_secure_zeroize sofort genullt, um Side-Channel Memory Dumps abzuführen (Cold-Boot Attack Resilienz).
+
+### 18. Endless-Boot Loop Prevention (oot_confirm.c)
+
+**Was wurde getan?**
+Die finalen Handoff Evaluations-Routinen, die entscheiden ob ein frisches Update den Survival-Mode überstanden hat, oder wir in den alten Backup-Slot zurückrollen (Fallback).
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+- **Das Whitelist Paradigma:** Anstelle eine endlose Blacklist von Fehlerursachen (WATCHDOG, SOFTWARE, FAULT, UNKNOWN) zu generieren, vertrauen wir der C-Basis NICHT. Im Code ist nun fixiert: Validiert (und somit nicht zurückgesetzt) bleiben Flags NUR dann, wenn der Boot-Grund POWER_ON, PIN_RESET oder ein harmloser BROWNOUT (Batterie war leer) war. Jeder andere Code stirbt im Rollback-Abgrund!
+- **Watchdog Umarmung:** Da externe I2C Bausteine das Confirm-Flag u.U. sehr langsam speichern, wurden alle check_ok und clear Interaktionen streng mit wdt->kick(); umschlungen (Defense-In-Depth Pattern). Alle Pointer werden zudem einzeln validiert, bevor auch nur ins OS Gesprungen wird.
+
+*(Phase 6 vervollständigt die Core Update Logik. M-State & Haupt-Orchestrierung folgen!)*
