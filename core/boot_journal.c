@@ -238,7 +238,6 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
     size_t sec_size = 0;
     platform->flash->get_sector_size(wal_sector_addrs[active_wal_index], &sec_size);
 
-    uint32_t current_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
     uint32_t target_offset = 0;
     bool needs_rotation = false;
 
