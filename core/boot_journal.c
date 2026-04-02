@@ -9,6 +9,10 @@
 #include "boot_config_mock.h"
 #include <string.h>
 
+#ifndef CHIP_FLASH_MAX_ERASE_CYCLES
+#define CHIP_FLASH_MAX_ERASE_CYCLES 100000 /* Default EOL limit */
+#endif
+
 /**
  * @brief Static Cache for the WAL bounds and states to avoid runtime allocation and constant recalculation.
  */
@@ -57,12 +61,19 @@ static uint32_t cached_write_offset = 0;
  * @brief Findet den am wenigsten abgenutzten physischen Sektor (Globales Wear-Leveling).
  * Schützt die letzten 3 TMR-Iterationen vor dem Überschreiben.
  */
-static uint32_t get_best_wear_leveling_sector(const boot_platform_t *platform, uint32_t highest_seq) {
+static uint32_t get_best_wear_leveling_sector(const boot_platform_t *platform, uint32_t highest_seq, const uint32_t *exclude_indices, uint8_t exclude_count) {
     uint32_t best_idx = 0;
     uint32_t min_erase = 0xFFFFFFFF;
     
     for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
-        if (i == active_wal_index) continue;
+        bool excluded = false;
+        for (uint8_t j = 0; j < exclude_count; j++) {
+            if (i == exclude_indices[j]) {
+                excluded = true;
+                break;
+            }
+        }
+        if (excluded) continue;
         
         wal_sector_header_aligned_t hdr;
         if (platform->flash->read(wal_sector_addrs[i], &hdr, sizeof(hdr)) != BOOT_OK) continue;
@@ -128,7 +139,8 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
         
         /* WDT kick and Erase */
         platform->wdt->kick();
-        platform->flash->erase_sector(wal_sector_addrs[0]);
+        boot_status_t er_stat = platform->flash->erase_sector(wal_sector_addrs[0]);
+        if (er_stat != BOOT_OK) return er_stat;
         
         current_active_header.header_crc32 = compute_wal_crc32((const uint8_t*)&current_active_header, sizeof(wal_sector_header_t) - sizeof(uint32_t));
         
@@ -196,6 +208,25 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
         }
     }
     
+    /* O(N) Frontier Scan to populate cached_write_offset */
+    uint32_t current_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
+    size_t sec_size = 0;
+    platform->flash->get_sector_size(wal_sector_addrs[active_wal_index], &sec_size);
+    uint32_t erased_32 = (uint32_t)platform->flash->erased_value | ((uint32_t)platform->flash->erased_value << 8) | 
+                         ((uint32_t)platform->flash->erased_value << 16) | ((uint32_t)platform->flash->erased_value << 24);
+                         
+    cached_write_offset = 0;
+    while (current_offset + sizeof(wal_entry_aligned_t) <= sec_size) {
+        platform->wdt->kick();
+        uint32_t magic = 0;
+        if (platform->flash->read(wal_sector_addrs[active_wal_index] + current_offset, &magic, sizeof(magic)) != BOOT_OK) break;
+        if (magic == erased_32 || magic != WAL_ENTRY_MAGIC) {
+            cached_write_offset = current_offset;
+            break;
+        }
+        current_offset += (uint32_t)sizeof(wal_entry_aligned_t);
+    }
+    
     wal_initialized = true;
     return BOOT_OK;
 }
@@ -224,18 +255,18 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
     }
 
     if (target_offset == 0) {
-        uint32_t current_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
-        while (current_offset + sizeof(wal_entry_aligned_t) <= sec_size) {
+        uint32_t s_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
+        while (s_offset + sizeof(wal_entry_aligned_t) <= sec_size) {
             platform->wdt->kick();
             
             uint32_t magic = 0;
-            if (platform->flash->read(wal_sector_addrs[active_wal_index] + current_offset, &magic, sizeof(magic)) != BOOT_OK) {
+            if (platform->flash->read(wal_sector_addrs[active_wal_index] + s_offset, &magic, sizeof(magic)) != BOOT_OK) {
                 needs_rotation = true;
                 break;
             }
             
             if (magic == erased_32) {
-                target_offset = current_offset;
+                target_offset = s_offset;
                 break;
             }
 
@@ -243,17 +274,17 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
                 needs_rotation = true;
                 break;
             }
-            current_offset += (uint32_t)sizeof(wal_entry_aligned_t);
+            s_offset += (uint32_t)sizeof(wal_entry_aligned_t);
         }
     }
 
+    /* Asymmetrisches Wear-Leveling Architektur-Notiz: 
+     * Bei extrem vielen Appends zwischen TMR-Updates können alte TMR-Schatten physikalisch abnutzen 
+     * und als Rotations-Ziel gewählt werden. Das ist P10-erwünscht (Wear-Optimierung > Historie). */
     /* Sliding Window Rotation: Sektor voll oder durch Brownout kontaminiert */
     if (needs_rotation || target_offset == 0 || target_offset + sizeof(wal_entry_aligned_t) > sec_size) {
-        uint32_t new_idx = get_best_wear_leveling_sector(platform, current_active_header.sequence_id);
-        
-        #ifndef CHIP_FLASH_MAX_ERASE_CYCLES
-        #define CHIP_FLASH_MAX_ERASE_CYCLES 100000 /* Default EOL limit */
-        #endif
+        uint32_t exclude_list[1] = { active_wal_index };
+        uint32_t new_idx = get_best_wear_leveling_sector(platform, current_active_header.sequence_id, exclude_list, 1);
 
         if (current_active_header.erase_count >= CHIP_FLASH_MAX_ERASE_CYCLES) {
             /* Das WAL-Volume hat das physische Lebensende der Silizium-Gates erreicht.
@@ -335,21 +366,22 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
      * Transaktion getätigt. Es überschneidet sich niemals logisch.
      */
      
+    if (current_active_header.erase_count >= CHIP_FLASH_MAX_ERASE_CYCLES - 3) {
+        /* Schutz vor physikalischem Flash-Burnout während TMR Übertragungen */
+        return BOOT_ERR_COUNTER_EXHAUSTED;
+    }
+
     uint32_t active_seq = current_active_header.sequence_id;
     uint32_t new_idx = active_wal_index;
     
+    uint32_t exclude_list[4];
+    exclude_list[0] = active_wal_index;
+    uint8_t exclude_count = 1;
+    
     for (uint32_t step = 1; step <= 3; step++) {
-        new_idx = get_best_wear_leveling_sector(platform, active_seq);
+        new_idx = get_best_wear_leveling_sector(platform, active_seq, exclude_list, exclude_count);
+        exclude_list[exclude_count++] = new_idx;
         active_seq++; /* Increment Sequence per Sector to maintain O(1) Sliding Window */
-        
-        #ifndef CHIP_FLASH_MAX_ERASE_CYCLES
-        #define CHIP_FLASH_MAX_ERASE_CYCLES 100000 /* Default EOL limit */
-        #endif
-
-        if (current_active_header.erase_count >= CHIP_FLASH_MAX_ERASE_CYCLES) {
-            /* Schutz vor physikalischem Flash-Burnout während TMR Übertragungen */
-            return BOOT_ERR_COUNTER_EXHAUSTED;
-        }
 
         /* WDT Kick zwingend vor schwerem Block-Erase (GAP-02) */
         platform->wdt->kick();
