@@ -249,3 +249,14 @@ Die sofortige Reintegration des zcbor-Encoders (`zcbor_encode.c`) in das `toob_z
 **Wieso wurde es so gebaut (Architekturentscheidungen)?**
 
 - **Bootloader-to-OS Boundary Codec (GAP-Fix):** Der Bootloader verarbeitet eingehende SUIT-Manifeste zwar rein lesend (Decodierung), muss aber im Anschluss seine eigene Crash-Vergangenheit (`toob_boot_diag_t`) als kompaktes CBOR in den Shared-RAM (.noinit) verpacken. Ohne den physikalischen Encoder im C-Tree existierte eine Designlücke zwischen Boot-Engine (die CBOR schreiben soll) und dem OS (`libtoob`), welches dieses CBOR abholen und decodieren muss (`toob_get_boot_diag()`). Dieser Pipeline-Bruch wurde damit endgültig repariert.
+
+### 21. Hardening: HAL Interfaces, ABI Constraints & VLA Protection (Phase 3.3/3.4)
+
+**Was wurde getan?**
+Die gesamte `boot_hal.h` Contract-Schicht sowie der Boot-Orchestrator (`boot_main.c` Block 1.5) wurden rigoros gehärtet, um multi-vendor Kompatibilitätsrisiken und P10 Verstöße auszulöschen. Dies umfasste ABI-Versionsprüfungen zur Runtime, Abschaffung harter Flash-Konstanten für Wear-Leveling und VLA (Variable-Length-Array)-Prävention.
+
+**Wieso wurde es so gebaut (Architekturentscheidungen)?**
+
+- **Runtime ABI Guarding:** `boot_main.c` prüft nun unbarmherzig jeden injezierten Vendor-HAL-Struct (Flash, Clock, Crypto, etc.) gegen das strikte Macro `TOOB_HAL_ABI_V2`. Asymmetrische C-Links oder falsche Major-Versionen reißen das System sofort fehlerfrei mit `BOOT_ERR_ABI_MISMATCH` ab, was das schwerste architektonische Wartbarkeitsrisiko für externe Ports neutralisiert.
+- **Dynamisches Vendor Wear-Leveling (`boot_journal.c`):** Das alte statische EOL Macro `CHIP_FLASH_MAX_ERASE_CYCLES` wurde eliminiert. Der WAL-Ring evaluiert seinen Flash-Abrieb nun dynamisch zur Laufzeit anhand des Feldes `platform->flash->max_erase_cycles`, wodurch der jeweilige Vendor die physikalische Siliziumlebensdauer diktieren kann, ohne den Core antasten zu müssen.
+- **Vorgegebene Buffer-Bounds & VLA-Prävention:** `read_pubkey` zwingt Vendor-Implementierungen nun defensiv per Signatur (`size_t key_len`) Buffer-Overflows auszuhebeln. Für das PQC- und Merkle Hashing wurde `get_hash_ctx_size()` implementiert: Um die NASA P10 Stack-Größen-Regeln zu wahren, prüft `boot_merkle.c` den dynamischen Hardware-Return gegen das harte `BOOT_MERKLE_MAX_CTX_SIZE` Limit in O(1) im Vorfeld ab, anstatt instabile Stack-Allokationen zur Laufzeit zu riskieren.

@@ -9,6 +9,12 @@
 #define CHIP_APP_SLOT_ABS_ADDR    0x00010000 
 #define CHIP_RECOVERY_OS_ABS_ADDR 0x000B0000
 
+/* Maximal physische Sektorgröße für den statischen Swap-Buffer, z.B. 4KB für SPI-Flash */
+#ifndef CHIP_FLASH_MAX_SECTOR_SIZE
+#define CHIP_FLASH_MAX_SECTOR_SIZE 4096
+#endif
+
+
 /* 
  * TODO (Phase 3.1): Kläre die endgültige physikalische Eigentümerschaft 
  * der crypto_arena. Sollte idealerweise via Linker-Script (flash_layout.ld) 

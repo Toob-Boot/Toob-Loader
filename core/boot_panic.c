@@ -47,6 +47,9 @@ _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason)
         
         if (c >= 0) {
             // Mock: Auth ist fehlgeschlagen (TODO: Ed25519 Verify anbinden)
+            // TODO: Implement cryptographically secure Auth-Token reading (104 bytes: Nonce + DSLC + Slot-ID) using ping-pong FLOW control (READY -> Chunk -> ACK).
+            // TODO: Enforce "Highest-Seen-Timestamp" tracking in persistent storage (eFuse/EEPROM, NOT WAL) to prevent replay attacks.
+            
             failed_auth_attempts++;
             
             // P10 Compliance: Bounds Check auf failed_auth_attempts (Max 10 Shifts = ~102 Sekunden)

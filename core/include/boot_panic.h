@@ -10,6 +10,9 @@
 
 #include "boot_hal.h"
 
+// TODO: Enforce Stage 1.5 Rescue API signatures and COBS state machine context decoupling as aligned with concept_fusion.md
+
+
 /**
  * @brief Atomically stops execution, attempts Serial Rescue (COBS)
  *        or enters SOS flashing loop if no console is present.
