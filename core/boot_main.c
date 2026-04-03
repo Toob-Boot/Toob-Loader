@@ -48,6 +48,25 @@ boot_status_t boot_main(const boot_platform_t *platform,
     return BOOT_ERR_INVALID_ARG;
   }
 
+  /* ABI & Constraint Checks (Block 1.5) */
+  if (platform->clock->abi_version != TOOB_HAL_ABI_V2 ||
+      platform->flash->abi_version != TOOB_HAL_ABI_V2 ||
+      platform->wdt->abi_version != TOOB_HAL_ABI_V2 ||
+      platform->crypto->abi_version != TOOB_HAL_ABI_V2 ||
+      platform->confirm->abi_version != TOOB_HAL_ABI_V2) {
+    return BOOT_ERR_ABI_MISMATCH;
+  }
+  if (platform->console != NULL && platform->console->abi_version != TOOB_HAL_ABI_V2) {
+    return BOOT_ERR_ABI_MISMATCH;
+  }
+  if (platform->soc != NULL && platform->soc->abi_version != TOOB_HAL_ABI_V2) {
+    return BOOT_ERR_ABI_MISMATCH;
+  }
+
+  if (platform->flash->max_erase_cycles == 0) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
   /* Pflicht-Funktionspointer prüfen, die boot_main direkt aufruft (Init/Deinit
    * Kaskade & Clock/Delay) */
   if (platform->clock->init == NULL || platform->clock->deinit == NULL ||

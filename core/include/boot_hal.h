@@ -33,7 +33,11 @@ typedef struct {
   uint32_t abi_version; /**< MUST be 0x02000000 (V2) */
 
   boot_status_t (*init)(void);
-  void (*deinit)(void); /**< Kills DMA, disables OTFDEC, isolates before jump */
+  /** 
+   * @brief Kills DMA, disables OTFDEC, isolates before jump.
+   * HAL-Contract: MUSS idempotent und fehlerfrei sein, oder Fehler stumm absorbieren. 
+   */
+  void (*deinit)(void);
 
   boot_status_t (*read)(uint32_t addr, void *buf, size_t len);
   boot_status_t (*write)(uint32_t addr, const void *buf, size_t len);
@@ -46,6 +50,7 @@ typedef struct {
   /* Dynamische Fuzzer-Limits (via Manifest-Compiler in chip_config.h injiziert) */
   uint32_t max_sector_size;
   uint32_t total_size;
+  uint32_t max_erase_cycles; /* Vendor Limit (e.g. 100000) */
   uint8_t  write_align;
   uint8_t  erased_value;
 } flash_hal_t;
@@ -62,6 +67,10 @@ typedef struct {
   uint32_t abi_version;
 
   boot_status_t (*init)(void);
+  /**
+   * @brief Power down underlying peripheral.
+   * HAL-Contract: MUSS idempotent sein. Loescht NICHT den Confirm-State (das macht clear).
+   */
   void (*deinit)(void);
 
   bool (*check_ok)(uint64_t expected_nonce);
@@ -81,6 +90,7 @@ typedef struct {
   /* POLICY (Phase 6): Vendor Ports MÜSSEN den TIMING_SAFETY_FACTOR bei der 
    * internen Register-Allokation auf timeout_ms_required beaufschlagen! */
   boot_status_t (*init)(uint32_t timeout_ms_required);
+  /** HAL-Contract: MUSS idempotent und fehlerfrei sein */
   void (*deinit)(void);
 
   void (*kick)(void);
@@ -100,7 +110,11 @@ typedef struct {
   uint32_t abi_version;
 
   boot_status_t (*init)(void);
-  void (*deinit)(void); /**< Zeroizes all internal buffers/keys */
+  /** 
+   * @brief Zeroizes all internal buffers/keys.
+   * HAL-Contract: MUSS idempotent und fehlerfrei sein. 
+   */
+  void (*deinit)(void);
 
   /* Hashing (Merkle) (GAP-C04: Zwang zur Nutzung der crypto_arena) */
   boot_status_t (*hash_init)(void *ctx, size_t ctx_size);
@@ -122,11 +136,12 @@ typedef struct {
   uint32_t (*get_last_vendor_error)(void);
 
   /* Hardware Roots (eFuse / OTP) */
-  boot_status_t (*read_pubkey)(uint8_t key[32], uint8_t key_index);
+  boot_status_t (*read_pubkey)(uint8_t *key, size_t key_len, uint8_t key_index);
   boot_status_t (*read_dslc)(uint8_t *buffer, size_t *len);
   boot_status_t (*read_monotonic_counter)(uint32_t *ctr);
   boot_status_t (*advance_monotonic_counter)(void);
 
+  size_t (*get_hash_ctx_size)(void);
   bool has_hw_acceleration;
 } crypto_hal_t;
 
@@ -139,6 +154,7 @@ typedef struct {
   uint32_t abi_version;
 
   boot_status_t (*init)(void);
+  /** HAL-Contract: MUSS idempotent und fehlerfrei sein */
   void (*deinit)(void);
 
   uint32_t (*get_tick_ms)(void);
@@ -157,10 +173,11 @@ typedef struct {
   uint32_t abi_version;
 
   boot_status_t (*init)(uint32_t baudrate);
+  /** HAL-Contract: MUSS idempotent und fehlerfrei sein */
   void (*deinit)(void);
 
   void (*putchar)(char c);
-  int (*getchar)(uint32_t timeout_ms);
+  boot_status_t (*getchar)(uint8_t *out, uint32_t timeout_ms);
   void (*flush)(void);
 } console_hal_t;
 

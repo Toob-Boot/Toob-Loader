@@ -70,7 +70,7 @@ boot_status_t boot_verify_manifest_envelope(const boot_platform_t* platform,
      */
     if (envelope->key_index < 255) {
         uint8_t dummy_pubkey[32];
-        if (platform->crypto->read_pubkey(dummy_pubkey, envelope->key_index + 1) == BOOT_OK) {
+        if (platform->crypto->read_pubkey(dummy_pubkey, sizeof(dummy_pubkey), envelope->key_index + 1) == BOOT_OK) {
             boot_secure_zeroize(dummy_pubkey, sizeof(dummy_pubkey));
             return BOOT_ERR_VERIFY; /* Aktiver Downgrade-Versuch mit gestohlenem Alt-Key! */
         }
@@ -79,7 +79,7 @@ boot_status_t boot_verify_manifest_envelope(const boot_platform_t* platform,
 
     /* 4. Lade den physischen Public-Key via crypto_hal */
     uint8_t root_pubkey[32];
-    boot_status_t key_stat = platform->crypto->read_pubkey(root_pubkey, envelope->key_index);
+    boot_status_t key_stat = platform->crypto->read_pubkey(root_pubkey, sizeof(root_pubkey), envelope->key_index);
     if (key_stat != BOOT_OK) {
         /* Anti-Leakage: Buffer sicher nilifizieren bei Mismatch/Hardware-Fehler */
         boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));

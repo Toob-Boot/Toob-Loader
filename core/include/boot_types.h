@@ -26,6 +26,8 @@
  * @brief Universal Bootloader Return Type (GAP-06)
  * Uses high-hamming-distance constants to prevent 0x00 / 0x01 glitching.
  */
+#define TOOB_HAL_ABI_V2 0x02000000
+
 typedef enum {
     BOOT_OK = 0x55AA55AA,             /**< Clean success (AUTOSAR Anti-Glitch) */
     
@@ -50,7 +52,8 @@ typedef enum {
     BOOT_ERR_INVALID_STATE = 16,      /**< State-Machine Fehler (z.B. Delta base_mismatch) */
     BOOT_ERR_WAL_FULL = 17,           /**< Journal Ring blockiert/voll */
     BOOT_ERR_WAL_LOCKED = 18,         /**< Transaktion über WAL-Grenzen verboten */
-    BOOT_RECOVERY_REQUESTED = 19      /**< Manueller/Hardware-Ausgelöster Fallback auf Serial Rescue */
+    BOOT_RECOVERY_REQUESTED = 19,     /**< Manueller/Hardware-Ausgelöster Fallback auf Serial Rescue */
+    BOOT_ERR_ABI_MISMATCH = 20        /**< HAL ABI-Version eines Structs ist zu alt/inkompatibel */
 } boot_status_t;
 
 /* --- 2. Hardware Reset Reasons --- */

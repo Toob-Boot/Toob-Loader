@@ -37,8 +37,15 @@ boot_status_t boot_merkle_verify_stream(const boot_platform_t* platform,
 
     /* Strenges HAL-Capability Gating: Krypto/Flash Traits müssen zwingend existieren */
     if (!platform->crypto->hash_init || !platform->crypto->hash_update || 
-        !platform->crypto->hash_finish || !platform->flash->read || !platform->wdt->kick) {
+        !platform->crypto->hash_finish || !platform->crypto->get_hash_ctx_size ||
+        !platform->flash->read || !platform->wdt->kick) {
         return BOOT_ERR_NOT_SUPPORTED;
+    }
+
+    /* P10 VLA Defense: Verhindert Stack-Overflows, wenn Vendor-HAL PQC konfiguriert
+     * und den fixen BSS/Stack-Puffer BOOT_MERKLE_MAX_CTX_SIZE übersteigen will. */
+    if (platform->crypto->get_hash_ctx_size() > BOOT_MERKLE_MAX_CTX_SIZE) {
+        return BOOT_ERR_INVALID_ARG;
     }
 
     /* P10 Pointer Sicherheit für externe Puffer */

@@ -10,9 +10,7 @@
 #include "boot_crc32.h"
 #include <string.h>
 
-#ifndef CHIP_FLASH_MAX_ERASE_CYCLES
-#define CHIP_FLASH_MAX_ERASE_CYCLES 100000 /* Default EOL limit */
-#endif
+
 
 /**
  * @brief Static Cache for the WAL bounds and states to avoid runtime allocation and constant recalculation.
@@ -280,7 +278,7 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
         uint32_t exclude_list[1] = { active_wal_index };
         uint32_t new_idx = get_best_wear_leveling_sector(platform, current_active_header.sequence_id, exclude_list, 1);
 
-        if (current_active_header.erase_count >= CHIP_FLASH_MAX_ERASE_CYCLES) {
+        if (current_active_header.erase_count >= platform->flash->max_erase_cycles) {
             /* Das WAL-Volume hat das physische Lebensende der Silizium-Gates erreicht.
              * Ein weiteres `erase_sector` führt statistisch zum Flash-Error / Short-Circuit.
              * Wir brechen ab und das Core wertet BOOT_ERR_COUNTER_EXHAUSTED aus,
@@ -360,7 +358,7 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
      * Transaktion getätigt. Es überschneidet sich niemals logisch.
      */
      
-    if (current_active_header.erase_count >= CHIP_FLASH_MAX_ERASE_CYCLES - 3) {
+    if (current_active_header.erase_count >= platform->flash->max_erase_cycles - 3) {
         /* Schutz vor physikalischem Flash-Burnout während TMR Übertragungen */
         return BOOT_ERR_COUNTER_EXHAUSTED;
     }
