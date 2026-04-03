@@ -49,7 +49,8 @@ typedef enum {
     BOOT_ERR_WDT_TRIGGER = 15,        /**< Watchdog Timeout simuliert/registriert */
     BOOT_ERR_INVALID_STATE = 16,      /**< State-Machine Fehler (z.B. Delta base_mismatch) */
     BOOT_ERR_WAL_FULL = 17,           /**< Journal Ring blockiert/voll */
-    BOOT_ERR_WAL_LOCKED = 18          /**< Transaktion über WAL-Grenzen verboten */
+    BOOT_ERR_WAL_LOCKED = 18,         /**< Transaktion über WAL-Grenzen verboten */
+    BOOT_RECOVERY_REQUESTED = 19      /**< Manueller/Hardware-Ausgelöster Fallback auf Serial Rescue */
 } boot_status_t;
 
 /* --- 2. Hardware Reset Reasons --- */
@@ -119,8 +120,8 @@ typedef struct __attribute__((aligned(8))) {
 
   /* Session & Integrity (GAP-F14 / Schicht 4b) */
   uint32_t boot_session_id;    /**< Boot-Session Vektor für OS-Tracking */
-  uint16_t crc16_trailer;      /**< CRC-16 Validierung gegen Handoff-RAM Garbage nach WDT-Resets */
-  uint8_t  _padding[6];        /**< Padding für striktes 56-Byte Alignment (NASA P10 GAP-39) */
+  uint32_t crc32_trailer;      /**< CRC-32 Validierung gegen Handoff-RAM Garbage nach WDT-Resets */
+  uint8_t  _padding[4];        /**< Padding für striktes 56-Byte Alignment (NASA P10 GAP-39) */
 } toob_handoff_t;
 
 /* P10 Size-Safety Asserts auf Handoff-ABI - Bricht bei inkompatiblen

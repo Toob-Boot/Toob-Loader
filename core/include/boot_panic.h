@@ -18,6 +18,6 @@
  * @param platform Hardware HAL abstraction
  * @param reason   Reason for panic
  */
-void boot_panic(const boot_platform_t *platform, boot_status_t reason);
+_Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason);
 
 #endif /* BOOT_PANIC_H */

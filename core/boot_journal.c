@@ -7,6 +7,7 @@
 
 #include "boot_journal.h"
 #include "boot_config_mock.h"
+#include "boot_crc32.h"
 #include <string.h>
 
 #ifndef CHIP_FLASH_MAX_ERASE_CYCLES
@@ -22,26 +23,12 @@ static wal_sector_header_t current_active_header;
 static bool wal_initialized = false;
 
 /**
- * @brief Table-less CRC-32 (O(L) in Datenlänge)
- */
-static uint32_t compute_wal_crc32(const uint8_t *data, size_t length) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < length; i++) {
-        crc ^= data[i];
-        for (uint8_t j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
-        }
-    }
-    return ~crc;
-}
-
-/**
  * @brief Validates the CRC-32 of a Sector Header
  */
 static bool verify_header_crc(const wal_sector_header_aligned_t *aligned_header) {
     if (aligned_header->data.sector_magic != WAL_ABI_VERSION_MAGIC) return false;
     size_t crc_len = sizeof(wal_sector_header_t) - sizeof(uint32_t);
-    uint32_t calc_crc = compute_wal_crc32((const uint8_t*)&aligned_header->data, crc_len);
+    uint32_t calc_crc = compute_boot_crc32((const uint8_t*)&aligned_header->data, crc_len);
     return (calc_crc == aligned_header->data.header_crc32);
 }
 
@@ -313,7 +300,7 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
         write_hdr.data.erase_count  = current_active_header.erase_count + 1;
         /* Wir transportieren den TMR Vote-State unbeschädigt in den neuen Ring-Sektor */
         write_hdr.data.tmr_data     = current_active_header.tmr_data; 
-        write_hdr.data.header_crc32 = compute_wal_crc32((const uint8_t*)&write_hdr.data, sizeof(wal_sector_header_t) - sizeof(uint32_t));
+        write_hdr.data.header_crc32 = compute_boot_crc32((const uint8_t*)&write_hdr.data, sizeof(wal_sector_header_t) - sizeof(uint32_t));
 
         platform->wdt->kick();
         status = platform->flash->write(wal_sector_addrs[new_idx], &write_hdr, sizeof(write_hdr));
@@ -340,7 +327,7 @@ boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_ent
     
     entry.data.magic = WAL_ENTRY_MAGIC;
     size_t crc_len = sizeof(wal_entry_payload_t) - sizeof(uint32_t);
-    entry.data.crc32_trailer = compute_wal_crc32((const uint8_t*)&entry.data, crc_len);
+    entry.data.crc32_trailer = compute_boot_crc32((const uint8_t*)&entry.data, crc_len);
     
     platform->wdt->kick();
     boot_status_t entry_status = platform->flash->write(wal_sector_addrs[active_wal_index] + target_offset, &entry, sizeof(entry));
@@ -407,7 +394,7 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
         write_hdr.data.tmr_data = *new_tmr;
         
         /* Safe Trailer */
-        write_hdr.data.header_crc32 = compute_wal_crc32((const uint8_t*)&write_hdr.data, sizeof(wal_sector_header_t) - sizeof(uint32_t));
+        write_hdr.data.header_crc32 = compute_boot_crc32((const uint8_t*)&write_hdr.data, sizeof(wal_sector_header_t) - sizeof(uint32_t));
         
         platform->wdt->kick(); /* Nach dem Erase nochmal WDT sichern */
         status = platform->flash->write(wal_sector_addrs[new_idx], &write_hdr, sizeof(write_hdr));
@@ -428,7 +415,7 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
     current_active_header.sequence_id = active_seq;
     current_active_header.erase_count = current_active_header.erase_count + 3; // Nach 3 Updates
     current_active_header.tmr_data = *new_tmr;
-    current_active_header.header_crc32 = compute_wal_crc32((const uint8_t*)&current_active_header, sizeof(wal_sector_header_t) - sizeof(uint32_t));
+    current_active_header.header_crc32 = compute_boot_crc32((const uint8_t*)&current_active_header, sizeof(wal_sector_header_t) - sizeof(uint32_t));
     
     return BOOT_OK;
 }
@@ -467,7 +454,7 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform, wal_
 
         /* Kryptografischer Bit-Rot / Brownout Check (GAP) */
         size_t crc_len = sizeof(wal_entry_payload_t) - sizeof(uint32_t);
-        uint32_t calc_crc = compute_wal_crc32((const uint8_t*)&entry.data, crc_len);
+        uint32_t calc_crc = compute_boot_crc32((const uint8_t*)&entry.data, crc_len);
         if (calc_crc != entry.data.crc32_trailer) {
             break;
         }

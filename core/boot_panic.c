@@ -18,7 +18,7 @@ static void enter_sos_loop(const boot_platform_t *platform) {
     }
 }
 
-void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
+_Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
     (void)reason; // Momentan nicht ausgegeben, da wir kein snprintf haben
 
     if (!platform) {

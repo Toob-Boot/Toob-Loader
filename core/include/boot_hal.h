@@ -179,11 +179,22 @@ typedef struct {
   uint32_t (*battery_level_mv)(void);
   bool (*can_sustain_update)(void);
 
-  /* Exponential-Penalty-Sleep (GAP-C06) erwartet MS statt SEC */
-  void (*enter_low_power)(uint32_t ms);
+  /* Exponential-Penalty-Sleep / Edge-Recovery (hals.md Z.753 erwartet SEC) */
+  void (*enter_low_power)(uint32_t wakeup_s);
 
+  /* 
+   * HAL-Contract: Diese Funktionen müssen "pre-init-safe" sein, d.h.
+   * sicher aufrufbar BEVOR `soc->init()` ausgeführt wurde, da sie von
+   * boot_main strukturell am absoluten Anfang zerschmetternd eingesetzt werden.
+   */
   void (*assert_secondary_cores_reset)(void);
   void (*flush_bus_matrix)(void);
+
+  /* 
+   * Mechanischer Recovery-Pin (Anti-Softbrick) Evaluator (concept_fusion.md Z.117).
+   * MUSS von der Hardware mit einer Debounce-Zeit (z.B. >= 500ms) ausgewertet werden!
+   */
+  bool (*get_recovery_pin_state)(void);
 
   uint32_t min_battery_mv;
 } soc_hal_t;
@@ -207,6 +218,13 @@ typedef struct {
 /**
  * @brief Vendor-specific Initialization Point.
  * Implemented per-platform in `hal/vendor/chip_platform.c`.
+ *
+ * P10 MANDATORY CONTRACT (hals.md Abs 0):
+ * Die implementierende Architektur MUSS zwingend einen asynchronen
+ * `HardFault_Handler` (inkl. `ECC_NMI` Trap) definieren, welcher Flash
+ * Bit-Rot Exceptions abfängt und asynchron ein `BOOT_ERR_ECC_HARDFAULT` 
+ * auslöst bzw. via Watchdog resettet, um einen Exception-Deadlock zu vermeiden!
+ *
  * @return Safely populated Platform struct, or halts/panics on failure.
  */
 const boot_platform_t *boot_platform_init(void);

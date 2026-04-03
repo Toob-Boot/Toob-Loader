@@ -39,21 +39,13 @@ boot_status_t boot_verify_manifest_envelope(const boot_platform_t* platform,
         return BOOT_ERR_INVALID_ARG;
     }
 
-    /* 2. OTFDEC abschalten (Anti-Side-Channel Regel aus concept_fusion.md) */
-    /* Die Signatur muss zwingend über den ROHEN Ciphertext abgegriffen werden. 
-     * Ist OTFDEC auf MCU-Ebene noch an, entstünden katastrophale Crypto-Timings durch die HW-Verzögerungen.
-     * ACHTUNG: Das Re-Enabling von OTFDEC erfolgt hier BEWUSST NICHT im Fehler-Exit. 
-     * Das Delegations-Design schreibt vor, dass die `flash.deinit()` dies unmittelbar vor dem OS-Handoff asynchron triggert. 
+    /* OTFDEC Abschaltung findet zentral in boot_main.c (Init-Cascade) statt.
+     * Das Delegations-Design schreibt vor, dass die `flash.deinit()` dies unmittelbar 
+     * vor dem OS-Handoff asynchron triggert. 
      * 
      * HINWEIS `work_buffer`: Das Manifest im Buffer wird nach Return bewusst nicht gezeroized, 
      * da es als signierte Public-Domain Daten keinerlei kryptografische Geheimnisse enthält (RAM-Effizienz).
      */
-    if (platform->flash->set_otfdec_mode != NULL) {
-        boot_status_t otf_stat = platform->flash->set_otfdec_mode(false);
-        if (otf_stat != BOOT_OK) {
-            return otf_stat; 
-        }
-    }
 
     /* 3. Flash-Read in den Puffer mit Watchdog Kicks */
     /* Watchdog Kicks umschließen den potenziell blockierenden SPI Read */
