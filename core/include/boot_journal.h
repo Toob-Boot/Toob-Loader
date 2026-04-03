@@ -42,6 +42,7 @@ typedef enum {
  */
 typedef struct {
     uint32_t primary_slot_id;
+    uint32_t app_svn;
     uint32_t boot_failure_counter;
     uint32_t svn_recovery_counter;
     uint32_t app_slot_erase_counter;

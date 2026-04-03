@@ -53,7 +53,8 @@ typedef enum {
     BOOT_ERR_WAL_FULL = 17,           /**< Journal Ring blockiert/voll */
     BOOT_ERR_WAL_LOCKED = 18,         /**< Transaktion über WAL-Grenzen verboten */
     BOOT_RECOVERY_REQUESTED = 19,     /**< Manueller/Hardware-Ausgelöster Fallback auf Serial Rescue */
-    BOOT_ERR_ABI_MISMATCH = 20        /**< HAL ABI-Version eines Structs ist zu alt/inkompatibel */
+    BOOT_ERR_ABI_MISMATCH = 20,       /**< HAL ABI-Version eines Structs ist zu alt/inkompatibel */
+    BOOT_ERR_DOWNGRADE = 21           /**< Hybrid SVN Check fehlgeschlagen (Anti-Rollback) */
 } boot_status_t;
 
 /* --- 2. Hardware Reset Reasons --- */

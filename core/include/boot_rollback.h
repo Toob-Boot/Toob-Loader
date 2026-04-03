@@ -11,18 +11,24 @@
 
 #include "boot_types.h"
 #include "boot_hal.h"
+#include "boot_journal.h"
 
 /**
- * @brief Evaluates the current Rollback state and Boot Failure Counter.
- *        Decides whether to boot Slot A, the Recovery_OS, or invoke Panic mode.
- *
- * TODO: Add boot_status_t boot_rollback_evaluate_cascade(const boot_platform_t *platform);
+ * @brief Hybrid SVN Verification.
+ *        Evaluates if the requested manifest SVN respects the persistent limits.
  */
+boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform, uint32_t manifest_svn, bool is_recovery_os);
 
 /**
- * @brief Executes the rollback operation (e.g., swapping fallback slot to main slot).
- *
- * TODO: Add boot_status_t boot_rollback_execute(const boot_platform_t *platform, uint32_t fallback_slot_addr);
+ * @brief Evaluates the Crash-Cascade state based on M-JOURNAL Boot Failure Counter.
+ *        Decides whether to boot Slot A (Normal), the Recovery_OS, invoke M-PANIC Rescue, or Exponential Backoff.
  */
+boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform, const wal_tmr_payload_t *tmr, bool *boot_recovery_os_out);
+
+/**
+ * @brief Executes the physical reverse in-place overwrite.
+ *        Used when an update immediately crashes after a TXN_COMMIT. Orchestrates `boot_swap_apply()` backwards.
+ */
+boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform);
 
 #endif /* BOOT_ROLLBACK_H */
