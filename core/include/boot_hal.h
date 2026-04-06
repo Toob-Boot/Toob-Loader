@@ -24,6 +24,8 @@
 
 /* --- 1. Flash HAL (Non-Volatile Storage) --- */
 
+#define TOOB_HAL_ABI_V2 0x02000000
+
 /**
  * @brief Flash / NVS Abstraction
  * Handles raw physical reads and writes. Requires OTFDEC capability for

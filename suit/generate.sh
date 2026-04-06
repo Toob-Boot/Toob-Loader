@@ -29,21 +29,22 @@ echo "[SUIT CodeGen] Generating C artifacts in: $OUTPUT_DIR"
 # 1. ZCBOR CODE GENERATION (CDDL -> C-Logic)
 # ------------------------------------------------------------------------------
 must_mock_zcbor=1
-if [ -f "$OUTPUT_DIR/boot_suit.h" ] && ! grep -q "BOOT_SUIT_MOCK_H" "$OUTPUT_DIR/boot_suit.h"; then
-    echo "[SUIT CodeGen] Real ZCBOR outputs already exist. Preserving them! (Idempotence Guard)"
+
+if python3 -c "import zcbor; assert zcbor.__version__ >= '0.8.0'" 2>/dev/null; then
+    echo "[SUIT CodeGen] Python zcbor >= 0.8.0 found. Generating strict parsers..."
+    python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_suit.cddl" --decode --type toob_suit --output-c "$OUTPUT_DIR/boot_suit.c" --output-h "$OUTPUT_DIR/boot_suit.h"
+    python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_telemetry.cddl" --decode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_decode.c" --output-h "$OUTPUT_DIR/toob_telemetry_decode.h"
+    python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_telemetry.cddl" --encode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_encode.c" --output-h "$OUTPUT_DIR/toob_telemetry_encode.h"
+    must_mock_zcbor=0
+elif [ -f "$OUTPUT_DIR/boot_suit.h" ] && ! grep -q "BOOT_SUIT_MOCK_H" "$OUTPUT_DIR/boot_suit.h"; then
+    echo "[SUIT CodeGen] zcbor not found, but real outputs exist. Preserving them! (Idempotence Guard)"
     must_mock_zcbor=0
 fi
 
 if [ "$must_mock_zcbor" -eq 1 ]; then
-    if python3 -c "import zcbor; assert zcbor.__version__ >= '0.8.0'" 2>/dev/null; then
-        echo "[SUIT CodeGen] Python zcbor >= 0.8.0 found. Generating strict parsers..."
-        python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_suit.cddl" --decode --type toob_suit --output-c "$OUTPUT_DIR/boot_suit.c" --output-h "$OUTPUT_DIR/boot_suit.h"
-        python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_telemetry.cddl" --decode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_decode.c" --output-h "$OUTPUT_DIR/toob_telemetry_decode.h"
-        python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_telemetry.cddl" --encode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_encode.c" --output-h "$OUTPUT_DIR/toob_telemetry_encode.h"
-    else
-        echo "[SUIT CodeGen] WARNING: Valid Python zcbor not found! Injecting CI Mock Stubs (Fail-Secure)..."
-        
-        # SUIT Parser Mock
+    echo "[SUIT CodeGen] WARNING: Valid Python zcbor not found! Injecting CI Mock Stubs (Fail-Secure)..."
+    
+    # SUIT Parser Mock
         cat << 'EOF' > "$OUTPUT_DIR/boot_suit.h"
 #ifndef BOOT_SUIT_MOCK_H
 #define BOOT_SUIT_MOCK_H

@@ -14,6 +14,7 @@ Die CBOR Struktur (CDDL) sieht wie folgt aus:
 
 ```cddl
 toob_telemetry = {
+    0: uint,     ; schema_version (Für Abwärtskompatibilität im Broker)
     1: uint,     ; boot_time_ms (Gesamtdauer Start)
     2: uint,     ; verify_time_ms (Zeit für Krypto-Hashes)
     3: uint,     ; last_error_code (z.B. BOOT_ERR_WDT_TRIGGER)

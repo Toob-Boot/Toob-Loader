@@ -25,6 +25,11 @@
  * Handoff Areal (.noinit Shared-RAM) gemäß libtoob_api.md und toob_telemetry.md
  * ==============================================================================
  */
+/* Die Types werden nun exklusiv via boot_types.h -> libtoob_types.h aufgelöst! */
+static inline toob_reset_reason_t translate_reset_reason(reset_reason_t internal_reason) {
+    /* Da das 1:1 Mapping zentral in boot_types.h per Static Assert verifiziert ist, ist ein O(1) Cast C17 sicher. */
+    return (toob_reset_reason_t)internal_reason;
+}
 __attribute__((section(".noinit"))) toob_handoff_t toob_handoff_state;
 __attribute__((section(".noinit"))) toob_boot_diag_t toob_diag_state;
 
@@ -226,7 +231,7 @@ init_success:
    * ==============================================================================
    */
   if (status != BOOT_OK) {
-    toob_diag_state.fallback_occurred = true;
+    toob_diag_state.last_error_code = status;
     boot_panic(platform, status);
     return status;
   }
@@ -239,7 +244,7 @@ init_success:
       target_out->active_image_size == 0 ||
       /* Subtraktiver Check umgeht `uint32_t` Wrapping wenn OOB! */
       target_out->active_image_size > (CHIP_FLASH_TOTAL_SIZE - target_out->active_entry_point)) {
-    toob_diag_state.fallback_occurred = true;
+    toob_diag_state.last_error_code = BOOT_ERR_FLASH_BOUNDS;
     boot_panic(platform, BOOT_ERR_FLASH_BOUNDS);
     return BOOT_ERR_FLASH_BOUNDS;
   }
@@ -261,9 +266,10 @@ init_success:
 
   /* Basic Handoff Population */
   toob_handoff_state.magic = TOOB_STATE_COMMITTED; /* 0x55AA55AA */
-  toob_handoff_state.struct_version = 0x01000000;  /* V1.0.0 */
+  toob_handoff_state.struct_version = TOOB_DIAG_STRUCT_VERSION;
   toob_handoff_state.boot_nonce = target_out->generated_nonce;
-  toob_handoff_state.reset_reason = platform->clock->get_reset_reason();
+  toob_handoff_state.reset_reason = translate_reset_reason(platform->clock->get_reset_reason());
+  toob_handoff_state.booted_partition = TOOB_PARTITION_APP; /* Gemäß concept_fusion zwingend OS In-Place Execution! */
 
   /* Die Wear-Counters und Failure-Counters uebernimmt boot_state.c, 
    * ebenso active_slot, da diese Logik tief im WAL Journal verankert ist.

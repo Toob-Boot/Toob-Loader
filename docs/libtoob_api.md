@@ -13,10 +13,10 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t magic;              /* Immer 0x55AA55AA */
     uint32_t struct_version;     /* GAP-11: ABI Versionierung (z.B. 0x01000000) für Abwärtskompatibilität */
     uint64_t boot_nonce;         /* Deterministische Anti-Replay Nonce */
-    uint32_t active_slot;        /* 0 = Slot A, 1 = Slot B */
+    uint32_t booted_partition;   /* 0 = App Slot A, 1 = Recovery OS */
     uint32_t reset_reason;       /* Letzter Hardware-Reset-Grund */
     uint32_t boot_failure_count; /* Aktueller Stand des Edge-Recovery Counters */
-    uint32_t _padding;           /* GAP-39: Explizites Padding auf 8-Byte Vielfache (32 Bytes Gesamtgröße) */
+    uint32_t crc32_trailer;      /* Kryptographische Versiegelung der Boundary-Daten */
 } toob_handoff_t;
 
 extern __attribute__((section(".noinit"))) toob_handoff_t toob_handoff_state;
@@ -29,11 +29,11 @@ extern __attribute__((section(".noinit"))) toob_handoff_t toob_handoff_state;
 ```c
 /* GAP-06: Spezifische libtoob Fehlercodes für sauberes OS-Handling */
 typedef enum {
-    TOOB_OK = 0x55AA55AA,
-    TOOB_ERR_NOT_FOUND = -1,    /* Keine gültige Toob-Boot Signatur gefunden */
-    TOOB_ERR_WAL_FULL = -2,     /* Journal Ring ist voll, Update abgewiesen */
-    TOOB_ERR_WAL_LOCKED = -3,   /* WAL ist durch anstehendes Update blockiert */
-    TOOB_ERR_FLASH = -4         /* Physikalischer Schreibfehler */
+    TOOB_OK             = 0x55AA55AA,
+    TOOB_ERR_NOT_FOUND  = 0xE1101CAE,  /* Keine gültige Toob-Boot Signatur gefunden */
+    TOOB_ERR_WAL_FULL   = 0xE2201CAE,  /* Journal Ring ist voll, Update abgewiesen */
+    TOOB_ERR_WAL_LOCKED = 0xE3301CAE,  /* WAL ist durch anstehendes Update blockiert */
+    TOOB_ERR_FLASH      = 0xE4401CAE   /* Physikalischer Schreibfehler */
 } toob_status_t;
 
 /* GAP-12: Explizite Boot-State Konstanten für TENTATIVE/COMMITTED Logik */
@@ -79,10 +79,10 @@ toob_status_t toob_set_next_update(uint32_t manifest_flash_addr);
 
 ```c
 typedef struct {
-    uint32_t boot_duration_ms;
-    uint32_t edge_recovery_events;
-    uint32_t hardware_fault_record;
+    uint32_t struct_version;      /* Abwärtskompatibler Header */
+    uint32_t boot_duration_ms;    /* Metrik Startlaufzeit */
     /* ... weitere felder korrespondierend zu toob_telemetry.md */
+    uint32_t crc32_trailer;       /* Versiegelung in .noinit */
 } toob_boot_diag_t;
 
 /**

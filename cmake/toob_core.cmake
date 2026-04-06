@@ -112,8 +112,9 @@ endif()
 # ------------------------------------------------------------------------------
 
 target_include_directories(toob_core PUBLIC 
-    core/include 
+    ${CMAKE_SOURCE_DIR}/core/include 
     ${CMAKE_BINARY_DIR}/generated
+    ${CMAKE_SOURCE_DIR}/libtoob/include
 )
 
 # Bindung an Third-Party Libs und dynamische Feature-Verwendung
