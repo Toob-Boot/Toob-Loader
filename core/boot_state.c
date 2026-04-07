@@ -12,11 +12,9 @@
 #include <string.h>
 
 #include "boot_verify.h"
-/*
- * TODO (Phase 3): Includes to resolve after dependencies are implemented
- * #include "boot_swap.h"
- * #include "boot_rollback.h"
- */
+#include "boot_swap.h"
+#include "boot_rollback.h"
+#include "boot_config_mock.h"
 
 boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config_t *target_out) {
     /* P10 Pointer-Guard (Zero-Trust HAL Assumption) */
@@ -56,7 +54,8 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
     }
 
     /* Reconstruct open transactions (Intents) */
-    status = boot_journal_reconstruct_txn(platform, &open_txn);
+    uint32_t active_net_accum = 0;
+    status = boot_journal_reconstruct_txn(platform, &open_txn, &active_net_accum);
     if (status != BOOT_OK && status != BOOT_ERR_STATE) {
         /* 
          * BOOT_ERR_STATE is acceptable here. It indicates an empty, 
@@ -81,20 +80,49 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
     /* FIX (Doublecheck): Added missing WAL_INTENT_RECOVERY_RESOLVED check from Specs */
     if (open_txn.intent == WAL_INTENT_CONFIRM_COMMIT || 
         open_txn.intent == WAL_INTENT_RECOVERY_RESOLVED) {
-        /*
-         * OS Boot or Recovery-Rescue was successful and delivered an atomic confirm.
-         * We rigorously reset the TMR boot_failure_counter back to 0 to separate
-         * past resolved crashes from future, unrelated timeouts.
+        
+        /* 
+         * P10 Security: Nonce Authorization (Anti-Replay Validation)
+         * Stellt sicher, dass das CONFIRM_COMMIT vom Feature-OS kryptografisch legitim 
+         * ist. Die aktive Nonce kommt hardware-signed aus der TMR-Payload, NICHT aus 
+         * dem OS-schreibbaren WAL (Verhindert Bypass-Attacken).
          */
-        if (current_tmr.boot_failure_counter > 0) {
-            current_tmr.boot_failure_counter = 0;
-            status = boot_journal_update_tmr(platform, &current_tmr);
-            if (status != BOOT_OK) {
-                return status;
+        bool is_authorized = false;
+        
+        if (open_txn.intent == WAL_INTENT_CONFIRM_COMMIT) {
+            is_authorized = (open_txn.expected_nonce == current_tmr.active_nonce);
+        } else if (open_txn.intent == WAL_INTENT_RECOVERY_RESOLVED) {
+            /* 
+             * P10 Security: RECOVERY_RESOLVED darf nur greifen, wenn der Reboot
+             * physisch vom Operator ausgeführt wurde (PIN/Power-On). Dies verhindert
+             * Malware-Mopsing des Serial-Rescue Intents.
+             */
+            reset_reason_t rst = platform->clock->get_reset_reason();
+            if (rst == RESET_REASON_PIN_RESET || rst == RESET_REASON_POWER_ON) {
+                is_authorized = true;
             }
         }
-        /* Normalize intent to IDLE so the OS boots normally without recurring updates */
-        open_txn.intent = WAL_INTENT_NONE;
+        
+        if (!is_authorized) {
+            /* MALICIOUS OR CORRUPT AUTHORIZATION! We discard it silently to 
+             * treat it like a generic Un-Confirmed Crash-Reboot. */
+            open_txn.intent = WAL_INTENT_NONE;
+        } else {
+            /*
+             * OS Boot or Recovery-Rescue was successful and delivered an atomic confirm.
+             * We rigorously reset the TMR boot_failure_counter back to 0 to separate
+             * past resolved crashes from future, unrelated timeouts.
+             */
+            if (current_tmr.boot_failure_counter > 0) {
+                current_tmr.boot_failure_counter = 0;
+                status = boot_journal_update_tmr(platform, &current_tmr);
+                if (status != BOOT_OK) {
+                    return status;
+                }
+            }
+            /* Normalize intent to IDLE so the OS boots normally without recurring updates */
+            open_txn.intent = WAL_INTENT_NONE;
+        }
     }
 
     /*
@@ -137,7 +165,11 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
          * -> We must invoke M-SWAP in reverse to physically rollback!
          */
         if (open_txn.intent == WAL_INTENT_TXN_COMMIT) {
-            /* TODO: trigger M-SWAP in rollback mode, write WAL_INTENT_TXN_ROLLBACK */
+            /* Trigger M-SWAP in rollback mode to revert the failed new firmware */
+            status = boot_rollback_trigger_revert(platform);
+            if (status != BOOT_OK) {
+                return status; /* FATAL: Cannot revert Staging image */
+            }
             target_out->boot_recovery_os = false; /* We will boot the restored Staging OS instead */
         } 
         /* 
@@ -145,7 +177,10 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
          * -> M-ROLLBACK must evaluate exponential backoff or booting Recovery-OS.
          */
         else {
-            /* TODO: boot_rollback_evaluate_os(&current_tmr, &target_out->boot_recovery_os); */
+            status = boot_rollback_evaluate_os(platform, &current_tmr, &target_out->boot_recovery_os);
+            if (status != BOOT_OK) {
+                return status;
+            }
         }
     }
 
@@ -163,8 +198,20 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
          * We do not read a single byte of internal instruction streams until the 
          * Ed25519 signature is evaluated to BOOT_OK.
          */
-        /* TODO: boot_status_t verify_status = boot_verify_staging(platform, &open_txn); */
-        boot_status_t verify_status = BOOT_OK; /* Stub pending M-VERIFY */
+        /* 
+         * Verify the complete update staging area via Envelope-First SUIT Validierung. 
+         * TODO (Phase 2 integration): SUIT Manifest Parser is currently mocked. 
+         * Create a static mock envelope that satisfies boot_verify_manifest_envelope.
+         */
+        boot_verify_envelope_t mock_envelope = {
+            .manifest_flash_addr = CHIP_STAGING_SLOT_ABS_ADDR,
+            .manifest_size = 128, /* Dummy Size */
+            .signature_ed25519 = (const uint8_t*)"DUMMYSIG",
+            .key_index = 0,
+            .pqc_hybrid_active = false
+        };
+
+        boot_status_t verify_status = boot_verify_manifest_envelope(platform, &mock_envelope, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
         if (verify_status == BOOT_OK) {
             /* 
@@ -172,8 +219,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
              * Trigger the WDT-safe In-Place Overwrite execution via M-SWAP.
              * The HAL suspends the WDT natively during monolithic ROM erase operations.
              */
-            /* TODO: boot_status_t swap_status = boot_swap_execute(platform, &open_txn); */
-            boot_status_t swap_status = BOOT_OK; /* Stub pending M-SWAP */
+            boot_status_t swap_status = boot_swap_apply(platform, CHIP_STAGING_SLOT_ABS_ADDR, CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE);
 
             if (swap_status == BOOT_OK) {
                 /*
@@ -234,11 +280,11 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
      * concept_fusion.md dictates an In-Place architecture for the main OS (App Slot A only).
      * The primary_slot_id in TMR refers ONLY to Stage 1. 
      */
-    uint32_t slot_addr = 0; /* TODO: CHIP_APP_SLOT_ABS_ADDR */
+    uint32_t slot_addr = CHIP_APP_SLOT_ABS_ADDR;
     
     /* Determine if rollback chose Recovery OS partition instead */
     if (target_out->boot_recovery_os) {
-        slot_addr = 0; /* TODO: CHIP_RECOVERY_OS_ABS_ADDR */
+        slot_addr = CHIP_RECOVERY_OS_ABS_ADDR;
     }
 
     status = platform->flash->read(slot_addr, &app_header, sizeof(toob_image_header_t));
@@ -272,12 +318,10 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
             return status; /* Graceful fallback. Do not lockup the device with P10_ASSERT! */
         }
 
-        /* Secure the Expected Nonce inside the WAL */
-        wal_entry_payload_t nonce_txn = open_txn;
-        nonce_txn.intent = WAL_INTENT_NONCE_INTENT;
-        nonce_txn.expected_nonce = target_out->generated_nonce;
-
-        status = boot_journal_append(platform, &nonce_txn);
+        /* Secure the Expected Nonce deep inside the TMR payload.
+         * The OS cannot forge this since it cannot calculate the Sector Header CRC32. */
+        current_tmr.active_nonce = target_out->generated_nonce;
+        status = boot_journal_update_tmr(platform, &current_tmr);
         if (status != BOOT_OK) {
             return status;
         }
@@ -289,6 +333,8 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
          */
         target_out->generated_nonce = 0;
     }
+
+    target_out->net_search_accum_ms = active_net_accum;
 
     /* Target configuration populated perfectly. Orchestration complete. */
     return BOOT_OK;

@@ -29,10 +29,10 @@ add_library(toob_libtoob STATIC
 
 # GAP-Fix OS Shim:
 # Die OS Shim Integration für `toob_os_flash_write` wurde nun formal in
-# `libtoob/include/libtoob_api.h` als `__attribute__((weak))` deklariert.
+# `libtoob/include/libtoob.h` als `__attribute__((weak))` deklariert.
 
 # 1. Public Includes für das Feature-OS
-# Wenn ein RTOS gegen toob_libtoob linkt, erbt es automatisch libtoob_api.h.
+# Wenn ein RTOS gegen toob_libtoob linkt, erbt es automatisch libtoob.h.
 target_include_directories(toob_libtoob PUBLIC
     libtoob/include
 )

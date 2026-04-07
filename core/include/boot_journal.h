@@ -4,36 +4,36 @@
  *
  * Implements the atomic sector management, persisting boot-status,
  * and rollback safety against brownouts.
- * 
+ *
  * Complies with GAP-C01 (TMR in Headers), GAP-C03 (union padding) and GAP-37.
  */
 
 #ifndef BOOT_JOURNAL_H
 #define BOOT_JOURNAL_H
 
-#include "boot_types.h"
 #include "boot_hal.h"
+#include "boot_types.h"
 
 /* Magic Header für Vorwärtskompatibilität (P10) */
 #define WAL_ABI_VERSION_MAGIC 0x57414C02 /* "WAL\x02" */
-#define WAL_ENTRY_MAGIC       0xBEEF
+#define WAL_ENTRY_MAGIC 0xB007BEEF
 
 /**
  * @brief Spezifische Boot-Intents (WAL Transaction States)
  */
 typedef enum {
-    WAL_INTENT_NONE = 0,
-    WAL_INTENT_TXN_BEGIN = 1,
-    WAL_INTENT_UPDATE_PENDING = 2,
-    WAL_INTENT_TXN_COMMIT = 3,
-    WAL_INTENT_CONFIRM_COMMIT = 4,
-    WAL_INTENT_RECOVERY_RESOLVED = 5,
-    WAL_INTENT_TXN_ROLLBACK = 6,
-    
-    /* FIX (Doublecheck): Missing Intents extracted from concept_fusion.md */
-    WAL_INTENT_NONCE_INTENT = 7,       /**< Sichert den 64-Bit Boot-Handoff gegen Brute-Force Wraparounds */
-    WAL_INTENT_NET_SEARCH_ACCUM = 8,   /**< Anti-Lagerhaus Lockout: Persistiert die akkumulierte Netz-Suchzeit */
-    WAL_INTENT_SLEEP_BACKOFF = 9       /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
+  WAL_INTENT_NONE = 0,
+  WAL_INTENT_TXN_BEGIN = 1,
+  WAL_INTENT_UPDATE_PENDING = 2,
+  WAL_INTENT_TXN_COMMIT = 3,
+  WAL_INTENT_CONFIRM_COMMIT = 4,
+  WAL_INTENT_RECOVERY_RESOLVED = 5,
+  WAL_INTENT_TXN_ROLLBACK = 6,
+  WAL_INTENT_DEPRECATED_NONCE = 7, /**< Deprecated. Nonce resides in TMR payload now */
+  WAL_INTENT_NET_SEARCH_ACCUM = 8, /**< Anti-Lagerhaus Lockout: Persistiert die
+                                      akkumulierte Netz-Suchzeit */
+  WAL_INTENT_SLEEP_BACKOFF =
+      9 /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
 } wal_intent_t;
 
 /**
@@ -41,13 +41,16 @@ typedef enum {
  * Diese Struktur wird durch Majority-Vote über 3 Sektoren geschützt.
  */
 typedef struct {
-    uint32_t primary_slot_id;
-    uint32_t app_svn;
-    uint32_t boot_failure_counter;
-    uint32_t svn_recovery_counter;
-    uint32_t app_slot_erase_counter;
-    uint32_t staging_slot_erase_counter;
-    uint32_t swap_buffer_erase_counter;
+  uint32_t primary_slot_id;
+  uint32_t app_svn;
+  uint32_t boot_failure_counter;
+  uint32_t svn_recovery_counter;
+  uint32_t app_slot_erase_counter;
+  uint32_t staging_slot_erase_counter;
+  uint32_t swap_buffer_erase_counter;
+  
+  /* P10 Anti-Replay: Nonce resides in TMR (Hardware-Signed), Not WAL! */
+  uint64_t active_nonce; 
 } wal_tmr_payload_t;
 
 /**
@@ -55,43 +58,44 @@ typedef struct {
  * Liegt am Offset 0 eines jeden der 4-8 physikalischen WAL-Sektoren.
  */
 typedef struct {
-    uint32_t sector_magic;      /**< Immer WAL_ABI_VERSION_MAGIC */
-    uint32_t sequence_id;       /**< Fortlaufende ID für O(1) Sliding-Window Discovery */
-    uint32_t erase_count;       /**< Tracks sector wear leveling */
-    wal_tmr_payload_t tmr_data; /**< Eine von 3 TMR Kopien (GAP-C01) */
-    uint32_t header_crc32;      /**< Sichert den Sector-Header */
+  uint32_t sector_magic; /**< Immer WAL_ABI_VERSION_MAGIC */
+  uint32_t
+      sequence_id; /**< Fortlaufende ID für O(1) Sliding-Window Discovery */
+  uint32_t erase_count;       /**< Tracks sector wear leveling */
+  wal_tmr_payload_t tmr_data; /**< Eine von 3 TMR Kopien (GAP-C01) */
+  uint32_t header_crc32;      /**< Sichert den Sector-Header */
 } wal_sector_header_t;
 
 /**
  * @brief GAP-C03: WAL Sector Header Padding Pattern
  */
 typedef union {
-    wal_sector_header_t data;
-    /* Festes 64-Byte Padding für Hardware-Alignment */
-    uint8_t padding[64]; 
+  wal_sector_header_t data;
+  /* Festes 64-Byte Padding für Hardware-Alignment */
+  uint8_t padding[64];
 } wal_sector_header_aligned_t;
 
-_Static_assert(sizeof(wal_sector_header_aligned_t) % 8 == 0, 
-               "GAP-C03: WAL Sector Header padding violates hardware alignment!");
-
+_Static_assert(
+    sizeof(wal_sector_header_aligned_t) % 8 == 0,
+    "GAP-C03: WAL Sector Header padding violates hardware alignment!");
 
 /**
  * @brief Der Payload eines einzelnen angehängten WAL-Eintrags.
  */
 typedef struct {
-    uint32_t magic;           /**< Immer WAL_ENTRY_MAGIC (0xBEEF) */
-    wal_intent_t intent;      /**< Der Transaction Intent */
-    
-    /* Transaktionale Daten für Resume/Checkpointing */
-    uint32_t update_deadline;
-    uint32_t transfer_bitmap[8]; /**< 1 Bit = 1 Chunk (256 Chunks max) */
-    uint32_t delta_chunk_id;     /**< Aktueller Checkpoint für Delta-Patches */
-    uint32_t offset;             /**< Generisches Offset (z.B. für Net-Search Accumulator) */
-    
-    /* FIX (Doublecheck): Missing 64-bit Nonce required for Anti-Replay Handoff */
-    uint64_t expected_nonce;  /**< Sichert EXPECTED_NONCE vor dem OS-Jump */
-    
-    uint32_t crc32_trailer;   /**< CRC-32 Trailer über den Entry */
+  uint32_t magic;      /**< Immer WAL_ENTRY_MAGIC (0xBEEF) */
+  uint32_t intent;     /**< Der Transaction Intent (enum wal_intent_t) */
+
+  /* FIX: 64-bit Nonce direkt hier für 8-Byte Alignment ohne Struct-Padding (P10 Struct Geometry) */
+  uint64_t expected_nonce; /**< Sichert EXPECTED_NONCE vor dem OS-Jump */
+
+  /* Transaktionale Daten für Resume/Checkpointing */
+  uint32_t update_deadline;
+  uint32_t transfer_bitmap[8]; /**< 1 Bit = 1 Chunk (256 Chunks max) */
+  uint32_t delta_chunk_id;     /**< Aktueller Checkpoint für Delta-Patches */
+  uint32_t offset; /**< Generisches Offset (z.B. für Net-Search Accumulator) */
+
+  uint32_t crc32_trailer; /**< CRC-32 Trailer über den Entry */
 } wal_entry_payload_t;
 
 /**
@@ -99,39 +103,54 @@ typedef struct {
  * Jeder Append-Eintrag muss auf Hardware-Flash-Größen aligned sein.
  */
 typedef union {
-    wal_entry_payload_t data;
-    /* Festes 64-Byte Padding für Hardware-Alignment */
-    uint8_t padding[64]; 
+  wal_entry_payload_t data;
+  /* Festes 64-Byte Padding für Hardware-Alignment */
+  uint8_t padding[64];
 } wal_entry_aligned_t;
 
-_Static_assert(sizeof(wal_entry_aligned_t) % 8 == 0, 
+_Static_assert(sizeof(wal_entry_aligned_t) % 8 == 0,
                "GAP-C03: WAL padding violates hardware alignment!");
 
+/* P10 Zero-Dependency Sicherung: Zentraler Translation-Layer Check gegen ABI-Drift der Boundaries */
+_Static_assert(sizeof(wal_entry_payload_t) == sizeof(toob_wal_entry_payload_t), "ABI Drift: WAL Entry Type Size Mismatch!");
+_Static_assert((uint32_t)WAL_ENTRY_MAGIC == (uint32_t)TOOB_WAL_ENTRY_MAGIC, "ABI Drift: WAL Entry Magic Mismatch!");
+_Static_assert((int)WAL_INTENT_CONFIRM_COMMIT == (int)TOOB_WAL_INTENT_CONFIRM_COMMIT, "ABI Drift: Enum Confirm Commit Mismatch!");
+_Static_assert((int)WAL_INTENT_UPDATE_PENDING == (int)TOOB_WAL_INTENT_UPDATE_PENDING, "ABI Drift: Enum Update Pending Mismatch!");
+_Static_assert(sizeof(wal_sector_header_t) == sizeof(toob_wal_sector_header_t), "ABI Drift: WAL Header Size Mismatch!");
 
 /**
- * @brief Initialisiert das WAL (Scannt Sliding Window & lädt TMR via Majority Vote)
+ * @brief Initialisiert das WAL (Scannt Sliding Window & lädt TMR via Majority
+ * Vote)
  */
 boot_status_t boot_journal_init(const boot_platform_t *platform);
 
 /**
- * @brief Retrieves the current TMR payload as established during init (Majority Vote).
+ * @brief Retrieves the current TMR payload as established during init (Majority
+ * Vote).
  */
-boot_status_t boot_journal_get_tmr(const boot_platform_t *platform, wal_tmr_payload_t *out_tmr);
+boot_status_t boot_journal_get_tmr(const boot_platform_t *platform,
+                                   wal_tmr_payload_t *out_tmr);
 
 /**
  * @brief Updated die TMR-Werte sicher.
  * Re-Ersast 3 WAL-Sektoren sequenziell, um die TMR Majority zu erneuern.
  */
-boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal_tmr_payload_t *new_tmr);
+boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
+                                      const wal_tmr_payload_t *new_tmr);
 
 /**
- * @brief Schreibt einen neuen Intent atomar + CRC gesichert als Append in den aktuellen Flash-Sektor.
+ * @brief Schreibt einen neuen Intent atomar + CRC gesichert als Append in den
+ * aktuellen Flash-Sektor.
  */
-boot_status_t boot_journal_append(const boot_platform_t *platform, const wal_entry_payload_t *new_entry);
+boot_status_t boot_journal_append(const boot_platform_t *platform,
+                                  const wal_entry_payload_t *new_entry);
 
 /**
- * @brief Rekonstruiert die letzte unfertige Transaktion / State aus den Append-Entries.
+ * @brief Rekonstruiert die letzte unfertige Transaktion / State aus den
+ * Append-Entries und extrahiert den aktiven Trial-Nonce (Anti-Replay).
  */
-boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform, wal_entry_payload_t *out_state);
+boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
+                                           wal_entry_payload_t *out_state,
+                                           uint32_t *out_net_accum);
 
 #endif /* BOOT_JOURNAL_H */

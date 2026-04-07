@@ -418,11 +418,17 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform, const wal
     return BOOT_OK;
 }
 
-boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform, wal_entry_payload_t *out_state) {
+boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform, wal_entry_payload_t *out_state, uint64_t *out_active_nonce, uint32_t *out_net_accum) {
     if (!platform || !platform->flash || !out_state) return BOOT_ERR_INVALID_ARG;
     if (!wal_initialized) return BOOT_ERR_STATE;
     
     memset(out_state, 0, sizeof(wal_entry_payload_t));
+    if (out_active_nonce) {
+        *out_active_nonce = 0;
+    }
+    if (out_net_accum) {
+        *out_net_accum = 0;
+    }
 
     size_t sec_size = 0;
     platform->flash->get_sector_size(wal_sector_addrs[active_wal_index], &sec_size);
@@ -460,6 +466,20 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform, wal_
         /* Eintrag ist zu 100% verifiziert. Wir überschreiben out_state, 
          * sodass am Ende der Schleife die finale konsequente Transaktion überlebt */
         memcpy(out_state, &entry.data, sizeof(wal_entry_payload_t));
+        
+        /* O(N) Scan Cache: P10 Extraktion des Trial-Nonce für kryptographisches Anti-Replay */
+        if (entry.data.intent == WAL_INTENT_NONCE_INTENT) {
+            if (out_active_nonce) {
+                *out_active_nonce = entry.data.expected_nonce;
+            }
+        }
+        
+        if (entry.data.intent == WAL_INTENT_NET_SEARCH_ACCUM) {
+            if (out_net_accum) {
+                *out_net_accum = entry.data.offset; /* P10 Spec: Absolute Setze, überschreibt ältere States im Sliding Window */
+            }
+        }
+        
         read_success = true;
 
         current_offset += (uint32_t)sizeof(wal_entry_aligned_t);

@@ -30,6 +30,13 @@ static inline toob_reset_reason_t translate_reset_reason(reset_reason_t internal
     /* Da das 1:1 Mapping zentral in boot_types.h per Static Assert verifiziert ist, ist ein O(1) Cast C17 sicher. */
     return (toob_reset_reason_t)internal_reason;
 }
+/* 
+ * Architektur-Notiz: Duplicate Symbol Isolation (Zero-Bloat Mocking)
+ * Im M-SANDBOX Unit-Test allokiert hier boot_main.c diese Sektion physisch.
+ * libtoob.a referenziert diese dann passiv im Test-Executable. Dieser Aufbau ist intentional 
+ * und fungiert als exklusiver Provider der MOCK-Sektion, um die Speicherisolation 
+ * (`TOOB_NOINIT` via `libtoob_types.h`) ohne doppelte C-Modifikatoren testen zu können!
+ */
 __attribute__((section(".noinit"))) toob_handoff_t toob_handoff_state;
 __attribute__((section(".noinit"))) toob_boot_diag_t toob_diag_state;
 
@@ -270,6 +277,8 @@ init_success:
   toob_handoff_state.boot_nonce = target_out->generated_nonce;
   toob_handoff_state.reset_reason = translate_reset_reason(platform->clock->get_reset_reason());
   toob_handoff_state.booted_partition = TOOB_PARTITION_APP; /* Gemäß concept_fusion zwingend OS In-Place Execution! */
+  toob_handoff_state.net_search_accum_ms = target_out->net_search_accum_ms;
+  toob_handoff_state._reserved_pad = 0; /* Padding nullen für P10 Reproducibility/Leakage Prevention */
 
   /* Die Wear-Counters und Failure-Counters uebernimmt boot_state.c, 
    * ebenso active_slot, da diese Logik tief im WAL Journal verankert ist.
