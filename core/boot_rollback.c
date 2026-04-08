@@ -28,15 +28,18 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform, uint32_t
     boot_status_t status = boot_journal_get_tmr(platform, &tmr);
     
     /* Wenn kein Journal existiert (Initial Flash/Blank Device), nehmen wir SVN 0 als Baseline an.
-     * BOOT_ERR_STATE maskieren wir explizit nicht, da dies eine interne Korruption des Journals anzeigt. 
+     * BOOT_ERR_NOT_FOUND (z.B. nach Factory Reset) maskieren wir ebenfalls absichtlich.
      */
-    if (status != BOOT_OK && status != BOOT_ERR_NOT_FOUND) {
+    if (status != BOOT_OK && status != BOOT_ERR_STATE && status != BOOT_ERR_NOT_FOUND) {
         return status;
     }
 
     uint32_t persisted_wal_svn = is_recovery_os ? tmr.svn_recovery_counter : tmr.app_svn; /* Hinweis: app_svn existiert (wurde in Phase 3.3 in boot_journal.h aufgenommen) */
 
-    /* 2. Hole eFuse Epoch als absolutes Hardware-Sicherheitsnetz gegen CVE-Downgrades */
+    /* 2. Hole eFuse Epoch als absolutes Hardware-Sicherheitsnetz gegen CVE-Downgrades.
+     * Architektur-Notiz: Auf Chips ohne Monotonic Counter in eFuse wird diese 
+     * Funktion übersprungen. Der Downgrade-Schutz verlässt sich dann rein auf den 
+     * kryptografisch signierten TMR Payload im Write-Ahead Log. */
     uint32_t efuse_epoch = 0;
     if (platform->crypto->read_monotonic_counter) {
         if (platform->wdt) platform->wdt->kick(); /* Kick vor langsamem OTP Hardware-Read */
@@ -173,13 +176,45 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
         return BOOT_ERR_FLASH_BOUNDS;
     }
 
-    /* 2 & 3. Orchestriere die physische Reverse-Operation (Staging -> App) 
-     * boot_swap_apply nutzt dynamisch CHIP_FLASH_MAX_SECTOR_SIZE für P10 Bounds.
-     * 4. WDT-Kicks werden nativ durch boot_swap_apply gehandelt.
+    /* 2. GAP: 1-Way Idempotent Backup Revert! 
+     * Der App Slot ist gecrasht und somit Müll. Wir kopieren stur von Staging -> App.
+     * Eine Tearing-Danger existiert nicht, da Staging read-only bleibt! Ein Reboot 
+     * fängt durch das WAL_INTENT_TXN_ROLLBACK_PENDING einfach von vorne an.
      */
-    status = boot_swap_apply(platform, CHIP_STAGING_SLOT_ABS_ADDR, CHIP_APP_SLOT_ABS_ADDR, backup_header.image_size);
-    if (status != BOOT_OK) {
-        return status;
+    wal_entry_payload_t pending_intent;
+    memset(&pending_intent, 0, sizeof(pending_intent));
+    pending_intent.magic = WAL_ENTRY_MAGIC;
+    pending_intent.intent = WAL_INTENT_TXN_ROLLBACK_PENDING;
+    status = boot_journal_append(platform, &pending_intent);
+    if (status != BOOT_OK) return status;
+
+    uint32_t current_offset = 0;
+    static uint8_t copy_buf[CHIP_FLASH_MAX_SECTOR_SIZE];
+    
+    while (current_offset < backup_header.image_size) {
+        platform->wdt->kick();
+        
+        uint32_t src = CHIP_STAGING_SLOT_ABS_ADDR + current_offset;
+        uint32_t dst = CHIP_APP_SLOT_ABS_ADDR + current_offset;
+        
+        size_t dst_sec_size = 0;
+        status = platform->flash->get_sector_size(dst, &dst_sec_size);
+        if (status != BOOT_OK || dst_sec_size == 0 || dst_sec_size > CHIP_FLASH_MAX_SECTOR_SIZE) {
+            return BOOT_ERR_FLASH_HW;
+        }
+
+        /* Lese Source sicher */
+        status = platform->flash->read(src, copy_buf, dst_sec_size);
+        if (status != BOOT_OK) return status;
+        
+        /* Überschreibe Dest */
+        status = boot_swap_erase_safe(platform, dst, dst_sec_size);
+        if (status != BOOT_OK) return status;
+        
+        status = platform->flash->write(dst, copy_buf, dst_sec_size);
+        if (status != BOOT_OK) return status;
+        
+        current_offset += dst_sec_size;
     }
 
     /* TODO (GAP-28): Multi-Core Atomic Groups & Secondary Boot Delegation (concept_fusion.md Z.28)

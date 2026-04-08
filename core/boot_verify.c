@@ -47,17 +47,9 @@ boot_status_t boot_verify_manifest_envelope(const boot_platform_t* platform,
      * da es als signierte Public-Domain Daten keinerlei kryptografische Geheimnisse enthält (RAM-Effizienz).
      */
 
-    /* 3. Flash-Read in den Puffer mit Watchdog Kicks */
-    /* Watchdog Kicks umschließen den potenziell blockierenden SPI Read */
-    platform->wdt->kick();
-    boot_status_t read_stat = platform->flash->read(envelope->manifest_flash_addr, work_buffer, envelope->manifest_size);
-    platform->wdt->kick();
-    
-    if (read_stat != BOOT_OK) {
-        return read_stat;
-    }
-
-    /* GAP-09 Key Epoch Revocation Check
+    /* TOCTOU-Fix: Der Payload MUSS zwingend im statischen SRAM-Buffer (work_buffer) verbleiben,
+     * welcher bereits vom Caller vor-verifiziert geladen wurde. Re-Reads aus dem Flash erlauben MITM.
+     * 
      * concept_fusion.md Line 38: "Ist ein höherer HW-Epochen-Key gebrannt, weist der Bootloader 
      * alle Manifeste mit niedrigerer Epoch unwiderruflich ab". 
      * Da eFuses hardwareseitig sequenziell gebrannt werden, validieren wir elegant in O(1):
@@ -127,7 +119,14 @@ boot_status_t boot_verify_manifest_envelope(const boot_platform_t* platform,
      * `work_buffer`, der oben bereits ERFOLGREICH über die Hardware-Root (Ed25519) verifiziert wurde!
      * Somit entsteht ein transitives, wasserdichtes Hardware-Vertrauensmodell für PQC.
      */
-    if (envelope->pqc_hybrid_active) {
+    bool pqc_enforced = false;
+    if (platform->crypto->is_pqc_enforced) {
+        pqc_enforced = platform->crypto->is_pqc_enforced();
+    }
+    
+    if (pqc_enforced || envelope->pqc_hybrid_active) {
+        /* GAP: Wenn Hardware PQC erzwingt, IGNORIEREN wir das (möglicherweise gefälschte) 
+         * pqc_hybrid_active = false des Angreifers und verbieten das Update bei fehlender Signatur! */
         if (!envelope->signature_pqc || envelope->signature_pqc_len == 0 ||
             !envelope->pubkey_pqc || envelope->pubkey_pqc_len == 0 ||
             !platform->crypto->verify_pqc) {
@@ -137,9 +136,18 @@ boot_status_t boot_verify_manifest_envelope(const boot_platform_t* platform,
         /* Zwingende hardwaretechnische Erzwignung des Anchored-Payload Modells:
          * Wir MÜSSEN in C validieren, dass der PQC-Key-Pointer des Parsers sich physisch 
          * wirklich innerhalb des durch Ed25519 signierten SRAM-Buffers befindet!
-         * Ein Pointer-Ausbruch in unsigniertes RAM würde die PQC-Vertrauenskette lautlos aushebeln. */
+         * Ein Pointer-Ausbruch in unsigniertes RAM würde die PQC-Vertrauenskette lautlos aushebeln. 
+         * Subtraktive Logik verhindert Pointer Wraparounds! */
          if (envelope->pubkey_pqc < work_buffer ||
-             (envelope->pubkey_pqc + envelope->pubkey_pqc_len) > (work_buffer + envelope->manifest_size)) {
+             (size_t)(envelope->pubkey_pqc - work_buffer) > envelope->manifest_size ||
+             envelope->pubkey_pqc_len > envelope->manifest_size - (size_t)(envelope->pubkey_pqc - work_buffer)) {
+             return BOOT_ERR_INVALID_ARG;
+         }
+
+         /* Gleiche Wraparound Defense für die Signatur! */
+         if (envelope->signature_pqc < work_buffer ||
+             (size_t)(envelope->signature_pqc - work_buffer) > envelope->manifest_size ||
+             envelope->signature_pqc_len > envelope->manifest_size - (size_t)(envelope->signature_pqc - work_buffer)) {
              return BOOT_ERR_INVALID_ARG;
          }
 

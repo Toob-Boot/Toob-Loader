@@ -75,6 +75,12 @@ typedef struct {
    */
   void (*deinit)(void);
 
+  /**
+   * @brief Verify RTC Backend Nonce Confirmation
+   * HAL-Contract: MUSS die abgelegte Nonce bei einem positiven Match zwingend auf 
+   * 0 (oder einen invaliden Wert) ueberschreiben/zeroizen, um Replay-Angriffe gegen 
+   * darauffolgende unbestaetigte Boots zu verhindern!
+   */
   bool (*check_ok)(uint64_t expected_nonce);
   boot_status_t (*clear)(void);
 } confirm_hal_t;
@@ -145,6 +151,7 @@ typedef struct {
 
   size_t (*get_hash_ctx_size)(void);
   bool has_hw_acceleration;
+  bool (*is_pqc_enforced)(void); /* Hardware profile enforces PQC */
 } crypto_hal_t;
 
 /* --- 5. Clock HAL (Timing & Resets) --- */

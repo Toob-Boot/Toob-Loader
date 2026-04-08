@@ -32,8 +32,8 @@ typedef enum {
   WAL_INTENT_DEPRECATED_NONCE = 7, /**< Deprecated. Nonce resides in TMR payload now */
   WAL_INTENT_NET_SEARCH_ACCUM = 8, /**< Anti-Lagerhaus Lockout: Persistiert die
                                       akkumulierte Netz-Suchzeit */
-  WAL_INTENT_SLEEP_BACKOFF =
-      9 /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
+  WAL_INTENT_SLEEP_BACKOFF = 9, /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
+  WAL_INTENT_TXN_ROLLBACK_PENDING = 10 /**< 1-way Firmware restore in progress */
 } wal_intent_t;
 
 /**
@@ -49,8 +49,10 @@ typedef struct {
   uint32_t staging_slot_erase_counter;
   uint32_t swap_buffer_erase_counter;
   
-  /* P10 Anti-Replay: Nonce resides in TMR (Hardware-Signed), Not WAL! */
-  uint64_t active_nonce; 
+  /* P10 Anti-Replay: Nonce resides in TMR (Hardware-Signed), Not WAL! 
+     Splitted into 32-bit chunks to strictly prevent 8-Byte struct alignment padding. */
+  uint32_t active_nonce_lo;
+  uint32_t active_nonce_hi;
 } wal_tmr_payload_t;
 
 /**
@@ -64,6 +66,7 @@ typedef struct {
   uint32_t erase_count;       /**< Tracks sector wear leveling */
   wal_tmr_payload_t tmr_data; /**< Eine von 3 TMR Kopien (GAP-C01) */
   uint32_t header_crc32;      /**< Sichert den Sector-Header */
+  uint8_t _padding[12];       /**< Definiertes statisches Padding für 64-Byte Alignment */
 } wal_sector_header_t;
 
 /**
@@ -78,6 +81,8 @@ typedef union {
 _Static_assert(
     sizeof(wal_sector_header_aligned_t) % 8 == 0,
     "GAP-C03: WAL Sector Header padding violates hardware alignment!");
+_Static_assert(sizeof(wal_tmr_payload_t) == 36, "ABI Drift: TMR payload must be exactly 36 bytes!");
+_Static_assert(sizeof(wal_sector_header_t) == 64, "ABI Drift: WAL Header must be exactly 64 bytes!");
 
 /**
  * @brief Der Payload eines einzelnen angehängten WAL-Eintrags.

@@ -33,9 +33,9 @@ static inline toob_reset_reason_t translate_reset_reason(reset_reason_t internal
 /* 
  * Architektur-Notiz: Duplicate Symbol Isolation (Zero-Bloat Mocking)
  * Im M-SANDBOX Unit-Test allokiert hier boot_main.c diese Sektion physisch.
- * libtoob.a referenziert diese dann passiv im Test-Executable. Dieser Aufbau ist intentional 
- * und fungiert als exklusiver Provider der MOCK-Sektion, um die Speicherisolation 
- * (`TOOB_NOINIT` via `libtoob_types.h`) ohne doppelte C-Modifikatoren testen zu können!
+ * libtoob.a referenziert diese dann passiv im Test-Executable. Im Production-Build 
+ * liegen Toob-Boot und Libtoob isoliert in getrennten RAM-Bänken, das Compiler-Duplicate
+ * entfällt also durch Link-Time Isolation (es sind separate Binaries).
  */
 __attribute__((section(".noinit"))) toob_handoff_t toob_handoff_state;
 __attribute__((section(".noinit"))) toob_boot_diag_t toob_diag_state;
@@ -238,7 +238,13 @@ init_success:
    * ==============================================================================
    */
   if (status != BOOT_OK) {
+    memset(&toob_diag_state, 0, sizeof(toob_diag_state));
+    toob_diag_state.struct_version = TOOB_DIAG_STRUCT_VERSION;
     toob_diag_state.last_error_code = status;
+    toob_diag_state.boot_duration_ms = boot_duration_ms;
+    size_t diag_hash_len = offsetof(toob_boot_diag_t, crc32_trailer);
+    toob_diag_state.crc32_trailer = compute_boot_crc32((const uint8_t*)&toob_diag_state, diag_hash_len);
+
     boot_panic(platform, status);
     return status;
   }
@@ -247,11 +253,19 @@ init_success:
    * Strenger Bounds Check für den Ziel-Vektor. Verhindert Exekutions-Sprünge ins
    * bodenlose Nichts oder in invaliden SRAM. P10 Rule: Check immediately!
    */
-  if (target_out->active_entry_point >= CHIP_FLASH_TOTAL_SIZE ||
+  if (target_out->active_entry_point < CHIP_FLASH_BASE_ADDR ||
+      target_out->active_entry_point >= CHIP_FLASH_BASE_ADDR + CHIP_FLASH_TOTAL_SIZE ||
       target_out->active_image_size == 0 ||
       /* Subtraktiver Check umgeht `uint32_t` Wrapping wenn OOB! */
-      target_out->active_image_size > (CHIP_FLASH_TOTAL_SIZE - target_out->active_entry_point)) {
+      target_out->active_image_size > (CHIP_FLASH_TOTAL_SIZE - (target_out->active_entry_point - CHIP_FLASH_BASE_ADDR))) {
+    
+    memset(&toob_diag_state, 0, sizeof(toob_diag_state));
+    toob_diag_state.struct_version = TOOB_DIAG_STRUCT_VERSION;
     toob_diag_state.last_error_code = BOOT_ERR_FLASH_BOUNDS;
+    toob_diag_state.boot_duration_ms = boot_duration_ms;
+    size_t diag_hash_len = offsetof(toob_boot_diag_t, crc32_trailer);
+    toob_diag_state.crc32_trailer = compute_boot_crc32((const uint8_t*)&toob_diag_state, diag_hash_len);
+
     boot_panic(platform, BOOT_ERR_FLASH_BOUNDS);
     return BOOT_ERR_FLASH_BOUNDS;
   }
@@ -269,11 +283,22 @@ init_success:
    */
   memset(&toob_diag_state, 0, sizeof(toob_diag_state));
   memset(&toob_handoff_state, 0, sizeof(toob_handoff_state));
+  toob_diag_state.struct_version = TOOB_DIAG_STRUCT_VERSION;
   toob_diag_state.boot_duration_ms = boot_duration_ms;
 
+  wal_tmr_payload_t tmr = {0};
+  if (boot_journal_get_tmr(platform, &tmr) == BOOT_OK) {
+      toob_diag_state.edge_recovery_events = tmr.boot_failure_counter;
+      toob_handoff_state.boot_failure_count = tmr.boot_failure_counter;
+  }
+
   /* Basic Handoff Population */
-  toob_handoff_state.magic = TOOB_STATE_COMMITTED; /* 0x55AA55AA */
-  toob_handoff_state.struct_version = TOOB_DIAG_STRUCT_VERSION;
+  if (target_out->is_tentative_boot) {
+      toob_handoff_state.magic = TOOB_STATE_TENTATIVE; /* 0xAAAA5555 */
+  } else {
+      toob_handoff_state.magic = TOOB_STATE_COMMITTED; /* 0x55AA55AA */
+  }
+  toob_handoff_state.struct_version = TOOB_HANDOFF_STRUCT_VERSION;
   toob_handoff_state.boot_nonce = target_out->generated_nonce;
   toob_handoff_state.reset_reason = translate_reset_reason(platform->clock->get_reset_reason());
   toob_handoff_state.booted_partition = TOOB_PARTITION_APP; /* Gemäß concept_fusion zwingend OS In-Place Execution! */
@@ -286,6 +311,9 @@ init_success:
 
   size_t hash_len = offsetof(toob_handoff_t, crc32_trailer);
   toob_handoff_state.crc32_trailer = compute_boot_crc32((const uint8_t*)&toob_handoff_state, hash_len);
+
+  size_t diag_hash_len_succ = offsetof(toob_boot_diag_t, crc32_trailer);
+  toob_diag_state.crc32_trailer = compute_boot_crc32((const uint8_t*)&toob_diag_state, diag_hash_len_succ);
 
   /*
    * ==============================================================================

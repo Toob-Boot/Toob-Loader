@@ -8,6 +8,7 @@
 #include "boot_swap.h"
 #include "boot_journal.h"
 #include "boot_config_mock.h"
+#include "boot_crc32.h"
 #include <string.h>
 
 /**
@@ -30,7 +31,7 @@ static uint8_t swap_buf[CHIP_FLASH_MAX_SECTOR_SIZE];
  * @param length   Total length to erase (must align with sector ends)
  * @return boot_status_t BOOT_OK on success, error otherwise.
  */
-static boot_status_t boot_swap_erase_safe(const boot_platform_t *platform, uint32_t addr, size_t length) {
+boot_status_t boot_swap_erase_safe(const boot_platform_t *platform, uint32_t addr, size_t length) {
     if (!platform || !platform->flash || !platform->flash->erase_sector || !platform->flash->get_sector_size) {
         return BOOT_ERR_INVALID_ARG;
     }
@@ -49,7 +50,7 @@ static boot_status_t boot_swap_erase_safe(const boot_platform_t *platform, uint3
     const uint32_t MAX_ERASE_LOOPS = 100000; 
 
     while (current_addr < end_addr) {
-        if (loop_guard++ > MAX_ERASE_LOOPS) {
+        if (++loop_guard >= MAX_ERASE_LOOPS) {
             return BOOT_ERR_FLASH_HW; /* P10 compliance guard */
         }
 
@@ -101,7 +102,10 @@ typedef enum {
     SWAP_STATE_READ_ONLY = 1
 } swap_state_t;
 
-/** @brief In-memory guard for EOL survival mode (GAP-C07) */
+/** 
+ * @brief In-memory guard for EOL survival mode (GAP-C07) 
+ *        Lock is transient and resets to NORMAL on hardware reboot.
+ */
 static swap_state_t current_swap_state = SWAP_STATE_NORMAL;
 
 /**
@@ -139,7 +143,7 @@ static boot_status_t boot_swap_check_eol_survival(const boot_platform_t *platfor
     return BOOT_OK;
 }
 
-boot_status_t boot_swap_apply(const boot_platform_t *platform, uint32_t src_base, uint32_t dest_base, uint32_t length) {
+boot_status_t boot_swap_apply(const boot_platform_t *platform, uint32_t src_base, uint32_t dest_base, uint32_t length, boot_dest_slot_t dest_slot, wal_entry_payload_t *open_txn) {
     if (!platform || !platform->flash || !platform->flash->read || !platform->flash->write || !platform->flash->get_sector_size) {
         return BOOT_ERR_INVALID_ARG;
     }
@@ -168,12 +172,16 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform, uint32_t src_base
     }
 
     uint32_t current_offset = 0;
+    if (open_txn != NULL) {
+        current_offset = open_txn->delta_chunk_id;
+    }
+    
     const uint32_t MAX_ERASE_LOOPS = 100000;
     uint32_t loop_guard = 0;
     uint32_t erased_sectors_count = 0;
 
     while (current_offset < length) {
-        if (loop_guard++ > MAX_ERASE_LOOPS) {
+        if (++loop_guard >= MAX_ERASE_LOOPS) {
             return BOOT_ERR_FLASH_HW; /* P10 compliance guard */
         }
 
@@ -187,18 +195,24 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform, uint32_t src_base
             return BOOT_ERR_FLASH_HW;
         }
 
-        /* Strict runtime sector alignment check for destination.
+        /* Strict runtime sector alignment check for destination and source.
            Protects against erasing neighbor partitions. (Source read does not mandate strict parity) */
         if (current_dest % dest_sec_size != 0) {
             return BOOT_ERR_FLASH_ALIGN;
         }
 
+        size_t src_sec_size = 0;
+        status = platform->flash->get_sector_size(current_src, &src_sec_size);
+        if (status != BOOT_OK || src_sec_size == 0 || (current_src % src_sec_size != 0)) {
+            return BOOT_ERR_FLASH_HW;
+        }
+
         /* Sector cannot be larger than our static swap buffer */
-        if (dest_sec_size > CHIP_FLASH_MAX_SECTOR_SIZE) {
+        if (dest_sec_size > CHIP_FLASH_MAX_SECTOR_SIZE || src_sec_size > CHIP_FLASH_MAX_SECTOR_SIZE) {
             return BOOT_ERR_FLASH_HW; 
         }
 
-        size_t chunk_len = dest_sec_size;
+        size_t chunk_len = (src_sec_size > dest_sec_size) ? src_sec_size : dest_sec_size;
         if (current_offset + chunk_len > length) {
             chunk_len = length - current_offset; 
             /* Enforce write_align for the final partial sector write */
@@ -207,68 +221,96 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform, uint32_t src_base
             }
         }
 
-        /* 2. Read from src into local static swap_buf. */
-        status = platform->flash->read(current_src, swap_buf, chunk_len);
-        if (status != BOOT_OK) {
-            return status;
-        }
-
-        /* (1) invoke WDT kick after reading into swap_buf */
-        if (platform->wdt) {
-            platform->wdt->kick();
-        }
-
-        /* 3. Erase dest sector (with WDT kicks via boot_swap_erase_safe). */
-        status = boot_swap_erase_safe(platform, current_dest, dest_sec_size);
-        if (status != BOOT_OK) {
-            return status;
-        }
-        erased_sectors_count++;
-
-        /* (2) invoke WDT kick after erasing the destination sector */
-        if (platform->wdt) {
-            platform->wdt->kick();
-        }
-
-        /* 4. Write swap_buf to dest sector. */
-        status = platform->flash->write(current_dest, swap_buf, chunk_len);
-        if (status != BOOT_OK) {
-            return status;
-        }
-
-        /* (3) invoke WDT kick after writing the buffer to the destination. */
-        if (platform->wdt) {
-            platform->wdt->kick();
-        }
-
-        /* 5. Read-Back Verify (Zero allocation via 32-byte stack window).
-           Detects silent write-errors or ECC weaknesses instantly. */
-        uint32_t verify_offset = 0;
-        uint8_t verify_buf[32];
-        while (verify_offset < chunk_len) {
-            /* WDT Kick to prevent starvation on very large sectors / slow flash (GAP-C02) */
-            if (platform->wdt) {
-                platform->wdt->kick();
+        /* 2. THREE-WAY IN-PLACE REVERSE SWAP LOGIC (GAP-C08)
+         * Tearing-Safe via Scratch-Metadata! 
+         */
+        uint32_t scratch_meta_addr = CHIP_SCRATCH_SECTOR_ABS_ADDR + CHIP_FLASH_MAX_SECTOR_SIZE - sizeof(scratch_meta_t);
+        
+        typedef struct {
+            uint32_t magic;
+            uint32_t offset;
+        } scratch_meta_t;
+        const uint32_t SCRATCH_META_MAGIC = 0x5C8A7C8A;
+        
+        scratch_meta_t meta;
+        bool skip_phase_a = false;
+        
+        if (platform->flash->read(scratch_meta_addr, (uint8_t*)&meta, sizeof(meta)) == BOOT_OK) {
+            if (meta.magic == SCRATCH_META_MAGIC && meta.offset == current_offset) {
+                skip_phase_a = true; /* Phase A completed successfully in a previous boot before Phase B/C finished */
             }
+        }
+         
+        /* Phase A: Backup Dest -> Scratch */
+        if (!skip_phase_a) {
+            status = platform->flash->read(current_dest, swap_buf, chunk_len);
+            if (status != BOOT_OK) return status;
+            if (platform->wdt) platform->wdt->kick();
             
-            uint32_t cmp_len = (chunk_len - verify_offset > sizeof(verify_buf)) ? sizeof(verify_buf) : (chunk_len - verify_offset);
-            status = platform->flash->read(current_dest + verify_offset, verify_buf, cmp_len);
-            if (status != BOOT_OK || memcmp(swap_buf + verify_offset, verify_buf, cmp_len) != 0) {
-                return BOOT_ERR_FLASH_HW; /* Silent corruption detected in hardware! */
-            }
-            verify_offset += cmp_len;
+            status = boot_swap_erase_safe(platform, CHIP_SCRATCH_SECTOR_ABS_ADDR, chunk_len);
+            if (status != BOOT_OK) return status;
+            if (platform->wdt) platform->wdt->kick();
+            
+            status = platform->flash->write(CHIP_SCRATCH_SECTOR_ABS_ADDR, swap_buf, chunk_len);
+            if (status != BOOT_OK) return status;
+            if (platform->wdt) platform->wdt->kick();
+            
+            /* Commit Phase A Completion to Meta Sector (Brownout Checkpoint without WAL spam) 
+             * No erase needed here since boot_swap_erase_safe above erased the entire sector,
+             * and our meta struct resides at the very end of it. */
+            meta.magic = SCRATCH_META_MAGIC;
+            meta.offset = current_offset;
+            platform->flash->write(scratch_meta_addr, (uint8_t*)&meta, sizeof(meta));
+        }
+        
+        /* Phase B: Copy Src -> Dest */
+        status = platform->flash->read(current_src, swap_buf, chunk_len);
+        if (status != BOOT_OK) return status;
+        if (platform->wdt) platform->wdt->kick();
+        
+        uint32_t crc_new = compute_boot_crc32(swap_buf, chunk_len);
+        
+        status = boot_swap_erase_safe(platform, current_dest, chunk_len);
+        if (status != BOOT_OK) return status;
+        erased_sectors_count++;
+        if (platform->wdt) platform->wdt->kick();
+        
+        status = platform->flash->write(current_dest, swap_buf, chunk_len);
+        if (status != BOOT_OK) return status;
+        if (platform->wdt) platform->wdt->kick();
+
+        /* Phase C: Copy Scratch -> Src */
+        status = platform->flash->read(CHIP_SCRATCH_SECTOR_ABS_ADDR, swap_buf, chunk_len);
+        if (status != BOOT_OK) return status;
+        if (platform->wdt) platform->wdt->kick();
+        
+        status = boot_swap_erase_safe(platform, current_src, chunk_len);
+        if (status != BOOT_OK) return status;
+        if (platform->wdt) platform->wdt->kick();
+        
+        status = platform->flash->write(current_src, swap_buf, chunk_len);
+        if (status != BOOT_OK) return status;
+        if (platform->wdt) platform->wdt->kick();
+
+        /* Optimierter Read-Back: Wir prüfen einfach, ob Dest den exakten CRC des Updates aufweist! */
+        platform->flash->read(current_dest, swap_buf, chunk_len);
+        if (compute_boot_crc32(swap_buf, chunk_len) != crc_new) {
+            return BOOT_ERR_FLASH_HW; /* Silent Hardware Corruption detected */
         }
 
         current_offset += chunk_len;
     }
 
-    /* GAP-C07: Wear Leveling Tracking. Update the TMR counters to reflect the physical wear on flash.
-       We primarily increment the app_slot_erase_counter since boot_swap_apply() typically overwrites the App slot. */
+    /* GAP-C07: Wear Leveling Tracking. Update the TMR counters to reflect the physical wear on flash. */
     if (erased_sectors_count > 0) {
         wal_tmr_payload_t tmr;
         boot_status_t tmr_status = boot_journal_get_tmr(platform, &tmr);
         if (tmr_status == BOOT_OK) {
-            tmr.app_slot_erase_counter += erased_sectors_count;
+            if (dest_slot == BOOT_DEST_SLOT_APP) {
+                tmr.app_slot_erase_counter += erased_sectors_count;
+            } else if (dest_slot == BOOT_DEST_SLOT_STAGING) {
+                tmr.staging_slot_erase_counter += erased_sectors_count;
+            }
             
             boot_status_t update_status = boot_journal_update_tmr(platform, &tmr);
             if (update_status != BOOT_OK) {

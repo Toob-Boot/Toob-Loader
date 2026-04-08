@@ -78,6 +78,7 @@ add_library(toob_core STATIC
     core/boot_state.c
     core/boot_journal.c
     core/boot_verify.c
+    core/boot_crc32.c
     core/boot_merkle.c
     core/boot_swap.c
     core/boot_delta.c

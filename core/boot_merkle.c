@@ -101,6 +101,7 @@ boot_status_t boot_merkle_verify_stream(const boot_platform_t* platform,
     /* 5. Die Streaming Loop (GAP-08) */
     /* Generischer Hash-Context auf dem Stack (Opaque Buffer abstrahiert HW/SW Varianten)
      * P10 Rule: Max erlaubte Stack-Allokation ~256 Bytes für State-Maschinen. */
+    _Static_assert(BOOT_MERKLE_MAX_CTX_SIZE % sizeof(uint64_t) == 0, "BOOT_MERKLE_MAX_CTX_SIZE must be exactly divisible by 8 for correct array sizing");
     uint64_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE / sizeof(uint64_t)];
     memset(hash_ctx, 0, sizeof(hash_ctx));
 
@@ -135,6 +136,8 @@ boot_status_t boot_merkle_verify_stream(const boot_platform_t* platform,
         if (stat != BOOT_OK) goto cleanup_err;
 
         uint8_t computed_hash[BOOT_MERKLE_HASH_LEN];
+        memset(computed_hash, 0, sizeof(computed_hash));
+        
         size_t digest_len = BOOT_MERKLE_HASH_LEN;
         stat = platform->crypto->hash_finish(hash_ctx, computed_hash, &digest_len);
         

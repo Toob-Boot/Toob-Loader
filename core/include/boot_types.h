@@ -43,6 +43,7 @@ typedef enum {
     BOOT_ERR_FLASH_NOT_ERASED  = 0xEB5B5B5B,  /**< Zielsektor wurde vor Write nicht gelöscht */
     BOOT_ERR_COUNTER_EXHAUSTED = 0xEC6C6C6C,  /**< OTP/eFuse Counter am Limit */
     BOOT_ERR_ECC_HARDFAULT     = 0xED7D7D7D,  /**< FATAL: NMI Unkorrigierbarer Bit-Rot (hals.md Z.47) */
+    BOOT_ERR_FLASH_HW          = 0xEE8E8E8E,  /**< FATAL: Hardware Flash Controller Error / Sektor-Mismatch */
     
     /* Core State-Machine Errors */
     BOOT_ERR_NOT_FOUND         = 0xF1818181,  /**< Erwartetes Image/Metadata nicht gefunden */

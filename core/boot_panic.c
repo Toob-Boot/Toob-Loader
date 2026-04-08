@@ -135,7 +135,7 @@ _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason)
         enter_sos_loop(platform); /* Kein Crypto für 2FA -> Terminal */
     }
 
-    size_t dslc_len = 0;
+    size_t dslc_len = 64; /* Fix: Initialize with physical output buffer max limit */
     if (platform->crypto->read_dslc) {
         boot_status_t d_status = platform->crypto->read_dslc(challenge_buf + 32, &dslc_len);
         if (d_status == BOOT_ERR_NOT_SUPPORTED || dslc_len == 0) {
@@ -318,19 +318,35 @@ _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason)
                     while (1) { } 
                 }
                 
+                /* Padding Alignment Guard for the final Chunk. 
+                 * Verhindert ECC Hardware-Exceptions beim Flashen ungerader Bytegrößen. */
+                uint8_t align = platform->flash->write_align;
+                if (align == 0) align = 1;
+                
+                size_t aligned_len = payload_len;
+                uint8_t align_mod = payload_len % align;
+                if (align_mod != 0) {
+                    size_t padding = align - align_mod;
+                    if (aligned_len + padding > sizeof(chunk_buf)) {
+                        enter_sos_loop(platform);
+                    }
+                    memset(chunk_buf + payload_len, platform->flash->erased_value, padding);
+                    aligned_len += padding;
+                }
+                
                 /* Bounds Guard: Verhindere Flash Overflow (CVE Prevention) via Subtraktion */
                 /* Reviewer-Note (While-Bound): Diese Schleife ist implizit sicher gebunden!
                  * Leere Chunks (payload_len == 0) blockieren das Erhöhen. Gefüllte Chunks erhöhen 
                  * `flash_offset` iterativ um `aligned_len >= 1`. Sobald `flash_offset` in die Nähe
                  * der maximalen App-Slot-Größe wandert, löst genau dieser Check den Abbruch aus. */
-                if (payload_len > CHIP_APP_SLOT_SIZE || 
-                    flash_offset > CHIP_APP_SLOT_SIZE - payload_len ||
+                if (aligned_len > CHIP_APP_SLOT_SIZE || 
+                    flash_offset > CHIP_APP_SLOT_SIZE - aligned_len ||
                     CHIP_STAGING_SLOT_ABS_ADDR > UINT32_MAX - CHIP_APP_SLOT_SIZE) {
                     enter_sos_loop(platform); 
                 }
                 
                 uint32_t addr = CHIP_STAGING_SLOT_ABS_ADDR + flash_offset;
-                size_t write_end = addr + payload_len;
+                size_t write_end = addr + aligned_len;
                 
                 /* On-Demand Sequential Erase */
                 while (!staging_erased || current_sector_end < write_end) {
@@ -358,21 +374,6 @@ _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason)
                         enter_sos_loop(platform);
                     }
                 }
-                
-                /* Padding Alignment Guard for the final Chunk. 
-                 * Verhindert ECC Hardware-Exceptions beim Flashen ungerader Bytegrößen. */
-                uint8_t align = platform->flash->write_align;
-                if (align == 0) align = 1;
-                
-                size_t aligned_len = payload_len;
-                uint8_t align_mod = payload_len % align;
-                if (align_mod != 0) {
-                    size_t padding = align - align_mod;
-                    if (aligned_len + padding > sizeof(chunk_buf)) {
-                        enter_sos_loop(platform);
-                    }
-                    memset(chunk_buf + payload_len, platform->flash->erased_value, padding);
-                    aligned_len += padding;
                 }
                 
                 /* Flash Write */

@@ -1,16 +1,10 @@
 param (
-    [string]$OutFile = "libtoob_review_export.txt"
+    [string]$OutFile = "full_review_export.txt"
 )
 
 $ExportItems = @(
     "libtoob",
-    "core/boot_state.c",
-    "core/include/boot_state.h",
-    "core/boot_swap.c",
-    "core/include/boot_swap.h",
-    "core/boot_journal.c",
-    "core/include/boot_journal.h",
-    "core/include/boot_types.h"
+    "core"
 )
 
 # Create or clear the output file

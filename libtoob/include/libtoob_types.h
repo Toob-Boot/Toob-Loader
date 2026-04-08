@@ -31,7 +31,9 @@ typedef enum {
     TOOB_ERR_FLASH      = 0xE4401CAE,
     TOOB_ERR_INVALID_ARG= 0xE5501CAE,
     TOOB_ERR_VERIFY     = 0xE6601CAE, /* RAM Korruption / CRC-32 Mismatch */
-    TOOB_ERR_REQUIRES_RESET = 0xE7701CAE /* Fataler WAL Lock (Reset zwingend) */
+    TOOB_ERR_REQUIRES_RESET = 0xE7701CAE, /* Fataler WAL Lock (Reset zwingend) */
+    TOOB_ERR_COUNTER_EXHAUSTED = 0xE8801CAE, 
+    TOOB_ERR_FLASH_HW   = 0xE9901CAE
 } toob_status_t;
 
 /* Partition Layout für boot_target Auswertung */
@@ -77,6 +79,9 @@ typedef struct __attribute__((aligned(8))) {
 _Static_assert(sizeof(toob_handoff_t) == 40, "toob_handoff_t size breach - must be exactly 40 bytes");
 _Static_assert(sizeof(toob_handoff_t) % 8 == 0, "toob_handoff_t alignment breach - must be 8-byte aligned");
 _Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 36, "crc32_trailer ABI offset drift detected");
+
+/* Konstante für struct_version des Handoff-Headers zur Vermeidung von ABI-Drift */
+#define TOOB_HANDOFF_STRUCT_VERSION 0x01000000
 
 /*
  * Cross-Compiler Abstraktion für die ".noinit" Linker-Section.
@@ -212,6 +217,7 @@ typedef struct {
     uint32_t erase_count;     /**< Tracks sector wear leveling */
     uint8_t  _reserved_tmr_space[36]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
     uint32_t header_crc32;    /**< Sichert den Sector-Header */
+    uint8_t  _padding[12];    /**< Definiertes statisches Padding für 64-Byte Alignment */
 } toob_wal_sector_header_t;
 
 typedef union {

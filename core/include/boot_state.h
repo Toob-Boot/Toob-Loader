@@ -22,6 +22,7 @@ typedef struct {
     uint32_t net_search_accum_ms; /**< Extrahierter Netzwerk-Suchzeit Akkumulator */
     uint64_t generated_nonce;     /**< Dem OS bereitzustellende Anti-Replay Nonce */
     bool boot_recovery_os;        /**< Wahr, wenn das Recovery-OS (Fallback) gebootet wird */
+    bool is_tentative_boot;       /**< Exported True if the boot is a trial (TXN_COMMIT) and unconfirmed */
 } boot_target_config_t;
 
 /**
@@ -36,36 +37,34 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
 
 /*
  * ==============================================================================
- * TODO (Phase 3) - Core Implementation Requirements (to be fulfilled in boot_state.c):
+ * STATE MACHINE LIFECYCLE (P10 Hardened)
  * ==============================================================================
- * 1. RECONSTRUCTION:
- *    Read WAL via boot_journal_reconstruct_txn() & get TMR states (primary_slot_id, 
- *    boot_failure_counter).
+ * Die boot_state_run() Orchestrierung führt folgende Phasen strikt sequentiell aus:
  *
- * 2. OS-CONFIRMATION (CONFIRMED):
- *    If WAL contains WAL_INTENT_CONFIRM_COMMIT:
- *    - Update TMR: Reset boot_failure_counter = 0.
- *
- * 3. PIPELINE STAGE 1 (STAGING -> TESTING):
- *    If WAL contains WAL_INTENT_UPDATE_PENDING:
- *    - Trigger M-VERIFY (Envelope-First: Verify SUIT Signature over Staging slot,
- *      then verify Merkle-Chunks).
- *    - If valid, advance to M-SWAP. If invalid, reject update and return to IDLE.
- *
- * 4. PIPELINE STAGE 2 (SWAP & COMMIT):
- *    - Trigger M-SWAP to execute the WDT-safe In-Place overwrite.
- *    - Append WAL_INTENT_TXN_COMMIT.
- *
- * 5. RECOVERY/FAILURE HANDLING (ROLLBACK):
- *    - If boot_failure_counter > 0 and no CONFIRM_COMMIT received:
- *    - Escalate to M-ROLLBACK to evaluate Epochs / Fail-Counts.
- *    - Includes Support for edge_unattended_mode (Exponential Sleep Backoff).
- *
- * 6. FINAL HALT (HANDOFF):
- *    - Read toob_image_header_t (TOOB_MAGIC_HEADER) from chosen app_slot.
- *    - Generate 64-Bit expected_nonce via platform->crypto->random().
- *    - Append WAL_INTENT_NONCE_INTENT into the Journal.
- *    - Populate target_out struct for boot_main() to perform hal_deinit() and jump.
+ * 1. RECONSTRUCTION & ABORT-HEALING:
+ *    - Fährt das WAL-Window hoch (boot_journal_init).
+ *    - Liest die hochsichere TMR-Payload inkl. boot_failure_counter.
+ *    - Heilt unvollständige Flash-Erase Brownouts.
+ * 
+ * 2. TRANSACTION CONFIRMATION:
+ *    - Handelt CONFIRM_COMMIT (vom OS) und RECOVERY_RESOLVED (vom SOS-Fallback).
+ *    - Validiert die kryptografische active_nonce aus dem TMR gegen Replay-Angriffe.
+ *    - Wenn valid: Setzt TMR Fail-Counter deterministisch auf 0 zurück.
+ * 
+ * 3. FALLBACK CASCADES (M-ROLLBACK):
+ *    - Verfolgt System-Crashes (WDT, HardFault).
+ *    - Bei TXN_COMMIT Crashes → Triggered In-Place Reverse-Swap (Hard Rollback).
+ *    - Bei wiederholten Crashes → Flieht in das Recovery-OS oder triggert Backoff-Sleep.
+ * 
+ * 4. UPDATE EXECUTION (M-VERIFY & M-SWAP):
+ *    - Verifiziert Updates ENVELOPE-FIRST (Ed25519 Sign-then-Hash) gegen Voltage-Glitches.
+ *    - Triggert boot_swap_apply() für In-Place Sector Overwrites mit WDT-Suspension.
+ *    - Persistiert TXN_COMMIT atomar ins WAL.
+ * 
+ * 5. HANDOFF PREPARATION:
+ *    - Ermittelt den Startvektor (Vector Table Adresse).
+ *    - Generiert eine neue krypografisch starke 64-Bit Nonce für den OS .noinit Start.
+ *    - Verankert die neue Nonce sicher im physikalisch isolierten TMR.
  * ==============================================================================
  */
 
