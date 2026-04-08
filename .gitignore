@@ -27,3 +27,7 @@ _deps/
 coverage/
 *.gcda
 *.gcno
+
+# Export Scripts and Review Files
+*.ps1
+*_review_export.txt
