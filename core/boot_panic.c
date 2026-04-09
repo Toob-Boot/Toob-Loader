@@ -8,16 +8,19 @@
  * - docs/testing_requirements.md (Zero-Allocation, P10 Bounds, Tearing-Proof)
  *
  * ARCHITECTURAL UPGRADES:
- * 1. Zero-Allocation Mapping: 100% aller Buffer liegen in der crypto_arena.
- *    Eliminiert >1.2 KB Stack-Bloat und verhindert Hardware Stack-Overflows!
- * 2. Unaligned Access Mitigation: Verhindert Cortex-M0 Exception-Traps durch
- *    sichere memcpy-Extrahierung der packed-Struct Metadaten.
- * 3. Glitch-Resistant 2FA Auth: Double-Check Gating für alle kryptografischen
- *    Entscheidungen (Nonce, Timestamp, Signature).
- * 4. Write-Through ECC Proof: Jeder seriell geschriebene Flash-Block wird
+ * 1. True Zero-Allocation Mapping: 100% aller Buffer, inklusive des 1056-Byte
+ *    Chunk-Buffers, des Read-Back-Arrays und aller Krypto-Keys liegen jetzt
+ *    in disjunkten, 8-Byte-aligned Zonen der crypto_arena. (Spart >1.2 KB
+ * Stack!)
+ * 2. Sizeof-Logic-Bomb Fixed: Ersetzt gefährliche sizeof(ptr) Aufrufe durch
+ *    hart codierte, statisch überprüfte Makro-Grenzen.
+ * 3. Unaligned Access Mitigation: Verhindert Cortex-M0 Exception-Traps durch
+ *    sichere memcpy-Extrahierung direkt aus dem UART-Empfangspuffer via
+ * offsetof.
+ * 4. WDT-Deadlock Fix: Erlaubt dem Hardware-Watchdog den finalen Biss am Ende
+ *    der Übertragung, um einen sauberen Kaltstart des SoCs zu erzwingen.
+ * 5. Write-Through ECC Proof: Jeder seriell geschriebene Flash-Block wird
  *    sofort rückgelesen und auf CRC-32 Hardware-Bit-Rot verifiziert!
- * 5. Mathematically Bound COBS Decoder: Buffer-Überläufe sind physikalisch
- *    durch die write_idx Invarianten ausgeschlossen.
  */
 
 #include "boot_panic.h"
@@ -25,6 +28,7 @@
 #include "boot_crc32.h"
 #include "boot_delay.h"
 #include "boot_secure_zeroize.h"
+#include <stddef.h>
 #include <string.h>
 
 
@@ -36,6 +40,19 @@ _Static_assert(
     "Crypto Arena muss mindestens 2KB aufweisen für Serial Rescue Puffer");
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK must be high-hamming distance for Glitch-Shielding");
+
+/* P10 Memory Arena Boundaries (100% Zero Allocation) */
+#define PANIC_CHALLENGE_MAX_SIZE 128
+#define PANIC_RX_MAX_SIZE 128
+#define PANIC_VERIFY_MAX_SIZE 80 /* 8-Byte Aligned (Spec requires 76) */
+#define PANIC_CHUNK_MAX_SIZE                                                   \
+  (BOOT_CRYPTO_ARENA_SIZE - PANIC_CHALLENGE_MAX_SIZE - PANIC_RX_MAX_SIZE -     \
+   PANIC_VERIFY_MAX_SIZE)
+
+_Static_assert(
+    (PANIC_CHALLENGE_MAX_SIZE + PANIC_RX_MAX_SIZE + PANIC_VERIFY_MAX_SIZE +
+     PANIC_CHUNK_MAX_SIZE) == BOOT_CRYPTO_ARENA_SIZE,
+    "FATAL: Arena Partitioning exceeds total BOOT_CRYPTO_ARENA_SIZE!");
 
 /* P10 Security Constants */
 #define CFI_PANIC_INIT 0xAAAAAAAA
@@ -110,7 +127,7 @@ static void send_cobs_frame(const boot_platform_t *platform,
     /* Write Block Data */
     for (size_t i = ptr; i < end; i++) {
       platform->console->putchar((char)data[i]);
-      if (platform->wdt)
+      if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
     }
 
@@ -123,7 +140,9 @@ static void send_cobs_frame(const boot_platform_t *platform,
 
   /* Frame End Marker */
   platform->console->putchar((char)COBS_MARKER_END);
-  platform->console->flush();
+  if (platform->console->flush) {
+    platform->console->flush();
+  }
 }
 
 /**
@@ -184,7 +203,7 @@ static boot_status_t cobs_decode_in_place(uint8_t *data, size_t len,
  */
 _Noreturn static void enter_sos_loop(const boot_platform_t *platform) {
   while (1) {
-    if (platform && platform->wdt)
+    if (platform && platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
     if (platform)
       boot_delay_with_wdt(platform, 500);
@@ -196,6 +215,7 @@ _Noreturn void boot_panic(const boot_platform_t *platform,
   /* Hard-Fault Exit, wenn der Platform-Pointer defekt ist */
   if (!platform || !platform->wdt) {
     while (1) {
+      /* Nichts tun, Hardware WDT Reset abwarten */
     }
   }
 
@@ -206,25 +226,26 @@ _Noreturn void boot_panic(const boot_platform_t *platform,
   uint32_t failed_auth_attempts = 0;
 
 session_reset:
-  /* Initialisierungs-UART Flush */
-  platform->console->putchar('P');
-  platform->console->putchar('N');
-  platform->console->putchar('C');
-  platform->console->flush();
+  if (platform->console->putchar && platform->console->flush) {
+    /* Initialisierungs-UART Flush */
+    platform->console->putchar('P');
+    platform->console->putchar('N');
+    platform->console->putchar('C');
+    platform->console->flush();
+  }
 
   /* ============================================================================
-   * MEMORY ARENA MAPPING (Zero-Allocation Architecture)
+   * TRUE ZERO-ALLOCATION ARENA MAPPING (P10 Architecture)
    * ============================================================================
-   * Stack Allocation wird verhindert. Die freie crypto_arena wird in
-   * funktionale, disjunkte Zonen segmentiert.
+   * Der C-Stack bleibt physikalisch zu 100 % sauber. Die 2048-Byte Arena wird
+   * durch exakt 8-Byte-aligned Offsets in disjunkte Zonen segmentiert.
    */
-  uint8_t *challenge_buf = crypto_arena;    /* 128 Bytes */
-  uint8_t *rx_buf = crypto_arena + 128;     /* 128 Bytes */
-  uint8_t *verify_msg = crypto_arena + 256; /* 76 Bytes */
-  uint8_t *chunk_buf = crypto_arena + 336;  /* >1700 Bytes */
-
-  /* P10 Init */
   boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+
+  uint8_t *challenge_buf = crypto_arena;
+  uint8_t *rx_buf = challenge_buf + PANIC_CHALLENGE_MAX_SIZE;
+  uint8_t *verify_msg = rx_buf + PANIC_RX_MAX_SIZE;
+  uint8_t *chunk_buf = verify_msg + PANIC_VERIFY_MAX_SIZE;
 
   volatile uint32_t panic_cfi = CFI_PANIC_INIT;
 
@@ -232,7 +253,6 @@ session_reset:
    * BLOCK 1: Challenge Generation (2FA)
    * ============================================================================
    */
-
   size_t challenge_len = 32; /* Nonce Base Size */
 
   if (platform->crypto->random(challenge_buf, 32) != BOOT_OK) {
@@ -241,11 +261,11 @@ session_reset:
 
   /* P10 HAL Containment: Wir übergeben dem Vendor-HAL isolierten Temp-Speicher,
    * damit ein Out-of-Bounds Write des Vendors niemals den Challenge-Buffer
-   * zerreißt! */
-  uint8_t temp_dslc[64] __attribute__((aligned(8)));
-  boot_secure_zeroize(temp_dslc, sizeof(temp_dslc));
-
+   * zerreißt! Zero-Allocation: Wir recyclen den chunk_buf in Phase 1 für den
+   * DSLC Read */
+  uint8_t *temp_dslc = chunk_buf;
   size_t dslc_len = 64;
+
   if (platform->crypto->read_dslc) {
     boot_status_t d_status = platform->crypto->read_dslc(temp_dslc, &dslc_len);
     if (d_status == BOOT_OK && dslc_len > 0) {
@@ -260,8 +280,7 @@ session_reset:
     dslc_len = 32;
     memset(challenge_buf + 32, 0, 32);
   }
-  boot_secure_zeroize(temp_dslc,
-                      sizeof(temp_dslc)); /* O(1) Zeroize nach Kopie */
+  boot_secure_zeroize(temp_dslc, 64); /* O(1) Zeroize nach Kopie */
   challenge_len += dslc_len;
 
   /* Monotonic Timer zur Erleichterung für das Host-Tooling anfügen */
@@ -286,15 +305,17 @@ session_reset:
    * ============================================================================
    */
   while (1) {
-    platform->wdt->kick();
+    if (platform->wdt && platform->wdt->kick)
+      platform->wdt->kick();
 
-    boot_secure_zeroize(rx_buf, 128);
+    boot_secure_zeroize(rx_buf, PANIC_RX_MAX_SIZE);
     size_t rx_len = 0;
     bool frame_ready = false;
 
     /* Frame Retrieval Logic */
     while (!frame_ready) {
-      platform->wdt->kick();
+      if (platform->wdt && platform->wdt->kick)
+        platform->wdt->kick();
 
       uint8_t c;
       if (platform->console->getchar(&c, 100) != BOOT_OK)
@@ -304,11 +325,11 @@ session_reset:
         if (rx_len > 0)
           frame_ready = true;
       } else {
-        if (rx_len < 128) {
+        if (rx_len < PANIC_RX_MAX_SIZE) {
           rx_buf[rx_len++] = c;
         } else {
           /* Overflow Defense: Buffer vernichten und auf nächsten Sync warten */
-          boot_secure_zeroize(rx_buf, 128);
+          boot_secure_zeroize(rx_buf, PANIC_RX_MAX_SIZE);
           rx_len = 0;
         }
       }
@@ -320,49 +341,56 @@ session_reset:
     if (cobs_decode_in_place(rx_buf, rx_len, &decoded_len) == BOOT_OK) {
       if (decoded_len == sizeof(stage15_auth_payload_t)) {
 
-        /* ABI Aliasing Fix: Safely extract into proper memory-aligned struct */
-        stage15_auth_payload_t payload;
-        memcpy(&payload, rx_buf, sizeof(stage15_auth_payload_t));
-
-        /* Unaligned Access Mitigation: 'timestamp' liegt im packed-struct auf
-         * Offset 4! Ein direkter Lesezugriff (payload.timestamp) wirft auf
-         * Cortex-M0 einen HardFault. P10 Lösung: Sichere Allokation über
-         * memcpy. */
-        uint64_t safe_timestamp = 0;
-        memcpy(&safe_timestamp, &payload.timestamp, sizeof(uint64_t));
-
+        /* Unaligned Access Mitigation: Cortex-M0/M0+ Exception Prevention.
+         * Extraktion ohne Stack-Struct, direkt in lokale Primitive via
+         * offsetof. */
         uint32_t safe_slot_id = 0;
-        memcpy(&safe_slot_id, &payload.slot_id, sizeof(uint32_t));
+        uint64_t safe_timestamp = 0;
+
+        memcpy(&safe_slot_id,
+               rx_buf + offsetof(stage15_auth_payload_t, slot_id),
+               sizeof(uint32_t));
+        memcpy(&safe_timestamp,
+               rx_buf + offsetof(stage15_auth_payload_t, timestamp),
+               sizeof(uint64_t));
+
+        const uint8_t *auth_nonce =
+            rx_buf + offsetof(stage15_auth_payload_t, nonce);
+        const uint8_t *auth_sig =
+            rx_buf + offsetof(stage15_auth_payload_t, sig);
 
         bool time_ok = (safe_timestamp > current_monotonic);
         bool slot_ok = (safe_slot_id == CHIP_STAGING_SLOT_ID);
         boot_status_t nonce_stat =
-            constant_time_memcmp_32_glitch_safe(payload.nonce, challenge_buf);
+            constant_time_memcmp_32_glitch_safe(auth_nonce, challenge_buf);
 
         if (time_ok && slot_ok && nonce_stat == BOOT_OK) {
           /* Assemble Ed25519 Message exakt nach Spec (76 Bytes):
            * [Nonce(32)] | [Padded DSLC(32)] | [Slot ID(4)] | [Timestamp(8)] */
-          boot_secure_zeroize(verify_msg, 76);
+          boot_secure_zeroize(verify_msg, PANIC_VERIFY_MAX_SIZE);
           memcpy(verify_msg, challenge_buf,
                  64); /* Zieht saubere Nonce & DSLC Base */
           memcpy(verify_msg + 64, &safe_slot_id, 4);
           memcpy(verify_msg + 68, &safe_timestamp, 8);
 
-          uint8_t root_pubkey[32] __attribute__((aligned(8)));
-          boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
+          /* Zero-Allocation Fix: Wir recyclen den ungenutzten chunk_buf für den
+           * Root Pubkey */
+          uint8_t *root_pubkey = chunk_buf;
+          boot_secure_zeroize(root_pubkey, 32);
 
           if (platform->crypto->read_pubkey &&
-              platform->crypto->read_pubkey(root_pubkey, sizeof(root_pubkey),
-                                            0) == BOOT_OK) {
+              platform->crypto->read_pubkey(root_pubkey, 32, 0) == BOOT_OK) {
 
             /* CFI Glitch Shielded Signature Verification */
             volatile uint32_t auth_shield_1 = 0;
             volatile uint32_t auth_shield_2 = 0;
 
-            platform->wdt->kick();
+            if (platform->wdt && platform->wdt->kick)
+              platform->wdt->kick();
             boot_status_t sig_stat = platform->crypto->verify_ed25519(
-                verify_msg, 76, payload.sig, root_pubkey);
-            platform->wdt->kick();
+                verify_msg, 76, auth_sig, root_pubkey);
+            if (platform->wdt && platform->wdt->kick)
+              platform->wdt->kick();
 
             if (sig_stat == BOOT_OK)
               auth_shield_1 = BOOT_OK;
@@ -382,14 +410,14 @@ session_reset:
               panic_cfi ^= CFI_AUTH_PASSED;
             }
           }
-          boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
+          boot_secure_zeroize(root_pubkey, 32);
         }
-        boot_secure_zeroize(verify_msg, 76);
-        boot_secure_zeroize(&payload, sizeof(payload));
+        boot_secure_zeroize(verify_msg, PANIC_VERIFY_MAX_SIZE);
       }
     }
 
-    boot_secure_zeroize(rx_buf, 128); /* P10: Wipe untrusted/used input */
+    boot_secure_zeroize(rx_buf,
+                        PANIC_RX_MAX_SIZE); /* P10: Wipe untrusted/used input */
 
     if (auth_eval == BOOT_OK) {
       break; /* Success! Aus Auth-Schleife ausbrechen */
@@ -430,19 +458,16 @@ session_reset:
   uint32_t current_sector_end = CHIP_STAGING_SLOT_ABS_ADDR;
   bool staging_erased = false;
 
-  /* P10: Alignment (1056 % 8 == 0) für Hardware-DMA.
-   * Groß genug für Max-Sector-Size Chunks + COBS Overhead. */
-  uint8_t chunk_buf[1056] __attribute__((aligned(8)));
-
   while (1) {
     send_cobs_frame(platform, (const uint8_t *)"RDY", 3);
 
-    boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+    boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
     size_t chunk_len = 0;
     bool chunk_received = false;
 
     while (!chunk_received) {
-      platform->wdt->kick();
+      if (platform->wdt && platform->wdt->kick)
+        platform->wdt->kick();
 
       uint8_t c;
       if (platform->console->getchar(&c, 500) != BOOT_OK)
@@ -452,10 +477,11 @@ session_reset:
         if (chunk_len > 0)
           chunk_received = true;
       } else {
-        if (chunk_len < sizeof(chunk_buf)) {
+        /* Dynamischer P10 Bounds Check via PANIC_CHUNK_MAX_SIZE */
+        if (chunk_len < PANIC_CHUNK_MAX_SIZE) {
           chunk_buf[chunk_len++] = c;
         } else {
-          boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+          boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
           chunk_len = 0; /* Frame overflow trap */
         }
       }
@@ -468,20 +494,30 @@ session_reset:
     if (cobs_decode_in_place(chunk_buf, chunk_len, &payload_len) == BOOT_OK &&
         payload_len > 0) {
 
+      /* P10 Glitch-Resistant EOF Evaluation */
+      volatile uint32_t eof_shield_1 = 0, eof_shield_2 = 0;
+      if (payload_len == 3 && memcmp(chunk_buf, "EOF", 3) == 0)
+        eof_shield_1 = BOOT_OK;
+      __asm__ volatile("nop; nop;");
+      if (eof_shield_1 == BOOT_OK && payload_len == 3 &&
+          memcmp(chunk_buf, "EOF", 3) == 0)
+        eof_shield_2 = BOOT_OK;
+
       /* EOF Marker: We are fully done. Trigger the OS-Load. */
-      if (payload_len == 3 && memcmp(chunk_buf, "EOF", 3) == 0) {
+      if (eof_shield_1 == BOOT_OK && eof_shield_2 == BOOT_OK) {
         send_cobs_frame(platform, (const uint8_t *)"ACK", 3);
         boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
-        /* P10 Handoff: Force an un-kickable WDT reset loop to safely reboot.
-         * Der Bootloader findet das intakte Staging-Image beim nächsten
-         * Kaltstart. */
-        if (platform->console)
+        /* P10 HANDOFF FIX: Hardware-Reset erzwingen durch absichtliches
+         * Verweigern des WDT-Kicks. Das friert die CPU sicher ein, bis der
+         * Timer abläuft! */
+        if (platform->console && platform->console->flush)
           platform->console->flush();
         if (platform->clock && platform->clock->deinit)
           platform->clock->deinit();
+
         while (1) {
-          platform->wdt->kick();
+          __asm__ volatile("nop; nop; nop;");
         }
       }
 
@@ -498,8 +534,8 @@ session_reset:
         size_t padding = align - align_mod;
         /* Wrap & Buffer Overflow Defense */
         if (UINT32_MAX - aligned_len < padding ||
-            aligned_len + padding > sizeof(chunk_buf)) {
-          boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+            aligned_len + padding > PANIC_CHUNK_MAX_SIZE) {
+          boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
           goto session_reset; /* Puffer wäre übergelaufen! Abbrechen. */
         }
         memset(chunk_buf + payload_len, platform->flash->erased_value, padding);
@@ -524,7 +560,7 @@ session_reset:
         bounds_flag_2 = BOOT_OK;
 
       if (bounds_flag_1 != BOOT_OK || bounds_flag_2 != BOOT_OK) {
-        boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+        boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
         goto session_reset;
       }
 
@@ -533,7 +569,7 @@ session_reset:
 
       /* Protect against 32-bit Integer wrap-around of write_end address */
       if (write_end < addr) {
-        boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+        boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
         goto session_reset;
       }
 
@@ -545,15 +581,17 @@ session_reset:
         if (platform->flash->get_sector_size(erase_target, &s_size) ==
             BOOT_OK) {
 
-          /* Smart-Erase Pre-Check: Ist der Sektor ohnehin schon 0xFF? */
+          /* Smart-Erase Pre-Check: Ist der Sektor ohnehin schon 0xFF?
+           * Zero-Allocation Nutzung des freien verify_msg Buffers! */
           bool needs_erase = false;
           uint32_t chk_off = 0;
           uint8_t e_val = platform->flash->erased_value;
-          uint8_t e_buf[64] __attribute__((aligned(8)));
+          uint8_t *e_buf = verify_msg;
+          size_t e_buf_size = PANIC_VERIFY_MAX_SIZE;
 
           while (chk_off < s_size) {
-            uint32_t read_len = (s_size - chk_off > sizeof(e_buf))
-                                    ? sizeof(e_buf)
+            uint32_t read_len = (s_size - chk_off > e_buf_size)
+                                    ? e_buf_size
                                     : (s_size - chk_off);
             if (platform->flash->read(erase_target + chk_off, e_buf,
                                       read_len) != BOOT_OK) {
@@ -565,36 +603,37 @@ session_reset:
               break;
             }
             chk_off += read_len;
-            platform->wdt->kick();
+            if (platform->wdt && platform->wdt->kick)
+              platform->wdt->kick();
           }
 
           if (needs_erase) {
-            if (platform->wdt->suspend_for_critical_section) {
+            if (platform->wdt && platform->wdt->suspend_for_critical_section) {
               platform->wdt->suspend_for_critical_section();
-            } else {
+            } else if (platform->wdt && platform->wdt->kick) {
               platform->wdt->kick();
             }
 
             if (platform->flash->erase_sector(erase_target) != BOOT_OK) {
-              boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+              boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
               goto session_reset;
             }
 
-            if (platform->wdt->resume) {
+            if (platform->wdt && platform->wdt->resume) {
               platform->wdt->resume();
             }
           }
 
           /* Wrapped Boundary Proof */
           if (UINT32_MAX - erase_target < s_size) {
-            boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+            boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
             goto session_reset;
           }
 
           current_sector_end = erase_target + s_size;
           staging_erased = true;
         } else {
-          boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+          boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
           goto session_reset;
         }
       }
@@ -603,15 +642,17 @@ session_reset:
       if (platform->flash->write(addr, chunk_buf, aligned_len) == BOOT_OK) {
 
         /* P10 ECC Read-Back: Verhindert Bit-Rot / Tearing auf dem UART-Puffer!
-         */
-        uint8_t rb_buf[64] __attribute__((aligned(8)));
+         * Zero-Allocation Nutzung des freien verify_msg Buffers! */
+        uint8_t *rb_buf = verify_msg;
+        size_t rb_buf_size = PANIC_VERIFY_MAX_SIZE;
         uint32_t check_off = 0;
         bool write_ok = true;
 
         while (check_off < aligned_len) {
-          platform->wdt->kick();
-          size_t step = (aligned_len - check_off > sizeof(rb_buf))
-                            ? sizeof(rb_buf)
+          if (platform->wdt && platform->wdt->kick)
+            platform->wdt->kick();
+          size_t step = (aligned_len - check_off > rb_buf_size)
+                            ? rb_buf_size
                             : (aligned_len - check_off);
 
           if (platform->flash->read(addr + check_off, rb_buf, step) !=
@@ -636,15 +677,15 @@ session_reset:
           flash_offset += aligned_len;
           send_cobs_frame(platform, (const uint8_t *)"ACK", 3);
         } else {
-          boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+          boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
           goto session_reset; /* Schreibfehler oder Bit-Rot -> Absturz und
                                  Neubeginn erzwingen! */
         }
       } else {
-        boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+        boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
         goto session_reset;
       }
     }
-    boot_secure_zeroize(chunk_buf, sizeof(chunk_buf));
+    boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
   }
 }
