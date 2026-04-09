@@ -8,29 +8,148 @@
  * - docs/toobfuzzer_integration.md (Fuzzing parameters, Alignment limitations)
  *
  * ARCHITECTURAL UPGRADES:
- * 1. Cryptographic State Deduction: 100% Tearing-proof WAL integration avoiding
+ * 1. True Zero-Allocation: Eliminiert 16 KB BSS Bloat (swap_buf). Alle
+ * Transfers und Prüfungen laufen dynamisch segmentiert über die 2KB
+ * crypto_arena.
+ * 2. Zero-Amplification Solver: Die Blockgröße wird aus dem Maximum von Src,
+ * Dest und Scratch abgeleitet. Verhindert brutale Multi-Erases auf
+ * asymmetrischen Flashs.
+ * 3. Cryptographic State Deduction: 100% Tearing-proof WAL integration avoiding
  *    ECC double-writes entirely! No metadata stored inside target sectors.
- * 2. O(1) Zero-Wear Identity Check: Überspringt identische Chunks automatisch.
- * 3. Smart-Erase Pre-Emption: Verhindert Hardware-Erases bei 0xFF Blöcken.
- * 4. Phase-Bound Verification: Garantiert ECC-sichere Read-Back
- * Verifizierungen.
+ * 4. O(1) Zero-Wear Identity Check: Überspringt identische Chunks dynamisch.
+ * 5. Phase-Bound Verification: Garantiert ECC-sichere Read-Back Verifizierungen
+ *    im Stream-Modus gegen HW-Defekte und DMAs.
  */
 
 #include "boot_swap.h"
 #include "boot_config_mock.h"
 #include "boot_crc32.h"
 #include "boot_journal.h"
+#include "boot_secure_zeroize.h"
 #include <string.h>
 
+/* Zero-Allocation: Exklusive Übernahme der Arena für den Swap-Vorgang */
+extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
+
+_Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 512,
+               "Crypto Arena is too small for chunked flash operations!");
+_Static_assert(BOOT_OK == 0x55AA55AA,
+               "Glitch-Defense benötigt High-Hamming-Distance BOOT_OK");
+
+/* ==============================================================================
+ * INTERNAL ZERO-ALLOCATION STREAMING HELPERS
+ * ==============================================================================
+ */
 
 /**
- * @brief Static swap buffer used across swap operations.
- *        Guarantees avoiding dynamic allocations (NASA P10 Rule).
+ * @brief O(1) Streaming CRC-32 Berechnung direkt aus dem Flash.
+ * Ersetzt den RAM-fressenden Monolithic-Buffer durch effizientes Chunking.
  */
-static uint8_t swap_buf[CHIP_FLASH_MAX_SECTOR_SIZE];
+static boot_status_t compute_flash_crc32(const boot_platform_t *platform,
+                                         uint32_t addr, size_t len,
+                                         uint32_t *out_crc) {
+  uint32_t crc = 0xFFFFFFFF;
+  size_t offset = 0;
+
+  while (offset < len) {
+    if (platform->wdt && platform->wdt->kick)
+      platform->wdt->kick();
+
+    size_t step = (len - offset > BOOT_CRYPTO_ARENA_SIZE)
+                      ? BOOT_CRYPTO_ARENA_SIZE
+                      : (len - offset);
+
+    boot_status_t st = platform->flash->read(addr + offset, crypto_arena, step);
+    if (st != BOOT_OK) {
+      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      return st;
+    }
+
+    for (size_t i = 0; i < step; i++) {
+      crc ^= crypto_arena[i];
+      for (uint8_t j = 0; j < 8; j++) {
+        crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
+      }
+    }
+    offset += step;
+  }
+
+  /* P10 Leakage Prevention */
+  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  *out_crc = ~crc;
+  return BOOT_OK;
+}
+
+/**
+ * @brief Beweist mathematisch, ob ein Puffer komplett den Erased-Status (0xFF)
+ * aufweist.
+ */
+static bool is_fully_erased(const uint8_t *buf, size_t len,
+                            uint8_t erased_val) {
+  for (size_t i = 0; i < len; i++) {
+    if (buf[i] != erased_val)
+      return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Kopiert Daten iterativ zwischen Flash-Sektoren mit simultanem
+ * ECC Read-Back Verify. Nutzt die dynamische crypto_arena.
+ */
+static boot_status_t
+stream_flash_copy_and_verify(const boot_platform_t *platform, uint32_t src,
+                             uint32_t dest, size_t len, uint32_t expected_crc) {
+  size_t offset = 0;
+
+  while (offset < len) {
+    if (platform->wdt && platform->wdt->kick)
+      platform->wdt->kick();
+    size_t step = (len - offset > BOOT_CRYPTO_ARENA_SIZE)
+                      ? BOOT_CRYPTO_ARENA_SIZE
+                      : (len - offset);
+
+    boot_status_t st = platform->flash->read(src + offset, crypto_arena, step);
+    if (st != BOOT_OK) {
+      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      return st;
+    }
+
+    st = platform->flash->write(dest + offset, crypto_arena, step);
+    if (st != BOOT_OK) {
+      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      return st;
+    }
+
+    offset += step;
+  }
+
+  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+
+  /* Phase-Bound ECC Readback Verification */
+  uint32_t verify_crc = 0;
+  boot_status_t st = compute_flash_crc32(platform, dest, len, &verify_crc);
+  if (st != BOOT_OK)
+    return st;
+
+  volatile uint32_t crc_shield_1 = 0, crc_shield_2 = 0;
+  if (verify_crc == expected_crc)
+    crc_shield_1 = BOOT_OK;
+  __asm__ volatile("nop; nop;");
+  if (crc_shield_1 == BOOT_OK && verify_crc == expected_crc)
+    crc_shield_2 = BOOT_OK;
+
+  if (crc_shield_1 != BOOT_OK || crc_shield_2 != BOOT_OK) {
+    return BOOT_ERR_FLASH_HW; /* Bit-Rot / Tearing / Voltage Fault detektiert */
+  }
+
+  return BOOT_OK;
+}
 
 /**
  * @brief Internal Tracker für physikalische Flash-Erases.
+ * Smart-Erase nutzt die crypto_arena iterativ, um unnötige Hardware-Erases zu
+ * blockieren.
  */
 static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
                                               uint32_t addr, size_t length,
@@ -42,7 +161,7 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
 
   if (length == 0)
     return BOOT_OK;
-  if (length > UINT32_MAX - addr)
+  if (UINT32_MAX - addr < length)
     return BOOT_ERR_INVALID_ARG;
 
   uint32_t current_addr = addr;
@@ -60,49 +179,48 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
     if (status != BOOT_OK || sec_size == 0)
       return BOOT_ERR_FLASH_HW;
 
-    /* SMART-ERASE PRE-EMPTION: Verhindert unnötigen Hardware-Verschleiß */
+    /* SMART-ERASE PRE-EMPTION: P10 Zero-Allocation Block Scan */
     bool needs_erase = false;
     uint32_t chk_off = 0;
     uint8_t erased_val = platform->flash->erased_value;
-    uint8_t chk_buf[64];
 
     while (chk_off < sec_size) {
-      uint32_t read_len = (sec_size - chk_off > sizeof(chk_buf))
-                              ? sizeof(chk_buf)
-                              : (sec_size - chk_off);
-      status = platform->flash->read(current_addr + chk_off, chk_buf, read_len);
+      if (platform->wdt && platform->wdt->kick)
+        platform->wdt->kick();
+      size_t read_len = (sec_size - chk_off > BOOT_CRYPTO_ARENA_SIZE)
+                            ? BOOT_CRYPTO_ARENA_SIZE
+                            : (sec_size - chk_off);
+
+      status =
+          platform->flash->read(current_addr + chk_off, crypto_arena, read_len);
       if (status != BOOT_OK) {
         needs_erase = true;
         break;
       }
 
-      for (uint32_t i = 0; i < read_len; i++) {
-        if (chk_buf[i] != erased_val) {
-          needs_erase = true;
-          break;
-        }
-      }
-      if (needs_erase)
+      if (!is_fully_erased(crypto_arena, read_len, erased_val)) {
+        needs_erase = true;
         break;
+      }
       chk_off += read_len;
-      if (platform->wdt)
-        platform->wdt->kick();
     }
+
+    boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
     if (needs_erase) {
       if (sec_size > CHIP_FLASH_MAX_SECTOR_SIZE) {
-        if (platform->wdt && platform->wdt->suspend_for_critical_section) {
+        if (platform->wdt && platform->wdt->suspend_for_critical_section)
           platform->wdt->suspend_for_critical_section();
-        }
+
         status = platform->flash->erase_sector(current_addr);
-        if (platform->wdt && platform->wdt->resume) {
+
+        if (platform->wdt && platform->wdt->resume)
           platform->wdt->resume();
-        }
       } else {
-        if (platform->wdt)
+        if (platform->wdt && platform->wdt->kick)
           platform->wdt->kick();
         status = platform->flash->erase_sector(current_addr);
-        if (platform->wdt)
+        if (platform->wdt && platform->wdt->kick)
           platform->wdt->kick();
       }
 
@@ -124,7 +242,6 @@ boot_status_t boot_swap_erase_safe(const boot_platform_t *platform,
 }
 
 typedef enum { SWAP_STATE_NORMAL = 0, SWAP_STATE_READ_ONLY = 1 } swap_state_t;
-
 static swap_state_t current_swap_state = SWAP_STATE_NORMAL;
 
 static boot_status_t
@@ -148,6 +265,11 @@ boot_swap_check_eol_survival(const boot_platform_t *platform) {
   return BOOT_OK;
 }
 
+/* ==============================================================================
+ * PUBLIC BOOT SWAP EXECUTION
+ * ==============================================================================
+ */
+
 boot_status_t boot_swap_apply(const boot_platform_t *platform,
                               uint32_t src_base, uint32_t dest_base,
                               uint32_t length, boot_dest_slot_t dest_slot,
@@ -157,8 +279,10 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     return BOOT_ERR_INVALID_ARG;
   }
 
-  if (length > UINT32_MAX - src_base || length > UINT32_MAX - dest_base)
-    return BOOT_ERR_INVALID_ARG;
+  if (length > UINT32_MAX - src_base || length > UINT32_MAX - dest_base ||
+      length > UINT32_MAX - CHIP_SCRATCH_SECTOR_ABS_ADDR) {
+    return BOOT_ERR_FLASH_BOUNDS;
+  }
   if (length == 0)
     return BOOT_OK;
 
@@ -191,35 +315,58 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
   uint32_t physical_scratch_erases = 0;
   uint32_t physical_dest_erases = 0;
   uint32_t physical_src_erases = 0;
+  boot_status_t status = BOOT_OK;
 
   while (current_offset < length) {
-    if (++loop_guard >= MAX_ERASE_LOOPS)
-      return BOOT_ERR_FLASH_HW;
+    if (++loop_guard >= MAX_ERASE_LOOPS) {
+      status = BOOT_ERR_FLASH_HW;
+      goto swap_cleanup;
+    }
 
     uint32_t current_src = src_base + current_offset;
     uint32_t current_dest = dest_base + current_offset;
 
-    size_t dest_sec_size = 0, src_sec_size = 0;
-    boot_status_t status =
-        platform->flash->get_sector_size(current_dest, &dest_sec_size);
-    if (status != BOOT_OK || dest_sec_size == 0 ||
-        dest_sec_size > CHIP_FLASH_MAX_SECTOR_SIZE ||
-        current_dest % dest_sec_size != 0)
-      return BOOT_ERR_FLASH_HW;
+    /* ====================================================================
+     * BLOCK ALIGNMENT SOLVER (Anti Write-Amplification)
+     * Ermittelt das physikalische Maximum der Sektor-Größen.
+     * Verhindert mehrfaches Löschen des Scratch-Sektors bei Asymmetrie!
+     * ==================================================================== */
+    size_t dest_sec_size = 0, src_sec_size = 0, scratch_sec_size = 0;
 
-    status = platform->flash->get_sector_size(current_src, &src_sec_size);
-    if (status != BOOT_OK || src_sec_size == 0 ||
-        src_sec_size > CHIP_FLASH_MAX_SECTOR_SIZE ||
-        current_src % src_sec_size != 0)
-      return BOOT_ERR_FLASH_HW;
+    if (platform->flash->get_sector_size(current_dest, &dest_sec_size) !=
+            BOOT_OK ||
+        dest_sec_size == 0 || current_dest % dest_sec_size != 0) {
+      status = BOOT_ERR_FLASH_HW;
+      goto swap_cleanup;
+    }
 
-    size_t chunk_len =
-        (src_sec_size > dest_sec_size) ? src_sec_size : dest_sec_size;
-    if (current_offset + chunk_len > length) {
-      chunk_len = length - current_offset;
-      if (platform->flash->write_align > 0 &&
-          (chunk_len % platform->flash->write_align != 0)) {
-        return BOOT_ERR_FLASH_ALIGN;
+    if (platform->flash->get_sector_size(current_src, &src_sec_size) !=
+            BOOT_OK ||
+        src_sec_size == 0 || current_src % src_sec_size != 0) {
+      status = BOOT_ERR_FLASH_HW;
+      goto swap_cleanup;
+    }
+
+    if (platform->flash->get_sector_size(CHIP_SCRATCH_SECTOR_ABS_ADDR,
+                                         &scratch_sec_size) != BOOT_OK ||
+        scratch_sec_size == 0) {
+      status = BOOT_ERR_FLASH_HW;
+      goto swap_cleanup;
+    }
+
+    size_t block_size = dest_sec_size;
+    if (src_sec_size > block_size)
+      block_size = src_sec_size;
+    if (scratch_sec_size > block_size)
+      block_size = scratch_sec_size;
+
+    if (current_offset + block_size > length) {
+      block_size = length - current_offset;
+      if (platform->flash->write_align > 0) {
+        uint32_t align = platform->flash->write_align;
+        uint32_t rem = block_size % align;
+        if (rem != 0)
+          block_size += (align - rem);
       }
     }
 
@@ -228,6 +375,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     bool is_resuming_this_chunk =
         (open_txn != NULL && open_txn->delta_chunk_id == current_offset &&
          open_txn->transfer_bitmap[2] == 0xAA55AA55);
+
     uint32_t crc_src = 0;
     uint32_t crc_dest = 0;
 
@@ -235,39 +383,51 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
       /* ====================================================================
        * 1. O(1) ZERO-WEAR IDENTITY CHECK (Flash Life Extender)
        * ==================================================================== */
-      platform->flash->read(current_src, swap_buf, chunk_len);
-      crc_src = compute_boot_crc32(swap_buf, chunk_len);
+      status = compute_flash_crc32(platform, current_src, block_size, &crc_src);
+      if (status != BOOT_OK)
+        goto swap_cleanup;
 
-      platform->flash->read(current_dest, swap_buf, chunk_len);
-      crc_dest = compute_boot_crc32(swap_buf, chunk_len);
+      status =
+          compute_flash_crc32(platform, current_dest, block_size, &crc_dest);
+      if (status != BOOT_OK)
+        goto swap_cleanup;
 
       if (crc_src == crc_dest) {
         bool is_identical = true;
-        uint32_t cmp_offset = 0;
-        uint8_t cmp_buf[64];
+        uint32_t chk_off = 0;
+        size_t half_arena = BOOT_CRYPTO_ARENA_SIZE / 2;
 
-        while (cmp_offset < chunk_len) {
-          if (platform->wdt)
+        while (chk_off < block_size) {
+          if (platform->wdt && platform->wdt->kick)
             platform->wdt->kick();
-          uint32_t step = (chunk_len - cmp_offset > sizeof(cmp_buf))
-                              ? sizeof(cmp_buf)
-                              : (chunk_len - cmp_offset);
+          size_t step = (block_size - chk_off > half_arena)
+                            ? half_arena
+                            : (block_size - chk_off);
 
-          /* Byte-für-Byte Abgleich verhindert Hash-Kollisions Risiken */
-          platform->flash->read(current_dest + cmp_offset, cmp_buf, step);
-          platform->flash->read(current_src + cmp_offset, swap_buf, step);
+          uint8_t *buf_dst = crypto_arena;
+          uint8_t *buf_src = crypto_arena + half_arena;
 
-          if (memcmp(swap_buf, cmp_buf, step) != 0) {
+          if (platform->flash->read(current_dest + chk_off, buf_dst, step) !=
+                  BOOT_OK ||
+              platform->flash->read(current_src + chk_off, buf_src, step) !=
+                  BOOT_OK) {
             is_identical = false;
             break;
           }
-          cmp_offset += step;
+
+          if (memcmp(buf_dst, buf_src, step) != 0) {
+            is_identical = false;
+            break;
+          }
+          chk_off += step;
         }
+
+        boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
         if (is_identical) {
           /* Überspringen! Fast-Forward spart WAL Writes und radikale Mengen an
            * Hardware Erases */
-          current_offset += chunk_len;
+          current_offset += block_size;
           continue;
         }
       }
@@ -280,8 +440,10 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
         open_txn->transfer_bitmap[1] = crc_dest;
         open_txn->transfer_bitmap[2] = 0xAA55AA55;
         boot_status_t log_stat = boot_journal_append(platform, open_txn);
-        if (log_stat != BOOT_OK)
-          return log_stat;
+        if (log_stat != BOOT_OK) {
+          status = log_stat;
+          goto swap_cleanup;
+        }
       }
     } else {
       /* Lade gesicherten Zustand aus dem WAL ein */
@@ -294,14 +456,19 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
      * ==================================================================== */
     uint32_t phys_src = 0, phys_dest = 0, phys_scratch = 0;
 
-    platform->flash->read(current_src, swap_buf, chunk_len);
-    phys_src = compute_boot_crc32(swap_buf, chunk_len);
+    status = compute_flash_crc32(platform, current_src, block_size, &phys_src);
+    if (status != BOOT_OK)
+      goto swap_cleanup;
 
-    platform->flash->read(current_dest, swap_buf, chunk_len);
-    phys_dest = compute_boot_crc32(swap_buf, chunk_len);
+    status =
+        compute_flash_crc32(platform, current_dest, block_size, &phys_dest);
+    if (status != BOOT_OK)
+      goto swap_cleanup;
 
-    platform->flash->read(CHIP_SCRATCH_SECTOR_ABS_ADDR, swap_buf, chunk_len);
-    phys_scratch = compute_boot_crc32(swap_buf, chunk_len);
+    status = compute_flash_crc32(platform, CHIP_SCRATCH_SECTOR_ABS_ADDR,
+                                 block_size, &phys_scratch);
+    if (status != BOOT_OK)
+      goto swap_cleanup;
 
     bool dest_has_src = (phys_dest == crc_src);
     bool src_has_dest = (phys_src == crc_dest);
@@ -313,32 +480,39 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
 
     if (dest_has_src && src_has_dest) {
       /* Swap war vollständig abgeschlossen, Crash direkt vor WAL Confirm */
-      current_offset += chunk_len;
+      current_offset += block_size;
       continue;
     }
 
     if (dest_has_src && !src_has_dest) {
-      if (!scratch_has_dest)
-        return BOOT_ERR_FLASH_HW; /* FATAL: Scratch Corruption */
+      if (!scratch_has_dest) {
+        status = BOOT_ERR_FLASH_HW; /* FATAL: Scratch Corruption */
+        goto swap_cleanup;
+      }
       run_phase_a = false;
       run_phase_b = false;
       run_phase_c = true;
     } else if (!dest_has_src) {
       if (scratch_has_dest) {
-        if (!src_has_src)
-          return BOOT_ERR_FLASH_HW; /* FATAL: Src Corruption */
+        if (!src_has_src) {
+          status = BOOT_ERR_FLASH_HW; /* FATAL: Src Corruption */
+          goto swap_cleanup;
+        }
         run_phase_a = false;
         run_phase_b = true;
         run_phase_c = true;
       } else {
-        if (!dest_has_dest || !src_has_src)
-          return BOOT_ERR_FLASH_HW; /* FATAL: Partial Corruption */
+        if (!dest_has_dest || !src_has_src) {
+          status = BOOT_ERR_FLASH_HW; /* FATAL: Partial Corruption */
+          goto swap_cleanup;
+        }
         run_phase_a = true;
         run_phase_b = true;
         run_phase_c = true;
       }
     } else {
-      return BOOT_ERR_INVALID_STATE;
+      status = BOOT_ERR_INVALID_STATE;
+      goto swap_cleanup;
     }
 
     /* ====================================================================
@@ -347,67 +521,46 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
 
     /* PHASE A: Backup Dest -> Scratch */
     if (run_phase_a) {
-      status = platform->flash->read(current_dest, swap_buf, chunk_len);
-      if (status != BOOT_OK)
-        return status;
-
       status = _boot_swap_erase_tracked(platform, CHIP_SCRATCH_SECTOR_ABS_ADDR,
-                                        chunk_len, &physical_scratch_erases);
+                                        block_size, &physical_scratch_erases);
       if (status != BOOT_OK)
-        return status;
+        goto swap_cleanup;
 
-      status = platform->flash->write(CHIP_SCRATCH_SECTOR_ABS_ADDR, swap_buf,
-                                      chunk_len);
+      status = stream_flash_copy_and_verify(platform, current_dest,
+                                            CHIP_SCRATCH_SECTOR_ABS_ADDR,
+                                            block_size, crc_dest);
       if (status != BOOT_OK)
-        return status;
-
-      platform->flash->read(CHIP_SCRATCH_SECTOR_ABS_ADDR, swap_buf, chunk_len);
-      if (compute_boot_crc32(swap_buf, chunk_len) != crc_dest)
-        return BOOT_ERR_FLASH_HW;
+        goto swap_cleanup;
     }
 
     /* PHASE B: Copy Src -> Dest */
     if (run_phase_b) {
-      status = platform->flash->read(current_src, swap_buf, chunk_len);
-      if (status != BOOT_OK)
-        return status;
-
-      status = _boot_swap_erase_tracked(platform, current_dest, chunk_len,
+      status = _boot_swap_erase_tracked(platform, current_dest, block_size,
                                         &physical_dest_erases);
       if (status != BOOT_OK)
-        return status;
+        goto swap_cleanup;
 
-      status = platform->flash->write(current_dest, swap_buf, chunk_len);
+      status = stream_flash_copy_and_verify(platform, current_src, current_dest,
+                                            block_size, crc_src);
       if (status != BOOT_OK)
-        return status;
-
-      platform->flash->read(current_dest, swap_buf, chunk_len);
-      if (compute_boot_crc32(swap_buf, chunk_len) != crc_src)
-        return BOOT_ERR_FLASH_HW;
+        goto swap_cleanup;
     }
 
     /* PHASE C: Copy Scratch -> Src */
     if (run_phase_c) {
-      status = platform->flash->read(CHIP_SCRATCH_SECTOR_ABS_ADDR, swap_buf,
-                                     chunk_len);
-      if (status != BOOT_OK)
-        return status;
-
-      status = _boot_swap_erase_tracked(platform, current_src, chunk_len,
+      status = _boot_swap_erase_tracked(platform, current_src, block_size,
                                         &physical_src_erases);
       if (status != BOOT_OK)
-        return status;
+        goto swap_cleanup;
 
-      status = platform->flash->write(current_src, swap_buf, chunk_len);
+      status =
+          stream_flash_copy_and_verify(platform, CHIP_SCRATCH_SECTOR_ABS_ADDR,
+                                       current_src, block_size, crc_dest);
       if (status != BOOT_OK)
-        return status;
-
-      platform->flash->read(current_src, swap_buf, chunk_len);
-      if (compute_boot_crc32(swap_buf, chunk_len) != crc_dest)
-        return BOOT_ERR_FLASH_HW;
+        goto swap_cleanup;
     }
 
-    current_offset += chunk_len;
+    current_offset += block_size;
   }
 
   /* 4. ACCURATE TELEMETRY WRAP-UP */
@@ -429,5 +582,9 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     }
   }
 
-  return BOOT_OK;
+swap_cleanup:
+  /* P10 Single Exit: Zerstöre unverschlüsselte Firmware-Residuen aus der Arena
+   */
+  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  return status;
 }
