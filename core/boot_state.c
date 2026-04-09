@@ -13,7 +13,9 @@
  *    durch Double-Check Patterns gegen Voltage Faults abgesichert.
  * 3. ZCBOR Pointer Sandboxing: Beweist mathematisch, dass extrahierte Manifest-
  *    Payloads physikalisch innerhalb der allokierten crypto_arena verbleiben.
- * 4. P10 Stack Security: Alle Crypto-Sub-Buffer und C-Structs werden vor dem
+ * 4. Zero-Allocation Streaming: Verzicht auf BSS-Bloat durch dynamische
+ *    sichere 8-Byte-aligned Partitionierung der bestehenden crypto_arena.
+ * 5. P10 Stack Security: Alle Crypto-Sub-Buffer und C-Structs werden vor dem
  *    Return via boot_secure_zeroize restlos vernichtet.
  */
 
@@ -38,11 +40,6 @@
 #define CFI_STEP_5 0x0F0F0F0F
 
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
-
-/* Static P10 Allocation: Verhindert Bare-Metal Stack Overflow für Stream
- * Hashing. Zwingendes 8-Byte Alignment für HW-Crypto-DMA Cores! */
-static uint8_t stream_buf[CHIP_FLASH_MAX_SECTOR_SIZE]
-    __attribute__((aligned(8)));
 
 /* ==============================================================================
  * STATIC HELPERS (Single Responsibility & Glitch Shielded)
@@ -110,22 +107,19 @@ static boot_status_t _handle_rollback_flow(const boot_platform_t *platform,
       if (status != BOOT_OK)
         return status;
 
-      *cfi_acc ^= 0x000A000A; /* Revert-Path bewiesen */
-    }
-    /* CASE B: Normal OS run with persistent crashes. Evaluate Backoff or
-       Recovery OS. */
-    else {
+    } else {
+      /* CASE B: Normal OS run with persistent crashes. Evaluate Backoff or
+       * Recovery OS. */
       status = boot_rollback_evaluate_os(platform, current_tmr,
                                          &target_out->boot_recovery_os);
       if (status != BOOT_OK)
         return status;
-
-      *cfi_acc ^= 0x000B000B; /* Backoff-Path bewiesen */
     }
-  } else {
-    *cfi_acc ^= 0x000C000C; /* Healthy-Path bewiesen */
   }
 
+  /* Logik-Bombe gefixt: Bei erfolgreicher Ausführung wird der CFI-Token exakt
+   * verrechnet */
+  *cfi_acc ^= CFI_STEP_3;
   return BOOT_OK;
 }
 
@@ -134,18 +128,24 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                                          uint32_t *extracted_svn,
                                          volatile uint32_t *cfi_acc) {
   if (open_txn->intent != WAL_INTENT_UPDATE_PENDING) {
-    *cfi_acc ^= 0x00A000A0; /* Skip-Update-Path bewiesen */
-    return BOOT_OK;         /* Safe Exit: No update pending */
+    /* Logik-Bombe gefixt: CFI Kaskade sicher schließen, falls kein Update
+     * läuft! */
+    *cfi_acc ^= CFI_STEP_4;
+    return BOOT_OK; /* Safe Exit: No update pending */
   }
 
   boot_status_t verify_status =
       BOOT_ERR_VERIFY; /* Grundannahme: Verifikation fehlgeschlagen
                           (Default-Deny) */
   struct toob_suit parsed_suit;
+  size_t suit_consumed_bytes = 0; /* Elevated scope für Scratchpad Allocation */
+  uint32_t local_svn = 0; /* Sicherer Zwischenspeicher für validierte SVN */
+
   boot_secure_zeroize(
       &parsed_suit, sizeof(parsed_suit)); /* P10: Uninitialized Trap Prevent */
 
 #ifdef TOOB_MOCK_TEST
+  suit_consumed_bytes = 128; /* Mock Payload Size */
   boot_verify_envelope_t mock_envelope = {
       .manifest_flash_addr = open_txn->offset,
       .manifest_size = 128,
@@ -162,11 +162,9 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
   platform->wdt->kick();
 
   if (read_stat == BOOT_OK) {
-    size_t consumed_bytes = 0;
-
     /* 2. ZCBOR Manifest Parsing (P10 Safe) */
     if (cbor_decode_toob_suit(crypto_arena, BOOT_CRYPTO_ARENA_SIZE,
-                              &parsed_suit, &consumed_bytes)) {
+                              &parsed_suit, &suit_consumed_bytes)) {
 
       /* Anti-Aliasing Fix: Extract hardware trust anchor safely to stack to
        * survive buffer overwrite from flash */
@@ -181,7 +179,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
 
         boot_verify_envelope_t real_envelope = {
             .manifest_flash_addr = open_txn->offset,
-            .manifest_size = consumed_bytes,
+            .manifest_size = suit_consumed_bytes,
             .signature_ed25519 = safe_sig_ed25519,
             .key_index = parsed_suit.suit_envelope.key_index,
             .pqc_hybrid_active = parsed_suit.suit_envelope.pqc_hybrid_active,
@@ -203,11 +201,10 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
           env_flag2 = BOOT_OK;
 
         if (env_flag1 == BOOT_OK && env_flag2 == BOOT_OK) {
+          local_svn = parsed_suit.suit_conditions.svn;
           /* 4. SVN Anti-Rollback Check happens ONLY if math signature matched
            * safely */
-          verify_status = boot_rollback_verify_svn(
-              platform, parsed_suit.suit_conditions.svn,
-              false); /* is_recovery_os = false */
+          verify_status = boot_rollback_verify_svn(platform, local_svn, false);
         } else {
           verify_status = BOOT_ERR_VERIFY; /* Trapped Glitch */
         }
@@ -249,9 +246,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
     } else {
       /* 5. GHOST MERKLE FIX: Stream-Hash Validation BEVOR geswappet wird!
          Die Firmware ist noch ungetestet. Wir jagen den Payload durch den
-         Stream-Hasher. P10 Rule: Wir nutzen out-of-scope pointers von
-         parsed_suit.suit_payload.images sicher, weil wir M-MERKLE anweisen, das
-         Scratch-Buffer intern neu zu deklarieren. */
+         Stream-Hasher. */
 
 #ifndef TOOB_MOCK_TEST
       if (staging_header.image_size <= sizeof(toob_image_header_t)) {
@@ -269,13 +264,34 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
           uint32_t num_chunks =
               parsed_suit.suit_payload.images.len / BOOT_MERKLE_HASH_LEN;
 
-          boot_secure_zeroize(stream_buf, sizeof(stream_buf));
-          verify_status = boot_merkle_verify_stream(
-              platform, CHIP_STAGING_SLOT_ABS_ADDR, staging_header.image_size,
-              chunk_size, parsed_suit.suit_payload.images.value,
-              parsed_suit.suit_payload.images.len, num_chunks, stream_buf,
-              sizeof(stream_buf));
-          boot_secure_zeroize(stream_buf, sizeof(stream_buf));
+          /* ZERO-ALLOCATION ARCHITECTURE FIX:
+           * Statt 16 KB BSS Bloat für stream_buf nutzen wir den ungenutzten
+           * Teil der crypto_arena. P10-sichere 8-Byte Pointer Alignment
+           * Berechnung. */
+          size_t aligned_offset = (suit_consumed_bytes + 7) & ~((size_t)7);
+
+          if (aligned_offset >= BOOT_CRYPTO_ARENA_SIZE) {
+            verify_status = BOOT_ERR_INVALID_ARG; /* Manifest füllt Arena
+                                                     bereits komplett */
+          } else {
+            uint8_t *scratch_ptr = crypto_arena + aligned_offset;
+            size_t scratch_size = BOOT_CRYPTO_ARENA_SIZE - aligned_offset;
+
+            /* Checken, ob das Rest-Budget für mindestens einen Chunk ausreicht
+             */
+            if (scratch_size < chunk_size) {
+              verify_status = BOOT_ERR_INVALID_ARG; /* Scratchpad zu klein! */
+            } else {
+              boot_secure_zeroize(scratch_ptr, scratch_size);
+              verify_status = boot_merkle_verify_stream(
+                  platform, CHIP_STAGING_SLOT_ABS_ADDR,
+                  staging_header.image_size, chunk_size,
+                  parsed_suit.suit_payload.images.value,
+                  parsed_suit.suit_payload.images.len, num_chunks, scratch_ptr,
+                  scratch_size);
+              boot_secure_zeroize(scratch_ptr, scratch_size);
+            }
+          }
         }
       }
 #endif
@@ -311,6 +327,12 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
       } else {
         open_txn->intent = WAL_INTENT_TXN_COMMIT; /* Normalize local state */
         flow_final_status = BOOT_OK;
+
+        /* FIX: Extrahierte SVN ERST HIER an den TMR übergeben, wenn das Update
+         * echt installiert wurde! */
+        if (extracted_svn != NULL) {
+          *extracted_svn = local_svn;
+        }
       }
     } else {
       flow_final_status = swap_status;
@@ -405,12 +427,14 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   uint32_t active_net_accum = 0;
   core_status =
       boot_journal_reconstruct_txn(platform, &open_txn, &active_net_accum);
+
   if (core_status != BOOT_OK && core_status != BOOT_ERR_STATE) {
     goto state_cleanup;
   }
 
   if (core_status == BOOT_ERR_STATE) {
     open_txn.intent = WAL_INTENT_NONE;
+    core_status = BOOT_OK; /* Normalize clean state */
   }
 
   state_cfi ^= CFI_STEP_1; /* Proof Step 1 */
@@ -613,26 +637,33 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   target_out->net_search_accum_ms = active_net_accum;
   state_cfi ^= CFI_STEP_5;
 
+state_cleanup:
   /* ==============================================================================
    * FINAL GLITCH-DEFENSE GATE (CFI VALIDATION)
    * ==============================================================================
+   * Nur wenn der Status bisher legitimerweise OK war, prüfen wir, ob die
+   * Pipeline physisch lückenlos bewiesen wurde! Ist sie das nicht, liegt ein
+   * Fault-Injection Angriff (PC-Glitch) vor. Hardware-Fehler aus früheren
+   * Schritten dürfen durch diesen Check nicht mit BOOT_ERR_INVALID_STATE
+   * überschrieben werden!
    */
-  uint32_t expected_cfi = CFI_TOKEN_INIT ^ CFI_STEP_1 ^ CFI_STEP_2 ^
-                          CFI_STEP_3 ^ CFI_STEP_4 ^ CFI_STEP_5;
-  volatile uint32_t cfi_shield_1 = 0;
-  volatile uint32_t cfi_shield_2 = 0;
+  if (core_status == BOOT_OK) {
+    uint32_t expected_cfi = CFI_TOKEN_INIT ^ CFI_STEP_1 ^ CFI_STEP_2 ^
+                            CFI_STEP_3 ^ CFI_STEP_4 ^ CFI_STEP_5;
+    volatile uint32_t cfi_shield_1 = 0;
+    volatile uint32_t cfi_shield_2 = 0;
 
-  if (state_cfi == expected_cfi)
-    cfi_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
-  if (cfi_shield_1 == BOOT_OK && state_cfi == expected_cfi)
-    cfi_shield_2 = BOOT_OK;
+    if (state_cfi == expected_cfi)
+      cfi_shield_1 = BOOT_OK;
+    __asm__ volatile("nop; nop; nop;");
+    if (cfi_shield_1 == BOOT_OK && state_cfi == expected_cfi)
+      cfi_shield_2 = BOOT_OK;
 
-  if (cfi_shield_1 != BOOT_OK || cfi_shield_2 != BOOT_OK) {
-    core_status = BOOT_ERR_INVALID_STATE; /* CFI Failure - Attack Trapped! */
+    if (cfi_shield_1 != BOOT_OK || cfi_shield_2 != BOOT_OK) {
+      core_status = BOOT_ERR_INVALID_STATE; /* CFI Failure - Attack Trapped! */
+    }
   }
 
-state_cleanup:
   /* Secure Fallback: Nulle den Target Output bei Fehlern, damit niemand den PC
    * verbiegt! */
   if (core_status != BOOT_OK) {
