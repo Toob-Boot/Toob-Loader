@@ -92,7 +92,7 @@ static inline boot_status_t verify_not_all_zeros_glitch_safe(const uint8_t *buf,
 
   if (or_acc != 0x00 && and_acc != 0xFF)
     zero_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (zero_shield_1 == BOOT_OK && or_acc != 0x00 && and_acc != 0xFF)
     zero_shield_2 = BOOT_OK;
 
@@ -215,7 +215,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     downgrade_shield_1 = BOOT_OK;
   }
 
-  __asm__ volatile("nop; nop; nop;"); /* Glitch Delay Injection */
+  BOOT_GLITCH_DELAY(); /* Glitch Delay Injection */
 
   if (downgrade_shield_1 == BOOT_OK && (is_max_key || next_key_absent)) {
     downgrade_shield_2 = BOOT_OK;
@@ -251,7 +251,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     key_shield_1 = BOOT_OK;
   }
 
-  __asm__ volatile("nop; nop; nop;"); /* EMFI Instruction Skip Protection */
+  BOOT_GLITCH_DELAY(); /* EMFI Instruction Skip Protection */
 
   if (key_shield_1 == BOOT_OK && key_stat == BOOT_OK) {
     key_shield_2 = BOOT_OK;
@@ -296,7 +296,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     ed_secure_flag_1 = BOOT_OK;
   }
 
-  __asm__ volatile("nop; nop; nop;"); /* Branch-Skip Mitigation */
+  BOOT_GLITCH_DELAY(); /* Branch-Skip Mitigation */
 
   if (ed_secure_flag_1 == BOOT_OK && verify_stat == BOOT_OK) {
     ed_secure_flag_2 = BOOT_OK;
@@ -325,7 +325,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     pqc_req_shield_1 = BOOT_OK;
   }
 
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
 
   if (pqc_req_shield_1 == BOOT_OK &&
       (pqc_enforced || local_env.pqc_hybrid_active)) {
@@ -369,7 +369,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     volatile uint32_t pqc_b_shield_1 = 0, pqc_b_shield_2 = 0;
     if (pqc_pub_ok && pqc_sig_ok)
       pqc_b_shield_1 = BOOT_OK;
-    __asm__ volatile("nop; nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (pqc_b_shield_1 == BOOT_OK && pqc_pub_ok && pqc_sig_ok)
       pqc_b_shield_2 = BOOT_OK;
 
@@ -402,7 +402,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
       pqc_secure_flag_1 = BOOT_OK;
     }
 
-    __asm__ volatile("nop; nop; nop;");
+    BOOT_GLITCH_DELAY();
 
     if (pqc_secure_flag_1 == BOOT_OK && pqc_stat == BOOT_OK) {
       pqc_secure_flag_2 = BOOT_OK;
@@ -424,7 +424,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
 
     if (!pqc_enforced && !local_env.pqc_hybrid_active)
       skip_shield_1 = BOOT_OK;
-    __asm__ volatile("nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (skip_shield_1 == BOOT_OK && !pqc_enforced &&
         !local_env.pqc_hybrid_active)
       skip_shield_2 = BOOT_OK;
@@ -455,7 +455,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     path_check_1 = BOOT_OK;
   }
 
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
 
   if (path_check_1 == BOOT_OK && execution_path == expected_path) {
     path_check_2 = BOOT_OK;

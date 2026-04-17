@@ -69,7 +69,7 @@ static inline boot_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
   volatile uint32_t shield_1 = 0, shield_2 = 0;
   if (acc_fwd == 0)
     shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (shield_1 == BOOT_OK && acc_rev == 0)
     shield_2 = BOOT_OK;
 
@@ -164,7 +164,7 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
     volatile uint32_t eshield_1 = 0, eshield_2 = 0;
     if (efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED)
       eshield_1 = BOOT_OK;
-    __asm__ volatile("nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (eshield_1 == BOOT_OK &&
         (efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED))
       eshield_2 = BOOT_OK;
@@ -196,7 +196,7 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
   }
 
   /* Timing/Branch Delay Injection gegen EMFI / Instruction-Skips */
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
 
   if (downgrade_shield_1 == BOOT_OK && valid_wal && valid_efuse) {
     downgrade_shield_2 = BOOT_OK;
@@ -217,7 +217,7 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
 
   if (cfi_tracker == expected_cfi)
     proof_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (proof_1 == BOOT_OK && cfi_tracker == expected_cfi)
     proof_2 = BOOT_OK;
 
@@ -271,7 +271,7 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
     path_flag_1 = 0x44444444;
   }
 
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
 
   if (path_flag_1 == 0x11111111 && counter <= limit_normal) {
     path_flag_2 = 0x11111111;
@@ -356,7 +356,7 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
   if (platform->clock && platform->clock->deinit)
     platform->clock->deinit();
   while (1) {
-    __asm__ volatile("nop; nop; nop;"); /* Starve the WDT to force Cold Boot! */
+    BOOT_GLITCH_DELAY(); /* Starve the WDT to force Cold Boot! */
   }
 #else
   /* Attended Mode (FALSE): Bootloader blockiert. Springe in die Schicht 4a
@@ -427,7 +427,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     hdr_shield_1 = BOOT_OK;
   }
 
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
 
   if (hdr_shield_1 == BOOT_OK && backup_header.magic == TOOB_MAGIC_HEADER &&
       size_valid) {
@@ -653,7 +653,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
       volatile uint32_t ecc_shield_1 = 0, ecc_shield_2 = 0;
       if (step_src_crc == step_dst_crc)
         ecc_shield_1 = BOOT_OK;
-      __asm__ volatile("nop; nop;");
+      BOOT_GLITCH_DELAY();
       if (ecc_shield_1 == BOOT_OK && step_src_crc == step_dst_crc)
         ecc_shield_2 = BOOT_OK;
 
@@ -679,7 +679,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
 
   if (revert_cfi == expected_cfi)
     cfi_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (cfi_shield_1 == BOOT_OK && revert_cfi == expected_cfi)
     cfi_shield_2 = BOOT_OK;
 

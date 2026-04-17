@@ -272,7 +272,7 @@ init_success:
 
       if (pin_active)
         pin_shield_1 = BOOT_OK;
-      __asm__ volatile("nop; nop; nop;");
+      BOOT_GLITCH_DELAY();
       if (pin_shield_1 == BOOT_OK && pin_active)
         pin_shield_2 = BOOT_OK;
 
@@ -309,7 +309,7 @@ init_success:
   volatile uint32_t sm_shield_1 = 0, sm_shield_2 = 0;
   if (status == BOOT_OK)
     sm_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (sm_shield_1 == BOOT_OK && status == BOOT_OK)
     sm_shield_2 = BOOT_OK;
 
@@ -349,7 +349,7 @@ init_success:
 
   if (bounds_ok)
     bounds_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (bounds_shield_1 == BOOT_OK && bounds_ok)
     bounds_shield_2 = BOOT_OK;
 
@@ -437,7 +437,7 @@ init_success:
 
   if (ram_ok)
     ram_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (ram_shield_1 == BOOT_OK && ram_ok)
     ram_shield_2 = BOOT_OK;
 
@@ -481,7 +481,7 @@ init_success:
 
   if (wipe_acc == 0)
     wipe_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (wipe_shield_1 == BOOT_OK && wipe_acc == 0)
     wipe_shield_2 = BOOT_OK;
 
@@ -492,7 +492,7 @@ init_success:
     if (platform->clock && platform->clock->deinit)
       platform->clock->deinit();
     while (1) {
-      __asm__ volatile("nop;");
+      BOOT_GLITCH_DELAY();
     } /* Starve WDT for reset */
   }
 
@@ -530,7 +530,7 @@ init_success:
 
   if (main_cfi == expected_cfi)
     final_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (final_shield_1 == BOOT_OK && main_cfi == expected_cfi)
     final_shield_2 = BOOT_OK;
 
@@ -543,7 +543,7 @@ init_success:
      * trennt. */
     boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
     while (1) {
-      __asm__ volatile("nop;");
+      BOOT_GLITCH_DELAY();
     }
   }
 

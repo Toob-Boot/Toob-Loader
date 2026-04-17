@@ -61,7 +61,7 @@ static inline boot_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
   volatile uint32_t s1 = 0, s2 = 0;
   if (acc_fwd == 0)
     s1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (s1 == BOOT_OK && acc_rev == 0)
     s2 = BOOT_OK;
 
@@ -161,7 +161,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
   volatile uint32_t b_shield_1 = 0, b_shield_2 = 0;
   if (!bounds_violation)
     b_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (b_shield_1 == BOOT_OK && !bounds_violation)
     b_shield_2 = BOOT_OK;
 
@@ -351,7 +351,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
 
   if (multi_cfi == expected_cfi)
     path_check_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (path_check_1 == BOOT_OK && multi_cfi == expected_cfi)
     path_check_2 = BOOT_OK;
 

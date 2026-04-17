@@ -81,7 +81,7 @@ constant_time_memcmp_32_glitch_safe(const uint8_t *a, const uint8_t *b) {
   volatile uint32_t flag1 = 0, flag2 = 0;
   if (acc_fwd == 0)
     flag1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (flag1 == BOOT_OK && acc_rev == 0)
     flag2 = BOOT_OK;
 
@@ -180,7 +180,7 @@ static boot_status_t cobs_decode_in_place(uint8_t *__restrict data, size_t len,
 
     if (is_within_bounds)
       bounds_shield_1 = BOOT_OK;
-    __asm__ volatile("nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (bounds_shield_1 == BOOT_OK && is_within_bounds)
       bounds_shield_2 = BOOT_OK;
 
@@ -387,7 +387,7 @@ session_reset:
         volatile uint32_t shield_1 = 0, shield_2 = 0;
         if (time_ok && slot_ok && nonce_stat == BOOT_OK)
           shield_1 = BOOT_OK;
-        __asm__ volatile("nop; nop;");
+        BOOT_GLITCH_DELAY();
         if (shield_1 == BOOT_OK && time_ok && slot_ok && nonce_stat == BOOT_OK)
           shield_2 = BOOT_OK;
 
@@ -420,7 +420,7 @@ session_reset:
 
             if (sig_stat == BOOT_OK)
               auth_shield_1 = BOOT_OK;
-            __asm__ volatile("nop; nop; nop;"); /* EMFI Protection */
+            BOOT_GLITCH_DELAY(); /* EMFI Protection */
             if (auth_shield_1 == BOOT_OK && sig_stat == BOOT_OK)
               auth_shield_2 = BOOT_OK;
 
@@ -467,7 +467,7 @@ session_reset:
   volatile uint32_t cfi_proof_1 = 0, cfi_proof_2 = 0;
   if (panic_cfi == (CFI_PANIC_INIT ^ CFI_AUTH_PASSED))
     cfi_proof_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (cfi_proof_1 == BOOT_OK && panic_cfi == (CFI_PANIC_INIT ^ CFI_AUTH_PASSED))
     cfi_proof_2 = BOOT_OK;
 
@@ -520,7 +520,7 @@ session_reset:
       volatile uint32_t eof_shield_1 = 0, eof_shield_2 = 0;
       if (payload_len == 3 && memcmp(chunk_buf, "EOF", 3) == 0)
         eof_shield_1 = BOOT_OK;
-      __asm__ volatile("nop; nop;");
+      BOOT_GLITCH_DELAY();
       if (eof_shield_1 == BOOT_OK && payload_len == 3 &&
           memcmp(chunk_buf, "EOF", 3) == 0)
         eof_shield_2 = BOOT_OK;
@@ -542,7 +542,7 @@ session_reset:
          * Vendor-NVIC zum Reset führt! */
         uint32_t hang_timeout = 10000000;
         while (hang_timeout > 0) {
-          __asm__ volatile("nop; nop; nop;");
+          BOOT_GLITCH_DELAY();
           hang_timeout--;
         }
 
@@ -577,7 +577,7 @@ session_reset:
 
       if (bounds_ok)
         bounds_flag_1 = BOOT_OK;
-      __asm__ volatile("nop; nop;");
+      BOOT_GLITCH_DELAY();
       if (bounds_flag_1 == BOOT_OK && bounds_ok)
         bounds_flag_2 = BOOT_OK;
 
@@ -688,7 +688,7 @@ session_reset:
           volatile uint32_t v_shield_1 = 0, v_shield_2 = 0;
           if (diff == 0)
             v_shield_1 = BOOT_OK;
-          __asm__ volatile("nop; nop;");
+          BOOT_GLITCH_DELAY();
           if (v_shield_1 == BOOT_OK && diff == 0)
             v_shield_2 = BOOT_OK;
 

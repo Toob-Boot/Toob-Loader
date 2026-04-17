@@ -23,6 +23,21 @@
 /* --- 1. Boot Status Codes (Glitch-Resistant Returns) --- */
 
 /**
+ * @brief Portability abstraction for Voltage/Clock Glitch protection
+ * Definiert die NOP-Sleds architekturspezifisch. Wird zwingend per CSEL/Branchless
+ * ausgewertet.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+  #define BOOT_GLITCH_DELAY() __asm__ volatile("nop; nop; nop;")
+#elif defined(__ICCARM__) /* IAR */
+  #define BOOT_GLITCH_DELAY() __asm volatile("nop"); __asm volatile("nop"); __asm volatile("nop")
+#elif defined(__CC_ARM) /* ARM Keil */
+  #define BOOT_GLITCH_DELAY() __nop(); __nop(); __nop()
+#else
+  #define BOOT_GLITCH_DELAY() /* Fallback for unknown compilers */
+#endif
+
+/**
  * @brief Universal Bootloader Return Type (GAP-06)
  * Uses high-hamming-distance constants to prevent 0x00 / 0x01 glitching.
  */

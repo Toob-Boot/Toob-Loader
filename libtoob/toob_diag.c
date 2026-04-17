@@ -83,6 +83,7 @@ static inline void toob_secure_zeroize(void *ptr, size_t len) {
   while (len--) {
     *p++ = 0;
   }
+  __asm__ volatile("" : : "g"(ptr) : "memory");
 }
 
 /* ==============================================================================

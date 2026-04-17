@@ -79,7 +79,7 @@ static boot_status_t _handle_rollback_flow(const boot_platform_t *platform,
 
   if (current_tmr->boot_failure_counter > 0)
     eval_flag_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (eval_flag_1 == BOOT_OK && current_tmr->boot_failure_counter > 0)
     eval_flag_2 = BOOT_OK;
 
@@ -196,7 +196,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
         volatile uint32_t env_flag1 = 0, env_flag2 = 0;
         if (verify_status == BOOT_OK)
           env_flag1 = BOOT_OK;
-        __asm__ volatile("nop;");
+        BOOT_GLITCH_DELAY();
         if (env_flag1 == BOOT_OK && verify_status == BOOT_OK)
           env_flag2 = BOOT_OK;
 
@@ -226,7 +226,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
   volatile uint32_t v_flag1 = 0, v_flag2 = 0;
   if (verify_status == BOOT_OK)
     v_flag1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (v_flag1 == BOOT_OK && verify_status == BOOT_OK)
     v_flag2 = BOOT_OK;
 
@@ -303,7 +303,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
   volatile uint32_t swap_gate_1 = 0, swap_gate_2 = 0;
   if (verify_status == BOOT_OK)
     swap_gate_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (swap_gate_1 == BOOT_OK && verify_status == BOOT_OK)
     swap_gate_2 = BOOT_OK;
 
@@ -478,7 +478,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
       auth_flag_1 = BOOT_OK;
     }
 
-    __asm__ volatile("nop; nop; nop;");
+    BOOT_GLITCH_DELAY();
 
     if (auth_flag_1 == BOOT_OK) {
       if (rtc_confirmed ||
@@ -532,7 +532,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   volatile uint32_t crash_flag_1 = 0, crash_flag_2 = 0;
   if (is_app_crash)
     crash_flag_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (crash_flag_1 == BOOT_OK && is_app_crash)
     crash_flag_2 = BOOT_OK;
 
@@ -586,7 +586,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   volatile uint32_t magic_shield_1 = 0, magic_shield_2 = 0;
   if (app_header.magic == TOOB_MAGIC_HEADER)
     magic_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (magic_shield_1 == BOOT_OK && app_header.magic == TOOB_MAGIC_HEADER)
     magic_shield_2 = BOOT_OK;
 
@@ -602,7 +602,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   volatile uint32_t req_flag_1 = 0, req_flag_2 = 0;
   if (open_txn.intent == WAL_INTENT_TXN_COMMIT)
     req_flag_1 = BOOT_OK;
-  __asm__ volatile("nop;");
+  BOOT_GLITCH_DELAY();
   if (req_flag_1 == BOOT_OK && open_txn.intent == WAL_INTENT_TXN_COMMIT)
     req_flag_2 = BOOT_OK;
 
@@ -655,7 +655,7 @@ state_cleanup:
 
     if (state_cfi == expected_cfi)
       cfi_shield_1 = BOOT_OK;
-    __asm__ volatile("nop; nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (cfi_shield_1 == BOOT_OK && state_cfi == expected_cfi)
       cfi_shield_2 = BOOT_OK;
 

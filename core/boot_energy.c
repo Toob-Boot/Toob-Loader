@@ -90,7 +90,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
     volatile uint32_t no_hal_shield_1 = 0, no_hal_shield_2 = 0;
     if (energy_cfi == (CFI_ENERGY_INIT ^ CFI_ENERGY_NO_HAL))
       no_hal_shield_1 = BOOT_OK;
-    __asm__ volatile("nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (no_hal_shield_1 == BOOT_OK &&
         energy_cfi == (CFI_ENERGY_INIT ^ CFI_ENERGY_NO_HAL))
       no_hal_shield_2 = BOOT_OK;
@@ -193,7 +193,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
   volatile uint32_t cfi_shield_1 = 0, cfi_shield_2 = 0;
   if (energy_cfi == expected_cfi)
     cfi_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (cfi_shield_1 == BOOT_OK && energy_cfi == expected_cfi)
     cfi_shield_2 = BOOT_OK;
 
@@ -203,7 +203,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
     if (platform->clock && platform->clock->deinit)
       platform->clock->deinit();
     while (1) {
-      __asm__ volatile("nop;");
+      BOOT_GLITCH_DELAY();
     } /* Starve WDT */
   }
 
@@ -212,7 +212,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
 
   if (pmic_sustain_ok && adc_voltage_ok)
     eval_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (eval_shield_1 == BOOT_OK && pmic_sustain_ok && adc_voltage_ok)
     eval_shield_2 = BOOT_OK;
 
@@ -242,7 +242,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
       platform->clock->deinit();
 
     while (1) {
-      __asm__ volatile("nop; nop;"); /* Starve WDT */
+      BOOT_GLITCH_DELAY(); /* Starve WDT */
     }
   }
 #endif

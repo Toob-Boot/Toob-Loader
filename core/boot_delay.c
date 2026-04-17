@@ -122,7 +122,7 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
 
     if (hw_ok && sw_ok)
       time_reached_1 = BOOT_OK;
-    __asm__ volatile("nop; nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (time_reached_1 == BOOT_OK && hw_ok && sw_ok)
       time_reached_2 = BOOT_OK;
 
@@ -145,7 +145,7 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
       if (platform->clock->deinit)
         platform->clock->deinit();
       while (1) {
-        __asm__ volatile("nop; nop;");
+        BOOT_GLITCH_DELAY();
       }
     }
 
@@ -176,7 +176,7 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
       if (platform->clock->deinit)
         platform->clock->deinit();
       while (1) {
-        __asm__ volatile("nop; nop;");
+        BOOT_GLITCH_DELAY();
       }
     }
   }
@@ -196,7 +196,7 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
 
   if (final_hw_ok && final_sw_ok)
     proof_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (proof_1 == BOOT_OK && final_hw_ok && final_sw_ok)
     proof_2 = BOOT_OK;
 
@@ -206,7 +206,7 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
     if (platform->clock->deinit)
       platform->clock->deinit();
     while (1) {
-      __asm__ volatile("nop;");
+      BOOT_GLITCH_DELAY();
     }
   }
 

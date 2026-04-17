@@ -86,7 +86,7 @@ static boot_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
   volatile uint32_t shield_1 = 0, shield_2 = 0;
   if (acc_fwd == 0)
     shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (shield_1 == BOOT_OK && acc_rev == 0)
     shield_2 = BOOT_OK;
 
@@ -114,7 +114,7 @@ static bool verify_header_crc_glitch_safe(
 
   if (magic_ok && crc_ok)
     shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;"); /* Branch Delay Injection gegen EMFI */
+  BOOT_GLITCH_DELAY(); /* Branch Delay Injection gegen EMFI */
   if (shield_1 == BOOT_OK && magic_ok && crc_ok)
     shield_2 = BOOT_OK;
 
@@ -280,7 +280,7 @@ static uint32_t scan_for_frontier_linear(const boot_platform_t *platform,
 
     if (magic_ok && crc_ok)
       shield_1 = BOOT_OK;
-    __asm__ volatile("nop; nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (shield_1 == BOOT_OK && magic_ok && crc_ok)
       shield_2 = BOOT_OK;
 
@@ -555,7 +555,7 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
 
       if (magic_ok && crc_ok)
         shield_1 = BOOT_OK;
-      __asm__ volatile("nop; nop; nop;");
+      BOOT_GLITCH_DELAY();
       if (shield_1 == BOOT_OK && magic_ok && crc_ok)
         shield_2 = BOOT_OK;
 

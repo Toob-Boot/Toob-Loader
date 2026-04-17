@@ -60,7 +60,7 @@ constant_time_memcmp_32_glitch_safe(const uint8_t *a, const uint8_t *b) {
   }
 
   /* Branch Delay Injection gegen Voltage Faults (Instruction Skips) */
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
 
   if (flag1 == BOOT_OK && acc_rev == 0) {
     flag2 = BOOT_OK;
@@ -273,7 +273,7 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
     loop_guard_1 = BOOT_OK;
   }
 
-  __asm__ volatile("nop; nop; nop;"); /* Branch Skips Mitigation */
+  BOOT_GLITCH_DELAY(); /* Branch Skips Mitigation */
 
   if (loop_guard_1 == BOOT_OK && remaining_bytes == 0) {
     loop_guard_2 = BOOT_OK;

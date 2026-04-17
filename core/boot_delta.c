@@ -62,7 +62,7 @@ static inline boot_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
   volatile uint32_t shield_1 = 0, shield_2 = 0;
   if (acc_fwd == 0)
     shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (shield_1 == BOOT_OK && acc_rev == 0)
     shield_2 = BOOT_OK;
 
@@ -190,7 +190,7 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
     volatile uint32_t s1 = 0, s2 = 0;
     if (diff == 0)
       s1 = BOOT_OK;
-    __asm__ volatile("nop; nop;");
+    BOOT_GLITCH_DELAY();
     if (s1 == BOOT_OK && diff == 0)
       s2 = BOOT_OK;
 
@@ -266,7 +266,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
 
   if (hdr_ok)
     hdr_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (hdr_shield_1 == BOOT_OK && hdr_ok)
     hdr_shield_2 = BOOT_OK;
 
@@ -443,7 +443,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
       volatile uint32_t i_shield_1 = 0, i_shield_2 = 0;
       if (calc_icrc == inst.crc32)
         i_shield_1 = BOOT_OK;
-      __asm__ volatile("nop; nop;");
+      BOOT_GLITCH_DELAY();
       if (i_shield_1 == BOOT_OK && calc_icrc == inst.crc32)
         i_shield_2 = BOOT_OK;
 
@@ -572,7 +572,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
 
   if (flow_ok)
     final_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (final_1 == BOOT_OK && flow_ok)
     final_2 = BOOT_OK;
 
@@ -588,7 +588,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
   volatile uint32_t cfi_1 = 0, cfi_2 = 0;
   if (delta_cfi == expected_cfi)
     cfi_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (cfi_1 == BOOT_OK && delta_cfi == expected_cfi)
     cfi_2 = BOOT_OK;
 

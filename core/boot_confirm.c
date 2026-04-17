@@ -49,7 +49,7 @@ boot_status_t boot_confirm_evaluate(const boot_platform_t* platform, uint64_t ex
     }
 
     /* Branch Delay Injection gegen Voltage Faults (Instruction Skips) */
-    __asm__ volatile ("nop; nop; nop;");
+    BOOT_GLITCH_DELAY();
 
     if (secure_flag_1 == BOOT_OK && is_ok) {
         secure_flag_2 = BOOT_OK;

@@ -135,7 +135,7 @@ stream_flash_copy_and_verify(const boot_platform_t *platform, uint32_t src,
   volatile uint32_t crc_shield_1 = 0, crc_shield_2 = 0;
   if (verify_crc == expected_crc)
     crc_shield_1 = BOOT_OK;
-  __asm__ volatile("nop; nop;");
+  BOOT_GLITCH_DELAY();
   if (crc_shield_1 == BOOT_OK && verify_crc == expected_crc)
     crc_shield_2 = BOOT_OK;
 
