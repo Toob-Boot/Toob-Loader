@@ -28,9 +28,11 @@ if(NOT TOOB_CRYPTO_DISABLE_SW_ENGINE)
     target_sources(toob_crypto_upstream PRIVATE
         crypto/monocypher/monocypher.c
         crypto/monocypher/monocypher-ed25519.c
+        crypto/sha256/sha256.c
     )
     target_include_directories(toob_crypto_upstream PUBLIC 
         crypto/monocypher
+        crypto/sha256
     )
     
     # GAP Fix: Performance & Constant-Time Guarantee

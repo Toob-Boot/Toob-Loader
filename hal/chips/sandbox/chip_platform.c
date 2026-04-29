@@ -48,7 +48,9 @@ static crypto_hal_t sandbox_crypto_hal = {
     .read_dslc                = mock_efuse_read_dslc,
     .read_monotonic_counter   = mock_efuse_read_monotonic_counter,
     .advance_monotonic_counter= mock_efuse_advance_monotonic_counter,
+    .get_hash_ctx_size        = crypto_monocypher_get_hash_ctx_size,
     .has_hw_acceleration      = false,
+    .is_pqc_enforced          = NULL,
 };
 
 /* -- Globale Platform Handoff Struktur -- */
