@@ -1,0 +1,39 @@
+[
+    {
+        "esp32": {
+            "flash_controller": {
+                "base_address": "0x3FF42000",
+                "erase_sector_sequence": [
+                    {
+                        "args_csv": "sector_addr / 4096",
+                        "desc": "Erase Flash Sector via BootROM",
+                        "function_name": "SPIEraseSector",
+                        "requires_physical_offset": true,
+                        "rom_address": "0x40062CCC",
+                        "type": "rom_function_call"
+                    }
+                ],
+                "unlock_sequence": [
+                    {
+                        "args_csv": "",
+                        "desc": "Unlock SPI Flash via BootROM",
+                        "function_name": "SPIUnlock",
+                        "requires_physical_offset": true,
+                        "rom_address": "0x40062738",
+                        "type": "rom_function_call"
+                    }
+                ],
+                "write_word_sequence": [
+                    {
+                        "args_csv": "sector_addr, &data_word, 4",
+                        "desc": "Write Flash Word via BootROM",
+                        "function_name": "SPIWrite",
+                        "requires_physical_offset": true,
+                        "rom_address": "0x40062D50",
+                        "type": "rom_function_call"
+                    }
+                ]
+            }
+        }
+    }
+]

@@ -1,0 +1,20 @@
+[GENERATE] Blueprint 2 successfully persisted to C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\blueprints\esp32-c6\run_2\blueprint.json
+[GENERATE] Confidence matrix saved to C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\blueprints\esp32-c6\run_2\confidence.json
+
+[PING PHASE] [COMPILE] Invoking Universal Toolchain Runner for esp32-c6...
+[PING PHASE] [*] Compiling JSON Blueprint to Toolchain Syntax & C Profiles...
+[*] Generated Linker Script: C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\build\esp32-c6\run_latest\esp32-c6.ld
+[*] Generated Startup Assembly: C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\build\esp32-c6\run_latest\esp32-c6_startup.S
+[*] Generated Capabilities Shim: C:\Users\Robin\Desktop\Repowatt-OS\repowatt-os\toobfuzzer3\build\esp32-c6\run_latest\capabilities_esp32-c6.c
+[*] Emitted: esp32-c6.ld | esp32-c6_startup.S | capabilities_esp32-c6.c
+
+=== STAGE 1: COMPILATION ===
+[*] Preparing execution for: riscv32-esp-elf-gcc
+[*] Tool 'riscv32-esp-elf-gcc' not in PATH. Searching common vendor directories (Max Depth: 6)...
+    [+] Found at: C:\Espressif\tools\riscv32-esp-elf\esp-14.2.0_20251107\riscv32-esp-elf\bin\riscv32-esp-elf-gcc.exe
+    [>] Executing: "C:\Espressif\tools\riscv32-esp-elf\esp-14.2.0_20251107\riscv32-esp-elf\bin\riscv32-esp-elf-gcc.exe" -O2 -nostdlib -ffreestanding -mlongcalls -T build/esp32-c6/run_latest/esp32-c6.ld -I core/ -I arch/ -I build/esp32-c6/run_latest/ -o build/esp32-c6/run_latest/toobfuzzer.bin.elf core\detect_profile.c core\fuzzer_main.c core\logger.c core\prober_core.c  hal\hal_uart.c mocks\hal_mock.c build/esp32-c6/run_latest/capabilities_esp32-c6.c build/esp32-c6/run_latest/esp32-c6_startup.S
+    [!] Execution Failed (Exit 1)
+    [!] STDERR: riscv32-esp-elf-gcc.exe: error: unrecognized command-line option '-mlongcalls'
+[!] Compilation Failed.
+    [?] To trigger the AI Self-Healing loop, implement error parsing here.
+[*] Restarting application...

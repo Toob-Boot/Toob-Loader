@@ -1,0 +1,215 @@
+{
+    "esp32": {
+        "arch": "Xtensa (ESP32)",
+        "boot_vectors": {
+            "rom_base": "0x4000_0000",
+            "user_app_base": "0x400C_2000"
+        },
+        "crypto_capabilities": {
+            "hw_aes": true,
+            "hw_ed25519": false,
+            "hw_rng": true,
+            "hw_sha256": true,
+            "pka_present": true
+        },
+        "factory_identity": {
+            "has_mac_address": true,
+            "uid_address": "0x3FF5A000"
+        },
+        "flash_capabilities": {
+            "app_alignment_bytes": 65536,
+            "bank_size_bytes": {},
+            "is_dual_bank": false,
+            "read_while_write_supported": false,
+            "write_alignment_bytes": 4
+        },
+        "flash_controller": {
+            "base_address": "0x3FF42000",
+            "erase_sector_sequence": [
+                {
+                    "args_csv": "sector_addr / 4096",
+                    "desc": "Erase a 4KB sector using built-in ROM API",
+                    "function_name": "SPIEraseSector",
+                    "type": "rom_function_call"
+                }
+            ],
+            "unlock_sequence": [
+                {
+                    "args_csv": "",
+                    "desc": "Unlock SPI flash using built-in ROM API",
+                    "function_name": "SPIUnlock",
+                    "type": "rom_function_call"
+                }
+            ],
+            "write_word_sequence": [
+                {
+                    "args_csv": "sector_addr, &data_word, 4",
+                    "desc": "Write a 32-bit word using built-in ROM API",
+                    "function_name": "SPIWrite",
+                    "type": "rom_function_call"
+                }
+            ]
+        },
+        "memory": {
+            "alignment_bytes": 16,
+            "bootrom_reserved_data_bytes": 8192,
+            "data_segment": "dram0",
+            "executable_segment": "iram0",
+            "memory_regions": [
+                {
+                    "length": "0x60000",
+                    "name": "irom0",
+                    "origin": "0x40000000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x10000",
+                    "name": "drom0",
+                    "origin": "0x3FF90000",
+                    "permissions": "r"
+                },
+                {
+                    "length": "0x10000",
+                    "name": "hardware_reserved_cache",
+                    "origin": "0x40070000",
+                    "permissions": "-"
+                },
+                {
+                    "length": "0x20000",
+                    "name": "iram0",
+                    "origin": "0x40080000",
+                    "permissions": "rwx"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "bootrom_reserved_dram",
+                    "origin": "0x3FFAE000",
+                    "permissions": "-"
+                },
+                {
+                    "length": "0x30000",
+                    "name": "dram0",
+                    "origin": "0x3FFB0000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x20000",
+                    "name": "dram1",
+                    "origin": "0x3FFE0000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_fast_dram",
+                    "origin": "0x3FF80000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_fast_iram",
+                    "origin": "0x400C0000",
+                    "permissions": "rwx"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_slow_dram",
+                    "origin": "0x50000000",
+                    "permissions": "rw"
+                }
+            ],
+            "vector_alignment_section": ".iram0.vectors",
+            "vector_table_offset_bytes": 1024
+        },
+        "multi_core_topology": {
+            "coprocessors": [
+                {
+                    "app_alignment_bytes": null,
+                    "flash_base": "0x50000000",
+                    "name": "ulp_coprocessor"
+                }
+            ],
+            "ipc_mechanism": "shared_ram",
+            "is_multi_core": true
+        },
+        "reset_reason": {
+            "power_on_reset_mask": {},
+            "register_address": {},
+            "software_reset_mask": {},
+            "wdt_reset_mask": {}
+        },
+        "security_registers": {
+            "flash_encryption": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5_A000"
+            },
+            "jtag_disabled": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5_A000"
+            },
+            "rdp_level": {
+                "bit_mask": {},
+                "register_addr": {}
+            }
+        },
+        "startup": {
+            "abi_initialization_instructions": [
+                "movi a0, 0",
+                "movi a1, _stack_top",
+                "wsr.vecbase a0"
+            ],
+            "bss_init_required": true,
+            "stack_top_expression": "ORIGIN(dram1) + LENGTH(dram1)"
+        },
+        "survival_mechanisms": {
+            "needs_vbat_pin": false,
+            "recommended_storage_type": "rtc_ram"
+        },
+        "toolchain_requirements": {
+            "compiler_prefix": "xtensa-esp32-elf-",
+            "core_architecture": "Xtensa (ESP32)",
+            "flashing": {
+                "flash_offset": "0x1000",
+                "method": "UART",
+                "tool": "esptool.py",
+                "write_command": "esptool.py --chip esp32 write_flash 0x1000 {binary_path}"
+            },
+            "packaging": [
+                {
+                    "command": "esptool.py --chip esp32 elf2image --flash_mode dio --flash_freq 40m --flash_size 4MB -o {binary_path} {elf_path}",
+                    "condition": "ANY",
+                    "tool": "esptool.py"
+                },
+                {
+                    "command": "espsecure.py sign_data --version 2 --keyfile {private_key_path} --output {binary_path} {binary_path}",
+                    "condition": "PROFILE_SECURE_BOOT_ONLY",
+                    "tool": "espsecure.py"
+                }
+            ]
+        },
+        "watchdog_kill_registers": [
+            {
+                "address": "0x3FF5F064",
+                "config_addr": "0x3FF5F048",
+                "disable_val": "0x0",
+                "name": "TIMG0_WDT",
+                "unlock_val": "0x50D83AA1"
+            },
+            {
+                "address": "0x3FF60064",
+                "config_addr": "0x3FF60048",
+                "disable_val": "0x0",
+                "name": "TIMG1_WDT",
+                "unlock_val": "0x50D83AA1"
+            },
+            {
+                "address": "0x3FF480A4",
+                "config_addr": "0x3FF4808C",
+                "disable_val": "0x0",
+                "name": "RTC_WDT",
+                "unlock_val": "0x50D83AA1"
+            }
+        ]
+    }
+}

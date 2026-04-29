@@ -1,0 +1,74 @@
+[
+    {
+        "esp32-c6": {
+            "arch": "RISC-V",
+            "memory": {
+                "alignment_bytes": 16,
+                "bootrom_reserved_data_bytes": 8192,
+                "data_segment": "dram",
+                "executable_segment": "iram",
+                "memory_regions": [
+                    {
+                        "length": "0x50000",
+                        "name": "irom",
+                        "origin": "0x40000000",
+                        "permissions": "rx"
+                    },
+                    {
+                        "length": "0x78000",
+                        "name": "iram",
+                        "origin": "0x40800000",
+                        "permissions": "rwx"
+                    },
+                    {
+                        "length": "0x78000",
+                        "name": "dram",
+                        "origin": "0x40800000",
+                        "permissions": "rw"
+                    },
+                    {
+                        "length": "0x4000",
+                        "name": "lp_ram",
+                        "origin": "0x50000000",
+                        "permissions": "rwx"
+                    }
+                ],
+                "vector_alignment_section": ".vectors",
+                "vector_table_offset_bytes": 0
+            },
+            "startup": {
+                "abi_initialization_instructions": [
+                    ".option push",
+                    ".option norelax",
+                    "la gp, __global_pointer$",
+                    ".option pop"
+                ],
+                "bss_init_required": true,
+                "stack_top_expression": "ORIGIN(dram) + LENGTH(dram)"
+            },
+            "watchdog_kill_registers": [
+                {
+                    "address": "0x60008064",
+                    "config_addr": "0x60008048",
+                    "disable_val": "0x0",
+                    "name": "TIMG0_WDT",
+                    "unlock_val": "0x50D83AA1"
+                },
+                {
+                    "address": "0x60009064",
+                    "config_addr": "0x60009048",
+                    "disable_val": "0x0",
+                    "name": "TIMG1_WDT",
+                    "unlock_val": "0x50D83AA1"
+                },
+                {
+                    "address": "0x600B1C18",
+                    "config_addr": "0x600B1C00",
+                    "disable_val": "0x0",
+                    "name": "LP_WDT",
+                    "unlock_val": "0x50D83AA1"
+                }
+            ]
+        }
+    }
+]

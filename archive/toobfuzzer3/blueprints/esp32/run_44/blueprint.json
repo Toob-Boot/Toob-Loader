@@ -1,0 +1,160 @@
+{
+    "esp32": {
+        "arch": "Xtensa (ESP32)",
+        "boot_vectors": {
+            "rom_base": "0x4000_0000",
+            "user_app_base": "0x400C_2000"
+        },
+        "crypto_capabilities": {
+            "hw_aes": true,
+            "hw_ed25519": false,
+            "hw_rng": true,
+            "hw_sha256": true,
+            "pka_present": true
+        },
+        "factory_identity": {
+            "has_mac_address": true,
+            "uid_address": "0x3FF5A000"
+        },
+        "flash_capabilities": {
+            "app_alignment_bytes": 65536,
+            "bank_size_bytes": 0,
+            "is_dual_bank": false,
+            "read_while_write_supported": false,
+            "write_alignment_bytes": 4
+        },
+        "memory": {
+            "alignment_bytes": 16,
+            "bootrom_reserved_data_bytes": 0,
+            "data_segment": "internal_sram_2",
+            "executable_segment": "internal_sram_0",
+            "memory_regions": [
+                {
+                    "length": "0x60000",
+                    "name": "internal_rom_0",
+                    "origin": "0x40000000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x10000",
+                    "name": "internal_rom_1",
+                    "origin": "0x3FF90000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x30000",
+                    "name": "internal_sram_0",
+                    "origin": "0x40070000",
+                    "permissions": "rwx"
+                },
+                {
+                    "length": "0x20000",
+                    "name": "internal_sram_1_data",
+                    "origin": "0x3FFE0000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x20000",
+                    "name": "internal_sram_1_inst",
+                    "origin": "0x400A0000",
+                    "permissions": "rwx"
+                },
+                {
+                    "length": "0x32000",
+                    "name": "internal_sram_2",
+                    "origin": "0x3FFAE000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_fast_memory_data",
+                    "origin": "0x3FF80000",
+                    "permissions": "rw"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_fast_memory_inst",
+                    "origin": "0x400C0000",
+                    "permissions": "rx"
+                },
+                {
+                    "length": "0x2000",
+                    "name": "rtc_slow_memory",
+                    "origin": "0x50000000",
+                    "permissions": "rw"
+                }
+            ],
+            "vector_alignment_section": ".vecbase",
+            "vector_table_offset_bytes": 0
+        },
+        "multi_core_topology": {
+            "coprocessors": [
+                {
+                    "app_alignment_bytes": null,
+                    "flash_base": null,
+                    "name": "ulp_coprocessor"
+                }
+            ],
+            "ipc_mechanism": "shared_ram",
+            "is_multi_core": true
+        },
+        "reset_reason": {
+            "power_on_reset_mask": {},
+            "register_address": {},
+            "software_reset_mask": {},
+            "wdt_reset_mask": {}
+        },
+        "security_registers": {
+            "flash_encryption": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5_A000"
+            },
+            "jtag_disabled": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5_A000"
+            },
+            "rdp_level": {
+                "bit_mask": {},
+                "register_addr": {}
+            }
+        },
+        "startup": {
+            "abi_initialization_instructions": [
+                "movi a0, 0",
+                "wsr.windowbase a0",
+                "rsync"
+            ],
+            "bss_init_required": true,
+            "stack_top_expression": "ORIGIN(internal_sram_2) + LENGTH(internal_sram_2)"
+        },
+        "survival_mechanisms": {
+            "needs_vbat_pin": false,
+            "recommended_storage_type": "rtc_ram"
+        },
+        "toolchain_requirements": {
+            "compiler_prefix": "xtensa-esp32-elf-",
+            "core_architecture": "Xtensa (ESP32)",
+            "flashing": {
+                "flash_offset": "0x1000",
+                "method": "UART",
+                "tool": "esptool.py",
+                "write_command": "esptool.py --chip esp32 write_flash 0x1000 {binary_path}"
+            },
+            "packaging": [
+                {
+                    "command": "esptool.py elf2image --flash_mode dio --flash_freq 40m --flash_size 2MB -o {binary_path} {elf_path}",
+                    "condition": "ANY",
+                    "tool": "esptool.py"
+                },
+                {
+                    "command": "espsecure.py sign_data --version 2 --keyfile {private_key_path} --output {binary_path} {binary_path}",
+                    "condition": "PROFILE_SECURE_BOOT_ONLY",
+                    "tool": "espsecure.py"
+                }
+            ]
+        },
+        "watchdog_kill_registers": {}
+    }
+}

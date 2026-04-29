@@ -1,0 +1,111 @@
+{
+    "esp32-c6": {
+        "arch": "RISC-V (RV32IMAC)",
+        "memory": {
+            "iram": {
+                "origin": "0x40800000",
+                "length": "0x80000",
+                "alignment_bytes": 16
+            },
+            "dram": {
+                "origin": "0x40800000",
+                "length": "0x80000",
+                "alignment_bytes": 16
+            }
+        },
+        "startup": {
+            "stack_top_expression": "ORIGIN(dram) + LENGTH(dram)",
+            "abi_initialization_instructions": [
+                "la sp, _stack_top",
+                ".option push",
+                ".option norelax",
+                "la gp, __global_pointer$",
+                ".option pop"
+            ],
+            "bss_init_required": true,
+            "vector_base_register": "mtvec"
+        },
+        "watchdog_kill_registers": [
+            {
+                "name": "TIMG0_WDT",
+                "address": "0x600080B4",
+                "unlock_val": "0x50D83AA1",
+                "config_addr": "0x60008048",
+                "disable_val": "0x0"
+            },
+            {
+                "name": "RTC_WDT",
+                "address": "0x600B10B4",
+                "unlock_val": "0x50D83AA1",
+                "config_addr": "0x600B10AC",
+                "disable_val": "0x0"
+            }
+        ],
+        "rom_functions": {
+            "printf": null,
+            "flash_erase": null
+        }
+    },
+    "esp32": {
+        "memory": {
+            "iram": {
+                "length": "0x30000",
+                "alignment_bytes": 16,
+                "origin": "0x40070000"
+            },
+            "dram": {
+                "length": "0x32000",
+                "alignment_bytes": 16,
+                "origin": "0x3FFAE000"
+            }
+        },
+        "watchdog_kill_registers": [
+            {
+                "address": "0x3FF5F064",
+                "config_addr": "0x3FF5F048",
+                "disable_val": "0x0",
+                "name": "TIMG0_WDT",
+                "unlock_val": "0x50D83AA1"
+            },
+            {
+                "address": "0x3FF480A4",
+                "config_addr": "0x3FF4808C",
+                "disable_val": "0x0",
+                "name": "RTC_WDT",
+                "unlock_val": "0x50D83AA1"
+            }
+        ],
+        "arch": "Xtensa (ESP32)",
+        "startup": {
+            "stack_top_expression": "ORIGIN(dram) + LENGTH(dram)",
+            "bss_init_required": true,
+            "abi_initialization_instructions": [
+                "movi a0, 0",
+                "wsr a0, WindowBase",
+                "movi a0, 1",
+                "wsr a0, WindowStart",
+                "rsync"
+            ]
+        },
+        "security_registers": {
+            "jtag_disabled": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5A000"
+            },
+            "flash_encryption": {
+                "active_if_true": true,
+                "bit_mask": {},
+                "register_addr": "0x3FF5A000"
+            },
+            "rdp_level": {
+                "bit_mask": {},
+                "register_addr": {}
+            }
+        },
+        "boot_vectors": {
+            "user_app_base": "0x400C2000",
+            "rom_base": "0x40000000"
+        }
+    }
+}

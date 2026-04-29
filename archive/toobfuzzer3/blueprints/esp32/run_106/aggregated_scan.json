@@ -1,0 +1,413 @@
+{
+    "0": {
+        "start_addr": 0,
+        "end_addr": 262143,
+        "start_hex": "0x0",
+        "end_hex": "0x3ffff",
+        "size": 262144,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "skipped"
+    },
+    "262144": {
+        "start_addr": 262144,
+        "end_addr": 266239,
+        "start_hex": "0x40000",
+        "end_hex": "0x40fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "266240": {
+        "start_addr": 266240,
+        "end_addr": 270335,
+        "start_hex": "0x41000",
+        "end_hex": "0x41fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "270336": {
+        "start_addr": 270336,
+        "end_addr": 274431,
+        "start_hex": "0x42000",
+        "end_hex": "0x42fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "274432": {
+        "start_addr": 274432,
+        "end_addr": 278527,
+        "start_hex": "0x43000",
+        "end_hex": "0x43fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "278528": {
+        "start_addr": 278528,
+        "end_addr": 282623,
+        "start_hex": "0x44000",
+        "end_hex": "0x44fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "282624": {
+        "start_addr": 282624,
+        "end_addr": 286719,
+        "start_hex": "0x45000",
+        "end_hex": "0x45fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "286720": {
+        "start_addr": 286720,
+        "end_addr": 290815,
+        "start_hex": "0x46000",
+        "end_hex": "0x46fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "290816": {
+        "start_addr": 290816,
+        "end_addr": 294911,
+        "start_hex": "0x47000",
+        "end_hex": "0x47fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "294912": {
+        "start_addr": 294912,
+        "end_addr": 299007,
+        "start_hex": "0x48000",
+        "end_hex": "0x48fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "299008": {
+        "start_addr": 299008,
+        "end_addr": 303103,
+        "start_hex": "0x49000",
+        "end_hex": "0x49fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "303104": {
+        "start_addr": 303104,
+        "end_addr": 307199,
+        "start_hex": "0x4a000",
+        "end_hex": "0x4afff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "307200": {
+        "start_addr": 307200,
+        "end_addr": 311295,
+        "start_hex": "0x4b000",
+        "end_hex": "0x4bfff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "311296": {
+        "start_addr": 311296,
+        "end_addr": 315391,
+        "start_hex": "0x4c000",
+        "end_hex": "0x4cfff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "315392": {
+        "start_addr": 315392,
+        "end_addr": 319487,
+        "start_hex": "0x4d000",
+        "end_hex": "0x4dfff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "319488": {
+        "start_addr": 319488,
+        "end_addr": 323583,
+        "start_hex": "0x4e000",
+        "end_hex": "0x4efff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "323584": {
+        "start_addr": 323584,
+        "end_addr": 327679,
+        "start_hex": "0x4f000",
+        "end_hex": "0x4ffff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "327680": {
+        "start_addr": 327680,
+        "end_addr": 331775,
+        "start_hex": "0x50000",
+        "end_hex": "0x50fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "331776": {
+        "start_addr": 331776,
+        "end_addr": 335871,
+        "start_hex": "0x51000",
+        "end_hex": "0x51fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "335872": {
+        "start_addr": 335872,
+        "end_addr": 339967,
+        "start_hex": "0x52000",
+        "end_hex": "0x52fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "339968": {
+        "start_addr": 339968,
+        "end_addr": 344063,
+        "start_hex": "0x53000",
+        "end_hex": "0x53fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "344064": {
+        "start_addr": 344064,
+        "end_addr": 348159,
+        "start_hex": "0x54000",
+        "end_hex": "0x54fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "348160": {
+        "start_addr": 348160,
+        "end_addr": 352255,
+        "start_hex": "0x55000",
+        "end_hex": "0x55fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "352256": {
+        "start_addr": 352256,
+        "end_addr": 356351,
+        "start_hex": "0x56000",
+        "end_hex": "0x56fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "356352": {
+        "start_addr": 356352,
+        "end_addr": 360447,
+        "start_hex": "0x57000",
+        "end_hex": "0x57fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "360448": {
+        "start_addr": 360448,
+        "end_addr": 364543,
+        "start_hex": "0x58000",
+        "end_hex": "0x58fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "364544": {
+        "start_addr": 364544,
+        "end_addr": 368639,
+        "start_hex": "0x59000",
+        "end_hex": "0x59fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "368640": {
+        "start_addr": 368640,
+        "end_addr": 372735,
+        "start_hex": "0x5a000",
+        "end_hex": "0x5afff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "372736": {
+        "start_addr": 372736,
+        "end_addr": 376831,
+        "start_hex": "0x5b000",
+        "end_hex": "0x5bfff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "376832": {
+        "start_addr": 376832,
+        "end_addr": 380927,
+        "start_hex": "0x5c000",
+        "end_hex": "0x5cfff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "380928": {
+        "start_addr": 380928,
+        "end_addr": 385023,
+        "start_hex": "0x5d000",
+        "end_hex": "0x5dfff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "385024": {
+        "start_addr": 385024,
+        "end_addr": 389119,
+        "start_hex": "0x5e000",
+        "end_hex": "0x5efff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "389120": {
+        "start_addr": 389120,
+        "end_addr": 393215,
+        "start_hex": "0x5f000",
+        "end_hex": "0x5ffff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "393216": {
+        "start_addr": 393216,
+        "end_addr": 397311,
+        "start_hex": "0x60000",
+        "end_hex": "0x60fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "397312": {
+        "start_addr": 397312,
+        "end_addr": 401407,
+        "start_hex": "0x61000",
+        "end_hex": "0x61fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "401408": {
+        "start_addr": 401408,
+        "end_addr": 405503,
+        "start_hex": "0x62000",
+        "end_hex": "0x62fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "405504": {
+        "start_addr": 405504,
+        "end_addr": 409599,
+        "start_hex": "0x63000",
+        "end_hex": "0x63fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "409600": {
+        "start_addr": 409600,
+        "end_addr": 413695,
+        "start_hex": "0x64000",
+        "end_hex": "0x64fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "413696": {
+        "start_addr": 413696,
+        "end_addr": 417791,
+        "start_hex": "0x65000",
+        "end_hex": "0x65fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "417792": {
+        "start_addr": 417792,
+        "end_addr": 421887,
+        "start_hex": "0x66000",
+        "end_hex": "0x66fff",
+        "size": 4096,
+        "fallback": false,
+        "verification_method": "Physical Fuzzing (Bare-Metal)",
+        "run_ping": "erased"
+    },
+    "metadata": {
+        "ram_fuzzed_boundaries": [
+            "0x400A0000",
+            "0x3FFE0000",
+            "0x40000000",
+            "0x3FF82000",
+            "0x400C2000",
+            "0x50002000"
+        ],
+        "scan_total_bytes": 4194304
+    }
+}

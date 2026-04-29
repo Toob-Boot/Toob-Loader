@@ -1,0 +1,22 @@
+[
+    {
+        "esp32": {
+            "toolchain_requirements": {
+                "compiler_prefix": "xtensa-esp32-elf-",
+                "core_architecture": "Xtensa Dual-Core",
+                "flashing": {
+                    "method": "Serial",
+                    "tool": "esptool.py",
+                    "write_command": "esptool.py --chip esp32 write_flash 0x10000 {binary_path}"
+                },
+                "packaging": [
+                    {
+                        "command": "espsecure.py sign_data --version 2 --keyfile {private_key_path} --output {binary_path}.signed {binary_path}",
+                        "condition": "PROFILE_SECURE_BOOT_ONLY",
+                        "tool": "espsecure.py"
+                    }
+                ]
+            }
+        }
+    }
+]

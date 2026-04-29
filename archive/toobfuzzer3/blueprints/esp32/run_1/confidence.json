@@ -1,0 +1,50 @@
+{
+    "esp32": {
+        "arch": "3/3",
+        "boot_vectors": {
+            "rom_base": "3/3",
+            "user_app_base": "3/3"
+        },
+        "memory": {
+            "dram": {
+                "alignment_bytes": "3/3",
+                "length": "3/3",
+                "origin": "3/3"
+            },
+            "iram": {
+                "alignment_bytes": "3/3",
+                "length": "3/3",
+                "origin": "3/3"
+            }
+        },
+        "security_registers": {
+            "flash_encryption": {
+                "active_if_true": "3/3",
+                "bit_mask": {},
+                "register_addr": {}
+            },
+            "jtag_disabled": {
+                "active_if_true": "3/3",
+                "bit_mask": {},
+                "register_addr": {}
+            },
+            "rdp_level": {}
+        },
+        "startup": {
+            "abi_initialization_instructions": "3/3",
+            "bss_init_required": "3/3",
+            "stack_top_expression": "3/3"
+        },
+        "toolchain_requirements": {
+            "compiler_prefix": "3/3",
+            "core_architecture": "3/3",
+            "flashing": {
+                "method": "3/3",
+                "tool": "3/3",
+                "write_command": "3/3"
+            },
+            "packaging": "3/3"
+        },
+        "watchdog_kill_registers": "3/3"
+    }
+}

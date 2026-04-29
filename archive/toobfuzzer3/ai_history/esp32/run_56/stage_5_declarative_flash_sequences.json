@@ -1,0 +1,33 @@
+[
+    {
+        "esp32": {
+            "flash_controller": {
+                "base_address": "0x3FF42000",
+                "erase_sector_sequence": [
+                    {
+                        "args_csv": "sector_addr / 4096",
+                        "desc": "Erase Flash Sector via ROM API",
+                        "function_name": "esp_rom_spiflash_erase_sector",
+                        "type": "rom_function_call"
+                    }
+                ],
+                "unlock_sequence": [
+                    {
+                        "args_csv": "",
+                        "desc": "Unlock SPI Flash via ROM API",
+                        "function_name": "esp_rom_spiflash_unlock",
+                        "type": "rom_function_call"
+                    }
+                ],
+                "write_word_sequence": [
+                    {
+                        "args_csv": "sector_addr, &data_word, 4",
+                        "desc": "Write Word to Flash via ROM API",
+                        "function_name": "esp_rom_spiflash_write",
+                        "type": "rom_function_call"
+                    }
+                ]
+            }
+        }
+    }
+]
