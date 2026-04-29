@@ -5,9 +5,61 @@
             "rom_base": "0x40000000",
             "user_app_base": "0x42000000"
         },
+        "crypto_capabilities": {
+            "hw_aes": true,
+            "hw_ed25519": false,
+            "hw_rng": true,
+            "hw_sha256": true,
+            "pka_present": true
+        },
+        "factory_identity": {
+            "has_mac_address": true,
+            "uid_address": {}
+        },
+        "flash_capabilities": {
+            "app_alignment_bytes": 65536,
+            "bank_size_bytes": {},
+            "is_dual_bank": false,
+            "read_while_write_supported": false,
+            "write_alignment_bytes": 4
+        },
+        "flash_controller": {
+            "analytical_notes": "The provided document is the ESP32-C6 Datasheet, which describes high-level features, pinouts, and electrical characteristics. It lacks the register-level details for the SPI0/SPI1 Flash Controller and the BootROM API memory map. ESP32 series chips strictly dictate the use of built-in BootROM functions (e.g., esp_rom_spiflash_erase_sector) to safely interact with the SPI Flash due to cache, SMP, and timing constraints. Exact ROM pointer addresses and SPI peripheral base addresses are not present in this datasheet and require the ESP32-C6 Technical Reference Manual (TRM) and ESP-IDF ROM linker scripts to resolve.",
+            "base_address": {},
+            "erase_sector_sequence": [
+                {
+                    "args_csv": "sector_addr / 4096",
+                    "desc": "Erase a 4KB sector via BootROM API",
+                    "function_name": "esp_rom_spiflash_erase_sector",
+                    "requires_physical_offset": true,
+                    "rom_address": "UNKNOWN_ADDRESS",
+                    "type": "rom_function_call"
+                }
+            ],
+            "unlock_sequence": [
+                {
+                    "args_csv": "",
+                    "desc": "Unlock SPI flash via BootROM API",
+                    "function_name": "esp_rom_spiflash_unlock",
+                    "requires_physical_offset": true,
+                    "rom_address": "UNKNOWN_ADDRESS",
+                    "type": "rom_function_call"
+                }
+            ],
+            "write_word_sequence": [
+                {
+                    "args_csv": "sector_addr, &data_word, 4",
+                    "desc": "Write data to SPI flash via BootROM API",
+                    "function_name": "esp_rom_spiflash_write",
+                    "requires_physical_offset": true,
+                    "rom_address": "UNKNOWN_ADDRESS",
+                    "type": "rom_function_call"
+                }
+            ]
+        },
         "memory": {
             "alignment_bytes": 16,
-            "bootrom_reserved_data_bytes": 0,
+            "bootrom_reserved_data_bytes": {},
             "data_segment": "hp_sram",
             "executable_segment": "hp_sram",
             "memory_regions": [
@@ -33,6 +85,23 @@
             "vector_alignment_section": ".vectors",
             "vector_table_offset_bytes": 0
         },
+        "multi_core_topology": {
+            "coprocessors": [
+                {
+                    "app_alignment_bytes": null,
+                    "flash_base": null,
+                    "name": "lp_core"
+                }
+            ],
+            "ipc_mechanism": "shared_ram",
+            "is_multi_core": true
+        },
+        "reset_reason": {
+            "power_on_reset_mask": {},
+            "register_address": {},
+            "software_reset_mask": {},
+            "wdt_reset_mask": {}
+        },
         "security_registers": {
             "flash_encryption": {
                 "active_if_true": true,
@@ -44,10 +113,7 @@
                 "bit_mask": {},
                 "register_addr": {}
             },
-            "rdp_level": {
-                "bit_mask": {},
-                "register_addr": {}
-            }
+            "rdp_level": {}
         },
         "startup": {
             "abi_initialization_instructions": [
@@ -59,23 +125,27 @@
             "bss_init_required": true,
             "stack_top_expression": "ORIGIN(hp_sram) + LENGTH(hp_sram)"
         },
+        "survival_mechanisms": {
+            "needs_vbat_pin": false,
+            "recommended_storage_type": "rtc_ram"
+        },
         "toolchain_requirements": {
             "compiler_prefix": "riscv32-esp-elf-",
             "core_architecture": "RISC-V",
             "flashing": {
                 "flash_offset": "0x0",
-                "method": "UART / USB Serial/JTAG",
+                "method": "UART/USB-JTAG",
                 "tool": "esptool.py",
                 "write_command": "esptool.py --chip esp32c6 write_flash 0x0 {binary_path}"
             },
             "packaging": [
                 {
-                    "command": "esptool.py --chip esp32c6 elf2image --flash_mode dio --flash_freq 40m --flash_size 2MB -o {binary_path} {elf_path}",
+                    "command": "esptool.py --chip esp32c6 elf2image -o {binary_path} {elf_path}",
                     "condition": "ANY",
                     "tool": "esptool.py"
                 },
                 {
-                    "command": "espsecure.py sign_data --version 2 --keyfile {private_key_path} -o {binary_path} {binary_path}",
+                    "command": "espsecure.py sign_data --version 2 --keyfile {private_key_path} --output {binary_path} {binary_path}",
                     "condition": "PROFILE_SECURE_BOOT_ONLY",
                     "tool": "espsecure.py"
                 }

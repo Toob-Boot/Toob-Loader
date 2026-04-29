@@ -3,9 +3,10 @@ ENTRY(_start)
 
 MEMORY
 {
-    rom (rx) : ORIGIN = 0x40000000, LENGTH = 0x50000
-    hp_sram (rwx) : ORIGIN = 0x40800000, LENGTH = 0x80000
-    lp_sram (rwx) : ORIGIN = 0x50000000, LENGTH = 0x4000
+    irom (rx) : ORIGIN = 0x40000000, LENGTH = 0x50000
+    iram (rwx) : ORIGIN = 0x40800000, LENGTH = 0x7C000
+    bootrom_reserved_ram : ORIGIN = 0x4087C000, LENGTH = 0x4000
+    lp_ram (rwx) : ORIGIN = 0x50000000, LENGTH = 0x4000
 }
 
 SECTIONS
@@ -19,7 +20,7 @@ SECTIONS
         *(.literal .literal.*)
         *(.text .text.*)
         _text_end = .;
-    } > hp_sram
+    } > iram
 
     .data : ALIGN(16)
     {
@@ -30,7 +31,7 @@ SECTIONS
         *(.rodata .rodata.*)
         *(.gnu.linkonce.r.*)
         _data_end = .;
-    } > hp_sram
+    } > iram
 
     .bss (NOLOAD) : ALIGN(16)
     {
@@ -39,8 +40,8 @@ SECTIONS
         *(.sbss .sbss.*)
         *(COMMON)
         _bss_end = .;
-    } > hp_sram
+    } > iram
 
     /* Stack calculation dynamically anchored to data segment end */
-    _stack_top = ORIGIN(hp_sram) + LENGTH(hp_sram);
+    _stack_top = ORIGIN(iram) + LENGTH(iram);
 }

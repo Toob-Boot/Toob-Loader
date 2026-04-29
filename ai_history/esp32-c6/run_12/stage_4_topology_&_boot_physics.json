@@ -1,0 +1,45 @@
+[
+    {
+        "esp32-c6": {
+            "crypto_capabilities": {
+                "hw_aes": true,
+                "hw_ed25519": false,
+                "hw_rng": true,
+                "hw_sha256": true,
+                "pka_present": true
+            },
+            "factory_identity": {
+                "has_mac_address": true,
+                "uid_address": null
+            },
+            "flash_capabilities": {
+                "app_alignment_bytes": 65536,
+                "bank_size_bytes": 0,
+                "is_dual_bank": false,
+                "read_while_write_supported": false,
+                "write_alignment_bytes": null
+            },
+            "multi_core_topology": {
+                "coprocessors": [
+                    {
+                        "app_alignment_bytes": null,
+                        "flash_base": null,
+                        "name": "lp_cpu"
+                    }
+                ],
+                "ipc_mechanism": "shared_ram",
+                "is_multi_core": true
+            },
+            "reset_reason": {
+                "power_on_reset_mask": null,
+                "register_address": null,
+                "software_reset_mask": null,
+                "wdt_reset_mask": null
+            },
+            "survival_mechanisms": {
+                "needs_vbat_pin": false,
+                "recommended_storage_type": "rtc_ram"
+            }
+        }
+    }
+]

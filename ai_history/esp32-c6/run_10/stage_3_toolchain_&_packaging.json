@@ -1,0 +1,28 @@
+[
+    {
+        "esp32-c6": {
+            "toolchain_requirements": {
+                "compiler_prefix": "riscv32-esp-elf-",
+                "core_architecture": "RISC-V",
+                "flashing": {
+                    "flash_offset": "0x0",
+                    "method": "UART / USB Serial/JTAG",
+                    "tool": "esptool.py",
+                    "write_command": "esptool.py --chip esp32c6 write_flash 0x0 {binary_path}"
+                },
+                "packaging": [
+                    {
+                        "command": "esptool.py --chip esp32c6 elf2image --flash_mode dio --flash_freq 80m --flash_size detect -o {binary_path} {elf_path}",
+                        "condition": "ANY",
+                        "tool": "esptool.py"
+                    },
+                    {
+                        "command": "espsecure.py sign_data --version 2 --keyfile {private_key_path} --output {binary_path} {binary_path}",
+                        "condition": "PROFILE_SECURE_BOOT_ONLY",
+                        "tool": "espsecure.py"
+                    }
+                ]
+            }
+        }
+    }
+]

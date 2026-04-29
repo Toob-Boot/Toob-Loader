@@ -3,14 +3,19 @@ import os
 
 
 def _parse_size(val):
+    if val is None or val == {} or val == "":
+        return 0
     if isinstance(val, int):
         return val
-    val = str(val).lower().strip()
-    if val.endswith("k"):
-        return int(val[:-1], 0) * 1024
-    if val.endswith("m"):
-        return int(val[:-1], 0) * 1024 * 1024
-    return int(val, 0)
+    try:
+        val = str(val).lower().strip()
+        if val.endswith("k"):
+            return int(val[:-1], 0) * 1024
+        if val.endswith("m"):
+            return int(val[:-1], 0) * 1024 * 1024
+        return int(val, 0)
+    except (ValueError, TypeError):
+        return 0
 
 
 def generate_linker_script(spec, chip_name, out_dir):
@@ -28,8 +33,8 @@ def generate_linker_script(spec, chip_name, out_dir):
     arch_lower = spec["arch"].lower()
     is_riscv = "risc-v" in arch_lower or "riscv" in arch_lower
 
-    vec_offset = memory_cfg.get("vector_table_offset_bytes", 0)
-    boot_offset = memory_cfg.get("bootrom_reserved_data_bytes", 0)
+    vec_offset = _parse_size(memory_cfg.get("vector_table_offset_bytes", 0))
+    boot_offset = _parse_size(memory_cfg.get("bootrom_reserved_data_bytes", 0))
 
     # RISC-V specific linker additions
     data_section_extras = ""
@@ -52,7 +57,9 @@ def generate_linker_script(spec, chip_name, out_dir):
             reg["origin"] = f"0x{(origin_int + vec_offset):08X}"
             reg["length"] = f"0x{(length_int - vec_offset):X}"
 
-        elif reg.get("name") == data_seg and boot_offset > 0:
+        # FIX: Changed elif to if so that unified segments (where exec_seg == data_seg) 
+        # receive BOTH their required offsets (e.g. BootROM stack + Vector Table) cooperatively.
+        if reg.get("name") == data_seg and boot_offset > 0:
             origin_int = _parse_size(reg.get("origin", "0x0"))
             length_int = _parse_size(reg.get("length", "0x0"))
 
@@ -140,10 +147,18 @@ def generate_startup_assembly(spec, chip_name, out_dir):
 
         # Insert AI provided ABI init (like GP setup)
         for inst in spec["startup"].get("abi_initialization_instructions", []):
-            asm_lines.append(f"    {inst}")
+            # Strip dangerous AI hallucinated flow-control to prevent infinite loops before WDT kill
+            if not any(x in inst.lower() for x in ["call ", "jump ", "bl ", " b ", "jal", " j "]):
+                asm_lines.append(f"    {inst}")
 
         asm_lines.append("    /* Stack setup from Linker */")
         asm_lines.append("    la sp, _stack_top")
+        
+        asm_lines.append("    /* Global Pointer initialization for relaxed data segments */")
+        asm_lines.append("    .option push")
+        asm_lines.append("    .option norelax")
+        asm_lines.append("    la gp, __global_pointer$")
+        asm_lines.append("    .option pop")
 
         asm_lines.append("\n    /* Watchdog Sterilization (AI Extracted) */")
         for wd in spec.get("watchdog_kill_registers", []):
@@ -186,7 +201,8 @@ def generate_startup_assembly(spec, chip_name, out_dir):
         asm_lines.append("_start:")
 
         for inst in spec["startup"].get("abi_initialization_instructions", []):
-            asm_lines.append(f"    {inst}")
+            if not any(x in inst.lower() for x in ["call ", "jump ", "bl ", " b ", "jal", " j "]):
+                asm_lines.append(f"    {inst}")
 
         asm_lines.append("    ldr sp, =_stack_top")
 
@@ -226,7 +242,8 @@ def generate_startup_assembly(spec, chip_name, out_dir):
         asm_lines.append("_start:")
 
         for inst in spec["startup"].get("abi_initialization_instructions", []):
-            asm_lines.append(f"    {inst}")
+            if not any(x in inst.lower() for x in ["call ", "jump ", "bl ", " b ", "jal", " j "]):
+                asm_lines.append(f"    {inst}")
 
         asm_lines.append("    movi a1, _stack_top")
 

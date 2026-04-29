@@ -1,0 +1,525 @@
+Auflistung der Ordnerpfade fr Volume Daten
+Volumeseriennummer : 9C2B-6CD5
+C:.
+³   .gitattributes
+³   .gitignore
+³   CMakeLists.txt
+³   CMakePresets.json
+³   export_full.ps1
+³   export_libtoob.ps1
+³   full_review_export.txt
+³   libtoob_review_export.txt
+³   LICENSE
+³   tree.txt
+³   
+ÃÄÄÄ.agents
+³   ÀÄÄÄworkflows
+³           doublecheck.md
+³           files-position.md
+³           planning.md
+³           
+ÃÄÄÄ.cache
+³   ÀÄÄÄclangd
+³       ÀÄÄÄindex
+³               boot_config_mock.h.236C63D0054EC46C.idx
+³               boot_confirm.c.2BE5B8BA2856D9C6.idx
+³               boot_confirm.h.9C24F103D7903FA3.idx
+³               boot_crc32.c.2D389985CA3ABE38.idx
+³               boot_crc32.h.7C4AAB7544882D08.idx
+³               boot_delay.c.662FFC83F1FFE43A.idx
+³               boot_delay.h.18C13271DE26E88A.idx
+³               boot_delta.c.918A561815E9F0C6.idx
+³               boot_diag.c.664D9FD553FD43BB.idx
+³               boot_energy.c.6463EAAA196650FC.idx
+³               boot_hal.h.74D42241CE67797A.idx
+³               boot_journal.c.A0FD46C57E838B91.idx
+³               boot_journal.h.D5C500BD9E6C2560.idx
+³               boot_main.c.64F8B1AFFE18DA5D.idx
+³               boot_main.h.017D1FFCA67B3404.idx
+³               boot_merkle.c.E24C3E2DBCB6318D.idx
+³               boot_merkle.h.DA6DB12F9C760CE1.idx
+³               boot_multiimage.c.F3AAC856B9321F7E.idx
+³               boot_panic.c.A69821E154D4536E.idx
+³               boot_panic.h.240336E2A1884D0C.idx
+³               boot_rollback.c.90C94E35BB8E19C7.idx
+³               boot_rollback.h.A2A63B9B463D8279.idx
+³               boot_secure_zeroize.h.ADD771203DC2C828.idx
+³               boot_secure_zeroize_host.c.A59C1A7FA493510C.idx
+³               boot_state.c.84F04705B90AC234.idx
+³               boot_state.h.D1F3E62E59E79F54.idx
+³               boot_swap.c.8543695B7D2E277F.idx
+³               boot_swap.h.587E4901B41E4BC3.idx
+³               boot_types.h.EED92BF7695D6B67.idx
+³               boot_verify.c.2C51370279A313C8.idx
+³               boot_verify.h.5EB842E4DF1178B9.idx
+³               chip_config.h.88E40BFDA125A5D4.idx
+³               chip_fault_inject.c.8357543B79EA383A.idx
+³               chip_fault_inject.h.5FF7DA2E1DDA0D28.idx
+³               chip_platform.c.19EBC86B8ADBFD05.idx
+³               crypto_monocypher.c.345DDCCBD68D0717.idx
+³               crypto_monocypher.h.EC5A36DC4217BFE0.idx
+³               heatshrink_decoder.c.9A13B8F14E1B3980.idx
+³               libtoob.h.7378075B17942665.idx
+³               libtoob_config_sandbox.h.014C7242B2E5CDEA.idx
+³               libtoob_types.h.F054E7093C6EBB38.idx
+³               main.c.305204C6578AA10A.idx
+³               mock_clock.h.409A90119013A86B.idx
+³               mock_console.h.4BC84A3CEE3A6CC1.idx
+³               mock_crypto_policy.h.D800FD4989F7C964.idx
+³               mock_efuses.h.B1D5BDEB1CBDF938.idx
+³               mock_flash.h.8813DBF2988523BB.idx
+³               mock_rtc_ram.h.1088FEE54BCFA79B.idx
+³               mock_soc.h.85228C9B39E75BF5.idx
+³               mock_wdt.h.B7E1041913B6F581.idx
+³               monocypher-ed25519.c.745F2904F1210DCC.idx
+³               monocypher-ed25519.h.46CD66EB719993FA.idx
+³               monocypher.c.92C6C8AA40622C62.idx
+³               monocypher.h.B1F9EE205222C4BD.idx
+³               stage0_boot_pointer.c.12428F3C201056C0.idx
+³               stage0_hash.c.ECBB4C3981DEC6C0.idx
+³               stage0_main.c.E0FEA7CA39007A3E.idx
+³               stage0_otp.c.37E04010BB417565.idx
+³               stage0_tentative.c.AAAA427E82C72588.idx
+³               stage0_verify.c.7549D07981A9BD91.idx
+³               startup.c.D5FC34351C6D4393.idx
+³               toob_confirm.c.0F3AE13914666A80.idx
+³               toob_diag.c.11E72A2E918CF022.idx
+³               toob_handoff.c.7C91BF44FD87DADC.idx
+³               toob_internal.h.CC68CF7C10EEAE4B.idx
+³               toob_update.c.4E1696AF08CF1547.idx
+³               zcbor_common.c.9FCE038665E1CFB9.idx
+³               zcbor_common.h.EFFD39E448033164.idx
+³               zcbor_decode.c.B080FF556A59169D.idx
+³               zcbor_decode.h.FE07A60F982C83E4.idx
+³               zcbor_encode.c.7DF6C1365651972E.idx
+³               zcbor_encode.h.4F20A777677F08E6.idx
+³               zcbor_print.h.A86C0B1E21AAD870.idx
+³               zcbor_tags.h.B222082D87C998C5.idx
+³               
+ÃÄÄÄ.github
+³   ÃÄÄÄISSUE_TEMPLATE
+³   ÀÄÄÄworkflows
+³           ci.yml
+³           
+ÃÄÄÄarchive
+³   ÀÄÄÄtoobfuzzer3
+³       ³   .env
+³       ³   
+³       ÃÄÄÄai_history
+³       ³   ÀÄÄÄesp32
+³       ³       ÃÄÄÄrun_100
+³       ³       ÃÄÄÄrun_101
+³       ³       ÃÄÄÄrun_91
+³       ³       ÃÄÄÄrun_92
+³       ³       ÃÄÄÄrun_93
+³       ³       ÃÄÄÄrun_94
+³       ³       ÃÄÄÄrun_95
+³       ³       ÃÄÄÄrun_96
+³       ³       ÃÄÄÄrun_97
+³       ³       ÃÄÄÄrun_98
+³       ³       ÀÄÄÄrun_99
+³       ÀÄÄÄblueprints
+³           ÀÄÄÄesp32
+³               ÃÄÄÄrun_87
+³               ÃÄÄÄrun_88
+³               ÃÄÄÄrun_89
+³               ÃÄÄÄrun_90
+³               ÃÄÄÄrun_91
+³               ÃÄÄÄrun_92
+³               ÃÄÄÄrun_93
+³               ÃÄÄÄrun_94
+³               ÃÄÄÄrun_95
+³               ÀÄÄÄrun_96
+ÃÄÄÄbuild
+³   ³   .ninja_deps
+³   ³   .ninja_log
+³   ³   build.ninja
+³   ³   CMakeCache.txt
+³   ³   cmake_install.cmake
+³   ³   compile_commands.json
+³   ³   err.log
+³   ³   libtoob_chip.a
+³   ³   libtoob_core.a
+³   ³   libtoob_crypto.a
+³   ³   libtoob_crypto_upstream.a
+³   ³   libtoob_heatshrink.a
+³   ³   libtoob_zcbor.a
+³   ³   
+³   ÃÄÄÄ.cache
+³   ³   ÀÄÄÄclangd
+³   ³       ÀÄÄÄindex
+³   ³               chip_config.h.7DBB9D31AAE49D7A.idx
+³   ³               
+³   ÃÄÄÄ.cmake
+³   ³   ÀÄÄÄapi
+³   ³       ÀÄÄÄv1
+³   ³           ÃÄÄÄquery
+³   ³           ³   ÀÄÄÄclient-vscode
+³   ³           ³           query.json
+³   ³           ³           
+³   ³           ÀÄÄÄreply
+³   ³                   cache-v2-e2182534265bf2183985.json
+³   ³                   cmakeFiles-v1-836b1381ea26674b7557.json
+³   ³                   codemodel-v2-ff7a6850e95d43cc04d9.json
+³   ³                   directory-.-Debug-f040eec181a89de70dbe.json
+³   ³                   index-2026-04-17T20-29-21-0146.json
+³   ³                   target-generate_manifest-Debug-b9c69975b32ad801f571.json
+³   ³                   target-toob_chip-Debug-f5609146814de3fe9c84.json
+³   ³                   target-toob_core-Debug-b681b94f6a90463c2e15.json
+³   ³                   target-toob_crypto-Debug-8cd40a27dac2c6be606b.json
+³   ³                   target-toob_crypto_upstream-Debug-1ac7fe99cd6404705ee1.json
+³   ³                   target-toob_heatshrink-Debug-492ec6163ef891c04fc4.json
+³   ³                   target-toob_libtoob-Debug-2fc4ae9332d13b625afd.json
+³   ³                   target-toob_stage0-Debug-ef5c2e0e9352aa44f60e.json
+³   ³                   target-toob_stage1-Debug-824db287afe81a61457d.json
+³   ³                   target-toob_zcbor-Debug-9271770c84156117e320.json
+³   ³                   toolchains-v1-219c0662c6ef85764fdf.json
+³   ³                   
+³   ÃÄÄÄCMakeFiles
+³   ³   ³   cmake.check_cache
+³   ³   ³   cmake.verify_globs
+³   ³   ³   CMakeConfigureLog.yaml
+³   ³   ³   InstallScripts.json
+³   ³   ³   rules.ninja
+³   ³   ³   TargetDirectories.txt
+³   ³   ³   VerifyGlobs.cmake
+³   ³   ³   
+³   ³   ÃÄÄÄ4.3.0-rc2
+³   ³   ³   ³   CMakeASMCompiler.cmake
+³   ³   ³   ³   CMakeCCompiler.cmake
+³   ³   ³   ³   CMakeDetermineCompilerABI_C.bin
+³   ³   ³   ³   CMakeRCCompiler.cmake
+³   ³   ³   ³   CMakeSystem.cmake
+³   ³   ³   ³   
+³   ³   ³   ÃÄÄÄCompilerIdASM
+³   ³   ³   ÀÄÄÄCompilerIdC
+³   ³   ³       ³   a.exe
+³   ³   ³       ³   CMakeCCompilerId.c
+³   ³   ³       ³   
+³   ³   ³       ÀÄÄÄtmp
+³   ³   ÃÄÄÄpkgRedirects
+³   ³   ÃÄÄÄtoob_chip.dir
+³   ³   ³   ÀÄÄÄhal
+³   ³   ³       ÀÄÄÄchips
+³   ³   ³           ÀÄÄÄsandbox
+³   ³   ³                   chip_fault_inject.c.obj
+³   ³   ³                   chip_platform.c.obj
+³   ³   ³                   main.c.obj
+³   ³   ³                   startup.c.obj
+³   ³   ³                   
+³   ³   ÃÄÄÄtoob_core.dir
+³   ³   ³   ÃÄÄÄcore
+³   ³   ³   ³       boot_confirm.c.obj
+³   ³   ³   ³       boot_delay.c.obj
+³   ³   ³   ³       boot_delta.c.obj
+³   ³   ³   ³       boot_diag.c.obj
+³   ³   ³   ³       boot_energy.c.obj
+³   ³   ³   ³       boot_journal.c.obj
+³   ³   ³   ³       boot_main.c.obj
+³   ³   ³   ³       boot_merkle.c.obj
+³   ³   ³   ³       boot_multiimage.c.obj
+³   ³   ³   ³       boot_panic.c.obj
+³   ³   ³   ³       boot_rollback.c.obj
+³   ³   ³   ³       boot_secure_zeroize_host.c.obj
+³   ³   ³   ³       boot_state.c.obj
+³   ³   ³   ³       boot_swap.c.obj
+³   ³   ³   ³       boot_verify.c.obj
+³   ³   ³   ³       
+³   ³   ³   ÀÄÄÄgenerated
+³   ³   ³           boot_suit.c.obj
+³   ³   ³           
+³   ³   ÃÄÄÄtoob_crypto.dir
+³   ³   ³   ÀÄÄÄcrypto
+³   ³   ³       ÀÄÄÄmonocypher
+³   ³   ³               crypto_monocypher.c.obj
+³   ³   ³               
+³   ³   ÃÄÄÄtoob_crypto_upstream.dir
+³   ³   ³   ÀÄÄÄcrypto
+³   ³   ³       ÀÄÄÄmonocypher
+³   ³   ³               monocypher-ed25519.c.obj
+³   ³   ³               monocypher.c.obj
+³   ³   ³               
+³   ³   ÃÄÄÄtoob_heatshrink.dir
+³   ³   ³   ÀÄÄÄlib
+³   ³   ³       ÀÄÄÄheatshrink
+³   ³   ³               heatshrink_decoder.c.obj
+³   ³   ³               
+³   ³   ÃÄÄÄtoob_libtoob.dir
+³   ³   ³   ÃÄÄÄgenerated
+³   ³   ³   ³       toob_telemetry_decode.c.obj
+³   ³   ³   ³       
+³   ³   ³   ÀÄÄÄlibtoob
+³   ³   ÃÄÄÄtoob_stage0.dir
+³   ³   ³   ÀÄÄÄstage0
+³   ³   ³           stage0_boot_pointer.c.obj
+³   ³   ³           stage0_hash.c.obj
+³   ³   ³           stage0_main.c.obj
+³   ³   ³           stage0_otp.c.obj
+³   ³   ³           stage0_tentative.c.obj
+³   ³   ³           stage0_verify.c.obj
+³   ³   ³           
+³   ³   ÃÄÄÄtoob_stage1.dir
+³   ³   ³   ÀÄÄÄcore
+³   ³   ³           boot_main.c.obj
+³   ³   ³           
+³   ³   ÀÄÄÄtoob_zcbor.dir
+³   ³       ÀÄÄÄlib
+³   ³           ÀÄÄÄzcbor
+³   ³               ÀÄÄÄsrc
+³   ³                       zcbor_common.c.obj
+³   ³                       zcbor_decode.c.obj
+³   ³                       zcbor_encode.c.obj
+³   ³                       
+³   ÀÄÄÄgenerated
+³           boot_suit.c
+³           chip_config.h
+³           stage0_layout.ld
+³           toob_telemetry_decode.c
+³           
+ÃÄÄÄcmake
+³       toob_core.cmake
+³       toob_crypto.cmake
+³       toob_hal.cmake
+³       toob_libtoob.cmake
+³       toob_stage0.cmake
+³       toolchain-arm-none-eabi.cmake
+³       toolchain-host.cmake
+³       toolchain-riscv32.cmake
+³       toolchain-xtensa-esp.cmake
+³       
+ÃÄÄÄcore
+³   ³   boot_confirm.c
+³   ³   boot_crc32.c
+³   ³   boot_delay.c
+³   ³   boot_delta.c
+³   ³   boot_diag.c
+³   ³   boot_energy.c
+³   ³   boot_journal.c
+³   ³   boot_main.c
+³   ³   boot_merkle.c
+³   ³   boot_multiimage.c
+³   ³   boot_panic.c
+³   ³   boot_rollback.c
+³   ³   boot_secure_zeroize_host.c
+³   ³   boot_state.c
+³   ³   boot_swap.c
+³   ³   boot_verify.c
+³   ³   
+³   ÀÄÄÄinclude
+³           boot_config_mock.h
+³           boot_confirm.h
+³           boot_crc32.h
+³           boot_delay.h
+³           boot_delta.h
+³           boot_hal.h
+³           boot_journal.h
+³           boot_main.h
+³           boot_merkle.h
+³           boot_multiimage.h
+³           boot_panic.h
+³           boot_rollback.h
+³           boot_secure_zeroize.h
+³           boot_state.h
+³           boot_swap.h
+³           boot_types.h
+³           boot_verify.h
+³           
+ÃÄÄÄcrypto
+³   ÃÄÄÄmonocypher
+³   ³       crypto_monocypher.c
+³   ³       crypto_monocypher.h
+³   ³       monocypher-ed25519.c
+³   ³       monocypher-ed25519.h
+³   ³       monocypher.c
+³   ³       monocypher.h
+³   ³       
+³   ÀÄÄÄpqc
+ÃÄÄÄdocs
+³   ³   aggregated_scan.json
+³   ³   blueprint.json
+³   ³   concept_fusion.md
+³   ³   dev_diary.md
+³   ³   dev_plan.md
+³   ³   getting_started.md
+³   ³   hals.md
+³   ³   implementation_backlog.md
+³   ³   index.md
+³   ³   libtoob_api.md
+³   ³   merkle_spec.md
+³   ³   provisioning_guide.md
+³   ³   sandbox_setup.md
+³   ³   stage_1_5_spec.md
+³   ³   structure_plan.md
+³   ³   testing_requirements.md
+³   ³   toobfuzzer_integration.md
+³   ³   toob_telemetry.md
+³   ³   
+³   ÃÄÄÄanalysis
+³   ³   ³   big_gap_analysis_v2.md
+³   ³   ³   concept_and_hals_analysis.md
+³   ³   ³   concept_fusion_gap_analysis.md
+³   ³   ³   concept_fusion_v2_gap_analysis.md
+³   ³   ³   c_implementation_readiness_gap_analysis.md
+³   ³   ³   hals_gap_analysis.md
+³   ³   ³   hals_gap_analysis_v2.md
+³   ³   ³   Toob-Boot_capability_analysis.md
+³   ³   ³   Toob-Boot_capability_analysis_v2.md
+³   ³   ³   Toob-Boot_gap_analysis.md
+³   ³   ³   Toob-Boot_gap_analysis_v2.md
+³   ³   ³   Toob-Boot_gap_analysis_v3.md
+³   ³   ³   Toob-Boot_gap_analysis_v4.md
+³   ³   ³   Toob-Boot_gap_analysis_v4_concept_fusion.md
+³   ³   ³   Toob-Boot_gap_analysis_v5.md
+³   ³   ³   Toob-Boot_gap_analysis_v6.md
+³   ³   ³   Toob-Boot_gap_analysis_v7.md
+³   ³   ³   toobfuzzer_gap.md
+³   ³   ³   
+³   ³   ÃÄÄÄidea1
+³   ³   ³       image copy 2.png
+³   ³   ³       image copy 3.png
+³   ³   ³       image copy.png
+³   ³   ³       image.png
+³   ³   ³       input1.md
+³   ³   ³       
+³   ³   ÃÄÄÄidea2
+³   ³   ³       image copy 2.png
+³   ³   ³       image copy.png
+³   ³   ³       image.png
+³   ³   ³       input2.md
+³   ³   ³       
+³   ³   ÀÄÄÄresearch
+³   ³           Bootloader Research.pdf
+³   ³           Bootloader_Research.txt
+³   ³           image.png
+³   ³           
+³   ÀÄÄÄpipeline
+³           Chip_data_and_validation.md
+³           device_toml_spec.md
+³           manifest_compiler_architecture.md
+³           manifest_compiler_pipeline.md
+³           toobfuzzer_integration_strategy.md
+³           
+ÃÄÄÄexamples
+³   ÃÄÄÄblinky_esp32s3
+³   ÃÄÄÄblinky_nrf52840
+³   ÀÄÄÄota_demo
+ÃÄÄÄhal
+³   ÃÄÄÄarch
+³   ³   ÃÄÄÄarm_cortex_m
+³   ³   ³   ÀÄÄÄinclude
+³   ³   ÃÄÄÄriscv32
+³   ³   ³   ÀÄÄÄinclude
+³   ³   ÀÄÄÄxtensa
+³   ³       ÀÄÄÄinclude
+³   ÃÄÄÄchips
+³   ³   ÃÄÄÄesp32c3
+³   ³   ÃÄÄÄesp32c6
+³   ³   ÃÄÄÄesp32s3
+³   ³   ÃÄÄÄnrf52840
+³   ³   ÃÄÄÄnrf5340
+³   ³   ÃÄÄÄsandbox
+³   ³   ³       chip_config.h
+³   ³   ³       chip_fault_inject.c
+³   ³   ³       chip_fault_inject.h
+³   ³   ³       chip_platform.c
+³   ³   ³       main.c
+³   ³   ³       startup.c
+³   ³   ³       
+³   ³   ÃÄÄÄstm32h7
+³   ³   ÃÄÄÄstm32l4
+³   ³   ÀÄÄÄstm32u5
+³   ÃÄÄÄinclude
+³   ÀÄÄÄvendor
+³       ÃÄÄÄesp
+³       ³   ÀÄÄÄinclude
+³       ÃÄÄÄnrf
+³       ³   ÀÄÄÄinclude
+³       ÀÄÄÄstm32
+³           ÀÄÄÄinclude
+ÃÄÄÄkeys
+ÃÄÄÄlib
+³   ÃÄÄÄheatshrink
+³   ³       heatshrink_decoder.c
+³   ³       
+³   ÃÄÄÄunity
+³   ÀÄÄÄzcbor
+³       ³   LICENSE
+³       ³   
+³       ÃÄÄÄinclude
+³       ³       zcbor_common.h
+³       ³       zcbor_decode.h
+³       ³       zcbor_encode.h
+³       ³       zcbor_print.h
+³       ³       zcbor_tags.h
+³       ³       
+³       ÀÄÄÄsrc
+³               zcbor_common.c
+³               zcbor_decode.c
+³               zcbor_encode.c
+³               
+ÃÄÄÄlibtoob
+³   ³   toob_confirm.c
+³   ³   toob_crc32.c
+³   ³   toob_diag.c
+³   ³   toob_handoff.c
+³   ³   toob_internal.h
+³   ³   toob_update.c
+³   ³   toob_wal_naive.c
+³   ³   
+³   ÀÄÄÄinclude
+³           libtoob.h
+³           libtoob_config_sandbox.h
+³           libtoob_types.h
+³           
+ÃÄÄÄmanifests
+ÃÄÄÄscripts
+ÃÄÄÄstage0
+³   ³   stage0_boot_pointer.c
+³   ³   stage0_hash.c
+³   ³   stage0_main.c
+³   ³   stage0_otp.c
+³   ³   stage0_tentative.c
+³   ³   stage0_verify.c
+³   ³   
+³   ÀÄÄÄinclude
+ÃÄÄÄsuit
+³   ³   generate.sh
+³   ³   toob_suit.cddl
+³   ³   toob_telemetry.cddl
+³   ³   
+³   ÀÄÄÄexamples
+ÃÄÄÄtest
+³   ÃÄÄÄfuzz
+³   ³   ÀÄÄÄcorpus
+³   ÃÄÄÄintegration
+³   ³       test_sandbox.c
+³   ³       
+³   ÃÄÄÄmocks
+³   ³       mock_clock.c
+³   ³       mock_clock.h
+³   ³       mock_console.c
+³   ³       mock_console.h
+³   ³       mock_crypto_policy.c
+³   ³       mock_crypto_policy.h
+³   ³       mock_efuses.c
+³   ³       mock_efuses.h
+³   ³       mock_flash.c
+³   ³       mock_flash.h
+³   ³       mock_rtc_ram.c
+³   ³       mock_rtc_ram.h
+³   ³       mock_soc.c
+³   ³       mock_soc.h
+³   ³       mock_wdt.c
+³   ³       mock_wdt.h
+³   ³       toob_test_stubs.c
+³   ³       
+³   ÃÄÄÄrenode
+³   ³   ÀÄÄÄplatforms
+³   ÀÄÄÄunit
+ÀÄÄÄtools
+    ÃÄÄÄmanifest_compiler
+    ³   ÃÄÄÄtoolchains
+    ³   ÀÄÄÄvendors
+    ÃÄÄÄpartition_inspector
+    ÃÄÄÄsign_tool
+    ÀÄÄÄtemplates

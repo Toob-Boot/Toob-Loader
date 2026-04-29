@@ -40,6 +40,11 @@ class ToobfuzzerBuilder:
     def _execute_command(self, tool_name, command_template, env=None, cwd=None):
         """Locates the tool and executes the template string."""
         print(f"[*] Preparing execution for: {tool_name}")
+        
+        # Enforce CWD to the toobfuzzer3 root so relative paths (core/*.c) hit the fuzzer, not the bootloader
+        if cwd is None:
+            cwd = os.path.dirname(os.path.dirname(__file__))
+
 
         # 1. Locate the actual binary path
         tool_path = ToolLocator.find_tool(tool_name)
@@ -103,11 +108,12 @@ class ToobfuzzerBuilder:
         # A generalized GCC command building core/ and arch/
         # In a real scenario, this command string would also be driven by chips.json,
         # but for safety/stability we keep the C-core compilation semi-fixed here.
-        # Manually expand globs because Windows cmd.exe does not do it automatically
-        c_files = " ".join(glob.glob("core/*.c"))
-        s_files = " ".join(glob.glob("arch/*.S"))
-        hal_files = " ".join(glob.glob("hal/*.c"))
-        mock_files = " ".join(glob.glob("mocks/*.c"))
+        fz_root = os.path.dirname(os.path.dirname(__file__))
+        c_files = " ".join(glob.glob(os.path.join(fz_root, "core/*.c")))
+        s_files = " ".join(glob.glob(os.path.join(fz_root, "arch/*.S")))
+        hal_files = " ".join(glob.glob(os.path.join(fz_root, "hal/*.c")))
+        mock_files = " ".join(glob.glob(os.path.join(fz_root, "mocks/*.c")))
+
 
         # Include dynamically generated C and Assembly files from the AI pipeline
         generated_c = (
@@ -119,26 +125,25 @@ class ToobfuzzerBuilder:
         keelhaul_inc = f"build/{self.chip_name}/run_latest/"
 
         # Hyphen-resilient fallback: If the user named the SVD esp32c6 but the run esp32-c6 (or vice versa)
-        if not os.path.exists(keelhaul_c):
+        if not os.path.exists(os.path.join(fz_root, keelhaul_c)):
             alt_chip = self.chip_name.replace("-", "")
             alt_keelhaul_c = f"build/{alt_chip}/run_latest/keelhaul_svd.c"
-            if os.path.exists(alt_keelhaul_c):
+            if os.path.exists(os.path.join(fz_root, alt_keelhaul_c)):
                 keelhaul_c = alt_keelhaul_c
                 keelhaul_inc = f"build/{alt_chip}/run_latest/"
 
         all_src_files = f"{c_files} {s_files} {hal_files} {mock_files}"
-        if os.path.exists(generated_c):
-            all_src_files += f" {generated_c}"
-        if os.path.exists(generated_s):
-            all_src_files += f" {generated_s}"
-        if os.path.exists(keelhaul_c):
-            all_src_files += f" {keelhaul_c}"
-        
-        has_true_hal = False
-        if os.path.exists(hal_flash_c):
-            all_src_files += f" {hal_flash_c}"
-            has_true_hal = True
+        if os.path.exists(os.path.join(fz_root, generated_c)):
+            all_src_files += f" {os.path.join(fz_root, generated_c)}"
+        if os.path.exists(os.path.join(fz_root, generated_s)):
+            all_src_files += f" {os.path.join(fz_root, generated_s)}"
+        if os.path.exists(os.path.join(fz_root, keelhaul_c)):
+            all_src_files += f" {os.path.join(fz_root, keelhaul_c)}"
 
+        has_true_hal = False
+        if os.path.exists(os.path.join(fz_root, hal_flash_c)):
+            all_src_files += f" {os.path.join(fz_root, hal_flash_c)}"
+            has_true_hal = True
 
         all_src_files = all_src_files.strip()
 
@@ -150,10 +155,9 @@ class ToobfuzzerBuilder:
         arch_flags = "" if is_riscv else "-mlongcalls "
         if has_true_hal:
             arch_flags += "-DHAS_TRUE_SPI_HAL=1 "
-            
+
         if self.debug_mode:
             arch_flags += "-DFZ_DEBUG_MODE=1 "
-
 
         compile_cmd = (
             f"-O2 -nostdlib -ffreestanding {arch_flags}"
@@ -200,6 +204,13 @@ class ToobfuzzerBuilder:
             if tool_name.upper() == "SYS_PAUSE":
                 input(f"[II] PAUSE REQUESTED: {command}. Press Enter to continue...")
                 continue
+
+            # Fix for Gemini hallucinating 'detect' on elf2image, and enforcing aggressive SPI flash modes
+            # that cause BootROM Checksum Failures (Calculated 0xef stored 0xff) due to hardware mismatch.
+            if "elf2image" in command:
+                command = command.replace("--flash_size detect", "")
+                command = command.replace("--flash_mode dio", "")
+                command = command.replace("--flash_freq 80m", "")
 
             success = self._execute_command(tool_name, command)
             if not success:

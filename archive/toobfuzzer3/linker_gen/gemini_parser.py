@@ -112,6 +112,7 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
        Does the architecture forcibly reserve a chunk of space at the very start of the Instruction RAM for a Hardware Vector Table or Boot Header? If yes, define its exact size in logically derived bytes (e.g., the size of the required vector space) so the linker can cleanly shift the entry point. Otherwise, set it to 0.
     5. Alignment & Bin-Headers: What alignment (e.g., 16-byte) does the ROM bootloader require for DMA transfers?
     6. Startup Assembly: What is the optimal initial stack pointer address? Does it require specific ABI setup?
+       CRITICAL: NEVER include flow-control instructions (like 'call', 'jump', 'b', 'bl', 'jal') in the `abi_initialization_instructions` array to prevent infinite bootloops! Our orchestrator natively links the main C root entry point automatically.
     7. Hardware Watchdogs: What are the exact Hex addresses for the Main and RTC Watchdog Unlock & Config registers? What constants disable them?
        CRITICAL: For the 'address' field, provide the EXACT memory-mapped register address for the Write Protection Unlock Key (e.g., WDTWPROTECT_REG). Do NOT provide the base address of the entire peripheral block. Writing the unlock key to a primary config/base address will corrupt the clock matrix and trigger an immediate SW_CPU_RESET!
 
@@ -180,6 +181,7 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
        CRITICAL: The deployment `flash_offset` MUST be the absolute hardware ROM Bootloader's expected entry point mapped to physical flash. NEVER dictate an application OTA offset for a raw bare-metal payload! Use {{binary_path}} as a placeholder for the compiled image.
     3. Payload Packaging (Sequential Array!): Does the vendor's boot infrastructure require the raw `.elf` binary to be format-converted, wrapped in a proprietary header, provisioned, or signed BEFORE it can be actively flashed or booted? 
        CRITICAL: If the architecture demands proprietary wrapping tools instead of just standard GNU objcopy, you MUST output this exact CLI command as a step with "condition": "ANY". This command MUST strictly guarantee the generation of exactly ONE single, unified output binary at {{binary_path}} (no scattered segments or address-based file suffixes).
+       CRITICAL: For tools like `esptool.py elf2image`, NEVER specify explicit flash parameters (like `--flash_mode`, `--flash_freq`, or `--flash_size`). Let the tool use safe generic defaults to avoid hardware checksum failures and bootloops on constrained silicon configurations.
        If Secure Boot algorithms dictate mandatory cryptographic wrapping (e.g., vendor signing algorithms or standard imgtool), add them sequentially with "condition": "PROFILE_SECURE_BOOT_ONLY". Provide the exact CLI scripts, binding variables precisely to {{binary_path}}, {{elf_path}}, and {{private_key_path}}.
 
     OUTPUT ONLY VALID JSON matching this exact structure (no markdown):
@@ -280,10 +282,13 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
     - `"write_addr"`: A `REG = value` operation. Provide `offset`. Provide `value_hex` if writing a constant magic number, OR `value_source` if the value is a dynamic runtime variable (strictly enum: `"sector_addr"` or `"data_word"`).
     - `"rom_function_call"`: Invoke a hardware ROM pointer directly. You MUST provide `function_name` (for logging), `args_csv` (like `"sector_addr / 4096"`), AND crucially `rom_address` (exact hex memory address, e.g., `"0x40062CCC"`). If the ROM strictly requires an absolute 0-indexed physical offset instead of the CPU memory-mapped address (like ESP32), set `"requires_physical_offset": true`. DO NOT omit `rom_address`, as our linker cannot resolve names.
 
+    CRITICAL RULE FOR ESP32 AND OTHERS: If the TRM does not document exact physical SPI Flash registers and instead forces you to use built-in BootROM APIs (like `esp_rom_spiflash_erase_sector`), YOU MUST NOT RETURN AN EMPTY ARRAY. You MUST output a `rom_function_call` sequence. If you absolutely cannot find the exact numeric `rom_address` in the document, you MUST provide "UNKNOWN_ADDRESS" as the `rom_address`. DO NOT abort or return empty sequences. You must attempt to map the sequence and include read/write/erase arrays containing the ROM calls. Use the `analytical_notes` field to explain what context is missing for a human engineer to improve the prompt.
+
     OUTPUT ONLY VALID JSON matching this exact structure (no markdown):
     {{
         "{chip_name}": {{
             "flash_controller": {{
+                "analytical_notes": "...",
                 "base_address": "0x...",
                 "unlock_sequence": [
                     {{"type": "write_addr", "offset": "0x...", "value_hex": "0x...", "desc": "Write Key 1"}}
@@ -372,24 +377,26 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
 
         results = []
 
-        def single_request(run_id):
-            safe_print(f"    -> {stage_name} [Run {run_id}/{runs}] Request fired...")
-            try:
-                response = gemini_client.models.generate_content(
-                    model="gemini-3.1-pro-preview",
-                    contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt,
-                        response_mime_type="application/json",
-                        temperature=0.0,
-                    ),
-                )
-                return json.loads(response.text)
-            except Exception as e:
-                safe_print(
-                    f"    [!] {stage_name} [Run {run_id}] Failed or malformed JSON: {e}"
-                )
-                return None
+        def single_request(run_id, retries=3):
+            import time
+            for attempt in range(retries):
+                safe_print(f"    -> {stage_name} [Run {run_id}/{runs}] Request fired (Attempt {attempt+1}/{retries})...")
+                try:
+                    response = gemini_client.models.generate_content(
+                        model="gemini-3.1-pro-preview",
+                        contents=contents,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_prompt,
+                            response_mime_type="application/json",
+                            temperature=0.0,
+                        ),
+                    )
+                    return json.loads(response.text)
+                except Exception as e:
+                    safe_print(f"    [!] {stage_name} [Run {run_id}] Error (Attempt {attempt+1}): {e}")
+                    if attempt < retries - 1:
+                        time.sleep(3 ** attempt)
+            return None
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=runs) as executor:
             futures = [executor.submit(single_request, i + 1) for i in range(runs)]
@@ -459,7 +466,7 @@ def generate_chip_definition(chip_name, architecture, context_file_path=None, ru
     while os.path.exists(os.path.join(hist_dir, f"run_{shared_run_num}")):
         shared_run_num += 1
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as stage_executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as stage_executor:
         f1 = stage_executor.submit(
             execute_prompt,
             prompt_stage1,
