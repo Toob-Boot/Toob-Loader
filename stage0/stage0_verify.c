@@ -2,6 +2,11 @@
  * Toob-Boot Stage 0: stage0_verify.c
  * Relevant Spec-Dateien:
  * - docs/concept_fusion.md (Ed25519)
+ *
+ * TODO (Architecture Requirements):
+ * - Verify-Mode Switch: Auswertung der stage0.verify_mode Direktive (hash-only, ed25519-sw oder ed25519-hw).
+ * - Signature Check: Validierung der Stage 1 Signatur basierend auf dem gewählten Modus.
+ * - Footprint-Awareness: Nutzung einer P10 Zero-Allocation Architektur, passend für das winzige 4-8 KB SRAM Budget der Stage 0.
  */
 #include "../../crypto/monocypher/monocypher-ed25519.h"
 #include "stage0_crypto.h"
