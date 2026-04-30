@@ -728,7 +728,7 @@ session_reset:
  * Vendor-ISRs (wie HardFault_Handler auf ARM) müssen diese Funktion aufrufen,
  * anstatt eigene Endlosschleifen zu implementieren.
  */
-void toob_ecc_trap(void) {
+void __attribute__((section(".iram1.text"))) toob_ecc_trap(void) {
     /* ACHTUNG: toob_ecc_trap hat keinen Kontext zur `platform`, da sie asynchron
      * aus einer NMI aufgerufen wird! Wir müssen den globalen Handoff-State 
      * oder eine reduzierte Panic fahren. 

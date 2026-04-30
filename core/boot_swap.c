@@ -208,7 +208,7 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
     boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
     if (needs_erase) {
-      if (sec_size > CHIP_FLASH_MAX_SECTOR_SIZE) {
+      if (sec_size >= CHIP_FLASH_MAX_SECTOR_SIZE) {
         if (platform->wdt && platform->wdt->suspend_for_critical_section)
           platform->wdt->suspend_for_critical_section();
 

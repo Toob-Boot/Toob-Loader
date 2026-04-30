@@ -96,6 +96,12 @@ if(TOOB_ARCH STREQUAL "xtensa")
     endif()
 endif()
 
+if(TOOB_ARCH STREQUAL "riscv32")
+    # ESP32-C6: rv32imac — integer multiply, atomics, compressed instructions.
+    # Explicitly set to avoid toolchain defaults that may include FPU extensions.
+    target_compile_options(toob_arch PUBLIC -march=rv32imac_zicsr -mabi=ilp32)
+endif()
+
 # ------------------------------------------------------------------------------
 # P10 Härtung (Stack-Protector für HAL erlaubt)
 # ------------------------------------------------------------------------------

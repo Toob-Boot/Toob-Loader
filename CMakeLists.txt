@@ -116,7 +116,16 @@ endif()
 
 # 5.4 Linker Script Integration
 if(NOT TOOB_ARCH STREQUAL "host")
-    target_link_options(toob_stage1 PRIVATE -T${CMAKE_BINARY_DIR}/generated/flash_layout.ld)
+    # Prefer manifest-compiler generated layout; fall back to chip-specific script
+    if(EXISTS "${CMAKE_BINARY_DIR}/generated/flash_layout.ld")
+        set(TOOB_LINKER_SCRIPT "${CMAKE_BINARY_DIR}/generated/flash_layout.ld")
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
+        set(TOOB_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
+    else()
+        message(FATAL_ERROR "No linker script found for chip '${TOOB_CHIP}'!")
+    endif()
+
+    target_link_options(toob_stage1 PRIVATE -T${TOOB_LINKER_SCRIPT})
 
     # 5.5 Firmware Image Generation (.elf -> .bin)
     add_custom_command(
