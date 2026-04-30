@@ -322,16 +322,25 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                         boot_status_t delta_stat = boot_delta_apply(
                             platform, 
                             open_txn->offset + suit_consumed_bytes, CHIP_STAGING_SLOT_ABS_ADDR + CHIP_APP_SLOT_SIZE - (open_txn->offset + suit_consumed_bytes), 
-                            CHIP_RECOVERY_OS_ABS_ADDR, CHIP_APP_SLOT_SIZE,  /* Ziel: A/B Safe Buffer */
+                            CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,  /* Ziel: Dedicated A/B Safe Buffer (Anti-Brick!) */
                             CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,     /* Base: Alte Firmware */
                             open_txn);
                             
                         if (delta_stat == BOOT_OK) {
-                            verify_status = BOOT_OK;
-                            requires_swap = true;
-                            /* Swap zieht nun aus Recovery! */
-                            staging_header.image_size = app_img->toob_image_delta.image_size;
-                            swap_src_addr = CHIP_RECOVERY_OS_ABS_ADDR; 
+                            /* P10 SECURITY FIX: SDVM Output zwingend gegen den signierten Merkle-Tree prüfen! */
+                            boot_status_t hash_stat = boot_merkle_verify_stream(
+                                platform, CHIP_SCRATCH_SLOT_ABS_ADDR, 
+                                app_img->toob_image_delta.image_size, chunk_hashes->value);
+
+                            if (hash_stat == BOOT_OK) {
+                                verify_status = BOOT_OK;
+                                requires_swap = true;
+                                /* Swap zieht nun aus Scratch-Partition! */
+                                staging_header.image_size = app_img->toob_image_delta.image_size;
+                                swap_src_addr = CHIP_SCRATCH_SLOT_ABS_ADDR; 
+                            } else {
+                                verify_status = BOOT_ERR_VERIFY; /* ACE Prevention! SDVM Output war korrupt/manipuliert! */
+                            }
                         } else {
                             verify_status = delta_stat;
                         }

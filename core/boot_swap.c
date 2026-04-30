@@ -280,7 +280,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
   }
 
   if (length > UINT32_MAX - src_base || length > UINT32_MAX - dest_base ||
-      length > UINT32_MAX - CHIP_SCRATCH_SECTOR_ABS_ADDR) {
+      length > UINT32_MAX - CHIP_SCRATCH_SLOT_ABS_ADDR) {
     return BOOT_ERR_FLASH_BOUNDS;
   }
   if (length == 0)
@@ -347,7 +347,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
       goto swap_cleanup;
     }
 
-    if (platform->flash->get_sector_size(CHIP_SCRATCH_SECTOR_ABS_ADDR,
+    if (platform->flash->get_sector_size(CHIP_SCRATCH_SLOT_ABS_ADDR,
                                          &scratch_sec_size) != BOOT_OK ||
         scratch_sec_size == 0) {
       status = BOOT_ERR_FLASH_HW;
@@ -465,7 +465,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     if (status != BOOT_OK)
       goto swap_cleanup;
 
-    status = compute_flash_crc32(platform, CHIP_SCRATCH_SECTOR_ABS_ADDR,
+    status = compute_flash_crc32(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
                                  block_size, &phys_scratch);
     if (status != BOOT_OK)
       goto swap_cleanup;
@@ -521,13 +521,13 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
 
     /* PHASE A: Backup Dest -> Scratch */
     if (run_phase_a) {
-      status = _boot_swap_erase_tracked(platform, CHIP_SCRATCH_SECTOR_ABS_ADDR,
+      status = _boot_swap_erase_tracked(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
                                         block_size, &physical_scratch_erases);
       if (status != BOOT_OK)
         goto swap_cleanup;
 
       status = stream_flash_copy_and_verify(platform, current_dest,
-                                            CHIP_SCRATCH_SECTOR_ABS_ADDR,
+                                            CHIP_SCRATCH_SLOT_ABS_ADDR,
                                             block_size, crc_dest);
       if (status != BOOT_OK)
         goto swap_cleanup;
@@ -554,7 +554,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
         goto swap_cleanup;
 
       status =
-          stream_flash_copy_and_verify(platform, CHIP_SCRATCH_SECTOR_ABS_ADDR,
+          stream_flash_copy_and_verify(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
                                        current_src, block_size, crc_dest);
       if (status != BOOT_OK)
         goto swap_cleanup;

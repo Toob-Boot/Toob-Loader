@@ -129,7 +129,7 @@ void sha256_final(SHA256_CTX *ctx, uint8_t hash[])
 		while (i < 64)
 			ctx->data[i++] = 0x00;
 		sha256_transform(ctx, ctx->data);
-		boot_secure_zeroize(ctx->data, 56);
+		boot_secure_zeroize(ctx->data, 64); /* P10 FIX: Kompletten Stack wipen (inklusive 8-Byte Length) */
 	}
 
 	// Append to the padding the total message's length in bits and transform.

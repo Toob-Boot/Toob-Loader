@@ -32,11 +32,9 @@ static void __attribute__((naked)) jump_to_payload(uint32_t vector_table_addr) {
       ::"r"(vector_table_addr)
       : "r1", "memory");
 #elif defined(__riscv)
-  __asm__ volatile("lw sp, 0(%0)\n" /* Lade Stack Pointer (SP) */
-                   "lw t0, 4(%0)\n" /* Lade Reset Handler (PC) */
-                   "jr t0\n"        /* Jump zum Payload */
+  __asm__ volatile("jr %0\n"        /* P10 FIX: Direkter Jump auf Binary Entry-Point für RISC-V */
                    ::"r"(vector_table_addr)
-                   : "t0", "memory");
+                   : "memory");
 #endif
 #endif
   while (1) {
@@ -141,6 +139,10 @@ int main(void) {
     platform->flash->deinit();
     if (platform->clock)
       platform->clock->deinit();
+
+    /* P10 FIX: XIP Flash-Cache Invalidierung erzwingen! Verhindert das Booten alten Codes. */
+    if (platform->soc && platform->soc->invalidate_icache)
+      platform->soc->invalidate_icache();
 
     __asm__ volatile("" ::: "memory");
     jump_to_payload(payload_addr + hdr.entry_point);

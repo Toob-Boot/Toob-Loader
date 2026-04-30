@@ -120,7 +120,7 @@ typedef struct {
  * Strukturierte Boot-Diagnostik für OS CBOR Extraction 
  * Harmonisiert GAP-F29 & GAP-16 mit toob_telemetry.md
  */
-typedef struct {
+typedef struct __attribute__((aligned(8))) {
     uint32_t struct_version;         /* Abwärtskompatibler Header */
     
     /* Systemwerte */

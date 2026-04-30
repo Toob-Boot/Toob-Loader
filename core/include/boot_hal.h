@@ -215,6 +215,10 @@ typedef struct {
    */
   void (*assert_secondary_cores_reset)(void);
   void (*flush_bus_matrix)(void);
+  
+  /* Cache und Interrupt Isolation für P10 (XIP) und Glitch Traps */
+  void (*invalidate_icache)(void);
+  void (*disable_interrupts)(void);
 
   /* 
    * Mechanischer Recovery-Pin (Anti-Softbrick) Evaluator (concept_fusion.md Z.117).

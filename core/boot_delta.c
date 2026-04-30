@@ -298,6 +298,12 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
   }
 
   uint32_t expected_lit_offset = sizeof(toob_tds_header_t) + instr_bytes;
+
+  /* P10 FIX: Verhindert Arbitrary Flash Read! Angreifer darf den Offset nicht frei wählen! */
+  if (hdr.literal_block_offset != expected_lit_offset) {
+    status = BOOT_ERR_VERIFY;
+    goto cleanup; 
+  }
   if (expected_lit_offset > delta_max_size) {
     status = BOOT_ERR_FLASH_BOUNDS;
     goto cleanup;

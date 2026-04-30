@@ -203,6 +203,11 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
     /* CFI Failure - Control Flow wurde attackiert! System einfrieren! */
     if (platform->clock && platform->clock->deinit)
       platform->clock->deinit();
+
+    /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts (z.B. RTOS/ROM Cache) */
+    if (platform->soc && platform->soc->disable_interrupts)
+      platform->soc->disable_interrupts();
+
     while (1) {
       BOOT_GLITCH_DELAY();
     } /* Starve WDT */
@@ -241,6 +246,10 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
       platform->console->flush();
     if (platform->clock && platform->clock->deinit)
       platform->clock->deinit();
+
+    /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts (z.B. RTOS/ROM Cache) */
+    if (platform->soc && platform->soc->disable_interrupts)
+      platform->soc->disable_interrupts();
 
     while (1) {
       BOOT_GLITCH_DELAY(); /* Starve WDT */

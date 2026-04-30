@@ -144,6 +144,11 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
        * Hard Reset zu erzwingen! */
       if (platform->clock->deinit)
         platform->clock->deinit();
+
+      /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts (z.B. RTOS/ROM Cache) */
+      if (platform->soc && platform->soc->disable_interrupts)
+        platform->soc->disable_interrupts();
+
       while (1) {
         BOOT_GLITCH_DELAY();
       }
@@ -175,6 +180,11 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
        * WDT Starvation: Wir hängen die MCU ohne WDT-Kicks auf. */
       if (platform->clock->deinit)
         platform->clock->deinit();
+
+      /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts (z.B. RTOS/ROM Cache) */
+      if (platform->soc && platform->soc->disable_interrupts)
+        platform->soc->disable_interrupts();
+
       while (1) {
         BOOT_GLITCH_DELAY();
       }
@@ -205,6 +215,11 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
      * Wir frieren das System absichtlich ein, um den WDT zu starven. */
     if (platform->clock->deinit)
       platform->clock->deinit();
+
+    /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts (z.B. RTOS/ROM Cache) */
+    if (platform->soc && platform->soc->disable_interrupts)
+      platform->soc->disable_interrupts();
+
     while (1) {
       BOOT_GLITCH_DELAY();
     }
