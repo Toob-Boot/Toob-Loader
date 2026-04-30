@@ -4,6 +4,15 @@ import threading
 import sys
 import os
 import time
+
+# FIX: Purge any inherited ghost proxy configurations from Windows/IDE
+# that cause `[Errno 11001] getaddrinfo failed` when `httpx` or `grpc`
+# tries to resolve the proxy server's hostname instead of the actual endpoint.
+for k in ["http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"]:
+    if k in os.environ:
+        del os.environ[k]
+os.environ["NO_PROXY"] = "*"
+
 from pipeline_core import ToobfuzzerPipeline, StateContext
 
 # Attempt to configure CTk appearance
@@ -195,7 +204,7 @@ Ready for Datasheet ingestion.
             anchor="w",
         )
         self.runs_label.grid(row=10, column=0, padx=20, pady=(10, 0), sticky="ew")
-        self.runs_var = ctk.StringVar(value="3")
+        self.runs_var = ctk.StringVar(value="1")
         self.runs_entry = ctk.CTkOptionMenu(
             self.sidebar_frame,
             values=["1", "2", "3", "5", "7"],

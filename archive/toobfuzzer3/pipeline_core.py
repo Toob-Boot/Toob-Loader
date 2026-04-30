@@ -245,6 +245,12 @@ class ToobfuzzerPipeline:
                 for k, v in u.items():
                     if isinstance(v, dict) and k in d and isinstance(d[k], dict):
                         deep_update(d[k], v)
+                    elif k.endswith("_append") and isinstance(v, list):
+                        real_k = k[:-7]
+                        if real_k in d and isinstance(d[real_k], list):
+                            d[real_k].extend(v)
+                        else:
+                            d[real_k] = v
                     else:
                         d[k] = v
                         
@@ -265,7 +271,7 @@ class ToobfuzzerPipeline:
             os.path.dirname(__file__), "build", self.ctx.chip, "run_latest"
         )
         ld_path, s_path = generate_toolchain_files(
-            self.ctx.chip, latest_blueprint, build_dir
+            self.ctx.chip, spec_json[self.ctx.chip], build_dir
         )
         # Define the Fuzzer's expected worst-case footprint for Self-Preservation & Ping-Pong Relocation
         self.ctx.fuzzer_footprint_bytes = 0x40000  # 256KB is safer for smaller MCUs

@@ -12,6 +12,9 @@ extern bool chip_flash_erase(uint32_t sector_addr);
 extern bool chip_flash_write32(uint32_t addr, uint32_t val);
 extern bool chip_flash_read32(uint32_t addr, uint32_t *out_val);
 
+// Generic Watchdog Sterilization/Feeding (implemented in generated capabilities)
+extern void feed_hardware_watchdogs(void);
+
 static void memory_bin_search(uint32_t start_addr, uint32_t max_range) {
   uint32_t low = 0;
   uint32_t high = max_range / 4; // Word aligned search
@@ -99,15 +102,15 @@ static uint32_t binary_search_sector_boundary(uint32_t start_addr,
       continue;
     }
 
-    FZ_LOG_DEBUG("        [~] Phase 2: Injecting probe marker 0xDEADBEEF...\n");
+    FZ_LOG_DEBUG("        [~] Phase 2: Injecting probe marker 0xDEADBEEF...\\n");
     chip_flash_write32(fine_mid, 0xDEADBEEF);
 
-    FZ_LOG_DEBUG("        [~] Phase 2: Re-Erasing Sector 0x");
-    FZ_LOG_HEX_DEBUG(start_addr);
-    FZ_LOG_DEBUG("...\n");
+    fz_log("[TRACE] Phase 2: Calling feed & erase\n");
+    feed_hardware_watchdogs();
     chip_flash_erase(start_addr);
+    fz_log("[TRACE] Phase 2: Erase returned\n");
 
-    FZ_LOG_DEBUG("        [~] Phase 2: Interrogating Marker Survival...\n");
+    FZ_LOG_DEBUG("        [~] Phase 2: Interrogating Marker Survival...\\n");
     uint32_t val = 0;
     if (!chip_flash_read32(fine_mid, &val)) {
       if (fine_mid <= start_addr + 4)
@@ -154,6 +157,15 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
 
   uint32_t addr = base;
   while (addr < limit) {
+    fz_log("[TRACE] Loop start addr=0x");
+    fz_log_hex(addr);
+    fz_log("\n");
+
+    // Keep hardware alive during long-running Flash operations
+    fz_log("[TRACE] Calling feed_hardware_watchdogs\n");
+    feed_hardware_watchdogs();
+    fz_log("[TRACE] Returned from feed_hardware_watchdogs\n");
+
     // Phase 11 & 18 & 19: Firmware Self-Preservation & Multiple Exclusions
     // Cross-reference all dynamically discovered hardware reserved regions
     bool skipped = false;
@@ -206,16 +218,18 @@ static void full_sector_scan(uint32_t base, uint32_t limit) {
         chip_flash_write32(addr + i, 0xAAAAAAAA);
       }
     } else {
-      FZ_LOG_DEBUG("      [~] Skipping Markers (Sector Unerased or Shielded)\n");
+      FZ_LOG_DEBUG("      [~] Skipping Markers (Sector Unerased or Shielded)\\n");
     }
 
-    FZ_LOG_DEBUG("      [~] Firing BootROM Sector Erase...\n");
+    fz_log("[TRACE] Calling chip_flash_erase for main scan\n");
     if (chip_flash_erase(addr)) {
-      FZ_LOG_DEBUG("      [~] SUCCESS: Sector Erased!\n");
+      fz_log("[TRACE] chip_flash_erase returned true\n");
 
       FZ_LOG_DEBUG("      [~] Initiating Binary Boundary Search...\n");
       uint32_t sector_size =
           binary_search_sector_boundary(addr, sample_range, sampling_interval);
+          
+      fz_log("[TRACE] binary_search_sector_boundary returned\n");
           
       fz_log("+");
       fz_log_hex(addr);

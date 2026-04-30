@@ -40,11 +40,10 @@ class ToobfuzzerBuilder:
     def _execute_command(self, tool_name, command_template, env=None, cwd=None):
         """Locates the tool and executes the template string."""
         print(f"[*] Preparing execution for: {tool_name}")
-        
+
         # Enforce CWD to the toobfuzzer3 root so relative paths (core/*.c) hit the fuzzer, not the bootloader
         if cwd is None:
             cwd = os.path.dirname(os.path.dirname(__file__))
-
 
         # 1. Locate the actual binary path
         tool_path = ToolLocator.find_tool(tool_name)
@@ -113,7 +112,6 @@ class ToobfuzzerBuilder:
         s_files = " ".join(glob.glob(os.path.join(fz_root, "arch/*.S")))
         hal_files = " ".join(glob.glob(os.path.join(fz_root, "hal/*.c")))
         mock_files = " ".join(glob.glob(os.path.join(fz_root, "mocks/*.c")))
-
 
         # Include dynamically generated C and Assembly files from the AI pipeline
         generated_c = (
@@ -207,10 +205,22 @@ class ToobfuzzerBuilder:
 
             # Fix for Gemini hallucinating 'detect' on elf2image, and enforcing aggressive SPI flash modes
             # that cause BootROM Checksum Failures (Calculated 0xef stored 0xff) due to hardware mismatch.
+            # We must FORCE DIO mode and a safe 40MHz frequency so the ROM reads the checksum correctly.
             if "elf2image" in command:
-                command = command.replace("--flash_size detect", "")
-                command = command.replace("--flash_mode dio", "")
-                command = command.replace("--flash_freq 80m", "")
+                # Strip any existing unsafe AI suggestions
+                for bad_arg in [
+                    "--flash_size detect",
+                    "--flash_mode qio",
+                    "--flash_freq 80m",
+                    "--flash_size 4MB",
+                ]:
+                    command = command.replace(bad_arg, "")
+
+                # Forcefully inject the safest possible bare-metal hardware config
+                command = command.replace(
+                    "elf2image",
+                    "elf2image --flash_mode dio --flash_freq 40m --flash_size 4MB",
+                )
 
             success = self._execute_command(tool_name, command)
             if not success:

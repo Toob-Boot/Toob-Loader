@@ -12,29 +12,28 @@ _start:
     .option norelax
     la gp, __global_pointer$
     .option pop
-
-    /* Watchdog Sterilization (AI Extracted) */
+    /* Disable Hardcoded Watchdogs (Quirks) */
     /* Disable TIMG0_WDT */
     li a0, 0x50D83AA1
-    li a1, 0x60008064
-    sw a0, 0(a1)
+    li t1, 0x60008064
+    sw a0, 0(t1)  /* Unlock */
     li a0, 0x0
     li a1, 0x60008048
-    sw a0, 0(a1)
+    sw a0, 0(a1)  /* Direct write disable_val */
     /* Disable TIMG1_WDT */
     li a0, 0x50D83AA1
-    li a1, 0x60009064
-    sw a0, 0(a1)
+    li t1, 0x60009064
+    sw a0, 0(t1)  /* Unlock */
     li a0, 0x0
     li a1, 0x60009048
-    sw a0, 0(a1)
+    sw a0, 0(a1)  /* Direct write disable_val */
     /* Disable LP_WDT */
     li a0, 0x50D83AA1
-    li a1, 0x600B0414
-    sw a0, 0(a1)
+    li t1, 0x600B1C18
+    sw a0, 0(t1)  /* Unlock */
     li a0, 0x0
-    li a1, 0x600B0400
-    sw a0, 0(a1)
+    li a1, 0x600B1C00
+    sw a0, 0(a1)  /* Direct write disable_val */
 
     /* Zero BSS */
     la t0, _bss_start

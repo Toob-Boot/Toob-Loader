@@ -160,18 +160,32 @@ def generate_startup_assembly(spec, chip_name, out_dir):
         asm_lines.append("    la gp, __global_pointer$")
         asm_lines.append("    .option pop")
 
-        asm_lines.append("\n    /* Watchdog Sterilization (AI Extracted) */")
+        asm_lines.append("    /* Disable Hardcoded Watchdogs (Quirks) */")
         for wd in spec.get("watchdog_kill_registers", []):
-            asm_lines.append(f"    /* Disable {wd['name']} */")
+            asm_lines.append(f"    /* Disable {wd.get('name', 'WDT')} */")
+            
+            use_mask = "disable_mask" in wd
+            
+            # Read BEFORE unlock if we are masking
+            if use_mask:
+                asm_lines.append(f"    li a1, {wd['config_addr']}")
+                asm_lines.append(f"    lw a2, 0(a1)  /* Read current config */")
+                asm_lines.append(f"    li t0, {wd['disable_mask']}")
+                asm_lines.append(f"    or a2, a2, t0  /* Apply mask */")
+            
+            # Unlock
             if wd.get("unlock_val") and wd["unlock_val"] != "0x0":
                 asm_lines.append(f"    li a0, {wd['unlock_val']}")
-                asm_lines.append(f"    li a1, {wd['address']}")
-                asm_lines.append(f"    sw a0, 0(a1)")
-
-            if wd.get("config_addr"):
+                asm_lines.append(f"    li t1, {wd['address']}")
+                asm_lines.append(f"    sw a0, 0(t1)  /* Unlock */")
+                
+            # Write immediately after unlock
+            if use_mask:
+                asm_lines.append(f"    sw a2, 0(a1)  /* Write masked config */")
+            elif "disable_val" in wd:
                 asm_lines.append(f"    li a0, {wd['disable_val']}")
                 asm_lines.append(f"    li a1, {wd['config_addr']}")
-                asm_lines.append(f"    sw a0, 0(a1)")
+                asm_lines.append(f"    sw a0, 0(a1)  /* Direct write disable_val */")
 
         if spec["startup"].get("bss_init_required", False):
             asm_lines.append("\n    /* Zero BSS */")
@@ -215,9 +229,16 @@ def generate_startup_assembly(spec, chip_name, out_dir):
                 asm_lines.append(f"    str r0, [r1]")
 
             if wd.get("config_addr"):
-                asm_lines.append(f"    ldr r0, ={wd['disable_val']}")
-                asm_lines.append(f"    ldr r1, ={wd['config_addr']}")
-                asm_lines.append(f"    str r0, [r1]")
+                if wd.get("disable_mask"):
+                    asm_lines.append(f"    ldr r1, ={wd['config_addr']}")
+                    asm_lines.append(f"    ldr r0, [r1]")
+                    asm_lines.append(f"    ldr r2, ={wd['disable_mask']}")
+                    asm_lines.append(f"    orr r0, r0, r2")
+                    asm_lines.append(f"    str r0, [r1]")
+                else:
+                    asm_lines.append(f"    ldr r0, ={wd['disable_val']}")
+                    asm_lines.append(f"    ldr r1, ={wd['config_addr']}")
+                    asm_lines.append(f"    str r0, [r1]")
 
         if spec["startup"].get("bss_init_required", False):
             asm_lines.append("\n    /* Zero BSS */")
@@ -289,14 +310,7 @@ def generate_startup_assembly(spec, chip_name, out_dir):
     return s_path
 
 
-def generate_toolchain_files(chip_name, chips_json_path, out_dir):
-    with open(chips_json_path, "r") as f:
-        db = json.load(f)
-
-    if chip_name not in db:
-        raise ValueError(f"Chip {chip_name} not found in {chips_json_path}")
-
-    spec = db[chip_name]
+def generate_toolchain_files(chip_name, spec, out_dir):
     ld_path = generate_linker_script(spec, chip_name, out_dir)
     s_path = generate_startup_assembly(spec, chip_name, out_dir)
 

@@ -242,6 +242,28 @@ def generate_flash_hal(spec, chip_name, out_dir):
     # Universal D-Cache Eviction Hook was removed since we use physical BootROM Cache Control
     # or rely strictly on internal RAM boundaries for non-XiP architectures.
 
+    # -------------------------------------------------------------------------
+    # DYNAMIC WATCHDOG FEED GENERATION
+    # -------------------------------------------------------------------------
+    watchdog_seq = spec.get("watchdog_feed_sequence", [])
+    watchdog_feed_lines = []
+    for step in watchdog_seq:
+        t = step.get("type")
+        addr = step.get("address", "0x0")
+        val = step.get("value", "0x0")
+        desc = step.get("desc", "")
+        if desc:
+            watchdog_feed_lines.append(f"    // {desc}")
+        ptr_macro = f"(*((volatile uint32_t*)({addr})))"
+        
+        if t == "memory_write":
+            watchdog_feed_lines.append(f"    {ptr_macro} = {val};")
+        elif t == "memory_or":
+            watchdog_feed_lines.append(f"    {ptr_macro} |= {val};")
+        elif t == "raw_c":
+            watchdog_feed_lines.append("    " + step.get("code", "").replace("\n", "\n    "))
+    watchdog_feed_c = "\n".join(watchdog_feed_lines)
+
     c_content = f"""/* Auto-Generated Bare-Metal Flash HAL for {chip_name} (Physical Architecture) */
 #include <stdint.h>
 #include <stdbool.h>
@@ -250,6 +272,10 @@ def generate_flash_hal(spec, chip_name, out_dir):
 
 void hal_print_status(void) {{
     fz_log("[HAL] Active Backend: True Physical Hardware MMU Driver\\n");
+}}
+
+void feed_hardware_watchdogs(void) {{
+{watchdog_feed_c}
 }}
 
 bool chip_flash_erase(uint32_t sector_addr) {{
