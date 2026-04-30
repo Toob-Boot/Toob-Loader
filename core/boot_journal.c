@@ -162,7 +162,7 @@ static boot_status_t smart_erase_sector(const boot_platform_t *platform,
     return BOOT_OK; /* Zero-Wear Skip! Hardware geschont. */
 
   /* Monolithic Erase Protection */
-  if (sec_size > CHIP_FLASH_MAX_SECTOR_SIZE && platform->wdt &&
+  if (sec_size >= CHIP_FLASH_MAX_SECTOR_SIZE && platform->wdt &&
       platform->wdt->suspend_for_critical_section) {
     platform->wdt->suspend_for_critical_section();
   } else if (platform->wdt && platform->wdt->kick) {
@@ -171,7 +171,7 @@ static boot_status_t smart_erase_sector(const boot_platform_t *platform,
 
   boot_status_t status = platform->flash->erase_sector(addr);
 
-  if (sec_size > CHIP_FLASH_MAX_SECTOR_SIZE && platform->wdt &&
+  if (sec_size >= CHIP_FLASH_MAX_SECTOR_SIZE && platform->wdt &&
       platform->wdt->resume) {
     platform->wdt->resume();
   } else if (platform->wdt && platform->wdt->kick) {
@@ -307,25 +307,21 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
   if (TOOB_WAL_SECTORS < 4 || TOOB_WAL_SECTORS > MAX_WAL_SECTORS)
     return BOOT_ERR_INVALID_ARG;
 
-  /* 1. Calculate boundaries dynamically to support asymmetric flash */
-  uint32_t current_addr = TOOB_WAL_BASE_ADDR;
-  for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
-    wal_sector_addrs[i] = current_addr;
-    size_t sec_size = 0;
-    boot_status_t status =
-        platform->flash->get_sector_size(current_addr, &sec_size);
-    if (status != BOOT_OK)
-      return status;
+  /* 1. O(1) Static Layout Initialization (Single Source of Truth)
+   * Nutzt P10-Stack-Free Arrays (.rodata) für physikalisch perfekte Asymmetrie */
+  static const uint32_t hw_addrs[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_ADDRS;
+  static const size_t hw_sizes[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_SIZES;
 
-    /* Sanity-Check: Ist der Sektor physikalisch groß genug für Header + 1
-     * Entry? */
-    if (sec_size <
+  for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
+    wal_sector_addrs[i] = hw_addrs[i];
+    wal_sector_sizes[i] = hw_sizes[i];
+
+    /* Sanity-Check: Ist der vom Manifest spezifizierte Sektor physikalisch groß
+     * genug für Header + 1 Entry? */
+    if (wal_sector_sizes[i] <
         sizeof(wal_sector_header_aligned_t) + sizeof(wal_entry_aligned_t)) {
       return BOOT_ERR_FLASH_HW;
     }
-
-    wal_sector_sizes[i] = sec_size;
-    current_addr += (uint32_t)sec_size;
   }
 
   /* 2. Scan all sectors for highest sequence */

@@ -5,6 +5,24 @@
 #define TOOB_WAL_BASE_ADDR 0x000F0000
 #define TOOB_WAL_SECTORS   4
 
+/* GAP-FIX: Asymmetrische Hardware-Sektor Mappings für den Mock */
+#ifndef TOOB_WAL_SECTOR_ADDRS
+#define TOOB_WAL_SECTOR_ADDRS { \
+    0x000F0000U, \
+    0x000F1000U, \
+    0x000F2000U, \
+    0x000F3000U  \
+}
+#endif
+#ifndef TOOB_WAL_SECTOR_SIZES
+#define TOOB_WAL_SECTOR_SIZES { \
+    4096U, \
+    4096U, \
+    4096U, \
+    4096U  \
+}
+#endif
+
 /* FIX (Doublecheck): Missing Addresses for App Slot A & Recovery OS */
 #define CHIP_APP_SLOT_ABS_ADDR     0x00010000 
 #define CHIP_STAGING_SLOT_ABS_ADDR 0x00060000
