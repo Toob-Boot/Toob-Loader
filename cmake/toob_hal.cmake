@@ -24,6 +24,7 @@ if(ARCH_SOURCES)
         hal/arch/${TOOB_ARCH}/include
         core/include                  # Unverzichtbar für boot_hal.h!
         ${CMAKE_BINARY_DIR}/generated # Unverzichtbar für chip_config.h!
+        libtoob/include
     )
 endif()
 
@@ -38,6 +39,7 @@ if(VENDOR_SOURCES)
         hal/vendor/${TOOB_VENDOR}/include
         core/include
         ${CMAKE_BINARY_DIR}/generated
+        libtoob/include
     )
     if(TARGET toob_arch)
         target_link_libraries(toob_vendor PUBLIC toob_arch)
@@ -58,6 +60,7 @@ if(CHIP_SOURCES)
         hal/chips/${TOOB_CHIP}
         core/include
         ${CMAKE_BINARY_DIR}/generated
+        libtoob/include
     )
     if(TOOB_CHIP STREQUAL "sandbox")
         target_include_directories(toob_chip PUBLIC test/mocks)

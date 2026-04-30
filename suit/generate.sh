@@ -167,7 +167,6 @@ bool cbor_encode_toob_telemetry(uint8_t *payload, size_t payload_len, const stru
 }
 EOF
     fi
-fi
 
 # ------------------------------------------------------------------------------
 # 2. CHIP CONFIG && MANIFEST COMPILER GENERATION

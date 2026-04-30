@@ -526,18 +526,19 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
         }
         
         /* Streaming Heatshrink Decompression */
-        size_t compressed_rem = step;
-        size_t decompressed_total = 0;
+        uint32_t compressed_rem = step;
+        uint32_t decompressed_total = 0;
         
         while (compressed_rem > 0) {
-          size_t chunk = compressed_rem > half_arena ? half_arena : compressed_rem;
+          uint32_t chunk = compressed_rem > (uint32_t)half_arena ? (uint32_t)half_arena : compressed_rem;
           if (platform->flash->read(delta_addr + lit_read_offset, read_buf, chunk) != BOOT_OK) {
             status = BOOT_ERR_FLASH_HW;
             goto cleanup;
           }
           
-          size_t sunk = 0;
-          HSD_sink_res sres = heatshrink_decoder_sink(hsd, read_buf, chunk, &sunk);
+          size_t sunk_sz = 0;
+          HSD_sink_res sres = heatshrink_decoder_sink(hsd, read_buf, chunk, &sunk_sz);
+          uint32_t sunk = (uint32_t)sunk_sz;
           if (sres < 0) {
             status = BOOT_ERR_VERIFY;
             goto cleanup;
@@ -546,19 +547,20 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
           while (1) {
             if (platform->wdt && platform->wdt->kick) platform->wdt->kick();
             
-            size_t polled = 0;
-            size_t space_left = half_arena - write_buf_pos;
+            size_t polled_sz = 0;
+            uint32_t space_left = (uint32_t)half_arena - write_buf_pos;
             if (space_left == 0) {
               /* Buffer full, need to flush */
               status = flush_target_buffer(
-                  platform, dest_addr, &flushed_target_offset, write_buf, half_arena,
+                  platform, dest_addr, &flushed_target_offset, write_buf, (uint32_t)half_arena,
                   &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
               if (status != BOOT_OK) goto cleanup;
               write_buf_pos = 0;
-              space_left = half_arena;
+              space_left = (uint32_t)half_arena;
             }
             
-            HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled);
+            HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled_sz);
+            uint32_t polled = (uint32_t)polled_sz;
             if (pres < 0) {
               status = BOOT_ERR_VERIFY;
               goto cleanup;
@@ -585,17 +587,18 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
           heatshrink_decoder_finish(hsd);
           while (1) {
             if (platform->wdt && platform->wdt->kick) platform->wdt->kick();
-            size_t polled = 0;
-            size_t space_left = half_arena - write_buf_pos;
+            size_t polled_sz = 0;
+            uint32_t space_left = (uint32_t)half_arena - write_buf_pos;
             if (space_left == 0) {
               status = flush_target_buffer(
-                  platform, dest_addr, &flushed_target_offset, write_buf, half_arena,
+                  platform, dest_addr, &flushed_target_offset, write_buf, (uint32_t)half_arena,
                   &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
               if (status != BOOT_OK) goto cleanup;
               write_buf_pos = 0;
-              space_left = half_arena;
+              space_left = (uint32_t)half_arena;
             }
-            HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled);
+            HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled_sz);
+            uint32_t polled = (uint32_t)polled_sz;
             if (pres < 0) {
               status = BOOT_ERR_VERIFY;
               goto cleanup;

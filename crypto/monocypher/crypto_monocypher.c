@@ -31,7 +31,7 @@ boot_status_t crypto_monocypher_hash_update(void *ctx, const void *data, size_t 
     if (!ctx || (len > 0 && !data)) {
         return BOOT_ERR_INVALID_ARG;
     }
-    sha256_update((SHA256_CTX *)ctx, (const BYTE *)data, len);
+    sha256_update((SHA256_CTX *)ctx, (const uint8_t *)data, len);
     return BOOT_OK;
 }
 

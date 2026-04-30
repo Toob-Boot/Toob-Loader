@@ -35,8 +35,8 @@ static const uint8_t MOCK_ED_PUBKEY_FALLBACK[32] = {
 /* Dummy DSLC (16 Bytes) */
 static const uint8_t MOCK_DSLC_BYTES[16] = "M-SANDBOX-DSLC01";
 
-boot_status_t mock_efuse_read_pubkey(uint8_t key[32], uint8_t key_index) {
-    if (key == NULL) {
+boot_status_t mock_efuse_read_pubkey(uint8_t *key, size_t key_len, uint8_t key_index) {
+    if (key == NULL || key_len < 32) {
         return BOOT_ERR_INVALID_ARG;
     }
 

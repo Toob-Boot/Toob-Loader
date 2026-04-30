@@ -269,7 +269,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
         } else {
           uint32_t chunk_size = 4096; /* GAP-08 Spec Default */
           uint32_t num_chunks =
-              parsed_suit.suit_payload.images.len / BOOT_MERKLE_HASH_LEN;
+              (uint32_t)(parsed_suit.suit_payload.images.len / BOOT_MERKLE_HASH_LEN);
 
           /* ZERO-ALLOCATION ARCHITECTURE FIX:
            * Statt 16 KB BSS Bloat für stream_buf nutzen wir den ungenutzten
@@ -294,8 +294,8 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                   platform, CHIP_STAGING_SLOT_ABS_ADDR,
                   staging_header.image_size, chunk_size,
                   parsed_suit.suit_payload.images.value,
-                  parsed_suit.suit_payload.images.len, num_chunks, scratch_ptr,
-                  scratch_size);
+                  (uint32_t)parsed_suit.suit_payload.images.len, num_chunks, scratch_ptr,
+                  (uint32_t)scratch_size);
               boot_secure_zeroize(scratch_ptr, scratch_size);
             }
           }

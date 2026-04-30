@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-boot_status_t mock_efuse_read_pubkey(uint8_t key[32], uint8_t key_index);
+boot_status_t mock_efuse_read_pubkey(uint8_t *key, size_t key_len, uint8_t key_index);
 boot_status_t mock_efuse_read_dslc(uint8_t *buffer, size_t *len);
 boot_status_t mock_efuse_read_monotonic_counter(uint32_t *ctr);
 boot_status_t mock_efuse_advance_monotonic_counter(void);

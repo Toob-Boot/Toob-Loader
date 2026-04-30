@@ -86,6 +86,7 @@ endif()
 target_include_directories(toob_crypto PUBLIC
     core/include
     ${CMAKE_BINARY_DIR}/generated
+    libtoob/include
 )
 
 # Linke den entspannten Upstream in unseren strengen Wrapper
