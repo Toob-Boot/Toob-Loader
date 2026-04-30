@@ -59,7 +59,7 @@ static boot_status_t compute_flash_crc32(const boot_platform_t *platform,
                       ? BOOT_CRYPTO_ARENA_SIZE
                       : (len - offset);
 
-    boot_status_t st = platform->flash->read(addr + offset, crypto_arena, step);
+    boot_status_t st = platform->flash->read(addr + (uint32_t)offset, crypto_arena, (uint32_t)step);
     if (st != BOOT_OK) {
       boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
       return st;
@@ -109,13 +109,13 @@ stream_flash_copy_and_verify(const boot_platform_t *platform, uint32_t src,
                       ? BOOT_CRYPTO_ARENA_SIZE
                       : (len - offset);
 
-    boot_status_t st = platform->flash->read(src + offset, crypto_arena, step);
+    boot_status_t st = platform->flash->read(src + (uint32_t)offset, crypto_arena, (uint32_t)step);
     if (st != BOOT_OK) {
       boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
       return st;
     }
 
-    st = platform->flash->write(dest + offset, crypto_arena, step);
+    st = platform->flash->write(dest + (uint32_t)offset, crypto_arena, (uint32_t)step);
     if (st != BOOT_OK) {
       boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
       return st;
@@ -165,7 +165,7 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
     return BOOT_ERR_INVALID_ARG;
 
   uint32_t current_addr = addr;
-  uint32_t end_addr = addr + length;
+  uint32_t end_addr = addr + (uint32_t)length;
   uint32_t loop_guard = 0;
   const uint32_t MAX_ERASE_LOOPS = 100000;
 
@@ -202,7 +202,7 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
         needs_erase = true;
         break;
       }
-      chk_off += read_len;
+      chk_off += (uint32_t)read_len;
     }
 
     boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
@@ -230,7 +230,7 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
         (*erases_out)++;
     }
 
-    current_addr += sec_size;
+    current_addr += (uint32_t)sec_size;
   }
 
   return BOOT_OK;
@@ -364,7 +364,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
       block_size = length - current_offset;
       if (platform->flash->write_align > 0) {
         uint32_t align = platform->flash->write_align;
-        uint32_t rem = block_size % align;
+        uint32_t rem = (uint32_t)(block_size % align);
         if (rem != 0)
           block_size += (align - rem);
       }
@@ -419,7 +419,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
             is_identical = false;
             break;
           }
-          chk_off += step;
+          chk_off += (uint32_t)step;
         }
 
         boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
@@ -427,7 +427,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
         if (is_identical) {
           /* Überspringen! Fast-Forward spart WAL Writes und radikale Mengen an
            * Hardware Erases */
-          current_offset += block_size;
+          current_offset += (uint32_t)block_size;
           continue;
         }
       }
@@ -480,7 +480,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
 
     if (dest_has_src && src_has_dest) {
       /* Swap war vollständig abgeschlossen, Crash direkt vor WAL Confirm */
-      current_offset += block_size;
+      current_offset += (uint32_t)block_size;
       continue;
     }
 
@@ -560,7 +560,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
         goto swap_cleanup;
     }
 
-    current_offset += block_size;
+    current_offset += (uint32_t)block_size;
   }
 
   /* 4. ACCURATE TELEMETRY WRAP-UP */

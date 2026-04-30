@@ -134,7 +134,7 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
         needs_erase = true;
         break;
       }
-      chk_off += step;
+      chk_off += (uint32_t)step;
     }
     boot_secure_zeroize(e_buf, max_step);
 
@@ -159,7 +159,7 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
 
     if (UINT32_MAX - *current_sector_end < sec_size)
       return BOOT_ERR_FLASH_BOUNDS;
-    *current_sector_end += sec_size;
+    *current_sector_end += (uint32_t)sec_size;
   }
 
   /* 2. Hardware Flash Write */
@@ -169,7 +169,6 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
     return BOOT_ERR_FLASH_HW;
 
   /* 3. Phase-Bound Read-Back Verify (Tearing / Bit-Rot Protection) */
-  uint32_t expected_crc = compute_boot_crc32(write_buf, write_len);
   uint8_t *rb_buf = crypto_arena + (BOOT_CRYPTO_ARENA_SIZE / 2);
   uint32_t rb_off = 0;
 
@@ -198,7 +197,7 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
 
     if (s1 != BOOT_OK || s2 != BOOT_OK)
       return BOOT_ERR_FLASH_HW; /* SPI-Rauschen oder Bit-Rot! */
-    rb_off += step;
+    rb_off += (uint32_t)step;
   }
   boot_secure_zeroize(rb_buf, BOOT_CRYPTO_ARENA_SIZE / 2);
 
@@ -351,7 +350,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
         status = BOOT_ERR_CRYPTO;
         goto cleanup;
       }
-      hashed += step;
+      hashed += (uint32_t)step;
     }
     boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
@@ -396,7 +395,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
         status = BOOT_ERR_FLASH_HW;
         goto cleanup;
       }
-      curr += sec_size;
+      curr += (uint32_t)sec_size;
     }
     if (curr != checkpoint) {
       status = BOOT_ERR_INVALID_STATE;
@@ -427,7 +426,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
 
     /* --- A. FETCH NEXT INSTRUCTION --- */
     if (inst_rem == 0) {
-      if (inst_idx >= hdr.instruction_count) {
+      if (inst_idx >= hdr.instr_count) {
         status = BOOT_ERR_VERIFY;
         goto cleanup; /* End of array reached before EOF */
       }
@@ -495,7 +494,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
         step = flushed_target_offset - target_logical_offset;
       }
     } else {
-      uint32_t space = half_arena - write_buf_pos;
+      uint32_t space = (uint32_t)half_arena - write_buf_pos;
       if (step > space)
         step = space;
     }
@@ -583,7 +582,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
         }
         
         /* If this was the last instruction, finish the decoder stream */
-        if (inst_idx == hdr.instruction_count && compressed_rem == 0) {
+        if (inst_idx == hdr.instr_count && compressed_rem == 0) {
           heatshrink_decoder_finish(hsd);
           while (1) {
             if (platform->wdt && platform->wdt->kick) platform->wdt->kick();

@@ -25,6 +25,7 @@
  */
 
 #include "boot_config_mock.h"
+#include "boot_energy.h"
 #include "boot_delay.h"
 #include "boot_hal.h"
 #include "boot_panic.h"

@@ -95,7 +95,7 @@ rollback_compute_flash_crc32(const boot_platform_t *platform, uint32_t addr,
                       ? BOOT_CRYPTO_ARENA_SIZE
                       : (len - offset);
 
-    boot_status_t st = platform->flash->read(addr + offset, crypto_arena, step);
+    boot_status_t st = platform->flash->read(addr + (uint32_t)offset, crypto_arena, (uint32_t)step);
     if (st != BOOT_OK) {
       boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
       return st;
@@ -529,7 +529,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
       /* Padding Alignment Guard für den finalen Block */
       if (platform->flash->write_align > 0) {
         uint32_t align = platform->flash->write_align;
-        uint32_t rem = block_size % align;
+        uint32_t rem = (uint32_t)(block_size % align);
         if (rem != 0)
           block_size += (align - rem);
       }
@@ -582,7 +582,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
           is_identical = false;
           break;
         }
-        chk_off += step;
+        chk_off += (uint32_t)step;
       }
 
       /* Radikal nullifizieren, damit keine Krypto-Residuen den nachfolgenden
@@ -591,7 +591,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
 
       if (is_identical) {
         /* Identisch: Fast-Forward zum nächsten Sektor ohne Erase/Write Last! */
-        current_offset += block_size;
+        current_offset += (uint32_t)block_size;
         continue;
       }
     }
@@ -611,7 +611,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     if (status != BOOT_OK)
       goto revert_cleanup;
     physical_app_erases +=
-        (block_size / dst_sec_size > 0) ? (block_size / dst_sec_size) : 1;
+        (uint32_t)((block_size / dst_sec_size > 0) ? (block_size / dst_sec_size) : 1);
 
     /* ====================================================================
      * 4.c Chunk-weiser Copy & Phase-Bound Verify (ECC-Proof)
@@ -664,10 +664,10 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
         goto revert_cleanup;
       }
 
-      wr_off += step;
+      wr_off += (uint32_t)step;
     }
 
-    current_offset += block_size;
+    current_offset += (uint32_t)block_size;
   }
 
   revert_cfi ^= CFI_RB_DONE;

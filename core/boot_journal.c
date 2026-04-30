@@ -140,8 +140,8 @@ static boot_status_t smart_erase_sector(const boot_platform_t *platform,
    * überhaupt nötig ist */
   while (chk_off < sec_size) {
     uint32_t read_len = (sec_size - chk_off > sizeof(chk_buf))
-                            ? sizeof(chk_buf)
-                            : (sec_size - chk_off);
+                            ? (uint32_t)sizeof(chk_buf)
+                            : (uint32_t)(sec_size - chk_off);
 
     if (platform->flash->read(addr + chk_off, chk_buf, read_len) != BOOT_OK) {
       needs_erase = true;
@@ -501,7 +501,7 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
                                 sizeof(hdr)) == BOOT_OK) {
         if (verify_header_crc_glitch_safe(&hdr) &&
             hdr.data.sequence_id == search_seq) {
-          sec_idx = i;
+          sec_idx = (int32_t)i;
           break;
         }
       }
@@ -533,7 +533,7 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
        bewiesen ist, dass genug Byte-Kapazität zur Header-Grenze besteht! */
     while (current_offset >= (sizeof(wal_sector_header_aligned_t) +
                               sizeof(wal_entry_aligned_t))) {
-      current_offset -= sizeof(wal_entry_aligned_t);
+      current_offset -= (uint32_t)sizeof(wal_entry_aligned_t);
 
       wal_entry_aligned_t entry __attribute__((aligned(8)));
       boot_secure_zeroize(&entry, sizeof(entry));

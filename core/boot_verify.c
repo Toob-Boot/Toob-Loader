@@ -186,7 +186,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
    * verhindern. Branchless Math für den Index, um SPA Leaks beim
    * Bedingungs-Sprung zu meiden.
    */
-  uint8_t next_idx = local_env.key_index + (local_env.key_index < 255);
+  uint8_t next_idx = (uint8_t)(local_env.key_index + (local_env.key_index < 255));
 
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();

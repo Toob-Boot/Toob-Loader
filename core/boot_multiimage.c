@@ -144,7 +144,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
    */
   bool bounds_violation = false;
   for (uint32_t i = 0; i < num_components; i++) {
-    if (!is_target_whitelisted(components[i].target_addr, components[i].size,
+    if (!is_target_whitelisted(components[i].target_addr, components[i].image_size,
                                whitelist, num_regions)) {
       bounds_violation = true;
       break;
@@ -152,7 +152,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
     /* Anti-Wraparound Check für den Source-Staging Slot */
     if (UINT32_MAX - staging_base < components[i].staging_offset ||
         UINT32_MAX - (staging_base + components[i].staging_offset) <
-            components[i].size) {
+            components[i].image_size) {
       bounds_violation = true;
       break;
     }
@@ -203,7 +203,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
      * blockieren */
     memcpy(&comp, &components[i], sizeof(boot_component_t));
 
-    if (comp.size == 0) {
+    if (comp.image_size == 0) {
       multi_cfi ^= (~comp.component_id); /* Trivial Completion */
       continue;
     }
@@ -226,7 +226,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
 
     /* 3. Hardware Erase für die Peripherie (Abstrahiert durch HAL) */
     uint32_t current_erase_addr = comp.target_addr;
-    uint32_t erase_end = comp.target_addr + comp.size;
+    uint32_t erase_end = comp.target_addr + comp.image_size;
     uint32_t e_loop = 0;
 
     while (current_erase_addr < erase_end) {
@@ -252,7 +252,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
         final_status = BOOT_ERR_FLASH_BOUNDS;
         goto multi_cleanup; /* Wrap-Proof */
       }
-      current_erase_addr += sec_size;
+      current_erase_addr += (uint32_t)sec_size;
     }
 
     /* 4. O(1) Streaming Copy & On-the-Fly Hashing */
@@ -263,11 +263,11 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
       goto multi_cleanup;
     }
 
-    while (written < comp.size) {
+    while (written < comp.image_size) {
       if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
-      size_t step = (comp.size - written > half_stream) ? half_stream
-                                                        : (comp.size - written);
+      size_t step = (comp.image_size - written > half_stream) ? half_stream
+                                                        : (comp.image_size - written);
 
       uint32_t src_addr = staging_base + comp.staging_offset + written;
       uint32_t dst_addr = comp.target_addr + written;
@@ -307,7 +307,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
         goto multi_cleanup;
       }
 
-      written += step;
+      written += (uint32_t)step;
     }
 
     /* 5. Verifikation des fertiggestellten Peripherie-Images */

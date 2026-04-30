@@ -29,6 +29,7 @@
 #include "boot_panic.h"
 #include "boot_secure_zeroize.h"
 #include "boot_state.h"
+#include "boot_journal.h"
 #include "chip_config.h"
 #include <stddef.h>
 #include <string.h>
@@ -41,6 +42,9 @@
 /* Mathematisches Glitch-Resistenz-Gating */
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein!");
+
+/* Definition of the central zero-allocation memory block */
+uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE] __attribute__((aligned(8)));
 
 /* P10 Zero-Trust CFI Constants for Master Orchestrator */
 #define CFI_MAIN_INIT 0x10101010
@@ -329,7 +333,10 @@ init_success:
   bool bounds_ok = false;
 
   /* Subtraktiver Check umgeht `uint32_t` Wrapping wenn OOB! */
-  if (target_out->active_entry_point >= CHIP_FLASH_BASE_ADDR) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wtype-limits"
+  if (CHIP_FLASH_BASE_ADDR == 0 || target_out->active_entry_point >= CHIP_FLASH_BASE_ADDR) {
+#pragma GCC diagnostic pop
     uint32_t relative_offset =
         target_out->active_entry_point - CHIP_FLASH_BASE_ADDR;
 

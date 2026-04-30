@@ -556,7 +556,7 @@ session_reset:
         align = 1;
 
       size_t aligned_len = payload_len;
-      uint8_t align_mod = payload_len % align;
+      uint8_t align_mod = (uint8_t)(payload_len % align);
       if (align_mod != 0) {
         size_t padding = align - align_mod;
         /* Wrap & Buffer Overflow Defense */
@@ -611,8 +611,8 @@ session_reset:
 
           while (chk_off < s_size) {
             uint32_t read_len = (s_size - chk_off > e_buf_size)
-                                    ? e_buf_size
-                                    : (s_size - chk_off);
+                                    ? (uint32_t)e_buf_size
+                                    : (uint32_t)(s_size - chk_off);
             if (platform->flash->read(erase_target + chk_off, e_buf,
                                       read_len) != BOOT_OK) {
               needs_erase = true;
@@ -649,7 +649,7 @@ session_reset:
             goto session_reset;
           }
 
-          current_sector_end = erase_target + s_size;
+          current_sector_end = erase_target + (uint32_t)s_size;
           staging_erased = true;
         } else {
           boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
@@ -697,11 +697,11 @@ session_reset:
             break;
           }
 
-          check_off += step;
+          check_off += (uint32_t)step;
         }
 
         if (write_ok) {
-          flash_offset += aligned_len;
+          flash_offset += (uint32_t)aligned_len;
           send_cobs_frame(platform, (const uint8_t *)"ACK", 3);
         } else {
           boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);

@@ -4,6 +4,7 @@
  * - docs/concept_fusion.md (Ed25519)
  */
 #include "../../crypto/monocypher/monocypher-ed25519.h"
+#include "stage0_crypto.h"
 #include <stddef.h>
 #include <stdint.h>
 
