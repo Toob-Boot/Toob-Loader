@@ -10,6 +10,7 @@
 #define CHIP_STAGING_SLOT_ABS_ADDR 0x00060000
 #define CHIP_RECOVERY_OS_ABS_ADDR  0x000B0000
 #define CHIP_SCRATCH_SLOT_ABS_ADDR 0x00100000 /* Dedicated A/B Safe Buffer for Delta Updates */
+#define CHIP_NETCORE_SLOT_ABS_ADDR 0x00150000 /* NetCore Base Address */
 #define CHIP_FLASH_BASE_ADDR       0x00000000
 #define CHIP_FLASH_TOTAL_SIZE      0x00200000 /* 2 MB Mock */
 #define CHIP_APP_SLOT_SIZE         0x00050000 /* 320 KB Mock */

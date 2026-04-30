@@ -718,3 +718,24 @@ session_reset:
     boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
   }
 }
+
+/* ==============================================================================
+ * ARCHITECTURE ROUTING (NMI & HARDFAULT)
+ * ============================================================================== */
+
+/**
+ * @brief Globaler C-Contract für HAL-Interaktionen bei schweren Memory-Fehlern.
+ * Vendor-ISRs (wie HardFault_Handler auf ARM) müssen diese Funktion aufrufen,
+ * anstatt eigene Endlosschleifen zu implementieren.
+ */
+void toob_ecc_trap(void) {
+    /* ACHTUNG: toob_ecc_trap hat keinen Kontext zur `platform`, da sie asynchron
+     * aus einer NMI aufgerufen wird! Wir müssen den globalen Handoff-State 
+     * oder eine reduzierte Panic fahren. 
+     * Wir versuchen einen sicheren WDT-Timeout herbeizuführen, indem wir in 
+     * eine unendliche Schleife ohne WDT-Kick gehen. Das ist P10 konform für NMIs. */
+    while(1) {
+        /* Warten auf den Watchdog-Biss. Keine Kicks erlaubt. */
+        __asm__ volatile("nop");
+    }
+}

@@ -259,4 +259,11 @@ typedef struct {
  */
 const boot_platform_t *boot_platform_init(void);
 
+/**
+ * @brief Architecture-Routing for HardFaults (NMI)
+ * HALs MÜSSEN diese Funktion in ihrem HardFault_Handler aufrufen, wenn 
+ * ein ECC-Rot detektiert wurde (anstatt ins Leere zu loopen).
+ */
+extern void toob_ecc_trap(void);
+
 #endif /* TOOB_BOOT_HAL_H */

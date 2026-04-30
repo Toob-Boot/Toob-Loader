@@ -394,6 +394,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
     if (swap_status == BOOT_OK && parsed_suit.suit_payload.toob_image_count > 1) {
         boot_component_t components[3]; 
         uint32_t comp_count = 0;
+        uint32_t current_staging_offset = staging_header.image_size;
         
         for (size_t i = 1; i < parsed_suit.suit_payload.toob_image_count && i < 4; i++) {
             struct toob_image *sub_img = &parsed_suit.suit_payload.toob_image[i];
@@ -402,11 +403,13 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
             
             if (sub_img->toob_image_choice == toob_image_toob_image_raw_c) {
                 components[comp_count].image_size = sub_img->toob_image_raw.image_size;
-                /* Dynamisches Offset im Staging-Slot für nachfolgende Images */
-                components[comp_count].staging_offset = staging_header.image_size + ((uint32_t)i * 0x10000); /* Mock Offset */
+                
+                /* P10 FIX: Dynamisches Offset im Staging-Slot (Lückenloses aneinanderhängen) */
+                components[comp_count].staging_offset = current_staging_offset;
+                current_staging_offset += sub_img->toob_image_raw.image_size;
                 
                 if (sub_img->toob_image_raw.image_type == 1) {
-                    components[comp_count].target_addr = 0x00800000; /* NetCore Mock */
+                    components[comp_count].target_addr = CHIP_NETCORE_SLOT_ABS_ADDR;
                 } else if (sub_img->toob_image_raw.image_type == 2) {
                     components[comp_count].target_addr = CHIP_RECOVERY_OS_ABS_ADDR;
                 } else {
@@ -422,7 +425,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
         
         if (swap_status == BOOT_OK && comp_count > 0) {
             boot_allowed_region_t whitelist[2] = {
-                {0x00800000, 0x00200000},               
+                {CHIP_NETCORE_SLOT_ABS_ADDR, 0x00200000},               
                 {CHIP_RECOVERY_OS_ABS_ADDR, 0x00050000} 
             };
             swap_status = boot_multiimage_apply(platform, CHIP_STAGING_SLOT_ABS_ADDR, 
