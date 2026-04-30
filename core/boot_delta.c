@@ -91,6 +91,7 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
                     uint32_t write_len, uint32_t *current_sector_end,
                     wal_entry_payload_t *txn, uint32_t *last_checkpoint,
                     heatshrink_decoder *hsd) {
+  (void)hsd;
   if (write_len == 0)
     return BOOT_OK;
 
@@ -115,10 +116,9 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
     uint32_t chk_off = 0;
     uint8_t erased_val = platform->flash->erased_value;
 
-    /* P10: Use upper half of crypto arena for read check to avoid overlapping
-     * with write_buf! */
-    uint8_t *e_buf = crypto_arena + (BOOT_CRYPTO_ARENA_SIZE / 2);
-    size_t max_step = BOOT_CRYPTO_ARENA_SIZE / 2;
+    /* P10 FIX: Isolierter Stack-Buffer (Zerstört die Krypto-Arena nicht!) */
+    uint8_t e_buf[64] __attribute__((aligned(8)));
+    size_t max_step = sizeof(e_buf);
 
     while (chk_off < sec_size) {
       if (platform->wdt && platform->wdt->kick)
@@ -136,7 +136,7 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
       }
       chk_off += (uint32_t)step;
     }
-    boot_secure_zeroize(e_buf, max_step);
+    boot_secure_zeroize(e_buf, sizeof(e_buf));
 
     if (needs_erase) {
       if (sec_size > CHIP_FLASH_MAX_SECTOR_SIZE && platform->wdt &&
@@ -169,14 +169,15 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
     return BOOT_ERR_FLASH_HW;
 
   /* 3. Phase-Bound Read-Back Verify (Tearing / Bit-Rot Protection) */
-  uint8_t *rb_buf = crypto_arena + (BOOT_CRYPTO_ARENA_SIZE / 2);
+  /* P10 FIX: Isolierter Stack-Buffer */
+  uint8_t rb_buf[64] __attribute__((aligned(8)));
   uint32_t rb_off = 0;
 
   while (rb_off < write_len) {
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
-    size_t step = (write_len - rb_off > (BOOT_CRYPTO_ARENA_SIZE / 2))
-                      ? (BOOT_CRYPTO_ARENA_SIZE / 2)
+    size_t step = (write_len - rb_off > sizeof(rb_buf))
+                      ? sizeof(rb_buf)
                       : (write_len - rb_off);
 
     boot_secure_zeroize(rb_buf, step); /* TOCTOU Guard */
@@ -199,15 +200,13 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
       return BOOT_ERR_FLASH_HW; /* SPI-Rauschen oder Bit-Rot! */
     rb_off += (uint32_t)step;
   }
-  boot_secure_zeroize(rb_buf, BOOT_CRYPTO_ARENA_SIZE / 2);
+  boot_secure_zeroize(rb_buf, sizeof(rb_buf));
 
   /* 4. WAL Checkpoint Logic (Aligned to max sector bounds) */
   *flushed_offset += write_len;
 
   if (*flushed_offset - *last_checkpoint >= CHIP_FLASH_MAX_SECTOR_SIZE) {
-    if (hsd) {
-      heatshrink_decoder_reset(hsd);
-    }
+    /* REMOVED: heatshrink_decoder_reset(hsd); -> This destroyed the LZSS stream! */
     txn->delta_chunk_id = *flushed_offset;
     boot_status_t log_stat = boot_journal_append(platform, txn);
     if (log_stat != BOOT_OK)
@@ -241,14 +240,13 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
   volatile uint32_t delta_cfi = CFI_DELTA_INIT;
   boot_status_t status = BOOT_OK;
 
-  /* Heatshrink Decoder Overlay (Zero-Allocation) */
-  heatshrink_decoder *hsd = (heatshrink_decoder *)crypto_arena;
-  size_t hsd_size = sizeof(heatshrink_decoder);
+  /* P10 Alignment Guard: Padding des Struct-Offsets für DMA-Sicherheit */
+  size_t hsd_size = (sizeof(heatshrink_decoder) + 7) & ~((size_t)7);
   if (hsd_size >= BOOT_CRYPTO_ARENA_SIZE) return BOOT_ERR_INVALID_STATE;
 
-  /* P10 Arena Segmentation (Rest) */
+  heatshrink_decoder *hsd = (heatshrink_decoder *)crypto_arena;
   size_t remaining_arena = BOOT_CRYPTO_ARENA_SIZE - hsd_size;
-  size_t half_arena = remaining_arena / 2;
+  size_t half_arena = (remaining_arena / 2) & ~((size_t)7); /* 8-Byte Aligned für SPI-DMA */
   uint8_t *write_buf = crypto_arena + hsd_size;
   uint8_t *read_buf = crypto_arena + hsd_size + half_arena;
 
@@ -472,187 +470,189 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
         break;
       }
 
-      if (UINT32_MAX - target_logical_offset < inst_rem ||
-          target_logical_offset + inst_rem > hdr.expected_target_size) {
-        status = BOOT_ERR_FLASH_BOUNDS;
-        goto cleanup;
+      /* ZIP-BOMB GUARD: Nur bei raw Opcodes hier prüfen. INSERT_LIT prüft dynamisch im poll() */
+      if (inst_opcode != TOOB_TDS_OP_EOF && inst_opcode != TOOB_TDS_OP_INSERT_LIT) {
+        if (UINT32_MAX - target_logical_offset < inst_rem || target_logical_offset + inst_rem > hdr.expected_target_size) {
+          status = BOOT_ERR_FLASH_BOUNDS; goto cleanup;
+        }
       }
+      if (inst_opcode != TOOB_TDS_OP_EOF) {
+        delta_read_offset += sizeof(toob_tds_instr_t);
+        inst_idx++;
+      }
+    }
 
-      delta_read_offset += sizeof(toob_tds_instr_t);
-      inst_idx++;
+    if (inst_opcode == TOOB_TDS_OP_EOF) {
+        eof_reached = true;
+        if (hsd) {
+            heatshrink_decoder_finish(hsd);
+            while (1) {
+                if (platform->wdt && platform->wdt->kick) platform->wdt->kick();
+                uint32_t space_left = (uint32_t)half_arena - write_buf_pos;
+                if (space_left == 0) {
+                    uint32_t logical_start = target_logical_offset - write_buf_pos;
+                    if (logical_start + write_buf_pos > flushed_target_offset) {
+                        uint32_t valid_offset = (logical_start < flushed_target_offset) ? flushed_target_offset - logical_start : 0;
+                        uint32_t write_len = write_buf_pos - valid_offset;
+                        if (write_len > 0) {
+                            status = flush_target_buffer(platform, dest_addr, &flushed_target_offset, write_buf + valid_offset, write_len, &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
+                            if (status != BOOT_OK) goto cleanup;
+                        }
+                    }
+                    write_buf_pos = 0; space_left = (uint32_t)half_arena;
+                }
+                size_t polled_sz = 0;
+                HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled_sz);
+                if (pres < 0) { status = BOOT_ERR_VERIFY; goto cleanup; }
+                write_buf_pos += (uint32_t)polled_sz;
+                target_logical_offset += (uint32_t)polled_sz;
+
+                /* P10 ZIP-BOMB GUARD FÜR EOF (Hier war die Lücke!) */
+                if (target_logical_offset > hdr.expected_target_size) {
+                    status = BOOT_ERR_INVALID_STATE; goto cleanup;
+                }
+                if (pres == HSDR_POLL_EMPTY) break;
+            }
+        }
+
+        /* FINALER FLUSH nach der EOF Dekodierung (Verhindert Data Loss!) */
+        if (write_buf_pos > 0) {
+            uint32_t logical_start = target_logical_offset - write_buf_pos;
+            if (logical_start + write_buf_pos > flushed_target_offset) {
+                uint32_t valid_offset = (logical_start < flushed_target_offset) ? flushed_target_offset - logical_start : 0;
+                uint32_t write_len = write_buf_pos - valid_offset;
+                /* Alignment Padding for final write */
+                if (platform->flash->write_align > 0) {
+                    uint32_t align = platform->flash->write_align;
+                    uint32_t pad = write_len % align;
+                    if (pad != 0) {
+                        pad = align - pad;
+                        if (write_len + pad + valid_offset > half_arena) { status = BOOT_ERR_FLASH_BOUNDS; goto cleanup; }
+                        memset(write_buf + valid_offset + write_len, platform->flash->erased_value, pad);
+                        write_len += pad;
+                    }
+                }
+                if (write_len > 0) {
+                    status = flush_target_buffer(platform, dest_addr, &flushed_target_offset, write_buf + valid_offset, write_len, &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
+                    if (status != BOOT_OK) goto cleanup;
+                }
+            }
+            write_buf_pos = 0;
+        }
+        break;
     }
 
     /* --- B. ZERO-ALLOCATION WRITE COMBINER (WITH DRY-RUN RESUME) --- */
     uint32_t step = inst_rem;
-    bool is_dry_run = false;
+    bool is_dry_run = (target_logical_offset < flushed_target_offset);
 
-    /* Fast-Forward Logic (Dry-Run): Ignore flash reads/writes until checkpoint
-     * is reached */
-    if (target_logical_offset < flushed_target_offset) {
-      is_dry_run = true;
-      if (target_logical_offset + step > flushed_target_offset) {
-        step = flushed_target_offset - target_logical_offset;
-      }
-    } else {
-      uint32_t space = (uint32_t)half_arena - write_buf_pos;
-      if (step > space)
-        step = space;
+    if (inst_opcode != TOOB_TDS_OP_INSERT_LIT) {
+        if (is_dry_run) {
+            if (target_logical_offset + step > flushed_target_offset) {
+                step = flushed_target_offset - target_logical_offset;
+            }
+        } else {
+            uint32_t space = (uint32_t)half_arena - write_buf_pos;
+            if (step > space) step = space;
+        }
     }
 
-    if (!is_dry_run) {
-      if (platform->wdt && platform->wdt->kick)
-        platform->wdt->kick();
-
-      if (inst_opcode == TOOB_TDS_OP_BZERO) {
-        memset(write_buf + write_buf_pos, 0x00, step);
-      } else if (inst_opcode == TOOB_TDS_OP_COPY_BASE) {
-        if (UINT32_MAX - inst_src_off < step ||
-            inst_src_off + step > hdr.base_size) {
-          status = BOOT_ERR_FLASH_BOUNDS;
-          goto cleanup; /* Arbitrary Read Prevented */
+    if (inst_opcode == TOOB_TDS_OP_BZERO) {
+        if (!is_dry_run) {
+            memset(write_buf + write_buf_pos, 0x00, step);
+            write_buf_pos += step;
         }
-        if (platform->flash->read(base_addr + inst_src_off, read_buf, step) !=
-            BOOT_OK) {
-          status = BOOT_ERR_FLASH_HW;
-          goto cleanup;
+        inst_rem -= step;
+    } else if (inst_opcode == TOOB_TDS_OP_COPY_BASE) {
+        if (!is_dry_run) {
+            if (UINT32_MAX - inst_src_off < step || inst_src_off + step > hdr.base_size) {
+                status = BOOT_ERR_FLASH_BOUNDS; goto cleanup;
+            }
+            if (platform->flash->read(base_addr + inst_src_off, write_buf + write_buf_pos, step) != BOOT_OK) {
+                status = BOOT_ERR_FLASH_HW; goto cleanup;
+            }
+            write_buf_pos += step;
         }
-        memcpy(write_buf + write_buf_pos, read_buf, step);
-      } else if (inst_opcode == TOOB_TDS_OP_INSERT_LIT) {
-        if (UINT32_MAX - lit_read_offset < step ||
-            lit_read_offset + step > delta_max_size) {
-          status = BOOT_ERR_FLASH_BOUNDS;
-          goto cleanup; /* OOB Stream Read Prevented */
-        }
-        
-        /* Streaming Heatshrink Decompression */
-        uint32_t compressed_rem = step;
+        inst_rem -= step;
+        inst_src_off += step;
+    } else if (inst_opcode == TOOB_TDS_OP_INSERT_LIT) {
+        uint32_t compressed_rem = inst_rem;
         uint32_t decompressed_total = 0;
-        
+
         while (compressed_rem > 0) {
-          uint32_t chunk = compressed_rem > (uint32_t)half_arena ? (uint32_t)half_arena : compressed_rem;
-          if (platform->flash->read(delta_addr + lit_read_offset, read_buf, chunk) != BOOT_OK) {
-            status = BOOT_ERR_FLASH_HW;
-            goto cleanup;
-          }
-          
-          size_t sunk_sz = 0;
-          HSD_sink_res sres = heatshrink_decoder_sink(hsd, read_buf, chunk, &sunk_sz);
-          uint32_t sunk = (uint32_t)sunk_sz;
-          if (sres < 0) {
-            status = BOOT_ERR_VERIFY;
-            goto cleanup;
-          }
-          
-          while (1) {
-            if (platform->wdt && platform->wdt->kick) platform->wdt->kick();
-            
-            size_t polled_sz = 0;
-            uint32_t space_left = (uint32_t)half_arena - write_buf_pos;
-            if (space_left == 0) {
-              /* Buffer full, need to flush */
-              status = flush_target_buffer(
-                  platform, dest_addr, &flushed_target_offset, write_buf, (uint32_t)half_arena,
-                  &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
-              if (status != BOOT_OK) goto cleanup;
-              write_buf_pos = 0;
-              space_left = (uint32_t)half_arena;
+            uint32_t max_sink = HEATSHRINK_DECODER_INPUT_BUFFER_SIZE(hsd);
+            uint32_t chunk = compressed_rem > max_sink ? max_sink : compressed_rem;
+            if (platform->flash->read(delta_addr + lit_read_offset, read_buf, chunk) != BOOT_OK) {
+                status = BOOT_ERR_FLASH_HW; goto cleanup;
             }
-            
-            HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled_sz);
-            uint32_t polled = (uint32_t)polled_sz;
-            if (pres < 0) {
-              status = BOOT_ERR_VERIFY;
-              goto cleanup;
+
+            size_t sunk_sz = 0;
+            if (heatshrink_decoder_sink(hsd, read_buf, chunk, &sunk_sz) < 0) {
+                status = BOOT_ERR_VERIFY; goto cleanup;
             }
-            
-            write_buf_pos += polled;
-            decompressed_total += polled;
-            
-            /* Zip-Bomb Guard */
-            if (target_logical_offset + decompressed_total > hdr.expected_target_size) {
-              status = BOOT_ERR_INVALID_STATE;
-              goto cleanup;
+
+            while (1) {
+                if (platform->wdt && platform->wdt->kick) platform->wdt->kick();
+                uint32_t space_left = (uint32_t)half_arena - write_buf_pos;
+
+                if (space_left == 0) {
+                    uint32_t logical_start = target_logical_offset + decompressed_total - write_buf_pos;
+                    if (logical_start + write_buf_pos > flushed_target_offset) {
+                        uint32_t valid_offset = (logical_start < flushed_target_offset) ? flushed_target_offset - logical_start : 0;
+                        uint32_t write_len = write_buf_pos - valid_offset;
+                        if (write_len > 0) {
+                            status = flush_target_buffer(platform, dest_addr, &flushed_target_offset, write_buf + valid_offset, write_len, &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
+                            if (status != BOOT_OK) goto cleanup;
+                        }
+                    }
+                    write_buf_pos = 0;
+                    space_left = (uint32_t)half_arena;
+                }
+
+                size_t polled_sz = 0;
+                HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled_sz);
+                if (pres < 0) { status = BOOT_ERR_VERIFY; goto cleanup; }
+
+                write_buf_pos += (uint32_t)polled_sz;
+                decompressed_total += (uint32_t)polled_sz;
+
+                if (target_logical_offset + decompressed_total > hdr.expected_target_size) {
+                    status = BOOT_ERR_INVALID_STATE; goto cleanup;
+                }
+                if (pres == HSDR_POLL_EMPTY) break;
             }
-            
-            if (pres == HSDR_POLL_EMPTY) break;
-          }
-          
-          lit_read_offset += sunk;
-          compressed_rem -= sunk;
+            lit_read_offset += (uint32_t)sunk_sz;
+            compressed_rem -= (uint32_t)sunk_sz;
         }
-        
-        /* If this was the last instruction, finish the decoder stream */
-        if (inst_idx == hdr.instr_count && compressed_rem == 0) {
-          heatshrink_decoder_finish(hsd);
-          while (1) {
-            if (platform->wdt && platform->wdt->kick) platform->wdt->kick();
-            size_t polled_sz = 0;
-            uint32_t space_left = (uint32_t)half_arena - write_buf_pos;
-            if (space_left == 0) {
-              status = flush_target_buffer(
-                  platform, dest_addr, &flushed_target_offset, write_buf, (uint32_t)half_arena,
-                  &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
-              if (status != BOOT_OK) goto cleanup;
-              write_buf_pos = 0;
-              space_left = (uint32_t)half_arena;
-            }
-            HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled_sz);
-            uint32_t polled = (uint32_t)polled_sz;
-            if (pres < 0) {
-              status = BOOT_ERR_VERIFY;
-              goto cleanup;
-            }
-            write_buf_pos += polled;
-            decompressed_total += polled;
-            if (target_logical_offset + decompressed_total > hdr.expected_target_size) {
-              status = BOOT_ERR_INVALID_STATE;
-              goto cleanup;
-            }
-            if (pres == HSDR_POLL_EMPTY) break;
-          }
-        }
-        
-        /* Update step for target progression based on decompressed amount */
+
         step = decompressed_total;
-      } else {
-        status = BOOT_ERR_INVALID_STATE;
-        goto cleanup; /* Illegal Opcode */
-      }
-      write_buf_pos += step;
+        inst_rem = 0;
     }
 
-    if (inst_opcode == TOOB_TDS_OP_COPY_BASE)
-      inst_src_off += step;
-
-    inst_rem -= inst_rem; /* Instruction fully consumed, logic offset advances by step (uncompressed) */
     target_logical_offset += step;
 
     /* --- C. FLUSH & CHECKPOINT --- */
-    if (!is_dry_run && (write_buf_pos == half_arena ||
-                        target_logical_offset == hdr.expected_target_size)) {
+    if (write_buf_pos == half_arena || target_logical_offset == hdr.expected_target_size) {
+      uint32_t logical_start = target_logical_offset - write_buf_pos;
+      if (logical_start + write_buf_pos > flushed_target_offset) {
+        uint32_t valid_offset = (logical_start < flushed_target_offset) ? flushed_target_offset - logical_start : 0;
+        uint32_t write_len = write_buf_pos - valid_offset;
 
-      /* Apply Alignment Padding for the final Flash Write */
-      uint32_t flush_len = write_buf_pos;
-      if (target_logical_offset == hdr.expected_target_size &&
-          platform->flash->write_align > 0) {
-        uint32_t align = platform->flash->write_align;
-        uint32_t pad = flush_len % align;
-        if (pad != 0) {
-          pad = align - pad;
-          if (flush_len + pad > half_arena) {
-            status = BOOT_ERR_FLASH_BOUNDS;
-            goto cleanup;
+        if (target_logical_offset == hdr.expected_target_size && platform->flash->write_align > 0) {
+          uint32_t align = platform->flash->write_align;
+          uint32_t pad = write_len % align;
+          if (pad != 0) {
+            pad = align - pad;
+            if (write_len + pad + valid_offset > half_arena) { status = BOOT_ERR_FLASH_BOUNDS; goto cleanup; }
+            memset(write_buf + valid_offset + write_len, platform->flash->erased_value, pad);
+            write_len += pad;
           }
-          memset(write_buf + flush_len, platform->flash->erased_value, pad);
-          flush_len += pad;
+        }
+        if (write_len > 0) {
+          status = flush_target_buffer(platform, dest_addr, &flushed_target_offset, write_buf + valid_offset, write_len, &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
+          if (status != BOOT_OK) goto cleanup;
         }
       }
-
-      status = flush_target_buffer(
-          platform, dest_addr, &flushed_target_offset, write_buf, flush_len,
-          &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
-      if (status != BOOT_OK)
-        goto cleanup;
       write_buf_pos = 0;
     }
   }

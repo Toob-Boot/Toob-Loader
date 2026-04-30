@@ -119,6 +119,7 @@ else()
         core/boot_secure_zeroize_host.c
         ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
     )
+    target_compile_definitions(toob_core PUBLIC TOOB_MOCK_TEST)
 endif()
 
 # ------------------------------------------------------------------------------

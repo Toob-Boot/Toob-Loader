@@ -1,12 +1,27 @@
-/*
- * Toob-Boot Stage 0: stage0_otp.c
- * Relevant Spec-Dateien:
- * - docs/concept_fusion.md
+/**
+ * @file stage0_otp.c
+ * @brief OTP Key-Index Rotation
  *
- * TODO (Architecture Requirements):
- * - Key-Index Rotation: Auslesen der OTP-eFuses zur Bestimmung des aktiven Root-Keys.
- * - Burn-Level Evaluation: Fallback auf den nächsten Key-Index, falls der vorherige kompromittiert oder widerrufen wurde.
- * - End-Of-Life Trigger: Meldung an Stage 1 (oder Notfall-Halt), falls der letzte verfügbare Schlüssel-Index in den eFuses aufgebraucht ist.
+ * Key-Index Rotation via OTP-eFuses to protect against Root-Key Bricks.
+ * 
+ * Relevant Specs:
+ * - docs/concept_fusion.md
  */
-static void stage0_otp_dummy(void) __attribute__((used));
-static void stage0_otp_dummy(void) {}
+
+#include "boot_hal.h"
+#include "stage0_crypto.h"
+
+uint8_t stage0_get_active_otp_key_index(const boot_platform_t *platform) {
+  if (!platform || !platform->crypto ||
+      !platform->crypto->read_monotonic_counter) {
+    return 0; /* Fallback auf Key 0 */
+  }
+
+  uint32_t epoch = 0;
+  if (platform->crypto->read_monotonic_counter(&epoch) == BOOT_OK) {
+    if (epoch > 255)
+      return 255;
+    return (uint8_t)epoch;
+  }
+  return 0;
+}

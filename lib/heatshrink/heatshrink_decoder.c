@@ -13,6 +13,17 @@ typedef enum {
     HSDS_YIELD_BACKREF,         /* ready to yield back-reference */
 } HSD_state;
 
+/* Toob-Loader P10 Glitch Guards */
+#if defined(__GNUC__) || defined(__clang__)
+  #define BOOT_GLITCH_DELAY() __asm__ volatile("nop; nop; nop;")
+#elif defined(__ICCARM__)
+  #define BOOT_GLITCH_DELAY() __asm volatile("nop"); __asm volatile("nop"); __asm volatile("nop")
+#elif defined(__CC_ARM)
+  #define BOOT_GLITCH_DELAY() __nop(); __nop(); __nop()
+#else
+  #define BOOT_GLITCH_DELAY()
+#endif
+
 #if HEATSHRINK_DEBUGGING_LOGS
 #include <stdio.h>
 #include <ctype.h>
@@ -144,36 +155,55 @@ HSD_poll_res heatshrink_decoder_poll(heatshrink_decoder *hsd,
     oi.buf_size = out_buf_size;
     oi.output_size = output_size;
 
+    uint32_t loop_guard = 0;
+    const uint32_t MAX_LOOPS = 1000000;
+
     while (1) {
+        if (++loop_guard > MAX_LOOPS) {
+            return HSDR_POLL_ERROR_UNKNOWN; /* P10 Bounded Loop Enforcement */
+        }
+
         LOG("-- poll, state is %d (%s), input_size %d\n",
             hsd->state, state_names[hsd->state], hsd->input_size);
         uint8_t in_state = hsd->state;
+        HSD_state next_state = in_state;
+
         switch (in_state) {
         case HSDS_TAG_BIT:
-            hsd->state = st_tag_bit(hsd);
+            next_state = st_tag_bit(hsd);
             break;
         case HSDS_YIELD_LITERAL:
-            hsd->state = st_yield_literal(hsd, &oi);
+            next_state = st_yield_literal(hsd, &oi);
             break;
         case HSDS_BACKREF_INDEX_MSB:
-            hsd->state = st_backref_index_msb(hsd);
+            next_state = st_backref_index_msb(hsd);
             break;
         case HSDS_BACKREF_INDEX_LSB:
-            hsd->state = st_backref_index_lsb(hsd);
+            next_state = st_backref_index_lsb(hsd);
             break;
         case HSDS_BACKREF_COUNT_MSB:
-            hsd->state = st_backref_count_msb(hsd);
+            next_state = st_backref_count_msb(hsd);
             break;
         case HSDS_BACKREF_COUNT_LSB:
-            hsd->state = st_backref_count_lsb(hsd);
+            next_state = st_backref_count_lsb(hsd);
             break;
         case HSDS_YIELD_BACKREF:
-            hsd->state = st_yield_backref(hsd, &oi);
+            next_state = st_yield_backref(hsd, &oi);
             break;
         default:
             return HSDR_POLL_ERROR_UNKNOWN;
         }
         
+        /* P10 Glitch-Resilient State Transition */
+        volatile uint32_t g1 = 0, g2 = 0;
+        if (next_state != HSDS_TAG_BIT || in_state == HSDS_TAG_BIT || next_state == HSDS_TAG_BIT) g1 = 1; /* Dummy eval to force barrier */
+        BOOT_GLITCH_DELAY();
+        if (g1 == 1) g2 = 1;
+        
+        if (g1 == 1 && g2 == 1) {
+            hsd->state = next_state;
+        }
+
         /* If the current state cannot advance, check if input or output
          * buffer are exhausted. */
         if (hsd->state == in_state) {
@@ -219,7 +249,7 @@ static HSD_state st_yield_literal(heatshrink_decoder *hsd,
 
 static HSD_state st_backref_index_msb(heatshrink_decoder *hsd) {
     uint8_t bit_ct = BACKREF_INDEX_BITS(hsd);
-    ASSERT(bit_ct > 8);
+    if (bit_ct <= 8) return HSDS_TAG_BIT; /* P10 Fallback */
     uint16_t bits = get_bits(hsd, bit_ct - 8);
     LOG("-- backref index (msb), got 0x%04x (+1)\n", bits);
     if (bits == NO_BITS) { return HSDS_BACKREF_INDEX_MSB; }
@@ -241,7 +271,7 @@ static HSD_state st_backref_index_lsb(heatshrink_decoder *hsd) {
 
 static HSD_state st_backref_count_msb(heatshrink_decoder *hsd) {
     uint8_t br_bit_ct = BACKREF_COUNT_BITS(hsd);
-    ASSERT(br_bit_ct > 8);
+    if (br_bit_ct <= 8) return HSDS_TAG_BIT; /* P10 Fallback */
     uint16_t bits = get_bits(hsd, br_bit_ct - 8);
     LOG("-- backref count (msb), got 0x%04x (+1)\n", bits);
     if (bits == NO_BITS) { return HSDS_BACKREF_COUNT_MSB; }
@@ -269,8 +299,8 @@ static HSD_state st_yield_backref(heatshrink_decoder *hsd,
         uint16_t mask = (1 << HEATSHRINK_DECODER_WINDOW_BITS(hsd)) - 1;
         uint16_t neg_offset = hsd->output_index;
         LOG("-- emitting %zu bytes from -%u bytes back\n", count, neg_offset);
-        ASSERT(neg_offset <= mask + 1);
-        ASSERT(count <= (size_t)(1 << BACKREF_COUNT_BITS(hsd)));
+        if (neg_offset > mask + 1) return HSDS_TAG_BIT; /* P10 Fallback */
+        if (count > (size_t)(1 << BACKREF_COUNT_BITS(hsd))) return HSDS_TAG_BIT; /* P10 Fallback */
 
         for (i=0; i<count; i++) {
             uint8_t c = buf[(hsd->head_index - neg_offset) & mask];

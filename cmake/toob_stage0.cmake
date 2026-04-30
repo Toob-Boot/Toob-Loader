@@ -26,6 +26,7 @@ add_executable(toob_stage0
     stage0/stage0_otp.c
     stage0/stage0_boot_pointer.c
     stage0/stage0_tentative.c
+    core/boot_crc32.c
 )
 
 if(TOOB_STAGE0_ED25519_SW)
@@ -33,14 +34,28 @@ if(TOOB_STAGE0_ED25519_SW)
     set_source_files_properties(
         crypto/monocypher/monocypher.c 
         crypto/monocypher/monocypher-ed25519.c 
+        crypto/sha256/sha256.c
         PROPERTIES COMPILE_FLAGS "-O3 -fno-lto"
     )
     target_sources(toob_stage0 PRIVATE
         crypto/monocypher/monocypher.c
         crypto/monocypher/monocypher-ed25519.c
+        crypto/sha256/sha256.c
     )
-    target_include_directories(toob_stage0 PRIVATE crypto/monocypher)
+    target_include_directories(toob_stage0 PRIVATE crypto/monocypher crypto/sha256)
 endif()
+
+if(NOT TOOB_ARCH STREQUAL "host")
+    target_sources(toob_stage0 PRIVATE core/boot_secure_zeroize.S)
+else()
+    target_sources(toob_stage0 PRIVATE core/boot_secure_zeroize_host.c)
+    # M-BUILD GAP-Fix: Sandbox Host-Mock für Hardware Pointers
+    target_compile_definitions(toob_stage0 PRIVATE 
+        TOOB_WAL_SECTOR_ADDRS={0x4000,0x5000,0x6000,0x10000}
+    )
+endif()
+
+target_compile_definitions(toob_stage0 PRIVATE TOOB_MINIMAL_CRYPTO=1)
 
 # 2. Toob-Boot Core-Includes verfügbar machen (boot_types.h) + Generiertes Config
 target_include_directories(toob_stage0 PRIVATE
@@ -53,6 +68,10 @@ target_include_directories(toob_stage0 PRIVATE
 # ARCHITEKTUR-LÖSUNG: Beide Binaries (S0 & S1) benutzen die statische HAL.
 if(TARGET toob_chip)
     target_link_libraries(toob_stage0 PRIVATE toob_chip)
+endif()
+
+if(TARGET toob_crypto)
+    target_link_libraries(toob_stage0 PRIVATE toob_crypto toob_crypto_upstream)
 endif()
 
 # 4. Strict Compliance Flags (NASA P10) OHNE Stack-Protectors

@@ -214,28 +214,32 @@ toob_status_t toob_get_boot_diag_cbor(uint8_t *out_buf, size_t max_len, size_t *
   struct toob_telemetry tel;
   toob_secure_zeroize(&tel, sizeof(tel));
 
-  tel.schema_version = diag.struct_version;
+  /* P10 Fix: Sicherer Shift des 32-bit Magic Headers in die 8-Bit CDDL Schema-Version */
+  tel.schema_version = (uint8_t)(diag.struct_version >> 24);
   tel.boot_duration_ms = diag.boot_duration_ms;
   tel.edge_recovery_events = diag.edge_recovery_events;
-  tel.hardware_fault_record = diag.hardware_fault_record;
+
+  /* C-Struct hat kein separates hardware_fault_record, belege vendor_error in beiden Feldern */
+  tel.hardware_fault_record = diag.vendor_error;
   tel.vendor_error = diag.vendor_error;
-  tel.wdt_kicks = diag.wdt_kicks;
+  tel.wdt_kicks = 0; /* Nicht in diag_t gemappt */
+
   tel.current_svn = diag.current_svn;
-  tel.active_key_index = diag.active_key_index;
-  tel.fallback_occurred = diag.fallback_occurred;
+  tel.active_key_index = (uint8_t)diag.active_key_index;
+  tel.fallback_occurred = false; /* Nicht in diag_t gemappt */
 
   tel.sbom_digest.value = diag.sbom_digest;
   tel.sbom_digest.len = sizeof(diag.sbom_digest);
 
-  tel.boot_session_id = diag.boot_session_id;
+  tel.boot_session_id = 0;
 
-  if (diag.wear_wal_erasures > 0 || diag.wear_app_erasures > 0 ||
-      diag.wear_staging_erasures > 0 || diag.wear_swap_erasures > 0) {
+  /* P10 Fix: Akkurates C-Struct Mapping auf das CDDL Element */
+  if (diag.ext_health_present) {
     tel.ext_health_present = true;
-    tel.ext_health.ext_health_wal_erasures = diag.wear_wal_erasures;
-    tel.ext_health.ext_health_app_erasures = diag.wear_app_erasures;
-    tel.ext_health.ext_health_staging_erasures = diag.wear_staging_erasures;
-    tel.ext_health.ext_health_swap_erasures = diag.wear_swap_erasures;
+    tel.ext_health.ext_health_wal_erasures = diag.ext_health.wal_erase_count;
+    tel.ext_health.ext_health_app_erasures = diag.ext_health.app_slot_erase_count;
+    tel.ext_health.ext_health_staging_erasures = diag.ext_health.staging_slot_erase_count;
+    tel.ext_health.ext_health_swap_erasures = diag.ext_health.swap_buffer_erase_count;
   } else {
     tel.ext_health_present = false;
   }
@@ -246,7 +250,7 @@ toob_status_t toob_get_boot_diag_cbor(uint8_t *out_buf, size_t max_len, size_t *
   toob_secure_zeroize(&diag, sizeof(diag));
 
   if (!encoded) {
-    return TOOB_ERR_INVALID_STATE;
+    return TOOB_ERR_VERIFY;
   }
 
   return TOOB_OK;

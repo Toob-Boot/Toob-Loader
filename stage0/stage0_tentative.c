@@ -1,12 +1,40 @@
-/*
- * Toob-Boot Stage 0: stage0_tentative.c
- * Relevant Spec-Dateien:
- * - docs/concept_fusion.md
+/**
+ * @file stage0_tentative.c
+ * @brief Trial-Boot and Anti-Endless-Loop
  *
- * TODO (Architecture Requirements):
- * - RTC-RAM Auswertung: Lesen des flüchtigen BOOT_SLOT_B_TENTATIVE Flags aus dem RTC-RAM.
- * - Reset-Reason Verknüpfung: Zwingender Abgleich mit dem RESET_REASON Register der MCU.
- * - Fallback-Trigger: Wenn (TENTATIVE == TRUE) UND (RESET_REASON == WATCHDOG_RESET / Panic) -> Flag sofort aus dem RAM löschen und Notfall-Flucht auf Slot A erzwingen.
+ * Trial-Boot Logic for Self-Updates and Anti-Endless-Loop by evaluating the
+ * RESET_REASON register against the TOOB_STATE_TENTATIVE flag.
+ * 
+ * Relevant Specs:
+ * - docs/concept_fusion.md
  */
-static void stage0_tentative_dummy(void) __attribute__((used));
-static void stage0_tentative_dummy(void) {}
+
+#include "boot_hal.h"
+#include "libtoob_types.h"
+#include "stage0_crypto.h"
+#include "boot_config_mock.h"
+
+extern TOOB_NOINIT toob_handoff_t toob_handoff_state;
+
+uint32_t stage0_evaluate_tentative(const boot_platform_t *platform,
+                                   uint32_t current_slot) {
+  if (!platform || !platform->clock || !platform->clock->get_reset_reason)
+    return current_slot;
+  reset_reason_t reason = platform->clock->get_reset_reason();
+
+  /* Wenn S1 im Tentative-Modus war und gecrasht ist... */
+  if (toob_handoff_state.magic == TOOB_STATE_TENTATIVE) {
+    if (reason == RESET_REASON_WATCHDOG || reason == RESET_REASON_HARD_FAULT ||
+        reason == RESET_REASON_BROWNOUT) {
+      /* 1. Atomares Zeroize des RTC-Flags (Anti-Death-Loop) */
+      toob_handoff_state.magic = 0x00000000;
+      __asm__ volatile("" ::: "memory");
+
+      /* 2. Physischer Rollback auf die vorherige Bank */
+      return (current_slot == CHIP_APP_SLOT_ABS_ADDR)
+                 ? CHIP_STAGING_SLOT_ABS_ADDR
+                 : CHIP_APP_SLOT_ABS_ADDR;
+    }
+  }
+  return current_slot;
+}

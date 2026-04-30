@@ -20,9 +20,10 @@
 
 typedef struct __attribute__((aligned(8))) {
 	uint8_t data[64];
-	uint32_t datalen;
-	uint64_t bitlen;
+	uint64_t bitlen;      /* Zwingend auf 8-Byte Offset verschieben! */
 	uint32_t state[8];
+	uint32_t datalen;
+	uint32_t _padding;    /* Explizites Padding für exaktes Alignment */
 } SHA256_CTX;
 
 /*********************** FUNCTION DECLARATIONS **********************/

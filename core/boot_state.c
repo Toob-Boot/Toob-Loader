@@ -21,12 +21,14 @@
 
 #include "boot_state.h"
 #include "boot_config_mock.h"
+#include "boot_delta.h"
 #include "boot_journal.h"
 #include "boot_merkle.h"
 #include "boot_rollback.h"
 #include "boot_secure_zeroize.h"
 #include "boot_suit.h"
 #include "boot_swap.h"
+#include "boot_multiimage.h"
 #include "boot_types.h"
 #include "boot_verify.h"
 #include <string.h>
@@ -139,6 +141,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                           (Default-Deny) */
   struct toob_suit parsed_suit;
   size_t suit_consumed_bytes = 0; /* Elevated scope für Scratchpad Allocation */
+  (void)suit_consumed_bytes;
   uint32_t local_svn = 0; /* Sicherer Zwischenspeicher für validierte SVN */
 
   boot_secure_zeroize(
@@ -212,8 +215,31 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
           /* 4. SVN Anti-Rollback Check happens ONLY if math signature matched
            * safely */
           verify_status = boot_rollback_verify_svn(platform, local_svn, false);
-        } else {
-          verify_status = BOOT_ERR_VERIFY; /* Trapped Glitch */
+
+        /* P10 Hardware-Identitäts Check (Device Binding / Anti-Clone) */
+        if (verify_status == BOOT_OK && parsed_suit.suit_conditions.device_identifier.len > 0) {
+          uint8_t dslc_buf[32] __attribute__((aligned(8)));
+          size_t dslc_len = 32;
+          if (platform->crypto->read_dslc && platform->crypto->read_dslc(dslc_buf, &dslc_len) == BOOT_OK) {
+            if (parsed_suit.suit_conditions.device_identifier.len != 32 || 
+                constant_time_memcmp_glitch_safe(parsed_suit.suit_conditions.device_identifier.value, dslc_buf, 32) != BOOT_OK) {
+              verify_status = BOOT_ERR_VERIFY; /* Hardware-MAC Mismatch! */
+            }
+          } else {
+            verify_status = BOOT_ERR_NOT_SUPPORTED;
+          }
+        }
+        
+        /* EU-CRA SBOM Extraction (wird später in .noinit Diagnostics Areal versiegelt) */
+        if (verify_status == BOOT_OK) {
+          if (parsed_suit.suit_payload.sbom_digest.len == 32) {
+            boot_diag_set_security_meta(local_svn, parsed_suit.suit_envelope.key_index, parsed_suit.suit_payload.sbom_digest.value);
+          } else {
+            boot_diag_set_security_meta(local_svn, parsed_suit.suit_envelope.key_index, NULL);
+          }
+        }
+      } else {
+        verify_status = BOOT_ERR_VERIFY; /* Trapped Glitch */
         }
       }
       boot_secure_zeroize(safe_sig_ed25519, sizeof(safe_sig_ed25519));
@@ -226,6 +252,8 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
   }
 #endif
 
+  bool requires_swap = true;
+  uint32_t swap_src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
   toob_image_header_t staging_header;
   boot_secure_zeroize(&staging_header, sizeof(staging_header));
 
@@ -259,46 +287,76 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
       if (staging_header.image_size <= sizeof(toob_image_header_t)) {
         verify_status = BOOT_ERR_INVALID_ARG; /* Integer Underflow Prevention */
       } else {
-        /* MATHEMATISCHES POINTER SANDBOXING (CVE-Defense)
-         * Beweist, dass ZCBOR uns nicht aus der crypto_arena ausbrechen lässt.
-         */
-        if (!is_buffer_within(parsed_suit.suit_payload.images.value,
-                              parsed_suit.suit_payload.images.len, crypto_arena,
-                              BOOT_CRYPTO_ARENA_SIZE)) {
-          verify_status = BOOT_ERR_INVALID_ARG;
+        /* ZCBOR Array Extraction: Find Primary App Image & Route Delta/Raw */
+        if (parsed_suit.suit_payload.toob_image_count == 0) {
+            verify_status = BOOT_ERR_INVALID_ARG;
         } else {
-          uint32_t chunk_size = 4096; /* GAP-08 Spec Default */
-          uint32_t num_chunks =
-              (uint32_t)(parsed_suit.suit_payload.images.len / BOOT_MERKLE_HASH_LEN);
+            /* Iteriere nicht blind, wir werten Image[0] als unser Target */
+            struct toob_image *app_img = &parsed_suit.suit_payload.toob_image[0];
+            struct zcbor_string *chunk_hashes = NULL;
+            uint32_t num_chunks = 0;
+            uint32_t chunk_sz = 0;
+            bool is_delta = false;
 
-          /* ZERO-ALLOCATION ARCHITECTURE FIX:
-           * Statt 16 KB BSS Bloat für stream_buf nutzen wir den ungenutzten
-           * Teil der crypto_arena. P10-sichere 8-Byte Pointer Alignment
-           * Berechnung. */
-          size_t aligned_offset = (suit_consumed_bytes + 7) & ~((size_t)7);
-
-          if (aligned_offset >= BOOT_CRYPTO_ARENA_SIZE) {
-            verify_status = BOOT_ERR_INVALID_ARG; /* Manifest füllt Arena
-                                                     bereits komplett */
-          } else {
-            uint8_t *scratch_ptr = crypto_arena + aligned_offset;
-            size_t scratch_size = BOOT_CRYPTO_ARENA_SIZE - aligned_offset;
-
-            /* Checken, ob das Rest-Budget für mindestens einen Chunk ausreicht
-             */
-            if (scratch_size < chunk_size) {
-              verify_status = BOOT_ERR_INVALID_ARG; /* Scratchpad zu klein! */
+            if (app_img->toob_image_choice == toob_image_toob_image_raw_c) {
+                chunk_hashes = &app_img->toob_image_raw.chunk_hashes;
+                num_chunks = app_img->toob_image_raw.num_chunks;
+                chunk_sz = app_img->toob_image_raw.chunk_size;
+            } else if (app_img->toob_image_choice == toob_image_toob_image_delta_c) {
+                chunk_hashes = &app_img->toob_image_delta.chunk_hashes;
+                num_chunks = app_img->toob_image_delta.num_chunks;
+                chunk_sz = app_img->toob_image_delta.chunk_size;
+                is_delta = true;
             } else {
-              boot_secure_zeroize(scratch_ptr, scratch_size);
-              verify_status = boot_merkle_verify_stream(
-                  platform, CHIP_STAGING_SLOT_ABS_ADDR,
-                  staging_header.image_size, chunk_size,
-                  parsed_suit.suit_payload.images.value,
-                  (uint32_t)parsed_suit.suit_payload.images.len, num_chunks, scratch_ptr,
-                  (uint32_t)scratch_size);
-              boot_secure_zeroize(scratch_ptr, scratch_size);
+                verify_status = BOOT_ERR_INVALID_ARG;
             }
-          }
+
+            if (verify_status == BOOT_OK) {
+                if (!chunk_hashes || !is_buffer_within(chunk_hashes->value, chunk_hashes->len, crypto_arena, BOOT_CRYPTO_ARENA_SIZE)) {
+                    verify_status = BOOT_ERR_INVALID_ARG; /* Exploit Trap */
+                } else {
+                    if (is_delta) {
+                        /* P10 ANTI-BRICK: Die SDVM MUSS in einen Safe-Slot schreiben! 
+                         * Ein In-Place Patch in den APP_SLOT zerstört die Base-Firmware!
+                         * Wir nutzen temporär den Recovery-Slot als A/B Safe Buffer. */
+                        boot_status_t delta_stat = boot_delta_apply(
+                            platform, 
+                            open_txn->offset + suit_consumed_bytes, CHIP_STAGING_SLOT_ABS_ADDR + CHIP_APP_SLOT_SIZE - (open_txn->offset + suit_consumed_bytes), 
+                            CHIP_RECOVERY_OS_ABS_ADDR, CHIP_APP_SLOT_SIZE,  /* Ziel: A/B Safe Buffer */
+                            CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,     /* Base: Alte Firmware */
+                            open_txn);
+                            
+                        if (delta_stat == BOOT_OK) {
+                            verify_status = BOOT_OK;
+                            requires_swap = true;
+                            /* Swap zieht nun aus Recovery! */
+                            staging_header.image_size = app_img->toob_image_delta.image_size;
+                            swap_src_addr = CHIP_RECOVERY_OS_ABS_ADDR; 
+                        } else {
+                            verify_status = delta_stat;
+                        }
+                    } else {
+                        /* ======================== RAW UPDATE ROUTING ======================== */
+                        requires_swap = true;
+                        swap_src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+                        size_t aligned_offset = (suit_consumed_bytes + 7) & ~((size_t)7);
+                        if (aligned_offset >= BOOT_CRYPTO_ARENA_SIZE) {
+                            verify_status = BOOT_ERR_INVALID_ARG; 
+                        } else {
+                            uint8_t *scratch = crypto_arena + aligned_offset;
+                            size_t scratch_size = BOOT_CRYPTO_ARENA_SIZE - aligned_offset;
+                            if (scratch_size < chunk_sz) {
+                                verify_status = BOOT_ERR_INVALID_ARG; 
+                            } else {
+                                boot_secure_zeroize(scratch, scratch_size);
+                                verify_status = boot_merkle_verify_stream(platform, CHIP_STAGING_SLOT_ABS_ADDR,
+                                    staging_header.image_size, chunk_sz, chunk_hashes->value, (uint32_t)chunk_hashes->len, num_chunks, scratch, scratch_size);
+                                boot_secure_zeroize(scratch, scratch_size);
+                            }
+                        }
+                    }
+                }
+            }
         }
       }
 #endif
@@ -315,13 +373,53 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
     swap_gate_2 = BOOT_OK;
 
   if (swap_gate_1 == BOOT_OK && swap_gate_2 == BOOT_OK) {
-    /*
-     * The update integrity is mathematically proven.
-     * Trigger the WDT-safe In-Place Overwrite execution via M-SWAP.
-     */
-    boot_status_t swap_status = boot_swap_apply(
-        platform, CHIP_STAGING_SLOT_ABS_ADDR, CHIP_APP_SLOT_ABS_ADDR,
+    boot_status_t swap_status = BOOT_OK;
+    
+    if (requires_swap) {
+      swap_status = boot_swap_apply(
+        platform, swap_src_addr, CHIP_APP_SLOT_ABS_ADDR,
         staging_header.image_size, BOOT_DEST_SLOT_APP, open_txn);
+    }
+
+    /* P10 FOTA Erweiterung: Multi-Image Deployment ausführen, falls CDDL Array > 1 */
+    if (swap_status == BOOT_OK && parsed_suit.suit_payload.toob_image_count > 1) {
+        boot_component_t components[3]; 
+        uint32_t comp_count = 0;
+        
+        for (size_t i = 1; i < parsed_suit.suit_payload.toob_image_count && i < 4; i++) {
+            struct toob_image *sub_img = &parsed_suit.suit_payload.toob_image[i];
+            boot_secure_zeroize(&components[comp_count], sizeof(boot_component_t));
+            components[comp_count].component_id = (uint32_t)i;
+            
+            if (sub_img->toob_image_choice == toob_image_toob_image_raw_c) {
+                components[comp_count].image_size = sub_img->toob_image_raw.image_size;
+                /* Dynamisches Offset im Staging-Slot für nachfolgende Images */
+                components[comp_count].staging_offset = staging_header.image_size + ((uint32_t)i * 0x10000); /* Mock Offset */
+                
+                if (sub_img->toob_image_raw.image_type == 1) {
+                    components[comp_count].target_addr = 0x00800000; /* NetCore Mock */
+                } else if (sub_img->toob_image_raw.image_type == 2) {
+                    components[comp_count].target_addr = CHIP_RECOVERY_OS_ABS_ADDR;
+                } else {
+                    swap_status = BOOT_ERR_INVALID_ARG; break;
+                }
+                
+                if (sub_img->toob_image_raw.chunk_hashes.len >= 32) {
+                    memcpy(components[comp_count].expected_hash, sub_img->toob_image_raw.chunk_hashes.value, 32); 
+                    comp_count++;
+                }
+            }
+        }
+        
+        if (swap_status == BOOT_OK && comp_count > 0) {
+            boot_allowed_region_t whitelist[2] = {
+                {0x00800000, 0x00200000},               
+                {CHIP_RECOVERY_OS_ABS_ADDR, 0x00050000} 
+            };
+            swap_status = boot_multiimage_apply(platform, CHIP_STAGING_SLOT_ABS_ADDR, 
+                                                components, comp_count, whitelist, 2, open_txn);
+        }
+    }
 
     if (swap_status == BOOT_OK) {
       /* Atomically persist TXN_COMMIT. */

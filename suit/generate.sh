@@ -73,8 +73,38 @@ struct toob_suit_suit_conditions {
     uint16_t max_resume_attempts;
 };
 
+enum toob_image_choice {
+    toob_image_toob_image_raw_c,
+    toob_image_toob_image_delta_c
+};
+
+struct toob_image_raw {
+    uint32_t image_type;
+    uint32_t image_size;
+    struct zcbor_string chunk_hashes;
+    uint32_t num_chunks;
+    uint32_t chunk_size;
+};
+
+struct toob_image_delta {
+    uint32_t image_size;
+    struct zcbor_string chunk_hashes;
+    uint32_t num_chunks;
+    uint32_t chunk_size;
+};
+
+struct toob_image {
+    enum toob_image_choice toob_image_choice;
+    union {
+        struct toob_image_raw toob_image_raw;
+        struct toob_image_delta toob_image_delta;
+    };
+};
+
 struct toob_suit_suit_payload {
-    struct zcbor_string images; /* Minimalistischer Array Platzhalter */
+    size_t toob_image_count;
+    struct toob_image toob_image[4];
+    struct zcbor_string sbom_digest;
 };
 
 struct toob_suit {

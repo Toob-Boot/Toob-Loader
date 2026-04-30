@@ -26,6 +26,7 @@
 #include "boot_config_mock.h"
 #include "boot_crc32.h"
 #include "boot_delay.h"
+#include "boot_diag.h"
 #include "boot_panic.h"
 #include "boot_secure_zeroize.h"
 #include "boot_state.h"
@@ -376,85 +377,58 @@ init_success:
    * (Nonce, Slot) in die designierten Abschnitte sichern. FIX: Das passiert
    * lokal im C-Stack und wird in einem Rutsch (memcpy) transferiert!
    */
-  toob_boot_diag_t local_diag __attribute__((aligned(8)));
-  toob_handoff_t local_handoff __attribute__((aligned(8)));
-
-  boot_secure_zeroize(&local_diag, sizeof(local_diag));
-  boot_secure_zeroize(&local_handoff, sizeof(local_handoff));
-
-  local_diag.struct_version = TOOB_DIAG_STRUCT_VERSION;
-  local_diag.boot_duration_ms = boot_duration_ms;
+  boot_diag_set_boot_time(boot_duration_ms);
 
   wal_tmr_payload_t tmr __attribute__((aligned(8)));
   boot_secure_zeroize(&tmr, sizeof(tmr));
   if (boot_journal_get_tmr(platform, &tmr) == BOOT_OK) {
-    local_diag.edge_recovery_events = tmr.boot_failure_counter;
-    local_handoff.boot_failure_count = tmr.boot_failure_counter;
+    boot_diag_set_recovery_events(tmr.boot_failure_counter);
 
-    /* Optional: Ext_Health Mappings hier anbinden */
-    local_diag.ext_health_present = 1;
-    local_diag.ext_health.wal_erase_count = tmr.app_svn; /* Map proxy */
-    local_diag.ext_health.app_slot_erase_count = tmr.app_slot_erase_counter;
-    local_diag.ext_health.staging_slot_erase_count =
-        tmr.staging_slot_erase_counter;
-    local_diag.ext_health.swap_buffer_erase_count =
-        tmr.swap_buffer_erase_counter;
+    toob_ext_health_t wear = {
+        .wal_erase_count = tmr.app_svn,
+        .app_slot_erase_count = tmr.app_slot_erase_counter,
+        .staging_slot_erase_count = tmr.staging_slot_erase_counter,
+        .swap_buffer_erase_count = tmr.swap_buffer_erase_counter
+    };
+    boot_diag_set_wear_data(&wear);
   }
-  boot_secure_zeroize(&tmr, sizeof(tmr)); /* TMR Secrets vernichten */
+  boot_secure_zeroize(&tmr, sizeof(tmr));
 
-  /* Basic Handoff Population */
-  local_handoff.magic = target_out->is_tentative_boot ? TOOB_STATE_TENTATIVE
-                                                      : TOOB_STATE_COMMITTED;
+  boot_diag_seal(); /* Kapselt CRC & Padding-Nulling perfekt ein */
+
+  /* Handoff Struct Population */
+  toob_handoff_t local_handoff __attribute__((aligned(8)));
+  boot_secure_zeroize(&local_handoff, sizeof(local_handoff));
+
+  local_handoff.magic = target_out->is_tentative_boot ? TOOB_STATE_TENTATIVE : TOOB_STATE_COMMITTED;
   local_handoff.struct_version = TOOB_HANDOFF_STRUCT_VERSION;
   local_handoff.boot_nonce = target_out->generated_nonce;
-  local_handoff.reset_reason =
-      translate_reset_reason(platform->clock->get_reset_reason());
-  local_handoff.booted_partition = target_out->boot_recovery_os
-                                       ? TOOB_PARTITION_RECOVERY
-                                       : TOOB_PARTITION_APP;
+  local_handoff.reset_reason = translate_reset_reason(platform->clock->get_reset_reason());
+  local_handoff.booted_partition = target_out->boot_recovery_os ? TOOB_PARTITION_RECOVERY : TOOB_PARTITION_APP;
   local_handoff.net_search_accum_ms = target_out->net_search_accum_ms;
-  local_handoff._reserved_pad = 0; /* Padding nullen für Leakage Prevention */
+  local_handoff._reserved_pad = 0;
 
   platform->wdt->kick();
 
-  /* CRC Berechnung und RAM-Versiegelung */
   size_t handoff_hash_len = offsetof(toob_handoff_t, crc32_trailer);
-  uint32_t handoff_crc =
-      compute_boot_crc32((const uint8_t *)&local_handoff, handoff_hash_len);
-  local_handoff.crc32_trailer = handoff_crc;
+  local_handoff.crc32_trailer = compute_boot_crc32((const uint8_t *)&local_handoff, handoff_hash_len);
 
-  size_t diag_hash_len_succ = offsetof(toob_boot_diag_t, crc32_trailer);
-  uint32_t diag_crc =
-      compute_boot_crc32((const uint8_t *)&local_diag, diag_hash_len_succ);
-  local_diag.crc32_trailer = diag_crc;
-
-  /* ATOMARER TRANSFER in den asynchronen .noinit RAM */
+  /* Atomarer Transfer (toob_diag_state wurde schon in boot_diag_seal aktualisiert) */
   memcpy(&toob_handoff_state, &local_handoff, sizeof(toob_handoff_t));
-  memcpy(&toob_diag_state, &local_diag, sizeof(toob_boot_diag_t));
 
-  /* PHASE-BOUND READ-BACK VERIFY (TOCTOU / RAM-Bit-Rot Defense) */
-  uint32_t ram_crc_handoff = compute_boot_crc32(
-      (const uint8_t *)&toob_handoff_state, handoff_hash_len);
-  uint32_t ram_crc_diag =
-      compute_boot_crc32((const uint8_t *)&toob_diag_state, diag_hash_len_succ);
+  uint32_t ram_crc_handoff = compute_boot_crc32((const uint8_t *)&toob_handoff_state, handoff_hash_len);
 
   volatile uint32_t ram_shield_1 = 0, ram_shield_2 = 0;
-  bool ram_ok = (ram_crc_handoff == local_handoff.crc32_trailer &&
-                 ram_crc_diag == local_diag.crc32_trailer);
+  bool ram_ok = (ram_crc_handoff == local_handoff.crc32_trailer);
 
-  if (ram_ok)
-    ram_shield_1 = BOOT_OK;
+  if (ram_ok) ram_shield_1 = BOOT_OK;
   BOOT_GLITCH_DELAY();
-  if (ram_shield_1 == BOOT_OK && ram_ok)
-    ram_shield_2 = BOOT_OK;
+  if (ram_shield_1 == BOOT_OK && ram_ok) ram_shield_2 = BOOT_OK;
 
-  /* P10 Cleanup: Stack-Sandboxes unwiderruflich zerstören */
   boot_secure_zeroize(&local_handoff, sizeof(local_handoff));
-  boot_secure_zeroize(&local_diag, sizeof(local_diag));
 
-  if (ram_shield_1 != BOOT_OK || ram_shield_2 != BOOT_OK ||
-      ram_shield_1 != ram_shield_2) {
-    status = BOOT_ERR_VERIFY; /* RAM Hardware is failing! */
+  if (ram_shield_1 != BOOT_OK || ram_shield_2 != BOOT_OK || ram_shield_1 != ram_shield_2) {
+    status = BOOT_ERR_VERIFY;
     goto panic_fallthrough;
   }
 
