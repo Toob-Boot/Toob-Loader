@@ -364,21 +364,23 @@ session_reset:
          * Extraktion ohne Stack-Struct, direkt in lokale Primitive via
          * offsetof. */
         uint32_t safe_slot_id = 0;
-        uint64_t safe_timestamp = 0;
+        uint32_t safe_sequence_id = 0;
 
         memcpy(&safe_slot_id,
                rx_buf + offsetof(stage15_auth_payload_t, slot_id),
                sizeof(uint32_t));
-        memcpy(&safe_timestamp,
-               rx_buf + offsetof(stage15_auth_payload_t, timestamp),
-               sizeof(uint64_t));
+        memcpy(&safe_sequence_id,
+               rx_buf + offsetof(stage15_auth_payload_t, sequence_id),
+               sizeof(uint32_t));
 
         const uint8_t *auth_nonce =
             rx_buf + offsetof(stage15_auth_payload_t, nonce);
         const uint8_t *auth_sig =
             rx_buf + offsetof(stage15_auth_payload_t, sig);
 
-        bool time_ok = (safe_timestamp > current_monotonic);
+        /* P10 FIX: Verhindert Replay-Attacks durch Offline-Tokens!
+         * Das Token MUSS exakt + 1 zum Hardware-Counter sein. */
+        bool time_ok = (safe_sequence_id == current_monotonic + 1);
         bool slot_ok = (safe_slot_id == CHIP_STAGING_SLOT_ID);
         boot_status_t nonce_stat =
             constant_time_memcmp_32_glitch_safe(auth_nonce, challenge_buf);
@@ -392,13 +394,13 @@ session_reset:
           shield_2 = BOOT_OK;
 
         if (shield_1 == BOOT_OK && shield_2 == BOOT_OK) {
-          /* Assemble Ed25519 Message exakt nach Spec (76 Bytes):
-           * [Nonce(32)] | [Padded DSLC(32)] | [Slot ID(4)] | [Timestamp(8)] */
+          /* Assemble Ed25519 Message exakt nach Spec (72 Bytes):
+           * [Nonce(32)] | [Padded DSLC(32)] | [Slot ID(4)] | [Sequence ID(4)] */
           boot_secure_zeroize(verify_msg, PANIC_VERIFY_MAX_SIZE);
           memcpy(verify_msg, challenge_buf,
                  64); /* Zieht saubere Nonce & DSLC Base */
           memcpy(verify_msg + 64, &safe_slot_id, sizeof(uint32_t));
-          memcpy(verify_msg + 68, &safe_timestamp, sizeof(uint64_t));
+          memcpy(verify_msg + 68, &safe_sequence_id, sizeof(uint32_t));
 
           /* Zero-Allocation Fix: Wir recyclen den ungenutzten chunk_buf für den
            * Root Pubkey */
@@ -414,7 +416,7 @@ session_reset:
             if (platform->wdt && platform->wdt->kick)
               platform->wdt->kick();
             boot_status_t sig_stat = platform->crypto->verify_ed25519(
-                verify_msg, 76, auth_sig, root_pubkey);
+                verify_msg, 72, auth_sig, root_pubkey);
             if (platform->wdt && platform->wdt->kick)
               platform->wdt->kick();
 
@@ -430,7 +432,7 @@ session_reset:
               /* OTP Burn: Nach erfolgreicher Autorisierung Token entwerten */
               if (platform->crypto->advance_monotonic_counter) {
                 platform->crypto->advance_monotonic_counter();
-                current_monotonic = (uint32_t)safe_timestamp;
+                current_monotonic = safe_sequence_id;
               }
               panic_cfi ^= CFI_AUTH_PASSED;
             }

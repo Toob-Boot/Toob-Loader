@@ -100,13 +100,19 @@ int main(void) {
   }
 
   /* 6. Zero-Allocation Hash Computation */
-  uint8_t digest[32] __attribute__((aligned(8)));
-  uint32_t payload_addr = active_slot + sizeof(hdr);
-  stage0_hash_compute(platform, payload_addr, hdr.image_size, digest);
+  /* P10 FIX: Monocypher OOB-Read Prevention. Ed25519ph erwartet einen 64-Byte Hash-Buffer.
+   * Da SHA-256 nur 32 Bytes schreibt, müssen die restlichen 32 Bytes genullt werden! */
+  uint8_t digest[64] __attribute__((aligned(8)));
+  boot_secure_zeroize(digest, 64);
+  
+  /* P10 FIX: Der Header MUSS mit in den Signature-Hash fließen, 
+   * da ein Angreifer sonst den entry_point beliebig fälschen könnte (ACE)! */
+  uint32_t payload_addr = active_slot;
+  stage0_hash_compute(platform, payload_addr, (uint32_t)sizeof(hdr) + hdr.image_size, digest);
 
-  /* 7. Lade die Signatur (Wir erwarten sie am Ende des Images) */
+  /* 7. Lade die Signatur (Wir erwarten sie am Ende des Images, also NACH dem Payload) */
   uint8_t sig[64] __attribute__((aligned(8)));
-  if (platform->flash->read(payload_addr + hdr.image_size, sig, 64) !=
+  if (platform->flash->read(active_slot + (uint32_t)sizeof(hdr) + hdr.image_size, sig, 64) !=
       BOOT_OK) {
     while (1) {
       if (platform->wdt)
@@ -119,7 +125,7 @@ int main(void) {
   int sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
 
   boot_secure_zeroize(pubkey, 32);
-  boot_secure_zeroize(digest, 32);
+  boot_secure_zeroize(digest, 64);
   boot_secure_zeroize(sig, 64);
 
   volatile uint32_t sig_shield_1 = 0, sig_shield_2 = 0;
@@ -144,8 +150,10 @@ int main(void) {
     if (platform->soc && platform->soc->invalidate_icache)
       platform->soc->invalidate_icache();
 
+    /* P10 FIX: Jump Target muss weiterhin payload_addr + hdr.entry_point (also active_slot + hdr.entry_point) bleiben, 
+     * da das Image relativ zum Slot-Start inkl. Header kompiliert wird. */
     __asm__ volatile("" ::: "memory");
-    jump_to_payload(payload_addr + hdr.entry_point);
+    jump_to_payload(active_slot + hdr.entry_point);
   }
 
   /* Fallback: Signatur fehlerhaft! (Kein Booten!) */

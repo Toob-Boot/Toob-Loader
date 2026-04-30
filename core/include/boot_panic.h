@@ -14,18 +14,18 @@
 #define COBS_MARKER_END   0x00
 
 /**
- * @brief The exact 108-byte Payload sent by the technician for Stage 1.5 Rescue.
- *        4 (Slot) + 8 (Timestamp) + 32 (Nonce Echo) + 64 (Ed25519 Sig) = 108 Bytes.
+ * @brief The exact 104-byte Payload sent by the technician for Stage 1.5 Rescue.
+ *        4 (Slot) + 4 (Sequence ID) + 32 (Nonce Echo) + 64 (Ed25519 Sig) = 104 Bytes.
  */
 typedef struct __attribute__((packed)) {
     uint32_t slot_id;       /* Target Slot ID für das folgende Naked-COBS Image */
-    uint64_t timestamp;     /* 8-Byte UNIX Time, Anti-Replay: Muss current_monotonic + 1 sein */
+    uint32_t sequence_id;   /* 4-Byte Hardware Counter, Anti-Replay: Muss exakt current_monotonic + 1 sein */
     uint8_t  nonce[32];     /* Echo des 32-Byte kryptografischen Challenge Nonces */
-    uint8_t  sig[64];       /* Ed25519(Nonce | DSLC(32) | Slot ID | Timestamp) */
+    uint8_t  sig[64];       /* Ed25519(Nonce | DSLC(32) | Slot ID | Sequence ID) */
 } stage15_auth_payload_t;
 
-// P10: statically assert the 108 byte size explicitly
-_Static_assert(sizeof(stage15_auth_payload_t) == 108, "Stage 1.5 Auth Payload must be exactly 108 bytes");
+// P10: statically assert the 104 byte size explicitly
+_Static_assert(sizeof(stage15_auth_payload_t) == 104, "Stage 1.5 Auth Payload must be exactly 104 bytes");
 
 /**
  * @brief Atomically stops execution, attempts Serial Rescue (COBS)

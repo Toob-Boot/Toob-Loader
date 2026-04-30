@@ -28,11 +28,11 @@
  * ausgewertet.
  */
 #if defined(__GNUC__) || defined(__clang__)
-  #define BOOT_GLITCH_DELAY() __asm__ volatile("nop; nop; nop;")
+  #define BOOT_GLITCH_DELAY() __asm__ volatile("nop; nop; nop;" ::: "memory")
 #elif defined(__ICCARM__) /* IAR */
-  #define BOOT_GLITCH_DELAY() __asm volatile("nop"); __asm volatile("nop"); __asm volatile("nop")
+  #define BOOT_GLITCH_DELAY() __asm volatile("nop"); __asm volatile("nop"); __asm volatile("nop" ::: "memory")
 #elif defined(__CC_ARM) /* ARM Keil */
-  #define BOOT_GLITCH_DELAY() __nop(); __nop(); __nop()
+  #define BOOT_GLITCH_DELAY() __nop(); __nop(); __nop() /* Compiler Barrier via Intrinsics usually needed here */
 #else
   #define BOOT_GLITCH_DELAY() /* Fallback for unknown compilers */
 #endif
