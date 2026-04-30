@@ -140,6 +140,15 @@ toob_status_t toob_set_next_update(uint32_t manifest_flash_addr);
  */
 toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
 
+/**
+ * @brief Extrahiert die Diagnosedaten kodiert im Cloud-tauglichen CBOR-Format.
+ * @param out_buf Buffer für den CBOR-Stream
+ * @param max_len Maximale Größe von out_buf
+ * @param out_len Tatsächliche Größe des geschriebenen CBOR-Streams
+ * @return TOOB_OK bei Erfolg
+ */
+toob_status_t toob_get_boot_diag_cbor(uint8_t* out_buf, size_t max_len, size_t* out_len);
+
 /* ==============================================================================
  * Der Hard-Linker Contract "Zero-Bloat Shim"
  * ==============================================================================

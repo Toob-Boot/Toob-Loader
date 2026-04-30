@@ -8,6 +8,7 @@
 #include "monocypher.h"
 #include "monocypher-ed25519.h"
 #include "../sha256/sha256.h"
+#include "boot_secure_zeroize.h"
 
 boot_status_t crypto_monocypher_init(void) {
     /* Monocypher benötigt keinen globalen HW-State zum Initialisieren. */
@@ -40,6 +41,10 @@ boot_status_t crypto_monocypher_hash_finish(void *ctx, uint8_t *digest, size_t *
     }
     sha256_final((SHA256_CTX *)ctx, digest);
     *digest_len = SHA256_BLOCK_SIZE;
+    
+    /* P10 Leakage Prevention: Ensure no hash fragments remain in RAM */
+    boot_secure_zeroize(ctx, sizeof(SHA256_CTX));
+    
     return BOOT_OK;
 }
 
@@ -53,8 +58,22 @@ boot_status_t crypto_monocypher_verify(const uint8_t *msg, size_t len, const uin
     
     /* crypto_ed25519_check returns 0 on success, -1 on failure */
     int status = crypto_ed25519_check(sig, pubkey, msg, len);
+    
+    /* P10 Glitch-Defense Double-Check Pattern */
+    volatile uint32_t s1 = 0, s2 = 0;
     if (status == 0) {
+        s1 = BOOT_OK;
+    }
+    
+    BOOT_GLITCH_DELAY();
+    
+    if (s1 == BOOT_OK && status == 0) {
+        s2 = BOOT_OK;
+    }
+    
+    if (s1 == BOOT_OK && s2 == BOOT_OK && s1 == s2) {
         return BOOT_OK;
     }
+    
     return BOOT_ERR_VERIFY;
 }

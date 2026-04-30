@@ -33,6 +33,7 @@ if(NOT TOOB_CRYPTO_DISABLE_SW_ENGINE)
     target_include_directories(toob_crypto_upstream PUBLIC 
         crypto/monocypher
         crypto/sha256
+        core/include
     )
     
     # GAP Fix: Performance & Constant-Time Guarantee

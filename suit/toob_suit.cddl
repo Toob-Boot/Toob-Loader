@@ -58,6 +58,7 @@ toob_image_raw = {
     404: uint .size 4,              ; num_chunks (OOB Bounds-Check: MUSS ceil(image_size/chunk_size) sein gem. boot_merkle.c)
     ; Die unteren 32 Bytes sind fest gekoppelt an BOOT_MERKLE_HASH_LEN aus boot_merkle.h!
     405: bstr .size (32..8192),     ; chunk_hashes (Flat Merkle-Stream: 8 KB Cap limitiert das SRAM. Reicht für 4MB OS)
+    406: bool,                      ; is_compressed
 }
 
 ; Delta-Kapsel mit ZWINGENDEM Laufzeit-Beweis des Base-Images zur Brick-Prevention!
@@ -68,5 +69,6 @@ toob_image_delta = {
     403: uint .size 4,              ; chunk_size
     404: uint .size 4,              ; num_chunks
     405: bstr .size (32..8192),     ; chunk_hashes
+    406: bool,                      ; is_compressed
     407: bstr .size 8,              ; base_fingerprint (PFLICHTFELD: 8-Byte Truncated SHA-256 des zwingenden Base-Images)
 }

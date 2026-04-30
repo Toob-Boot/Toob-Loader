@@ -24,6 +24,7 @@
 #include "boot_crc32.h"
 #include "boot_panic.h"
 #include "boot_secure_zeroize.h"
+#include "heatshrink_decoder.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -88,7 +89,8 @@ static boot_status_t
 flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
                     uint32_t *flushed_offset, uint8_t *write_buf,
                     uint32_t write_len, uint32_t *current_sector_end,
-                    wal_entry_payload_t *txn, uint32_t *last_checkpoint) {
+                    wal_entry_payload_t *txn, uint32_t *last_checkpoint,
+                    heatshrink_decoder *hsd) {
   if (write_len == 0)
     return BOOT_OK;
 
@@ -204,6 +206,9 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
   *flushed_offset += write_len;
 
   if (*flushed_offset - *last_checkpoint >= CHIP_FLASH_MAX_SECTOR_SIZE) {
+    if (hsd) {
+      heatshrink_decoder_reset(hsd);
+    }
     txn->delta_chunk_id = *flushed_offset;
     boot_status_t log_stat = boot_journal_append(platform, txn);
     if (log_stat != BOOT_OK)
@@ -237,12 +242,19 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
   volatile uint32_t delta_cfi = CFI_DELTA_INIT;
   boot_status_t status = BOOT_OK;
 
-  /* P10 Arena Segmentation (Hälftig) */
-  size_t half_arena = BOOT_CRYPTO_ARENA_SIZE / 2;
-  uint8_t *write_buf = crypto_arena;
-  uint8_t *read_buf = crypto_arena + half_arena;
+  /* Heatshrink Decoder Overlay (Zero-Allocation) */
+  heatshrink_decoder *hsd = (heatshrink_decoder *)crypto_arena;
+  size_t hsd_size = sizeof(heatshrink_decoder);
+  if (hsd_size >= BOOT_CRYPTO_ARENA_SIZE) return BOOT_ERR_INVALID_STATE;
+
+  /* P10 Arena Segmentation (Rest) */
+  size_t remaining_arena = BOOT_CRYPTO_ARENA_SIZE - hsd_size;
+  size_t half_arena = remaining_arena / 2;
+  uint8_t *write_buf = crypto_arena + hsd_size;
+  uint8_t *read_buf = crypto_arena + hsd_size + half_arena;
 
   boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  heatshrink_decoder_reset(hsd);
 
   /* ====================================================================
    * STEP 1: PARSE & VERIFY TDS HEADER (Bounds & Magic)
@@ -512,12 +524,94 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
           status = BOOT_ERR_FLASH_BOUNDS;
           goto cleanup; /* OOB Stream Read Prevented */
         }
-        if (platform->flash->read(delta_addr + lit_read_offset, read_buf,
-                                  step) != BOOT_OK) {
-          status = BOOT_ERR_FLASH_HW;
-          goto cleanup;
+        
+        /* Streaming Heatshrink Decompression */
+        size_t compressed_rem = step;
+        size_t decompressed_total = 0;
+        
+        while (compressed_rem > 0) {
+          size_t chunk = compressed_rem > half_arena ? half_arena : compressed_rem;
+          if (platform->flash->read(delta_addr + lit_read_offset, read_buf, chunk) != BOOT_OK) {
+            status = BOOT_ERR_FLASH_HW;
+            goto cleanup;
+          }
+          
+          size_t sunk = 0;
+          HSD_sink_res sres = heatshrink_decoder_sink(hsd, read_buf, chunk, &sunk);
+          if (sres < 0) {
+            status = BOOT_ERR_VERIFY;
+            goto cleanup;
+          }
+          
+          while (1) {
+            if (platform->wdt && platform->wdt->kick) platform->wdt->kick();
+            
+            size_t polled = 0;
+            size_t space_left = half_arena - write_buf_pos;
+            if (space_left == 0) {
+              /* Buffer full, need to flush */
+              status = flush_target_buffer(
+                  platform, dest_addr, &flushed_target_offset, write_buf, half_arena,
+                  &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
+              if (status != BOOT_OK) goto cleanup;
+              write_buf_pos = 0;
+              space_left = half_arena;
+            }
+            
+            HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled);
+            if (pres < 0) {
+              status = BOOT_ERR_VERIFY;
+              goto cleanup;
+            }
+            
+            write_buf_pos += polled;
+            decompressed_total += polled;
+            
+            /* Zip-Bomb Guard */
+            if (target_logical_offset + decompressed_total > hdr.expected_target_size) {
+              status = BOOT_ERR_INVALID_STATE;
+              goto cleanup;
+            }
+            
+            if (pres == HSDR_POLL_EMPTY) break;
+          }
+          
+          lit_read_offset += sunk;
+          compressed_rem -= sunk;
         }
-        memcpy(write_buf + write_buf_pos, read_buf, step);
+        
+        /* If this was the last instruction, finish the decoder stream */
+        if (inst_idx == hdr.instruction_count && compressed_rem == 0) {
+          heatshrink_decoder_finish(hsd);
+          while (1) {
+            if (platform->wdt && platform->wdt->kick) platform->wdt->kick();
+            size_t polled = 0;
+            size_t space_left = half_arena - write_buf_pos;
+            if (space_left == 0) {
+              status = flush_target_buffer(
+                  platform, dest_addr, &flushed_target_offset, write_buf, half_arena,
+                  &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
+              if (status != BOOT_OK) goto cleanup;
+              write_buf_pos = 0;
+              space_left = half_arena;
+            }
+            HSD_poll_res pres = heatshrink_decoder_poll(hsd, write_buf + write_buf_pos, space_left, &polled);
+            if (pres < 0) {
+              status = BOOT_ERR_VERIFY;
+              goto cleanup;
+            }
+            write_buf_pos += polled;
+            decompressed_total += polled;
+            if (target_logical_offset + decompressed_total > hdr.expected_target_size) {
+              status = BOOT_ERR_INVALID_STATE;
+              goto cleanup;
+            }
+            if (pres == HSDR_POLL_EMPTY) break;
+          }
+        }
+        
+        /* Update step for target progression based on decompressed amount */
+        step = decompressed_total;
       } else {
         status = BOOT_ERR_INVALID_STATE;
         goto cleanup; /* Illegal Opcode */
@@ -527,10 +621,8 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
 
     if (inst_opcode == TOOB_TDS_OP_COPY_BASE)
       inst_src_off += step;
-    if (inst_opcode == TOOB_TDS_OP_INSERT_LIT)
-      lit_read_offset += step;
 
-    inst_rem -= step;
+    inst_rem -= inst_rem; /* Instruction fully consumed, logic offset advances by step (uncompressed) */
     target_logical_offset += step;
 
     /* --- C. FLUSH & CHECKPOINT --- */
@@ -556,7 +648,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
 
       status = flush_target_buffer(
           platform, dest_addr, &flushed_target_offset, write_buf, flush_len,
-          &current_sector_end, open_txn, &last_wal_checkpoint);
+          &current_sector_end, open_txn, &last_wal_checkpoint, hsd);
       if (status != BOOT_OK)
         goto cleanup;
       write_buf_pos = 0;

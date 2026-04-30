@@ -52,6 +52,7 @@
 // <https://creativecommons.org/publicdomain/zero/1.0/>
 
 #include "monocypher.h"
+#include "boot_secure_zeroize.h"
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 namespace MONOCYPHER_CPP_NAMESPACE {
@@ -162,10 +163,10 @@ int crypto_verify64(const u8 a[64], const u8 b[64]){ return neq0(x64(a, b)); }
 
 void crypto_wipe(void *secret, size_t size)
 {
-	volatile u8 *v_secret = (u8*)secret;
-	ZERO(v_secret, size);
+	boot_secure_zeroize(secret, size);
 }
 
+#ifndef TOOB_MINIMAL_CRYPTO
 /////////////////
 /// Chacha 20 ///
 /////////////////
@@ -447,6 +448,7 @@ void crypto_poly1305(u8     mac[16],  const u8 *message,
 	crypto_poly1305_update(&ctx, message, message_size);
 	crypto_poly1305_final (&ctx, mac);
 }
+#endif // TOOB_MINIMAL_CRYPTO
 
 ////////////////
 /// BLAKE2 b ///
@@ -650,6 +652,7 @@ void crypto_blake2b(u8 *hash, size_t hash_size, const u8 *msg, size_t msg_size)
 	crypto_blake2b_keyed(hash, hash_size, 0, 0, msg, msg_size);
 }
 
+#ifndef TOOB_MINIMAL_CRYPTO
 //////////////
 /// Argon2 ///
 //////////////
@@ -918,6 +921,7 @@ void crypto_argon2(u8 *hash, u32 hash_size, void *work_area,
 	extended_hash(hash, hash_size, final_block, 1024);
 	WIPE_BUFFER(final_block);
 }
+#endif // TOOB_MINIMAL_CRYPTO
 
 ////////////////////////////////////
 /// Arithmetic modulo 2^255 - 19 ///
@@ -2711,6 +2715,7 @@ int crypto_elligator_rev(u8 hidden[32], const u8 public_key[32], u8 tweak)
 	return is_square - 1;
 }
 
+#ifndef TOOB_MINIMAL_CRYPTO
 void crypto_elligator_key_pair(u8 hidden[32], u8 secret_key[32], u8 seed[32])
 {
 	u8 pk [32]; // public key
@@ -2732,6 +2737,7 @@ void crypto_elligator_key_pair(u8 hidden[32], u8 secret_key[32], u8 seed[32])
 	WIPE_BUFFER(buf);
 	WIPE_BUFFER(pk);
 }
+#endif // TOOB_MINIMAL_CRYPTO
 
 ///////////////////////
 /// Scalar division ///
@@ -2852,6 +2858,7 @@ void crypto_x25519_inverse(u8 blind_salt [32], const u8 private_key[32],
 	WIPE_BUFFER(product);  WIPE_BUFFER(m_inv);
 }
 
+#ifndef TOOB_MINIMAL_CRYPTO
 ////////////////////////////////
 /// Authenticated encryption ///
 ////////////////////////////////
@@ -2950,6 +2957,7 @@ int crypto_aead_unlock(u8 *plain_text, const u8  mac[16], const u8 key[32],
 	crypto_wipe(&ctx, sizeof(ctx));
 	return mismatch;
 }
+#endif // TOOB_MINIMAL_CRYPTO
 
 #ifdef MONOCYPHER_CPP_NAMESPACE
 }

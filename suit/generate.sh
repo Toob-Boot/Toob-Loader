@@ -104,11 +104,33 @@ EOF
 #include <stdbool.h>
 #include <stddef.h>
 
-/* Minimalistisches ZCBOR Dummy Struct (ABI Aligned uint8_t) */
+struct ext_health {
+    uint32_t ext_health_wal_erasures;
+    uint32_t ext_health_app_erasures;
+    uint32_t ext_health_staging_erasures;
+    uint32_t ext_health_swap_erasures;
+};
+
+struct zcbor_string {
+    const uint8_t *value;
+    size_t len;
+};
+
+/* Minimalistisches ZCBOR Dummy Struct (ABI Aligned) */
 struct toob_telemetry {
     uint8_t schema_version;
+    uint32_t boot_duration_ms;
+    uint32_t edge_recovery_events;
+    uint32_t hardware_fault_record;
+    uint32_t vendor_error;
+    uint32_t wdt_kicks;
+    uint32_t current_svn;
     uint8_t active_key_index;
     bool fallback_occurred;
+    struct zcbor_string sbom_digest;
+    uint32_t boot_session_id;
+    struct ext_health ext_health;
+    bool ext_health_present;
 };
 
 extern bool cbor_decode_toob_telemetry(const uint8_t *payload, size_t payload_len, struct toob_telemetry *result, size_t *payload_len_out);

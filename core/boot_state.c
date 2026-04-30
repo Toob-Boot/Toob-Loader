@@ -171,7 +171,14 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
       uint8_t safe_sig_ed25519[64] __attribute__((aligned(8)));
       boot_secure_zeroize(safe_sig_ed25519, sizeof(safe_sig_ed25519));
 
-      if (parsed_suit.suit_envelope.signature_ed25519.len != 64) {
+      if (parsed_suit.suit_envelope.signature_ed25519.len != 64 ||
+          !is_buffer_within(parsed_suit.suit_envelope.signature_ed25519.value, 64, crypto_arena, BOOT_CRYPTO_ARENA_SIZE) ||
+          (parsed_suit.suit_envelope.pqc_hybrid_active && (
+              !is_buffer_within(parsed_suit.suit_envelope.signature_pqc.value, parsed_suit.suit_envelope.signature_pqc.len, crypto_arena, BOOT_CRYPTO_ARENA_SIZE) ||
+              !is_buffer_within(parsed_suit.suit_envelope.pubkey_pqc.value, parsed_suit.suit_envelope.pubkey_pqc.len, crypto_arena, BOOT_CRYPTO_ARENA_SIZE)
+          )) ||
+          (parsed_suit.suit_conditions.device_identifier.len > 0 &&
+              !is_buffer_within(parsed_suit.suit_conditions.device_identifier.value, parsed_suit.suit_conditions.device_identifier.len, crypto_arena, BOOT_CRYPTO_ARENA_SIZE))) {
         verify_status = BOOT_ERR_INVALID_ARG;
       } else {
         memcpy(safe_sig_ed25519,

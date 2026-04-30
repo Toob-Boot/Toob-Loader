@@ -90,8 +90,7 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
   _Static_assert(BOOT_MERKLE_MAX_CTX_SIZE % sizeof(uint64_t) == 0,
                  "BOOT_MERKLE_MAX_CTX_SIZE must be exactly divisible by 8");
 
-  uint64_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE / sizeof(uint64_t)]
-      __attribute__((aligned(8)));
+  uint8_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
   uint8_t computed_hash[BOOT_MERKLE_HASH_LEN] __attribute__((aligned(8)));
 
   /* Zwingende Initialisierung aller Stack-Bereiche (Verhindert Leakage) */

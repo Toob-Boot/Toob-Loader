@@ -13,8 +13,9 @@
 *********************************************************************/
 
 /*************************** HEADER FILES ***************************/
-#include <stdlib.h>
-#include <memory.h>
+#include <stdint.h>
+#include <string.h>
+#include "boot_secure_zeroize.h"
 #include "sha256.h"
 
 /****************************** MACROS ******************************/
@@ -29,7 +30,7 @@
 #define SIG1(x) (ROTRIGHT(x,17) ^ ROTRIGHT(x,19) ^ ((x) >> 10))
 
 /**************************** VARIABLES *****************************/
-static const WORD k[64] = {
+static const uint32_t k[64] = {
 	0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
 	0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
 	0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
@@ -41,9 +42,9 @@ static const WORD k[64] = {
 };
 
 /*********************** FUNCTION DEFINITIONS ***********************/
-void sha256_transform(SHA256_CTX *ctx, const BYTE data[])
+void sha256_transform(SHA256_CTX *ctx, const uint8_t data[])
 {
-	WORD a, b, c, d, e, f, g, h, i, j, t1, t2, m[64];
+	uint32_t a, b, c, d, e, f, g, h, i, j, t1, t2, m[64];
 
 	for (i = 0, j = 0; i < 16; ++i, j += 4)
 		m[i] = (data[j] << 24) | (data[j + 1] << 16) | (data[j + 2] << 8) | (data[j + 3]);
@@ -96,9 +97,9 @@ void sha256_init(SHA256_CTX *ctx)
 	ctx->state[7] = 0x5be0cd19;
 }
 
-void sha256_update(SHA256_CTX *ctx, const BYTE data[], size_t len)
+void sha256_update(SHA256_CTX *ctx, const uint8_t data[], size_t len)
 {
-	WORD i;
+	uint32_t i;
 
 	for (i = 0; i < len; ++i) {
 		ctx->data[ctx->datalen] = data[i];
@@ -111,9 +112,9 @@ void sha256_update(SHA256_CTX *ctx, const BYTE data[], size_t len)
 	}
 }
 
-void sha256_final(SHA256_CTX *ctx, BYTE hash[])
+void sha256_final(SHA256_CTX *ctx, uint8_t hash[])
 {
-	WORD i;
+	uint32_t i;
 
 	i = ctx->datalen;
 
@@ -128,7 +129,7 @@ void sha256_final(SHA256_CTX *ctx, BYTE hash[])
 		while (i < 64)
 			ctx->data[i++] = 0x00;
 		sha256_transform(ctx, ctx->data);
-		memset(ctx->data, 0, 56);
+		boot_secure_zeroize(ctx->data, 56);
 	}
 
 	// Append to the padding the total message's length in bits and transform.

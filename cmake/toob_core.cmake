@@ -24,13 +24,24 @@ add_library(toob_zcbor STATIC
 )
 target_include_directories(toob_zcbor PUBLIC lib/zcbor/include)
 
+# P10 Manifest Malleability Defense (GAP Fix)
+# Erzwingt kanonisches CBOR. Verhindert, dass identische Daten
+# durch unterschiedliche CBOR-Repräsentationen unterschiedliche Hashes erzeugen.
+target_compile_definitions(toob_zcbor PUBLIC ZCBOR_CANONICAL)
+set_target_properties(toob_zcbor PROPERTIES C_VISIBILITY_PRESET hidden)
+
 # heatshrink (ISC License)
 add_library(toob_heatshrink STATIC 
     lib/heatshrink/heatshrink_decoder.c
 )
 # WICHTIG (Zero-Allocation Limit): Ohne dieses Define würde heatshrink via malloc
 # dynamisch Dictionary-Speicher anfordern, was das P10-Setup hart crashen würde!
-target_compile_definitions(toob_heatshrink PUBLIC HEATSHRINK_DYNAMIC_ALLOC=0)
+target_compile_definitions(toob_heatshrink PUBLIC 
+    HEATSHRINK_DYNAMIC_ALLOC=0 
+    HEATSHRINK_STATIC_INPUT_BUFFER_SIZE=128 
+    HEATSHRINK_STATIC_WINDOW_BITS=8 
+    HEATSHRINK_STATIC_LOOKAHEAD_BITS=4
+)
 target_include_directories(toob_heatshrink PUBLIC lib/heatshrink)
 
 # ------------------------------------------------------------------------------
@@ -41,12 +52,14 @@ target_include_directories(toob_heatshrink PUBLIC lib/heatshrink)
 # anhand von device.toml generiert. Daher müssen wir CMake warnen, dass
 # die Datei zur Evaluierungszeit evtl. noch gar nicht im Filebaum liegt.
 set(GENERATED_SUIT_C "${CMAKE_BINARY_DIR}/generated/boot_suit.c")
-set_source_files_properties(${GENERATED_SUIT_C} PROPERTIES GENERATED TRUE)
+set(GENERATED_TELEMETRY_ENCODE_C "${CMAKE_BINARY_DIR}/generated/toob_telemetry_encode.c")
+set_source_files_properties(${GENERATED_SUIT_C} ${GENERATED_TELEMETRY_ENCODE_C} PROPERTIES GENERATED TRUE)
 
 # M-BUILD GAP-Fix: Custom Command zum Aufrufen der SUIT & Config Generation
 add_custom_command(
     OUTPUT ${GENERATED_SUIT_C}
            ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
+           ${GENERATED_TELEMETRY_ENCODE_C}
            ${CMAKE_BINARY_DIR}/generated/chip_config.h
            ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
            ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
@@ -59,7 +72,7 @@ add_custom_command(
     # Fehlt Python oder ZCBOR, generiert das Skript C-Mocks und das rettende
     # `stage0_layout.ld` Dummy-File, um Windows-Linker Abstürze zu verhindern.
     # -------------------------------------------------------------------------
-    COMMAND bash ${CMAKE_SOURCE_DIR}/suit/generate.sh ${CMAKE_BINARY_DIR}/generated
+    COMMAND sh ${CMAKE_SOURCE_DIR}/suit/generate.sh ${CMAKE_BINARY_DIR}/generated
     COMMENT "Executing SUIT ZCBOR CodeGen & Config-Bridge..."
 )
 

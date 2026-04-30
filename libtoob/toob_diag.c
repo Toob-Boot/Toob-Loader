@@ -25,6 +25,7 @@
 
 #include "libtoob.h"
 #include "toob_internal.h"
+#include "toob_telemetry_encode.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -195,6 +196,58 @@ toob_status_t toob_get_boot_diag(toob_boot_diag_t *diag) {
 
   /* O(1) Stack Clean-Up (DCE Proof) */
   toob_secure_zeroize(&local_diag, sizeof(local_diag));
+
+  return TOOB_OK;
+}
+
+toob_status_t toob_get_boot_diag_cbor(uint8_t *out_buf, size_t max_len, size_t *out_len) {
+  if (!out_buf || !out_len) {
+    return TOOB_ERR_INVALID_ARG;
+  }
+
+  toob_boot_diag_t diag;
+  toob_status_t status = toob_get_boot_diag(&diag);
+  if (status != TOOB_OK) {
+    return status;
+  }
+
+  struct toob_telemetry tel;
+  toob_secure_zeroize(&tel, sizeof(tel));
+
+  tel.schema_version = diag.struct_version;
+  tel.boot_duration_ms = diag.boot_duration_ms;
+  tel.edge_recovery_events = diag.edge_recovery_events;
+  tel.hardware_fault_record = diag.hardware_fault_record;
+  tel.vendor_error = diag.vendor_error;
+  tel.wdt_kicks = diag.wdt_kicks;
+  tel.current_svn = diag.current_svn;
+  tel.active_key_index = diag.active_key_index;
+  tel.fallback_occurred = diag.fallback_occurred;
+
+  tel.sbom_digest.value = diag.sbom_digest;
+  tel.sbom_digest.len = sizeof(diag.sbom_digest);
+
+  tel.boot_session_id = diag.boot_session_id;
+
+  if (diag.wear_wal_erasures > 0 || diag.wear_app_erasures > 0 ||
+      diag.wear_staging_erasures > 0 || diag.wear_swap_erasures > 0) {
+    tel.ext_health_present = true;
+    tel.ext_health.ext_health_wal_erasures = diag.wear_wal_erasures;
+    tel.ext_health.ext_health_app_erasures = diag.wear_app_erasures;
+    tel.ext_health.ext_health_staging_erasures = diag.wear_staging_erasures;
+    tel.ext_health.ext_health_swap_erasures = diag.wear_swap_erasures;
+  } else {
+    tel.ext_health_present = false;
+  }
+
+  bool encoded = cbor_encode_toob_telemetry(out_buf, max_len, &tel, out_len);
+  
+  toob_secure_zeroize(&tel, sizeof(tel));
+  toob_secure_zeroize(&diag, sizeof(diag));
+
+  if (!encoded) {
+    return TOOB_ERR_INVALID_STATE;
+  }
 
   return TOOB_OK;
 }
