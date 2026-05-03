@@ -29,6 +29,7 @@ target_include_directories(toob_zcbor PUBLIC lib/zcbor/include)
 # durch unterschiedliche CBOR-Repräsentationen unterschiedliche Hashes erzeugen.
 target_compile_definitions(toob_zcbor PUBLIC ZCBOR_CANONICAL)
 set_target_properties(toob_zcbor PROPERTIES C_VISIBILITY_PRESET hidden)
+target_compile_options(toob_zcbor PRIVATE -Os -ffunction-sections -fdata-sections)
 
 # heatshrink (ISC License)
 add_library(toob_heatshrink STATIC 
@@ -42,6 +43,7 @@ target_compile_definitions(toob_heatshrink PUBLIC
     HEATSHRINK_STATIC_WINDOW_BITS=8 
     HEATSHRINK_STATIC_LOOKAHEAD_BITS=4
 )
+target_compile_options(toob_heatshrink PRIVATE -Os -ffunction-sections -fdata-sections)
 target_include_directories(toob_heatshrink PUBLIC lib/heatshrink)
 
 # ------------------------------------------------------------------------------

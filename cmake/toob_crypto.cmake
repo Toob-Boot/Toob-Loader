@@ -39,7 +39,7 @@ if(NOT TOOB_CRYPTO_DISABLE_SW_ENGINE)
     # GAP Fix: Performance & Constant-Time Guarantee
     # Erzwinge O3 für ~9ms Ed25519 Latenz und blockiere globales LTO (-fno-lto),
     # was bewiesenermaßen Constant-Time Algorithmen kaputt-inlinen kann.
-    target_compile_options(toob_crypto_upstream PRIVATE -O3 -fno-lto)
+    target_compile_options(toob_crypto_upstream PRIVATE -O3 -fno-lto -ffunction-sections -fdata-sections)
 endif()
 
 # Optionaler PQC Code (Zero-Allocation ML-DSA)

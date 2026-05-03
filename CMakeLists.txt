@@ -66,6 +66,8 @@ function(toob_apply_strict_flags TARGET_NAME ALLOW_STACK_PROTECTOR)
         -Wstrict-prototypes 
         -Wmissing-prototypes
         -fno-common
+        # Force Size Optimization for P10 28KB Budget
+        -Os
         # Dead Code Elimination (linker will gc later)
         -ffunction-sections 
         -fdata-sections
