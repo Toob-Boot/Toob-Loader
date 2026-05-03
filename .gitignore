@@ -2,6 +2,8 @@
 archive/
 build/
 build-*/
+build_c6/
+build_c6_ninja/
 CMakeCache.txt
 CMakeFiles/
 Makefile

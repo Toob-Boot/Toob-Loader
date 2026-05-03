@@ -114,6 +114,20 @@ if(TARGET toob_crypto_upstream)
     target_link_libraries(toob_stage1 PRIVATE toob_crypto_upstream)
 endif()
 
+# 5.3.5 eFuse Link-Time Mocking Strategy (P10 Anti-Brick)
+option(TOOB_MOCK_EFUSES "Use Link-Time Mocking for eFuses" ON)
+if(TOOB_MOCK_EFUSES)
+    add_compile_definitions(TOOB_MOCK_EFUSES=1)
+    if(TOOB_CHIP STREQUAL "esp32c6")
+        target_link_options(toob_stage1 PRIVATE
+            "-Wl,--wrap=esp32c6_read_pubkey"
+            "-Wl,--wrap=esp32c6_read_dslc"
+            "-Wl,--wrap=esp32c6_read_monotonic"
+            "-Wl,--wrap=esp32c6_advance_monotonic"
+        )
+    endif()
+endif()
+
 # 5.4 Linker Script Integration
 if(NOT TOOB_ARCH STREQUAL "host")
     # Prefer manifest-compiler generated layout; fall back to chip-specific script

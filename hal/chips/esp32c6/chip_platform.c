@@ -142,26 +142,58 @@ static boot_status_t esp32c6_hw_random(uint8_t *buf, size_t len)
     return BOOT_OK;
 }
 
-static boot_status_t esp32c6_read_pubkey_stub(uint8_t *key, size_t key_len, uint8_t key_index)
+/* EFUSE Controller Base Address for ESP32-C6 */
+#define ESP32C6_EFUSE_BASE 0x600B0800U
+/* Block 4 is commonly used for secure boot keys (KEY0) */
+#define EFUSE_BLK_KEY0_DATA0_REG (ESP32C6_EFUSE_BASE + 0x0A4U)
+/* SYS_DATA_PART2 is often used for custom counters (Block 2) */
+#define EFUSE_SYS_DATA_PART2_REG (ESP32C6_EFUSE_BASE + 0x04CU)
+
+static boot_status_t esp32c6_read_pubkey(uint8_t *key, size_t key_len, uint8_t key_index)
 {
-    (void)key; (void)key_len; (void)key_index;
-    return BOOT_ERR_NOT_SUPPORTED;
+    (void)key_index; /* Selects between KEY0-KEY5. We statically map to KEY0. */
+    if (!key || key_len != 32) {
+        return BOOT_ERR_INVALID_ARG;
+    }
+
+    /* Production P10 Physical Access: Direct memory mapped hardware registers */
+    for (size_t i = 0; i < 8; i++) {
+        uint32_t word = REG_READ(EFUSE_BLK_KEY0_DATA0_REG + (i * 4U));
+        key[(i * 4) + 0] = (uint8_t)(word & 0xFF);
+        key[(i * 4) + 1] = (uint8_t)((word >> 8) & 0xFF);
+        key[(i * 4) + 2] = (uint8_t)((word >> 16) & 0xFF);
+        key[(i * 4) + 3] = (uint8_t)((word >> 24) & 0xFF);
+    }
+    return BOOT_OK;
 }
 
-static boot_status_t esp32c6_read_dslc_stub(uint8_t *buffer, size_t *len)
+static boot_status_t esp32c6_read_dslc(uint8_t *buffer, size_t *len)
 {
-    (void)buffer; (void)len;
-    return BOOT_ERR_NOT_SUPPORTED;
+    if (!buffer || !len || *len < 1) {
+        return BOOT_ERR_INVALID_ARG;
+    }
+    /* Read lowest byte of SYS_DATA_PART2 as DSLC */
+    uint32_t word = REG_READ(EFUSE_SYS_DATA_PART2_REG);
+    buffer[0] = (uint8_t)(word & 0xFF);
+    *len = 1;
+    return BOOT_OK;
 }
 
-static boot_status_t esp32c6_read_monotonic_stub(uint32_t *ctr)
+static boot_status_t esp32c6_read_monotonic(uint32_t *ctr)
 {
-    (void)ctr;
-    return BOOT_ERR_NOT_SUPPORTED;
+    if (!ctr) {
+        return BOOT_ERR_INVALID_ARG;
+    }
+    /* Read from next word in SYS_DATA_PART2 as Monotonic Counter */
+    *ctr = REG_READ(EFUSE_SYS_DATA_PART2_REG + 4U);
+    return BOOT_OK;
 }
 
-static boot_status_t esp32c6_advance_monotonic_stub(void)
+static boot_status_t esp32c6_advance_monotonic(void)
 {
+    /* Physical write to eFuse requires timing/programming control (ets_efuse_program).
+       For production bootloaders, advancing the monotonic counter is handled via ROM calls 
+       or strictly regulated burn cycles to prevent brcking. */
     return BOOT_ERR_NOT_SUPPORTED;
 }
 
@@ -176,10 +208,10 @@ static const crypto_hal_t esp32c6_crypto_hal = {
     .verify_pqc               = NULL,
     .random                   = esp32c6_hw_random,
     .get_last_vendor_error    = NULL,
-    .read_pubkey              = esp32c6_read_pubkey_stub,
-    .read_dslc                = esp32c6_read_dslc_stub,
-    .read_monotonic_counter   = esp32c6_read_monotonic_stub,
-    .advance_monotonic_counter = esp32c6_advance_monotonic_stub,
+    .read_pubkey              = esp32c6_read_pubkey,
+    .read_dslc                = esp32c6_read_dslc,
+    .read_monotonic_counter   = esp32c6_read_monotonic,
+    .advance_monotonic_counter = esp32c6_advance_monotonic,
     .get_hash_ctx_size        = crypto_monocypher_get_hash_ctx_size,
     .has_hw_acceleration      = false,
     .is_pqc_enforced          = NULL,

@@ -20,7 +20,9 @@
  */
 
 #include "boot_state.h"
+#include "chip_config.h"
 #include "boot_config_mock.h"
+#include "boot_diag.h"
 #include "boot_delta.h"
 #include "boot_journal.h"
 #include "boot_merkle.h"
@@ -33,6 +35,32 @@
 #include "boot_verify.h"
 #include <string.h>
 
+/* ============================================================================
+ * INTERNAL HELPER: CONSTANT TIME MEMCMP (Glitch Protected)
+ * ============================================================================
+ */
+static inline boot_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
+                                                             const uint8_t *b,
+                                                             size_t len) {
+  uint32_t acc_fwd = 0;
+  uint32_t acc_rev = 0;
+
+  for (size_t i = 0; i < len; i++) {
+    acc_fwd |= (uint32_t)(a[i] ^ b[i]);
+    acc_rev |= (uint32_t)(a[len - 1 - i] ^ b[len - 1 - i]);
+  }
+
+  volatile uint32_t shield_1 = 0, shield_2 = 0;
+  if (acc_fwd == 0)
+    shield_1 = BOOT_OK;
+  BOOT_GLITCH_DELAY();
+  if (shield_1 == BOOT_OK && acc_rev == 0)
+    shield_2 = BOOT_OK;
+
+  if (shield_1 == BOOT_OK && shield_2 == BOOT_OK && shield_1 == shield_2)
+    return BOOT_OK;
+  return BOOT_ERR_VERIFY;
+}
 /* P10 Zero-Trust CFI Constants (High Hamming Distance) */
 #define CFI_TOKEN_INIT 0xAAAAAAAA
 #define CFI_STEP_1 0x11111111
@@ -330,7 +358,13 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                             /* P10 SECURITY FIX: SDVM Output zwingend gegen den signierten Merkle-Tree prüfen! */
                             boot_status_t hash_stat = boot_merkle_verify_stream(
                                 platform, CHIP_SCRATCH_SLOT_ABS_ADDR, 
-                                app_img->toob_image_delta.image_size, chunk_hashes->value);
+                                app_img->toob_image_delta.image_size,
+                                app_img->toob_image_delta.chunk_size,
+                                chunk_hashes->value,
+                                chunk_hashes->len,
+                                num_chunks,
+                                crypto_arena,
+                                BOOT_CRYPTO_ARENA_SIZE);
 
                             if (hash_stat == BOOT_OK) {
                                 verify_status = BOOT_OK;

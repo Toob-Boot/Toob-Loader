@@ -23,6 +23,7 @@
  */
 
 #include "boot_main.h"
+#include "chip_config.h"
 #include "boot_config_mock.h"
 #include "boot_crc32.h"
 #include "boot_delay.h"
@@ -31,7 +32,6 @@
 #include "boot_secure_zeroize.h"
 #include "boot_state.h"
 #include "boot_journal.h"
-#include "chip_config.h"
 #include <stddef.h>
 #include <string.h>
 

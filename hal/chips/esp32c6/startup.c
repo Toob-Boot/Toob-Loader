@@ -103,6 +103,8 @@ jump_to_os(uint32_t entry_point)
     __builtin_unreachable();
 }
 
+void _start(void);
+
 /**
  * @brief Entry point from the BootROM / linker.
  *

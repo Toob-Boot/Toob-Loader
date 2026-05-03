@@ -24,17 +24,24 @@
 #endif
 
 /* FIX (Doublecheck): Missing Addresses for App Slot A & Recovery OS */
+#ifndef CHIP_APP_SLOT_ABS_ADDR
 #define CHIP_APP_SLOT_ABS_ADDR     0x00010000 
 #define CHIP_STAGING_SLOT_ABS_ADDR 0x00060000
 #define CHIP_RECOVERY_OS_ABS_ADDR  0x000B0000
 #define CHIP_SCRATCH_SLOT_ABS_ADDR 0x00100000 /* Dedicated A/B Safe Buffer for Delta Updates */
 #define CHIP_NETCORE_SLOT_ABS_ADDR 0x00150000 /* NetCore Base Address */
 #define CHIP_FLASH_BASE_ADDR       0x00000000
-#define CHIP_FLASH_TOTAL_SIZE      0x00200000 /* 2 MB Mock */
 #define CHIP_APP_SLOT_SIZE         0x00050000 /* 320 KB Mock */
+#endif
+
+#ifndef CHIP_FLASH_TOTAL_SIZE
+#define CHIP_FLASH_TOTAL_SIZE      0x00200000 /* 2 MB Mock */
+#endif
 
 /* Mocks for Serial-Rescue Target Checks */
+#ifndef CHIP_STAGING_SLOT_ID
 #define CHIP_STAGING_SLOT_ID       2
+#endif
 
 /* WDT Timeout als Hardware-Konstante (generiert vom Manifest Builder) */
 #ifndef BOOT_WDT_TIMEOUT_MS
