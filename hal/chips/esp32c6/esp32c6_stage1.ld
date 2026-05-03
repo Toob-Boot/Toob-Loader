@@ -12,6 +12,9 @@
  * LP_RAM (0x50000000, 16KB):
  *   - Used for confirm_hal (vendor_rtc_mem.c) and .noinit handoff state.
  * =========================================================================== */
+
+INCLUDE generated_memory.ld
+
 ENTRY(_start)
 
 MEMORY

@@ -28,6 +28,11 @@ else()
     endif()
 endif()
 
+# Set default manifest if not provided by the user
+if(NOT TOOB_DEVICE_MANIFEST)
+    set(TOOB_DEVICE_MANIFEST "${CMAKE_SOURCE_DIR}/manifests/device.toml")
+endif()
+
 # ------------------------------------------------------------------------------
 # 2. Global Safety Limits (P10 / NASA Standards)
 # ------------------------------------------------------------------------------
@@ -76,11 +81,12 @@ function(toob_apply_strict_flags TARGET_NAME ALLOW_STACK_PROTECTOR)
     # Nur für Cross-Compilate (ESP32, ARM etc.), nicht für den Fuzzer (Host)!
     if(NOT TOOB_ARCH STREQUAL "host")
         target_link_options(${TARGET_NAME} PRIVATE
-            -nostartfiles       # Verhindert Einbinden von crt0.o (main() etc.)
-            --specs=nosys.specs # Setzt leere Stubs für OS-Syscalls (_close, _read)
+            -nostartfiles
+            -Wl,-Map=${TARGET_NAME}.map
         )
-        # Nano.specs minimiert die Newlib stark. Standard bei ARM und Espressif GCC.
-        # Schützt vor Toolchain-Fehlern bei exotischen Compilern.
+        target_compile_options(${TARGET_NAME} PRIVATE
+            -fno-builtin        # Prevent GCC from silently linking libc built-ins (e.g. memcpy, printf)
+        )
         if(CMAKE_C_COMPILER_ID MATCHES "GNU")
             target_link_options(${TARGET_NAME} PRIVATE --specs=nano.specs)
         endif()
@@ -153,13 +159,14 @@ if(NOT TOOB_ARCH STREQUAL "host")
         message(FATAL_ERROR "No linker script found for chip '${TOOB_CHIP}'!")
     endif()
 
-    target_link_options(toob_stage1 PRIVATE -T${TOOB_LINKER_SCRIPT})
+    target_link_options(toob_stage1 PRIVATE -T${TOOB_LINKER_SCRIPT} -L${CMAKE_BINARY_DIR}/generated)
 
-    # 5.5 Firmware Image Generation (.elf -> .bin)
+    # 5.5 Firmware Image Generation (.elf -> .bin) & Budget Check
     add_custom_command(
         TARGET toob_stage1 POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_stage1> $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin
-        COMMENT "Generating flashable RAW binary toob_stage1.bin..."
+        COMMAND python ${CMAKE_SOURCE_DIR}/manifest_compiler/budget_check.py --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin --stage stage1
+        COMMENT "Generating flashable RAW binary toob_stage1.bin and checking flash budget..."
     )
 endif()
 

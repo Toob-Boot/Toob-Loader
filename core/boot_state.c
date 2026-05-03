@@ -20,7 +20,7 @@
  */
 
 #include "boot_state.h"
-#include "chip_config.h"
+#include "generated_boot_config.h"
 #include "boot_config_mock.h"
 #include "boot_diag.h"
 #include "boot_delta.h"

@@ -60,7 +60,7 @@ add_custom_command(
     OUTPUT ${GENERATED_SUIT_C}
            ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
            ${GENERATED_TELEMETRY_ENCODE_C}
-           ${CMAKE_BINARY_DIR}/generated/chip_config.h
+           ${CMAKE_BINARY_DIR}/generated/generated_boot_config.h
            ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
            ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
@@ -72,7 +72,7 @@ add_custom_command(
     # Fehlt Python oder ZCBOR, generiert das Skript C-Mocks und das rettende
     # `stage0_layout.ld` Dummy-File, um Windows-Linker Abstürze zu verhindern.
     # -------------------------------------------------------------------------
-    COMMAND sh ${CMAKE_SOURCE_DIR}/suit/generate.sh ${CMAKE_BINARY_DIR}/generated
+    COMMAND sh ${CMAKE_SOURCE_DIR}/suit/generate.sh ${CMAKE_BINARY_DIR}/generated ${TOOB_DEVICE_MANIFEST} ${TOOB_CHIP}
     COMMENT "Executing SUIT ZCBOR CodeGen & Config-Bridge..."
 )
 
@@ -80,7 +80,7 @@ add_custom_command(
 add_custom_target(generate_manifest
     DEPENDS ${GENERATED_SUIT_C}
             ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
-            ${CMAKE_BINARY_DIR}/generated/chip_config.h
+            ${CMAKE_BINARY_DIR}/generated/generated_boot_config.h
             ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
             ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
 )

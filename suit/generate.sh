@@ -13,12 +13,14 @@
 
 set -euo pipefail
 
-OUTPUT_DIR=$1
-
-if [ -z "$OUTPUT_DIR" ]; then
-    echo "Usage: $0 <output_dir>"
+if [ "$#" -lt 3 ]; then
+    echo "Usage: $0 <output_dir> <device_manifest_path> <toob_chip>"
     exit 1
 fi
+
+OUTPUT_DIR=$1
+DEVICE_MANIFEST=$2
+TOOB_CHIP=$3
 
 PROJECT_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$OUTPUT_DIR"
@@ -204,9 +206,9 @@ EOF
 
 inject_hardware_mocks() {
     echo "[SUIT CodeGen] Injecting Sandbox Hardware Mocks..."
-    cat << 'EOF' > "$OUTPUT_DIR/chip_config.h"
-#ifndef TOOB_CHIP_CONFIG_MOCK_H
-#define TOOB_CHIP_CONFIG_MOCK_H
+    cat << 'EOF' > "$OUTPUT_DIR/generated_boot_config.h"
+#ifndef TOOB_GENERATED_BOOT_CONFIG_MOCK_H
+#define TOOB_GENERATED_BOOT_CONFIG_MOCK_H
 
 #include <stdint.h>
 
@@ -234,7 +236,7 @@ extern volatile uint32_t toob_mock_addr_rtc_ram;
 EOF
 
     cat << 'EOF' > "$OUTPUT_DIR/chip_config_mock.c"
-#include "chip_config.h"
+#include "generated_boot_config.h"
 
 /* ODR-sichere Allokation für Sandbox Pointer-Targets, verhindert Segfaults */
 volatile uint32_t toob_mock_reg_reset_reason = 0;
@@ -255,11 +257,11 @@ SECTIONS {
 EOF
 }
 
-MANIFEST_CLI="$PROJECT_ROOT/tools/manifest_compiler/cli.py"
+MANIFEST_CLI="$PROJECT_ROOT/manifest_compiler/toob_manifest.py"
 
 if [ -f "$MANIFEST_CLI" ]; then
     echo "[SUIT CodeGen] Executing Manifest-Compiler..."
-    if ! python3 "$MANIFEST_CLI" generate --output-dir "$OUTPUT_DIR"; then
+    if ! python "$MANIFEST_CLI" --toml "$DEVICE_MANIFEST" --hardware "$PROJECT_ROOT/hal/chips/$TOOB_CHIP/hardware.json" --outdir "$OUTPUT_DIR"; then
         echo "[SUIT CodeGen] ERROR: Manifest-Compiler crashed! Yielding to fallback mocks to preserve CI..."
         inject_hardware_mocks
     fi
@@ -269,7 +271,7 @@ if [ -f "$MANIFEST_CLI" ]; then
     fi
 else
     echo "[SUIT CodeGen] WARNING: manifest_compiler not deployed. Generating Bare-Metal Linker & Header Definitions via Python Fallback..."
-    python3 -c "
+    python -c "
 import os
 
 out_dir = '$OUTPUT_DIR'

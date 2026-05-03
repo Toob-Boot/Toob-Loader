@@ -1,9 +1,17 @@
 #ifndef BOOT_CONFIG_MOCK_H
 #define BOOT_CONFIG_MOCK_H
 
+#if __has_include("generated_boot_config.h")
+#include "generated_boot_config.h"
+#endif
+
 /* Temporäre Phase 1-3 Mock-Konfiguration bis der Manifest-Compiler fertig ist */
+#ifndef TOOB_WAL_BASE_ADDR
 #define TOOB_WAL_BASE_ADDR 0x000F0000
+#endif
+#ifndef TOOB_WAL_SECTORS
 #define TOOB_WAL_SECTORS   4
+#endif
 
 /* GAP-FIX: Asymmetrische Hardware-Sektor Mappings für den Mock */
 #ifndef TOOB_WAL_SECTOR_ADDRS

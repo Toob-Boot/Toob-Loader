@@ -23,7 +23,7 @@
  */
 
 #include "boot_main.h"
-#include "chip_config.h"
+#include "generated_boot_config.h"
 #include "boot_config_mock.h"
 #include "boot_crc32.h"
 #include "boot_delay.h"

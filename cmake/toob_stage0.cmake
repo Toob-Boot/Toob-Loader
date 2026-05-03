@@ -95,6 +95,7 @@ target_compile_options(toob_stage0 PRIVATE
 target_link_options(toob_stage0 PRIVATE
     "-Wl,--gc-sections"
     "-T${CMAKE_BINARY_DIR}/generated/stage0_layout.ld"
+    "-L${CMAKE_BINARY_DIR}/generated"
 )
 
 # Linker-Trigger:
@@ -107,7 +108,7 @@ if(TARGET generate_manifest)
 endif()
 
 # ==============================================================================
-# M-BUILD GAP-Fix: Flashable Raw-Binary Generation (.bin)
+# M-BUILD GAP-Fix: Flashable Raw-Binary Generation (.bin) & Budget Check
 # ==============================================================================
 # Die Sandbox benötigt keine Binary-Dumps, Bare-Metal Cortex-M und Xtensa hingegen
 # starten exklusiv aus entpacktem Flash-RAM ohne ELF-Header.
@@ -115,6 +116,7 @@ if(NOT TOOB_ARCH STREQUAL "host")
     add_custom_command(
         TARGET toob_stage0 POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_stage0> $<TARGET_FILE_DIR:toob_stage0>/toob_stage0.bin
-        COMMENT "Generating flashable RAW binary toob_stage0.bin..."
+        COMMAND python ${CMAKE_SOURCE_DIR}/manifest_compiler/budget_check.py --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage0>/toob_stage0.bin --stage stage0
+        COMMENT "Generating flashable RAW binary toob_stage0.bin and checking flash budget..."
     )
 endif()

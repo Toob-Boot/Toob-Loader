@@ -37,6 +37,7 @@ if(VENDOR_SOURCES)
     add_library(toob_vendor STATIC ${VENDOR_SOURCES})
     target_include_directories(toob_vendor PUBLIC 
         hal/vendor/${TOOB_VENDOR}/include
+        hal/chips/${TOOB_CHIP}
         core/include
         ${CMAKE_BINARY_DIR}/generated
         libtoob/include

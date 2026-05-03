@@ -1,0 +1,12 @@
+[device]
+vendor = "espressif"
+chip = "esp32c6"
+
+[partitions]
+# Budgets in Bytes
+stage0_size = 16384        # 16 KB
+stage1_size = 28672        # 28 KB
+app_size = 393216          # 384 KB
+recovery_size = 131072     # 128 KB
+netcore_size = 65536       # 64 KB
+enable_deltas = true       # Force Scratch Slot Generation

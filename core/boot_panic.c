@@ -739,3 +739,21 @@ void __attribute__((section(".iram1.text"))) toob_ecc_trap(void) {
         __asm__ volatile("nop");
     }
 }
+
+/* 
+ * Override libc's __stack_chk_fail to prevent pulling in abort(), raise(), and printf() 
+ * which bloat the binary by 120KB.
+ */
+/* 
+ * P10 / OSV Härtung: Eigene Stack Protector Definitionen.
+ * Wenn wir diese nicht bereitstellen, zieht GCC `stack_protector.o` aus `libc_nano.a`,
+ * was `abort()`, `raise()` und letztlich `printf()` und IO nachzieht -> 145KB Bloat!
+ */
+uintptr_t __stack_chk_guard = 0xDEADBEEF;
+
+void __stack_chk_fail(void);
+
+void __stack_chk_fail(void) {
+    /* Stack smashing detected: Enter hardware panic */
+    boot_panic(NULL, BOOT_ERR_ECC_HARDFAULT);
+}
