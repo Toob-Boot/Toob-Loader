@@ -72,6 +72,20 @@ function(toob_apply_strict_flags TARGET_NAME ALLOW_STACK_PROTECTOR)
         -Wl,--gc-sections
     )
 
+    # P10 Bare-Metal Linker Protection:
+    # Nur für Cross-Compilate (ESP32, ARM etc.), nicht für den Fuzzer (Host)!
+    if(NOT TOOB_ARCH STREQUAL "host")
+        target_link_options(${TARGET_NAME} PRIVATE
+            -nostartfiles       # Verhindert Einbinden von crt0.o (main() etc.)
+            --specs=nosys.specs # Setzt leere Stubs für OS-Syscalls (_close, _read)
+        )
+        # Nano.specs minimiert die Newlib stark. Standard bei ARM und Espressif GCC.
+        # Schützt vor Toolchain-Fehlern bei exotischen Compilern.
+        if(CMAKE_C_COMPILER_ID MATCHES "GNU")
+            target_link_options(${TARGET_NAME} PRIVATE --specs=nano.specs)
+        endif()
+    endif()
+
     if(ALLOW_STACK_PROTECTOR)
         target_compile_options(${TARGET_NAME} PRIVATE -fstack-protector-strong)
     endif()
@@ -111,7 +125,7 @@ if(TARGET toob_chip)
 endif()
 
 if(TARGET toob_crypto_upstream)
-    target_link_libraries(toob_stage1 PRIVATE toob_crypto_upstream)
+    target_link_libraries(toob_stage1 PRIVATE toob_crypto toob_crypto_upstream)
 endif()
 
 # 5.3.5 eFuse Link-Time Mocking Strategy (P10 Anti-Brick)
