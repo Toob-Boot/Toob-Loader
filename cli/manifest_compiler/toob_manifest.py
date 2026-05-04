@@ -39,51 +39,50 @@ def main():
         print(f"FATAL: Could not read {args.hardware}: {e}")
         sys.exit(1)
 
+    # GAP-15: Cross-file validation
+    toml_chip = toml_data.get("device", {}).get("chip", "").replace("-", "").lower()
+    hw_chip = blueprint_data.get("chip_family", "").replace("-", "").lower()
+    if toml_chip != hw_chip:
+        print(f"FATAL: device.toml chip ({toml_chip}) does not match hardware.json chip_family ({hw_chip})")
+        sys.exit(1)
+
     # Hardware facts
     flash_info = blueprint_data.get("flash", {})
-    flash_size = flash_info.get("size", 4 * 1024 * 1024)  # Fallback 4MB
-    write_align = flash_info.get("write_alignment", 32)
+    # GAP-05: Mandatory flash size
+    if "size" not in flash_info:
+        print("FATAL: flash.size is mandatory in hardware.json")
+        sys.exit(1)
+    flash_size = flash_info["size"]
+    
+    # GAP-06: Safe minimum write alignment
+    write_align = flash_info.get("write_alignment", 1)
+    
     regions = flash_info.get("regions", [])
-
-    # Fallback for old format
+    # GAP-08: Remove legacy fallback with 999999 count
     if not regions:
-        sector_size = flash_info.get("sector_size", 4096)
-        bootrom_reserved = flash_info.get("bootrom_reserved", 0)
-        if bootrom_reserved > 0:
-            regions.append(
-                {
-                    "base": 0,
-                    "size": bootrom_reserved,
-                    "type": "reserved",
-                    "description": "Legacy BootROM",
-                }
-            )
-        regions.append(
-            {
-                "base": bootrom_reserved,
-                "sector_size": sector_size,
-                "count": 999999,
-                "type": "writable",
-            }
-        )
+        print("FATAL: flash.regions array is mandatory in hardware.json")
+        sys.exit(1)
+
+    # GAP-02: Pre-calculate max_sector_size correctly once
+    max_sector_size = 0
+    for r in regions:
+        if r.get("type", "writable") == "writable":
+            max_sector_size = max(max_sector_size, r.get("sector_size", 0))
+    if max_sector_size == 0:
+        print("FATAL: No writable regions defined with valid sector_size")
+        sys.exit(1)
 
     def get_sector_size_at(addr):
         for r in regions:
             if r.get("type", "writable") == "writable":
                 base = r.get("base", 0)
-                sec_sz = r.get("sector_size", 4096)
+                sec_sz = r.get("sector_size", max_sector_size)
                 count = r.get("count", 0)
                 if base <= addr < base + sec_sz * count:
                     return sec_sz
-        return 4096  # Fallback
-
-    # Determine absolute max sector size for buffer allocations
-    max_sector_size = 0
-    if regions:
-        for r in regions:
-            max_sector_size = max(max_sector_size, r.get("sector_size", 4096))
-    if max_sector_size == 0:
-        max_sector_size = flash_info.get("sector_size", 4096)
+        # GAP-07: Abort instead of 4096 fallback
+        print(f"FATAL: Address 0x{addr:X} does not fall within any writable flash region")
+        sys.exit(1)
 
     def advance_to_writable(addr):
         while True:
@@ -138,28 +137,35 @@ def main():
 
     # Budgets from user
     partitions = toml_data.get("partitions", {})
+    # GAP-09: Mandatory core partitions
+    for key in ("stage0_size", "stage1_size", "app_size"):
+        if key not in partitions:
+            print(f"FATAL: {key} is mandatory in [partitions]")
+            sys.exit(1)
+            
     enable_deltas = partitions.get("enable_deltas", True)
     wal_sectors = partitions.get("wal_sectors", 4)
 
     boot_config = toml_data.get("boot_config", {})
     max_retries = boot_config.get("max_retries", 3)
     max_recovery_retries = boot_config.get("max_recovery_retries", 3)
-    edge_unattended_mode = str(boot_config.get("edge_unattended_mode", False)).lower()
+    # GAP-14: Emit 1 or 0 instead of true/false string
+    edge_unattended_mode = "1" if boot_config.get("edge_unattended_mode", False) else "0"
     backoff_base_s = boot_config.get("backoff_base_s", 3600)
     wdt_timeout_ms = boot_config.get("wdt_timeout_ms", 4100)
 
     # Phase 2: Memory Allocation Engine (Sequential Flash Pack)
-    s0_addr, s0_budget = allocate(partitions.get("stage0_size", 16384))
-    s1a_addr, s1_budget = allocate(partitions.get("stage1_size", 28672))
-    s1b_addr, _ = allocate(partitions.get("stage1_size", 28672))
+    s0_addr, s0_budget = allocate(partitions["stage0_size"])
+    s1a_addr, s1_budget = allocate(partitions["stage1_size"])
+    s1b_addr, _ = allocate(partitions["stage1_size"])
 
-    # Apply dynamic APP alignment from hardware.json
-    app_align = flash_info.get("app_alignment", 65536)
+    # GAP-10: Dynamic APP alignment, fallback to sector size instead of 64KB
+    app_align = flash_info.get("app_alignment", max_sector_size)
     app_addr, app_budget = allocate(
-        partitions.get("app_size", 384 * 1024), force_align=app_align
+        partitions["app_size"], force_align=app_align
     )
     staging_addr, _ = allocate(
-        partitions.get("app_size", 384 * 1024), force_align=app_align
+        partitions["app_size"], force_align=app_align
     )
 
     if partitions.get("recovery_size"):
@@ -205,19 +211,12 @@ def main():
         f.write("#define GENERATED_BOOT_CONFIG_H\n\n")
         f.write("#include <stdint.h>\n\n")
 
-        # Find absolute max sector size for fallback definitions
-        max_sector_size = max(
-            [
-                r.get("sector_size", 4096)
-                for r in regions
-                if r.get("type", "writable") == "writable"
-            ],
-            default=4096,
-        )
-
-        f.write(f"#define CHIP_FLASH_MAX_SECTOR_SIZE  {max_sector_size}U\n")
+        # GAP-01: Removed duplicate CHIP_FLASH_MAX_SECTOR_SIZE definition here. It is defined at the bottom.
+        
         f.write(f"#define CHIP_FLASH_WRITE_ALIGNMENT  {write_align}U\n")
-        f.write(f"#define CHIP_FLASH_BASE_ADDR        0x00000000U\n")
+        # GAP-03: Dynamic Flash Base
+        flash_base = flash_info.get("base_addr", "0x00000000")
+        f.write(f"#define CHIP_FLASH_BASE_ADDR        {flash_base}U\n")
 
         # Calculate bootrom_reserved dynamically from reserved regions starting at 0
         bootrom_end = 0
@@ -237,7 +236,9 @@ def main():
         f.write(f"#define CHIP_APP_SLOT_SIZE          0x{app_budget:08X}U\n")
         f.write(f"#define CHIP_STAGING_SLOT_ABS_ADDR  0x{staging_addr:08X}U\n")
         f.write(f"#define CHIP_STAGING_SLOT_SIZE      0x{app_budget:08X}U\n")
-        f.write(f"#define CHIP_STAGING_SLOT_ID        2U\n\n")
+        # GAP-04: Dynamic Staging Slot ID (App is usually 1, Staging is usually 2)
+        staging_slot_id = partitions.get("staging_slot_id", 2)
+        f.write(f"#define CHIP_STAGING_SLOT_ID        {staging_slot_id}U\n\n")
 
         f.write(f"#define CHIP_RECOVERY_OS_ABS_ADDR   0x{rec_addr:08X}U\n")
         f.write(f"#define CHIP_RECOVERY_OS_SIZE       0x{rec_budget:08X}U\n")
@@ -276,9 +277,12 @@ def main():
         f.write("}\n\n")
 
         # Crypto Arena (Derived from blueprint)
-        crypto_size = blueprint_data.get("crypto_capabilities", {}).get(
-            "arena_size", 2048
-        )
+        # GAP-13: Mandatory crypto arena size
+        crypto_caps = blueprint_data.get("crypto_capabilities", {})
+        if "arena_size" not in crypto_caps:
+            print("FATAL: crypto_capabilities.arena_size is mandatory in hardware.json")
+            sys.exit(1)
+        crypto_size = crypto_caps["arena_size"]
         f.write(f"#define BOOT_CRYPTO_ARENA_SIZE      {crypto_size}U\n\n")
 
         # WDT Timeout
@@ -311,8 +315,12 @@ def main():
 
     # Generate stage0_layout.ld
     memory_info = blueprint_data.get("memory", {})
-    s0_ram_base = memory_info.get("ram_base", "0x20000000")
-    s0_ram_size = memory_info.get("ram_size", "0x8000")
+    # GAP-11 & GAP-12: Mandatory RAM configurations
+    if "ram_base" not in memory_info or "ram_size" not in memory_info:
+        print("FATAL: memory.ram_base and memory.ram_size are mandatory in hardware.json")
+        sys.exit(1)
+    s0_ram_base = memory_info["ram_base"]
+    s0_ram_size = memory_info["ram_size"]
 
     stage0_ld_path = os.path.join(args.outdir, "stage0_layout.ld")
     with open(stage0_ld_path, "w") as f:
