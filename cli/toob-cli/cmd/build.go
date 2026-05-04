@@ -28,6 +28,7 @@ var (
 	flagManifest      string
 	flagBuildDir      string
 	flagToolchainPath string
+	flagNative        bool
 )
 
 var buildCmd = &cobra.Command{
@@ -40,6 +41,7 @@ func init() {
 	buildCmd.Flags().StringVar(&flagManifest, "manifest", "", "Path to device.toml (auto-detected if omitted)")
 	buildCmd.Flags().StringVar(&flagBuildDir, "build-dir", "", "Build output directory (default: builds/build_<chip>)")
 	buildCmd.Flags().StringVar(&flagToolchainPath, "toolchain-path", "", "Path to the cross-compiler bin/ directory")
+	buildCmd.Flags().BoolVar(&flagNative, "native", false, "Force native build (use local toolchains instead of Docker)")
 }
 
 // deviceToml mirrors the [device] section of device.toml.
@@ -58,17 +60,81 @@ type chipManifest struct {
 	ToolchainPrefix string `json:"toolchain_prefix"`
 }
 
+func isMonorepo(root string) bool {
+	cmPath := filepath.Join(root, "CMakeLists.txt")
+	data, err := os.ReadFile(cmPath)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "toob-boot")
+}
+
 func runBuild(cmd *cobra.Command, args []string) error {
 	root, err := paths.FindProjectRoot("")
 	if err != nil {
 		return err
 	}
 
+	useNative := flagNative
+	if !useNative && isMonorepo(root) {
+		fmt.Println("[toob] Detected Toob-Loader Monorepo. Auto-enabling --native build.")
+		useNative = true
+	}
+
+	if useNative {
+		return runNativeBuild(root)
+	}
+	return runDockerBuild(root)
+}
+
+func runDockerBuild(root string) error {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return fmt.Errorf("Docker is not installed or not in PATH.\nPlease install Docker to use the containerized compiler, or run `toob build --native`.")
+	}
+
+	regDir, _ := paths.RegistryDir()
+	cache := registry.NewCache("")
+	if !cache.IsInitialized() {
+		fmt.Println("[toob] Registry not initialized. Attempting auto-clone...")
+		if err := cache.Sync(); err != nil {
+			return fmt.Errorf("failed to sync registry (offline?): %w\nRun `toob chip add` when connected to the internet.", err)
+		}
+	}
+
+	args := []string{
+		"run", "--rm",
+		"-v", fmt.Sprintf("%s:/workspace", root),
+		"-v", fmt.Sprintf("%s:/root/.toob/registry", regDir),
+		"-w", "/workspace",
+		"repowatt/toob-compiler:latest",
+		"toob", "build", "--native",
+	}
+
+	if flagManifest != "" {
+		relManifest, err := filepath.Rel(root, flagManifest)
+		if err == nil {
+			args = append(args, "--manifest", filepath.ToSlash(filepath.Join("/workspace", relManifest)))
+		}
+	}
+	if flagBuildDir != "" {
+		relBuildDir, err := filepath.Rel(root, flagBuildDir)
+		if err == nil {
+			args = append(args, "--build-dir", filepath.ToSlash(filepath.Join("/workspace", relBuildDir)))
+		}
+	}
+
+	fmt.Println("[toob] Starting Docker container (repowatt/toob-compiler)...")
+	return run(root, "docker", args...)
+}
+
+func runNativeBuild(root string) error {
+
 	// 1. Resolve device manifest
 	manifest := flagManifest
 	if manifest == "" {
 		manifest = filepath.Join(root, "device.toml")
 	}
+	manifest, _ = filepath.Abs(manifest)
 	if _, err := os.Stat(manifest); err != nil {
 		return fmt.Errorf("device manifest not found: %s", manifest)
 	}
