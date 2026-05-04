@@ -44,7 +44,7 @@ suit_conditions = {
 
 suit_payload = {
     301: bstr .size 32,             ; sbom_digest (CRA Pflicht: exakt 32 Byte SHA-256 des SBOMs)
-    302: [ 1..4 * toob_image ],     ; Array der Images: Mindestens 1, maximal 4 (Array-Overhead Limitierung für OOM-Schutz)
+    302: [ 1*4 toob_image ],        ; Array der Images: Mindestens 1, maximal 4 (Array-Overhead Limitierung für OOM-Schutz)
 }
 
 toob_image = toob_image_raw / toob_image_delta

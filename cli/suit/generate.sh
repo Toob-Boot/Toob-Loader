@@ -32,11 +32,11 @@ echo "[SUIT CodeGen] Generating C artifacts in: $OUTPUT_DIR"
 # ------------------------------------------------------------------------------
 must_mock_zcbor=1
 
-if python3 -c "import zcbor; assert zcbor.__version__ >= '0.8.0'" 2>/dev/null; then
-    echo "[SUIT CodeGen] Python zcbor >= 0.8.0 found. Generating strict parsers..."
-    python3 -m zcbor code -c "$PROJECT_ROOT/cli/suit/toob_suit.cddl" --decode --type toob_suit --output-c "$OUTPUT_DIR/boot_suit.c" --output-h "$OUTPUT_DIR/boot_suit.h"
-    python3 -m zcbor code -c "$PROJECT_ROOT/cli/suit/toob_telemetry.cddl" --decode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_decode.c" --output-h "$OUTPUT_DIR/toob_telemetry_decode.h"
-    python3 -m zcbor code -c "$PROJECT_ROOT/cli/suit/toob_telemetry.cddl" --encode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_encode.c" --output-h "$OUTPUT_DIR/toob_telemetry_encode.h"
+if command -v zcbor >/dev/null 2>&1; then
+    echo "[SUIT CodeGen] zcbor CLI found. Generating strict parsers..."
+    zcbor code -c "$PROJECT_ROOT/cli/suit/toob_suit.cddl" --decode -t toob_suit --output-c "$OUTPUT_DIR/boot_suit.c" --output-h "$OUTPUT_DIR/boot_suit.h"
+    zcbor code -c "$PROJECT_ROOT/cli/suit/toob_telemetry.cddl" --decode -t toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_decode.c" --output-h "$OUTPUT_DIR/toob_telemetry_decode.h"
+    zcbor code -c "$PROJECT_ROOT/cli/suit/toob_telemetry.cddl" --encode -t toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_encode.c" --output-h "$OUTPUT_DIR/toob_telemetry_encode.h"
     must_mock_zcbor=0
 elif [ -f "$OUTPUT_DIR/boot_suit.h" ] && ! grep -q "BOOT_SUIT_MOCK_H" "$OUTPUT_DIR/boot_suit.h"; then
     echo "[SUIT CodeGen] zcbor not found, but real outputs exist. Preserving them! (Idempotence Guard)"

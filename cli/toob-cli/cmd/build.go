@@ -106,6 +106,9 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	generateSh := filepath.Join(root, "cli", "suit", "generate.sh")
 	if _, err := os.Stat(generateSh); err == nil {
 		if bash := findBash(); bash != "" {
+			if pyScripts := findPythonScriptsBin(); pyScripts != "" {
+				os.Setenv("PATH", pyScripts+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
 			fmt.Println("[toob] Running SUIT code generator ...")
 			if err := run(root, bash, generateSh, generatedDir, manifest, chip); err != nil {
 				return err
@@ -229,7 +232,7 @@ func findToolchainBin(prefix string) string {
 	// Espressif IDF standard layout
 	if runtime.GOOS == "windows" {
 		triplet := strings.TrimSuffix(prefix, "-")
-		base := filepath.Join("C:", "Espressif", "tools", triplet)
+		base := filepath.Join("C:\\", "Espressif", "tools", triplet)
 		entries, err := os.ReadDir(base)
 		if err != nil {
 			return ""
@@ -267,5 +270,18 @@ func findToolchainBin(prefix string) string {
 		}
 	}
 
+	return ""
+}
+
+// findPythonScriptsBin finds the Scripts directory of the active python interpreter
+func findPythonScriptsBin() string {
+	cmd := exec.Command("python", "-c", "import sys, os; print(os.path.join(sys.prefix, 'Scripts'))")
+	out, err := cmd.Output()
+	if err == nil {
+		path := strings.TrimSpace(string(out))
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
 	return ""
 }
