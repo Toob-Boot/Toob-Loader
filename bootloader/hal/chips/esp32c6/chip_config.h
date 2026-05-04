@@ -31,11 +31,9 @@
 #define CHIP_FLASH_ERASED_BYTE      0xFFU
 
 /**
- * Flash XIP mapping base address.
- * On ESP32-C6, flash is memory-mapped starting at 0x42000000.
- * Physical flash offset 0x0 → virtual address 0x42000000.
+ * Flash XIP mapping base address is generated dynamically
+ * via Manifest Compiler to generated_boot_config.h.
  */
-#define CHIP_FLASH_XIP_BASE         0x42000000U
 
 /* ========================================================================
  * ROM FUNCTION POINTERS (esp32c6.rom.ld + quirks/esp32-c6.json)
