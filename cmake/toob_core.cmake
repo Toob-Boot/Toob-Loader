@@ -64,7 +64,6 @@ add_custom_command(
            ${GENERATED_TELEMETRY_ENCODE_C}
            ${CMAKE_BINARY_DIR}/generated/generated_boot_config.h
            ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
-           ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
     
     # -------------------------------------------------------------------------
@@ -84,7 +83,6 @@ add_custom_target(generate_manifest
             ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
             ${CMAKE_BINARY_DIR}/generated/generated_boot_config.h
             ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
-            ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
 )
 
 
@@ -119,7 +117,6 @@ else()
     # M-BUILD GAP-Fix: Sandbox Host-Mock für Assembler-Dateien und Hardware Pointers!
     target_sources(toob_core PRIVATE 
         bootloader/core/boot_secure_zeroize_host.c
-        ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
     )
     target_compile_definitions(toob_core PUBLIC TOOB_MOCK_TEST)
 endif()

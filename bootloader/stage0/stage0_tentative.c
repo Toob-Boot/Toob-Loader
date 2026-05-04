@@ -12,7 +12,7 @@
 #include "boot_hal.h"
 #include "libtoob_types.h"
 #include "stage0_crypto.h"
-#include "boot_config_mock.h"
+#include "generated_boot_config.h"
 
 extern TOOB_NOINIT toob_handoff_t toob_handoff_state;
 

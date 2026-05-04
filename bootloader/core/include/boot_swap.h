@@ -10,9 +10,7 @@
 
 #include "boot_types.h"
 #include "boot_hal.h"
-#ifdef TOOB_MOCK_TEST
-#include "boot_config_mock.h"
-#endif
+
 
 
 /**

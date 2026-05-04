@@ -9,7 +9,7 @@
  * - docs/concept_fusion.md
  */
 
-#include "boot_config_mock.h"
+#include "generated_boot_config.h"
 #include "boot_crc32.h"
 #include "boot_hal.h"
 #include "boot_journal.h"
