@@ -1,0 +1,3 @@
+[submodule "toob-registry"]
+	path = toob-registry
+	url = https://github.com/Toob-Boot/Toob-Registry.git
