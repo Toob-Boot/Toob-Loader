@@ -30,175 +30,18 @@ echo "[SUIT CodeGen] Generating C artifacts in: $OUTPUT_DIR"
 # ------------------------------------------------------------------------------
 # 1. ZCBOR CODE GENERATION (CDDL -> C-Logic)
 # ------------------------------------------------------------------------------
-must_mock_zcbor=1
-
 if command -v zcbor >/dev/null 2>&1; then
     echo "[SUIT CodeGen] zcbor CLI found. Generating strict parsers..."
     zcbor code -c "$PROJECT_ROOT/cli/suit/toob_suit.cddl" --decode -t toob_suit --output-c "$OUTPUT_DIR/boot_suit.c" --output-h "$OUTPUT_DIR/boot_suit.h"
     zcbor code -c "$PROJECT_ROOT/cli/suit/toob_telemetry.cddl" --decode -t toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_decode.c" --output-h "$OUTPUT_DIR/toob_telemetry_decode.h"
     zcbor code -c "$PROJECT_ROOT/cli/suit/toob_telemetry.cddl" --encode -t toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_encode.c" --output-h "$OUTPUT_DIR/toob_telemetry_encode.h"
-    must_mock_zcbor=0
 elif [ -f "$OUTPUT_DIR/boot_suit.h" ] && ! grep -q "BOOT_SUIT_MOCK_H" "$OUTPUT_DIR/boot_suit.h"; then
     echo "[SUIT CodeGen] zcbor not found, but real outputs exist. Preserving them! (Idempotence Guard)"
-    must_mock_zcbor=0
+else
+    echo "[SUIT CodeGen] FATAL ERROR: Valid Python zcbor CLI not found!"
+    echo "Please ensure zcbor is installed ('pip install zcbor') and available in your PATH."
+    exit 1
 fi
-
-if [ "$must_mock_zcbor" -eq 1 ]; then
-    echo "[SUIT CodeGen] WARNING: Valid Python zcbor not found! Injecting CI Mock Stubs (Fail-Secure)..."
-    
-    # SUIT Parser Mock
-        cat << 'EOF' > "$OUTPUT_DIR/boot_suit.h"
-#ifndef BOOT_SUIT_MOCK_H
-#define BOOT_SUIT_MOCK_H
-#include <stdint.h>
-#include <stdbool.h>
-#include <stddef.h>
-
-struct zcbor_string {
-    const uint8_t *value;
-    size_t len;
-};
-
-struct toob_suit_suit_envelope {
-    struct zcbor_string signature_ed25519;
-    uint8_t key_index; /* ABI Alignment Fix (CDDL uint .size 1) */
-    bool pqc_hybrid_active;
-    struct zcbor_string signature_pqc;
-    struct zcbor_string pubkey_pqc;
-};
-
-struct toob_suit_suit_conditions {
-    struct zcbor_string device_identifier;
-    uint32_t svn;
-    uint32_t required_key_epoch;
-    uint16_t min_parser_version;
-    uint16_t max_resume_attempts;
-};
-
-enum toob_image_choice {
-    toob_image_toob_image_raw_c,
-    toob_image_toob_image_delta_c
-};
-
-struct toob_image_raw {
-    uint32_t image_type;
-    uint32_t image_size;
-    struct zcbor_string chunk_hashes;
-    uint32_t num_chunks;
-    uint32_t chunk_size;
-};
-
-struct toob_image_delta {
-    uint32_t image_size;
-    struct zcbor_string chunk_hashes;
-    uint32_t num_chunks;
-    uint32_t chunk_size;
-};
-
-struct toob_image {
-    enum toob_image_choice toob_image_choice;
-    union {
-        struct toob_image_raw toob_image_raw;
-        struct toob_image_delta toob_image_delta;
-    };
-};
-
-struct toob_suit_suit_payload {
-    size_t toob_image_count;
-    struct toob_image toob_image[4];
-    struct zcbor_string sbom_digest;
-};
-
-struct toob_suit {
-    struct toob_suit_suit_envelope suit_envelope;
-    struct toob_suit_suit_conditions suit_conditions;
-    struct toob_suit_suit_payload suit_payload;
-};
-
-extern bool cbor_decode_toob_suit(const uint8_t *payload, size_t payload_len, struct toob_suit *result, size_t *payload_len_out);
-#endif
-EOF
-
-        cat << 'EOF' > "$OUTPUT_DIR/boot_suit.c"
-#include "boot_suit.h"
-
-bool cbor_decode_toob_suit(const uint8_t *payload, size_t payload_len, struct toob_suit *result, size_t *payload_len_out) {
-    (void)payload; (void)payload_len; (void)result; (void)payload_len_out;
-    return false; /* Mocks lehnen Parsing stets ab! */
-}
-EOF
-
-        # Telemetry Parser Mock
-        cat << 'EOF' > "$OUTPUT_DIR/toob_telemetry_decode.h"
-#ifndef TOOB_TELEMETRY_MOCK_H
-#define TOOB_TELEMETRY_MOCK_H
-#include <stdint.h>
-#include <stdbool.h>
-#include <stddef.h>
-
-struct ext_health {
-    uint32_t ext_health_wal_erasures;
-    uint32_t ext_health_app_erasures;
-    uint32_t ext_health_staging_erasures;
-    uint32_t ext_health_swap_erasures;
-};
-
-struct zcbor_string {
-    const uint8_t *value;
-    size_t len;
-};
-
-/* Minimalistisches ZCBOR Dummy Struct (ABI Aligned) */
-struct toob_telemetry {
-    uint8_t schema_version;
-    uint32_t boot_duration_ms;
-    uint32_t edge_recovery_events;
-    uint32_t hardware_fault_record;
-    uint32_t vendor_error;
-    uint32_t wdt_kicks;
-    uint32_t current_svn;
-    uint8_t active_key_index;
-    bool fallback_occurred;
-    struct zcbor_string sbom_digest;
-    uint32_t boot_session_id;
-    struct ext_health ext_health;
-    bool ext_health_present;
-};
-
-extern bool cbor_decode_toob_telemetry(const uint8_t *payload, size_t payload_len, struct toob_telemetry *result, size_t *payload_len_out);
-#endif
-EOF
-
-        cat << 'EOF' > "$OUTPUT_DIR/toob_telemetry_encode.h"
-#ifndef TOOB_TELEMETRY_ENCODE_MOCK_H
-#define TOOB_TELEMETRY_ENCODE_MOCK_H
-#include <stdint.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include "toob_telemetry_decode.h"
-
-extern bool cbor_encode_toob_telemetry(uint8_t *payload, size_t payload_len, const struct toob_telemetry *input, size_t *payload_len_out);
-#endif
-EOF
-
-        cat << 'EOF' > "$OUTPUT_DIR/toob_telemetry_decode.c"
-#include "toob_telemetry_decode.h"
-
-bool cbor_decode_toob_telemetry(const uint8_t *payload, size_t payload_len, struct toob_telemetry *result, size_t *payload_len_out) {
-    (void)payload; (void)payload_len; (void)result; (void)payload_len_out;
-    return false; /* Mocks lehnen Parsing stets ab! */
-}
-EOF
-
-        cat << 'EOF' > "$OUTPUT_DIR/toob_telemetry_encode.c"
-#include "toob_telemetry_encode.h"
-
-bool cbor_encode_toob_telemetry(uint8_t *payload, size_t payload_len, const struct toob_telemetry *input, size_t *payload_len_out) {
-    (void)payload; (void)payload_len; (void)input; (void)payload_len_out;
-    return false; /* Mocks erzeugen keinen Output! */
-}
-EOF
-    fi
 
 # ------------------------------------------------------------------------------
 # 2. CHIP CONFIG && MANIFEST COMPILER GENERATION

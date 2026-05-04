@@ -215,33 +215,33 @@ toob_status_t toob_get_boot_diag_cbor(uint8_t *out_buf, size_t max_len, size_t *
   toob_secure_zeroize(&tel, sizeof(tel));
 
   /* P10 Fix: Sicherer Shift des 32-bit Magic Headers in die 8-Bit CDDL Schema-Version */
-  tel.schema_version = (uint8_t)(diag.struct_version >> 24);
-  tel.boot_duration_ms = diag.boot_duration_ms;
-  tel.edge_recovery_events = diag.edge_recovery_events;
+  tel.toob_telemetry_uint0uint = (uint8_t)(diag.struct_version >> 24);
+  tel.toob_telemetry_uint1uint = diag.boot_duration_ms;
+  tel.toob_telemetry_uint2uint = diag.edge_recovery_events;
 
   /* C-Struct hat kein separates hardware_fault_record, belege vendor_error in beiden Feldern */
-  tel.hardware_fault_record = diag.vendor_error;
-  tel.vendor_error = diag.vendor_error;
-  tel.wdt_kicks = 0; /* Nicht in diag_t gemappt */
+  tel.toob_telemetry_uint3uint = diag.vendor_error;
+  tel.toob_telemetry_uint4uint = diag.vendor_error;
+  tel.toob_telemetry_uint5uint = 0; /* Nicht in diag_t gemappt */
 
-  tel.current_svn = diag.current_svn;
-  tel.active_key_index = (uint8_t)diag.active_key_index;
-  tel.fallback_occurred = false; /* Nicht in diag_t gemappt */
+  tel.toob_telemetry_uint6uint = diag.current_svn;
+  tel.toob_telemetry_uint7uint = (uint8_t)diag.active_key_index;
+  tel.toob_telemetry_uint8bool = false; /* Nicht in diag_t gemappt */
 
-  tel.sbom_digest.value = diag.sbom_digest;
-  tel.sbom_digest.len = sizeof(diag.sbom_digest);
+  tel.toob_telemetry_uint9bstr.value = diag.sbom_digest;
+  tel.toob_telemetry_uint9bstr.len = sizeof(diag.sbom_digest);
 
-  tel.boot_session_id = 0;
+  tel.toob_telemetry_uint11uint = 0;
 
   /* P10 Fix: Akkurates C-Struct Mapping auf das CDDL Element */
   if (diag.ext_health_present) {
-    tel.ext_health_present = true;
-    tel.ext_health.ext_health_wal_erasures = diag.ext_health.wal_erase_count;
-    tel.ext_health.ext_health_app_erasures = diag.ext_health.app_slot_erase_count;
-    tel.ext_health.ext_health_staging_erasures = diag.ext_health.staging_slot_erase_count;
-    tel.ext_health.ext_health_swap_erasures = diag.ext_health.swap_buffer_erase_count;
+    tel.toob_telemetry_ext_health_m_present = true;
+    tel.toob_telemetry_ext_health_m.toob_telemetry_ext_health_m.ext_health_uint101uint = diag.ext_health.wal_erase_count;
+    tel.toob_telemetry_ext_health_m.toob_telemetry_ext_health_m.ext_health_uint102uint = diag.ext_health.app_slot_erase_count;
+    tel.toob_telemetry_ext_health_m.toob_telemetry_ext_health_m.ext_health_uint103uint = diag.ext_health.staging_slot_erase_count;
+    tel.toob_telemetry_ext_health_m.toob_telemetry_ext_health_m.ext_health_uint104uint = diag.ext_health.swap_buffer_erase_count;
   } else {
-    tel.ext_health_present = false;
+    tel.toob_telemetry_ext_health_m_present = false;
   }
 
   bool encoded = cbor_encode_toob_telemetry(out_buf, max_len, &tel, out_len);

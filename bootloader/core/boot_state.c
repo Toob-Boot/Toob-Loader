@@ -204,29 +204,29 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
       uint8_t safe_sig_ed25519[64] __attribute__((aligned(8)));
       boot_secure_zeroize(safe_sig_ed25519, sizeof(safe_sig_ed25519));
 
-      if (parsed_suit.suit_envelope.signature_ed25519.len != 64 ||
-          !is_buffer_within(parsed_suit.suit_envelope.signature_ed25519.value, 64, crypto_arena, BOOT_CRYPTO_ARENA_SIZE) ||
-          (parsed_suit.suit_envelope.pqc_hybrid_active && (
-              !is_buffer_within(parsed_suit.suit_envelope.signature_pqc.value, parsed_suit.suit_envelope.signature_pqc.len, crypto_arena, BOOT_CRYPTO_ARENA_SIZE) ||
-              !is_buffer_within(parsed_suit.suit_envelope.pubkey_pqc.value, parsed_suit.suit_envelope.pubkey_pqc.len, crypto_arena, BOOT_CRYPTO_ARENA_SIZE)
+      if (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint101bstr.len != 64 ||
+          !is_buffer_within(parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint101bstr.value, 64, crypto_arena, BOOT_CRYPTO_ARENA_SIZE) ||
+          (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint103bool && (
+              !is_buffer_within((parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint104bstr_present ? parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint104bstr.suit_envelope_uint104bstr.value : NULL), (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint104bstr_present ? parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint104bstr.suit_envelope_uint104bstr.len : 0), crypto_arena, BOOT_CRYPTO_ARENA_SIZE) ||
+              !is_buffer_within((parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint105bstr_present ? parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint105bstr.suit_envelope_uint105bstr.value : NULL), (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint105bstr_present ? parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint105bstr.suit_envelope_uint105bstr.len : 0), crypto_arena, BOOT_CRYPTO_ARENA_SIZE)
           )) ||
-          (parsed_suit.suit_conditions.device_identifier.len > 0 &&
-              !is_buffer_within(parsed_suit.suit_conditions.device_identifier.value, parsed_suit.suit_conditions.device_identifier.len, crypto_arena, BOOT_CRYPTO_ARENA_SIZE))) {
+          (parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr.len > 0 &&
+              !is_buffer_within(parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr.value, parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr.len, crypto_arena, BOOT_CRYPTO_ARENA_SIZE))) {
         verify_status = BOOT_ERR_INVALID_ARG;
       } else {
         memcpy(safe_sig_ed25519,
-               parsed_suit.suit_envelope.signature_ed25519.value, 64);
+               parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint101bstr.value, 64);
 
         boot_verify_envelope_t real_envelope = {
             .manifest_flash_addr = open_txn->offset,
             .manifest_size = suit_consumed_bytes,
             .signature_ed25519 = safe_sig_ed25519,
-            .key_index = parsed_suit.suit_envelope.key_index,
-            .pqc_hybrid_active = parsed_suit.suit_envelope.pqc_hybrid_active,
-            .signature_pqc = parsed_suit.suit_envelope.signature_pqc.value,
-            .signature_pqc_len = parsed_suit.suit_envelope.signature_pqc.len,
-            .pubkey_pqc = parsed_suit.suit_envelope.pubkey_pqc.value,
-            .pubkey_pqc_len = parsed_suit.suit_envelope.pubkey_pqc.len};
+            .key_index = (uint8_t)parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint102uint,
+            .pqc_hybrid_active = parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint103bool,
+            .signature_pqc = (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint104bstr_present ? parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint104bstr.suit_envelope_uint104bstr.value : NULL),
+            .signature_pqc_len = (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint104bstr_present ? parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint104bstr.suit_envelope_uint104bstr.len : 0),
+            .pubkey_pqc = (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint105bstr_present ? parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint105bstr.suit_envelope_uint105bstr.value : NULL),
+            .pubkey_pqc_len = (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint105bstr_present ? parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint105bstr.suit_envelope_uint105bstr.len : 0)};
 
         /* 3. Hardware-gehärtete Envelope Signatur Verifikation FIRST */
         verify_status = boot_verify_manifest_envelope(
@@ -241,18 +241,18 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
           env_flag2 = BOOT_OK;
 
         if (env_flag1 == BOOT_OK && env_flag2 == BOOT_OK) {
-          local_svn = parsed_suit.suit_conditions.svn;
+          local_svn = parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint203uint;
           /* 4. SVN Anti-Rollback Check happens ONLY if math signature matched
            * safely */
           verify_status = boot_rollback_verify_svn(platform, local_svn, false);
 
         /* P10 Hardware-Identitäts Check (Device Binding / Anti-Clone) */
-        if (verify_status == BOOT_OK && parsed_suit.suit_conditions.device_identifier.len > 0) {
+        if (verify_status == BOOT_OK && parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr.len > 0) {
           uint8_t dslc_buf[32] __attribute__((aligned(8)));
           size_t dslc_len = 32;
           if (platform->crypto->read_dslc && platform->crypto->read_dslc(dslc_buf, &dslc_len) == BOOT_OK) {
-            if (parsed_suit.suit_conditions.device_identifier.len != 32 || 
-                constant_time_memcmp_glitch_safe(parsed_suit.suit_conditions.device_identifier.value, dslc_buf, 32) != BOOT_OK) {
+            if (parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr.len != 32 || 
+                constant_time_memcmp_glitch_safe(parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr.value, dslc_buf, 32) != BOOT_OK) {
               verify_status = BOOT_ERR_VERIFY; /* Hardware-MAC Mismatch! */
             }
           } else {
@@ -262,10 +262,10 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
         
         /* EU-CRA SBOM Extraction (wird später in .noinit Diagnostics Areal versiegelt) */
         if (verify_status == BOOT_OK) {
-          if (parsed_suit.suit_payload.sbom_digest.len == 32) {
-            boot_diag_set_security_meta(local_svn, parsed_suit.suit_envelope.key_index, parsed_suit.suit_payload.sbom_digest.value);
+          if (parsed_suit.toob_suit_suit_payload_m.suit_payload_uint301bstr.len == 32) {
+            boot_diag_set_security_meta(local_svn, parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint102uint, parsed_suit.toob_suit_suit_payload_m.suit_payload_uint301bstr.value);
           } else {
-            boot_diag_set_security_meta(local_svn, parsed_suit.suit_envelope.key_index, NULL);
+            boot_diag_set_security_meta(local_svn, parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint102uint, NULL);
           }
         }
       } else {
@@ -318,24 +318,24 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
         verify_status = BOOT_ERR_INVALID_ARG; /* Integer Underflow Prevention */
       } else {
         /* ZCBOR Array Extraction: Find Primary App Image & Route Delta/Raw */
-        if (parsed_suit.suit_payload.toob_image_count == 0) {
+        if (parsed_suit.toob_suit_suit_payload_m.suit_payload_toob_image_m_l_toob_image_m_count == 0) {
             verify_status = BOOT_ERR_INVALID_ARG;
         } else {
             /* Iteriere nicht blind, wir werten Image[0] als unser Target */
-            struct toob_image *app_img = &parsed_suit.suit_payload.toob_image[0];
+            struct toob_image_r *app_img = &parsed_suit.toob_suit_suit_payload_m.suit_payload_toob_image_m_l_toob_image_m[0];
             struct zcbor_string *chunk_hashes = NULL;
             uint32_t num_chunks = 0;
             uint32_t chunk_sz = 0;
             bool is_delta = false;
 
-            if (app_img->toob_image_choice == toob_image_toob_image_raw_c) {
-                chunk_hashes = &app_img->toob_image_raw.chunk_hashes;
-                num_chunks = app_img->toob_image_raw.num_chunks;
-                chunk_sz = app_img->toob_image_raw.chunk_size;
-            } else if (app_img->toob_image_choice == toob_image_toob_image_delta_c) {
-                chunk_hashes = &app_img->toob_image_delta.chunk_hashes;
-                num_chunks = app_img->toob_image_delta.num_chunks;
-                chunk_sz = app_img->toob_image_delta.chunk_size;
+            if (app_img->toob_image_choice == toob_image_raw_m_c) {
+                chunk_hashes = &app_img->toob_image_raw_m.toob_image_raw_uint405bstr;
+                num_chunks = app_img->toob_image_raw_m.toob_image_raw_uint404uint;
+                chunk_sz = app_img->toob_image_raw_m.toob_image_raw_uint403uint;
+            } else if (app_img->toob_image_choice == toob_image_delta_m_c) {
+                chunk_hashes = &app_img->toob_image_delta_m.toob_image_delta_uint405bstr;
+                num_chunks = app_img->toob_image_delta_m.toob_image_delta_uint404uint;
+                chunk_sz = app_img->toob_image_delta_m.toob_image_delta_uint403uint;
                 is_delta = true;
             } else {
                 verify_status = BOOT_ERR_INVALID_ARG;
@@ -360,8 +360,8 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                             /* P10 SECURITY FIX: SDVM Output zwingend gegen den signierten Merkle-Tree prüfen! */
                             boot_status_t hash_stat = boot_merkle_verify_stream(
                                 platform, CHIP_SCRATCH_SLOT_ABS_ADDR, 
-                                app_img->toob_image_delta.image_size,
-                                app_img->toob_image_delta.chunk_size,
+                                app_img->toob_image_delta_m.toob_image_delta_uint402uint,
+                                app_img->toob_image_delta_m.toob_image_delta_uint403uint,
                                 chunk_hashes->value,
                                 chunk_hashes->len,
                                 num_chunks,
@@ -372,7 +372,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                                 verify_status = BOOT_OK;
                                 requires_swap = true;
                                 /* Swap zieht nun aus Scratch-Partition! */
-                                staging_header.image_size = app_img->toob_image_delta.image_size;
+                                staging_header.image_size = app_img->toob_image_delta_m.toob_image_delta_uint402uint;
                                 swap_src_addr = CHIP_SCRATCH_SLOT_ABS_ADDR; 
                             } else {
                                 verify_status = BOOT_ERR_VERIFY; /* ACE Prevention! SDVM Output war korrupt/manipuliert! */
@@ -427,28 +427,28 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
     }
 
     /* P10 FOTA Erweiterung: Multi-Image Deployment ausführen, falls CDDL Array > 1 */
-    if (swap_status == BOOT_OK && parsed_suit.suit_payload.toob_image_count > 1) {
+    if (swap_status == BOOT_OK && parsed_suit.toob_suit_suit_payload_m.suit_payload_toob_image_m_l_toob_image_m_count > 1) {
         boot_component_t components[3]; 
         uint32_t comp_count = 0;
         uint32_t current_staging_offset = staging_header.image_size;
         
-        for (size_t i = 1; i < parsed_suit.suit_payload.toob_image_count && i < 4; i++) {
-            struct toob_image *sub_img = &parsed_suit.suit_payload.toob_image[i];
+        for (size_t i = 1; i < parsed_suit.toob_suit_suit_payload_m.suit_payload_toob_image_m_l_toob_image_m_count && i < 4; i++) {
+            struct toob_image_r *sub_img = &parsed_suit.toob_suit_suit_payload_m.suit_payload_toob_image_m_l_toob_image_m[i];
             boot_secure_zeroize(&components[comp_count], sizeof(boot_component_t));
             components[comp_count].component_id = (uint32_t)i;
             
-            if (sub_img->toob_image_choice == toob_image_toob_image_raw_c) {
-                components[comp_count].image_size = sub_img->toob_image_raw.image_size;
+            if (sub_img->toob_image_choice == toob_image_raw_m_c) {
+                components[comp_count].image_size = sub_img->toob_image_raw_m.toob_image_raw_uint402uint;
                 
                 /* P10 FIX: Dynamisches Offset im Staging-Slot (Lückenloses aneinanderhängen) */
                 components[comp_count].staging_offset = current_staging_offset;
-                current_staging_offset += sub_img->toob_image_raw.image_size;
+                current_staging_offset += sub_img->toob_image_raw_m.toob_image_raw_uint402uint;
                 
-                if (sub_img->toob_image_raw.image_type == 1) {
+                if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint == 1) {
                     components[comp_count].target_addr = CHIP_NETCORE_SLOT_ABS_ADDR;
-                } else if (sub_img->toob_image_raw.image_type == 2) {
+                } else if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint == 2) {
                     components[comp_count].target_addr = CHIP_RECOVERY_OS_ABS_ADDR;
-                } else if (sub_img->toob_image_raw.image_type == 3) {
+                } else if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint == 3) {
                     wal_tmr_payload_t temp_tmr;
                     boot_secure_zeroize(&temp_tmr, sizeof(temp_tmr));
                     if (boot_journal_get_tmr(platform, &temp_tmr) == BOOT_OK) {
@@ -462,8 +462,8 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                     swap_status = BOOT_ERR_INVALID_ARG; break;
                 }
                 
-                if (sub_img->toob_image_raw.chunk_hashes.len >= 32) {
-                    memcpy(components[comp_count].expected_hash, sub_img->toob_image_raw.chunk_hashes.value, 32); 
+                if (sub_img->toob_image_raw_m.toob_image_raw_uint405bstr.len >= 32) {
+                    memcpy(components[comp_count].expected_hash, sub_img->toob_image_raw_m.toob_image_raw_uint405bstr.value, 32); 
                     comp_count++;
                 }
             }

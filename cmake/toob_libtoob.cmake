@@ -59,8 +59,8 @@ endif()
 # LÖSUNG (Symbol-Kollision-Mitigation): Wir linken zcbor strikt als PRIVATE 
 # Dependency. Wenn das Feature-OS intern selbst zcbor nutzt, verhindert die 
 # Build-Pipeline so eine "Redeclaration of Symbols" auf Include-Ebene.
-if(TARGET zcbor)
-    target_link_libraries(toob_libtoob PRIVATE zcbor)
+if(TARGET toob_zcbor)
+    target_link_libraries(toob_libtoob PRIVATE toob_zcbor)
 endif()
 
 # 4. Compiler-Limits auf OS-Niveau abstimmen
