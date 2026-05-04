@@ -469,8 +469,8 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
         
         if (swap_status == BOOT_OK && comp_count > 0) {
             boot_allowed_region_t whitelist[4] = {
-                {CHIP_NETCORE_SLOT_ABS_ADDR, 0x00200000},               
-                {CHIP_RECOVERY_OS_ABS_ADDR, 0x00050000},
+                {CHIP_NETCORE_SLOT_ABS_ADDR, CHIP_NETCORE_SLOT_SIZE},               
+                {CHIP_RECOVERY_OS_ABS_ADDR, CHIP_RECOVERY_OS_SIZE},
                 {CHIP_STAGE1A_ABS_ADDR, CHIP_STAGE1A_SIZE},
                 {CHIP_STAGE1B_ABS_ADDR, CHIP_STAGE1B_SIZE}
             };

@@ -395,7 +395,8 @@ session_reset:
 
         if (shield_1 == BOOT_OK && shield_2 == BOOT_OK) {
           /* Assemble Ed25519 Message exakt nach Spec (72 Bytes):
-           * [Nonce(32)] | [Padded DSLC(32)] | [Slot ID(4)] | [Sequence ID(4)] */
+           * [Nonce(32)] | [Padded DSLC(32)] | [Slot ID(4)] | [Sequence ID(4)]
+           */
           boot_secure_zeroize(verify_msg, PANIC_VERIFY_MAX_SIZE);
           memcpy(verify_msg, challenge_buf,
                  64); /* Zieht saubere Nonce & DSLC Base */
@@ -539,7 +540,7 @@ session_reset:
         if (platform->clock && platform->clock->deinit)
           platform->clock->deinit();
 
-        /* Fallback Trap: Wenn der HW-WDT nach ~10 Sekunden nicht beißt,
+        /* Fallback Trap: Wenn der HW-WDT nach dem Deinit nicht beißt,
          * erzwingen wir einen HardFault (CPU Exception Trap), der über den
          * Vendor-NVIC zum Reset führt! */
         uint32_t hang_timeout = 10000000;
@@ -721,7 +722,8 @@ session_reset:
 
 /* ==============================================================================
  * ARCHITECTURE ROUTING (NMI & HARDFAULT)
- * ============================================================================== */
+ * ==============================================================================
+ */
 
 /**
  * @brief Globaler C-Contract für HAL-Interaktionen bei schweren Memory-Fehlern.
@@ -729,31 +731,33 @@ session_reset:
  * anstatt eigene Endlosschleifen zu implementieren.
  */
 void __attribute__((section(".iram1.text"))) toob_ecc_trap(void) {
-    /* ACHTUNG: toob_ecc_trap hat keinen Kontext zur `platform`, da sie asynchron
-     * aus einer NMI aufgerufen wird! Wir müssen den globalen Handoff-State 
-     * oder eine reduzierte Panic fahren. 
-     * Wir versuchen einen sicheren WDT-Timeout herbeizuführen, indem wir in 
-     * eine unendliche Schleife ohne WDT-Kick gehen. Das ist P10 konform für NMIs. */
-    while(1) {
-        /* Warten auf den Watchdog-Biss. Keine Kicks erlaubt. */
-        __asm__ volatile("nop");
-    }
+  /* ACHTUNG: toob_ecc_trap hat keinen Kontext zur `platform`, da sie asynchron
+   * aus einer NMI aufgerufen wird! Wir müssen den globalen Handoff-State
+   * oder eine reduzierte Panic fahren.
+   * Wir versuchen einen sicheren WDT-Timeout herbeizuführen, indem wir in
+   * eine unendliche Schleife ohne WDT-Kick gehen. Das ist P10 konform für NMIs.
+   */
+  while (1) {
+    /* Warten auf den Watchdog-Biss. Keine Kicks erlaubt. */
+    __asm__ volatile("nop");
+  }
 }
 
-/* 
- * Override libc's __stack_chk_fail to prevent pulling in abort(), raise(), and printf() 
- * which bloat the binary by 120KB.
+/*
+ * Override libc's __stack_chk_fail to prevent pulling in abort(), raise(), and
+ * printf() which bloat the binary by 120KB.
  */
-/* 
+/*
  * P10 / OSV Härtung: Eigene Stack Protector Definitionen.
- * Wenn wir diese nicht bereitstellen, zieht GCC `stack_protector.o` aus `libc_nano.a`,
- * was `abort()`, `raise()` und letztlich `printf()` und IO nachzieht -> 145KB Bloat!
+ * Wenn wir diese nicht bereitstellen, zieht GCC `stack_protector.o` aus
+ * `libc_nano.a`, was `abort()`, `raise()` und letztlich `printf()` und IO
+ * nachzieht -> 145KB Bloat!
  */
 uintptr_t __stack_chk_guard = 0xDEADBEEF;
 
 void __stack_chk_fail(void);
 
 void __stack_chk_fail(void) {
-    /* Stack smashing detected: Enter hardware panic */
-    boot_panic(NULL, BOOT_ERR_ECC_HARDFAULT);
+  /* Stack smashing detected: Enter hardware panic */
+  boot_panic(NULL, BOOT_ERR_ECC_HARDFAULT);
 }

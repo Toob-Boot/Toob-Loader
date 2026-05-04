@@ -31,6 +31,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef BOOT_DELAY_TOLERANCE_MULTIPLIER
+#define BOOT_DELAY_TOLERANCE_MULTIPLIER 8
+#endif
 
 /* Mathematisches Glitch-Resistenz-Gating */
 _Static_assert(BOOT_OK == 0x55AA55AA,
@@ -79,9 +82,9 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
   /* P10 Anti-Endless-Loop Guard & Instruction Skip Trap.
    * Wenn das Hardware-Tick-Register physikalisch einfriert,
    * oder delay_ms() übersprungen wird, wächst sw_accum extrem schnell.
-   * Toleranz: 400% Margin (target_ms * 4) für ungenaue Hardware-Delays + 1000
+   * Toleranz: Margin (target_ms * BOOT_DELAY_TOLERANCE_MULTIPLIER) für ungenaue Hardware-Delays + 1000
    * Ticks. */
-  uint32_t max_sw_limit = (target_ms * 4) + 1000;
+  uint32_t max_sw_limit = (target_ms * BOOT_DELAY_TOLERANCE_MULTIPLIER) + 1000;
 
   while (1) {
     /* Anti-Starvation Guard für den regulären Lauf */

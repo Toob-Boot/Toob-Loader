@@ -28,7 +28,9 @@
 #include <stddef.h>
 #include <string.h>
 
+#ifndef MAX_WAL_SECTORS
 #define MAX_WAL_SECTORS 8
+#endif
 
 /**
  * @brief Static Cache for the WAL bounds and states to avoid runtime

@@ -36,6 +36,11 @@
 #define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
 #endif
 
+/* OTA Checkpoint Intervall: 64 KB (Konfigurierbar für stark abnutzende Flashs) */
+#ifndef TOOB_OTA_CHECKPOINT_INTERVAL
+#define TOOB_OTA_CHECKPOINT_INTERVAL 65536
+#endif
+
 /* ==============================================================================
  * Cross-Compiler Glitch-Delay (mirrors toob_confirm.c pattern)
  * ==============================================================================
@@ -173,10 +178,10 @@ static toob_status_t _ota_begin_core(uint32_t total_size, uint8_t image_type) {
 
   /* Erase Flash before write (Erase-Before-Write Hardware Constraint) */
   /* P10 Fix: Align total size to flash erase sectors */
-  uint32_t erase_size = total_size;
-  uint32_t remainder = erase_size % 4096; /* Assumption: standard 4K sector */
+  uint32_t erase_size = total_size; /* Dynamisches Sector-Alignment über HAL-Konstante statt fix 4096 */
+  uint32_t remainder = erase_size % CHIP_FLASH_MAX_SECTOR_SIZE;
   if (remainder != 0) {
-      erase_size += (4096 - remainder);
+    erase_size += (CHIP_FLASH_MAX_SECTOR_SIZE - remainder);
   }
   if (erase_size > CHIP_STAGING_SLOT_SIZE) {
       erase_size = CHIP_STAGING_SLOT_SIZE;
@@ -294,8 +299,8 @@ toob_status_t toob_ota_process_chunk(const uint8_t *chunk, uint32_t len) {
       s_buf_len = 0;
       toob_ota_secure_zeroize(s_align_buf, TOOB_OTA_BUF_SIZE);
 
-      /* GAP-02: Write Resume Checkpoint every 64KB to save WAL wear */
-      if ((s_bytes_queued % 65536) == 0) {
+      /* Write Resume Checkpoint basierend auf konfiguriertem Makro */
+      if ((s_bytes_queued % TOOB_OTA_CHECKPOINT_INTERVAL) == 0) {
           toob_wal_entry_payload_t ckpt;
           toob_ota_secure_zeroize(&ckpt, sizeof(ckpt));
           ckpt.magic = TOOB_WAL_ENTRY_MAGIC;
