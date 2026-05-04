@@ -64,7 +64,6 @@ set(TOOB_RISCV_LINKER_FLAGS
     "--specs=nosys.specs"
     "-Wl,--gc-sections"
     "-nostartfiles"
-    "-nodefaultlibs"
 )
 
 # Flags global an die CMake Init Variablen hängen

@@ -89,9 +89,6 @@ function(toob_apply_strict_flags TARGET_NAME ALLOW_STACK_PROTECTOR)
         target_compile_options(${TARGET_NAME} PRIVATE
             -fno-builtin        # Prevent GCC from silently linking libc built-ins (e.g. memcpy, printf)
         )
-        if(CMAKE_C_COMPILER_ID MATCHES "GNU")
-            target_link_options(${TARGET_NAME} PRIVATE --specs=nano.specs)
-        endif()
     endif()
 
     if(ALLOW_STACK_PROTECTOR)
