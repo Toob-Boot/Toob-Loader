@@ -446,6 +446,16 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                     components[comp_count].target_addr = CHIP_NETCORE_SLOT_ABS_ADDR;
                 } else if (sub_img->toob_image_raw.image_type == 2) {
                     components[comp_count].target_addr = CHIP_RECOVERY_OS_ABS_ADDR;
+                } else if (sub_img->toob_image_raw.image_type == 3) {
+                    wal_tmr_payload_t temp_tmr;
+                    boot_secure_zeroize(&temp_tmr, sizeof(temp_tmr));
+                    if (boot_journal_get_tmr(platform, &temp_tmr) == BOOT_OK) {
+                        components[comp_count].target_addr = (temp_tmr.active_stage1_bank == 0) 
+                                                             ? CHIP_STAGE1B_ABS_ADDR 
+                                                             : CHIP_STAGE1A_ABS_ADDR;
+                    } else {
+                        swap_status = BOOT_ERR_INVALID_ARG; break;
+                    }
                 } else {
                     swap_status = BOOT_ERR_INVALID_ARG; break;
                 }
@@ -458,12 +468,14 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
         }
         
         if (swap_status == BOOT_OK && comp_count > 0) {
-            boot_allowed_region_t whitelist[2] = {
+            boot_allowed_region_t whitelist[4] = {
                 {CHIP_NETCORE_SLOT_ABS_ADDR, 0x00200000},               
-                {CHIP_RECOVERY_OS_ABS_ADDR, 0x00050000} 
+                {CHIP_RECOVERY_OS_ABS_ADDR, 0x00050000},
+                {CHIP_STAGE1A_ABS_ADDR, CHIP_STAGE1A_SIZE},
+                {CHIP_STAGE1B_ABS_ADDR, CHIP_STAGE1B_SIZE}
             };
             swap_status = boot_multiimage_apply(platform, CHIP_STAGING_SLOT_ABS_ADDR, 
-                                                components, comp_count, whitelist, 2, open_txn);
+                                                components, comp_count, whitelist, 4, open_txn);
         }
     }
 

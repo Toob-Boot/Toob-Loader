@@ -49,12 +49,10 @@ uint32_t stage0_get_active_slot(const boot_platform_t *platform) {
       if (shield_1 == BOOT_OK && shield_2 == BOOT_OK) {
         if (hdr.data.sequence_id > highest_seq) {
           highest_seq = hdr.data.sequence_id;
-          if (hdr.data.tmr_data.primary_slot_id == 0 ||
-              hdr.data.tmr_data.primary_slot_id == 1) {
-            active_slot = (hdr.data.tmr_data.primary_slot_id == 0)
-                              ? CHIP_APP_SLOT_ABS_ADDR
-                              : CHIP_STAGING_SLOT_ABS_ADDR;
-          }
+          /* FIX: Stage 0 wählt die Bootloader-Bank, NICHT das Feature-OS! */
+          active_slot = (hdr.data.tmr_data.active_stage1_bank == 0)
+                            ? CHIP_STAGE1A_ABS_ADDR
+                            : CHIP_STAGE1B_ABS_ADDR;
         }
       }
     }

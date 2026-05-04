@@ -42,6 +42,7 @@ typedef enum {
  */
 typedef struct {
   uint32_t primary_slot_id;
+  uint32_t active_stage1_bank;
   uint32_t app_svn;
   uint32_t boot_failure_counter;
   uint32_t svn_recovery_counter;
@@ -66,7 +67,7 @@ typedef struct {
   uint32_t erase_count;       /**< Tracks sector wear leveling */
   wal_tmr_payload_t tmr_data; /**< Eine von 3 TMR Kopien (GAP-C01) */
   uint32_t header_crc32;      /**< Sichert den Sector-Header */
-  uint8_t _padding[12];       /**< Definiertes statisches Padding für 64-Byte Alignment */
+  uint8_t _padding[8];        /**< Definiertes statisches Padding für 64-Byte Alignment */
 } wal_sector_header_t;
 
 /**
@@ -81,7 +82,7 @@ typedef union {
 _Static_assert(
     sizeof(wal_sector_header_aligned_t) % 8 == 0,
     "GAP-C03: WAL Sector Header padding violates hardware alignment!");
-_Static_assert(sizeof(wal_tmr_payload_t) == 36, "ABI Drift: TMR payload must be exactly 36 bytes!");
+_Static_assert(sizeof(wal_tmr_payload_t) == 40, "ABI Drift: TMR payload must be exactly 40 bytes!");
 _Static_assert(sizeof(wal_sector_header_t) == 64, "ABI Drift: WAL Header must be exactly 64 bytes!");
 
 /**

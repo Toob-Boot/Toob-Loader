@@ -31,9 +31,9 @@ uint32_t stage0_evaluate_tentative(const boot_platform_t *platform,
       __asm__ volatile("" ::: "memory");
 
       /* 2. Physischer Rollback auf die vorherige Bank */
-      return (current_slot == CHIP_APP_SLOT_ABS_ADDR)
-                 ? CHIP_STAGING_SLOT_ABS_ADDR
-                 : CHIP_APP_SLOT_ABS_ADDR;
+      return (current_slot == CHIP_STAGE1A_ABS_ADDR)
+                 ? CHIP_STAGE1B_ABS_ADDR
+                 : CHIP_STAGE1A_ABS_ADDR;
     }
   }
   return current_slot;

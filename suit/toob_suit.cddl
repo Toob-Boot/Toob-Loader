@@ -52,7 +52,7 @@ toob_image = toob_image_raw / toob_image_delta
 ; Standard Image ohne Delta-Abhängigkeiten
 toob_image_raw = {
     400: false,                     ; is_delta (Expliziter Diskriminator für schnelles zcbor-Union Branching)
-    401: uint .size 1,              ; image_type (0=App, 1=NetCore, 2=Recovery)
+    401: uint .size 1,              ; image_type (0=App, 1=NetCore, 2=Recovery, 3=Stage1)
     402: uint .size 4,              ; image_size (Exakte Partition-Schreibkapazität in Bytes)
     403: uint .size 4,              ; chunk_size (Blockgröße des Streames, i.d.R. 4096)
     404: uint .size 4,              ; num_chunks (OOB Bounds-Check: MUSS ceil(image_size/chunk_size) sein gem. boot_merkle.c)

@@ -215,9 +215,9 @@ typedef struct {
     uint32_t sector_magic;    /**< Immer TOOB_WAL_SECTOR_MAGIC (0x57414C02) */
     uint32_t sequence_id;     /**< Fortlaufende ID für O(1) Sliding-Window Discovery */
     uint32_t erase_count;     /**< Tracks sector wear leveling */
-    uint8_t  _reserved_tmr_space[36]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
+    uint8_t  _reserved_tmr_space[40]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
     uint32_t header_crc32;    /**< Sichert den Sector-Header */
-    uint8_t  _padding[12];    /**< Definiertes statisches Padding für 64-Byte Alignment */
+    uint8_t  _padding[8];     /**< Definiertes statisches Padding für 64-Byte Alignment */
 } toob_wal_sector_header_t;
 
 typedef union {
@@ -226,7 +226,7 @@ typedef union {
 } toob_wal_sector_header_aligned_t;
 
 _Static_assert(sizeof(toob_wal_sector_header_aligned_t) == TOOB_WAL_HEADER_SIZE, "WAL Header Boundary breach!");
-_Static_assert(offsetof(toob_wal_sector_header_t, header_crc32) == 48, "Sector Header Layout Drift: CRC32 must be at offset 48");
+_Static_assert(offsetof(toob_wal_sector_header_t, header_crc32) == 52, "Sector Header Layout Drift: CRC32 must be at offset 52");
 
 /* Extern Definitions (After structs are fully typed!) */
 extern TOOB_NOINIT toob_handoff_t toob_handoff_state;

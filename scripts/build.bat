@@ -13,10 +13,12 @@ if errorlevel 1 (
     set "PATH=%TOOLCHAIN_BIN%;%PATH%"
 )
 
+cd /d "%~dp0\.."
+
 REM Build-Ordner anlegen, falls noch nicht vorhanden
 if not exist "build_c6_ninja" (
     echo [INFO] Build-Ordner fehlt. Führe Initiale Konfiguration aus...
-    python configure.py
+    python scripts\configure.py
 )
 
 REM Build starten und Argumente weiterreichen
