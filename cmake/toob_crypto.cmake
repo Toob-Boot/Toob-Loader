@@ -3,7 +3,7 @@
 # 
 # Relevant Specs: 
 # - docs/concept_fusion.md (Schicht 2: Pluggable Crypto, crypto_arena)
-# - docs/structure_plan.md (Verzeichnisbaum `bootloader/crypto/`)
+# - docs/structure_plan.md (Verzeichnisbaum `toobloader/crypto/`)
 # - docs/hals.md (crypto_hal_t)
 # ==============================================================================
 
@@ -26,15 +26,15 @@ add_library(toob_crypto_upstream STATIC)
 
 if(NOT TOOB_CRYPTO_DISABLE_SW_ENGINE)
     target_sources(toob_crypto_upstream PRIVATE
-        bootloader/crypto/monocypher/monocypher.c
-        bootloader/crypto/monocypher/monocypher-ed25519.c
-        bootloader/crypto/sha256/sha256.c
+        ${TOOB_CRYPTO_DIR}/monocypher/monocypher.c
+        ${TOOB_CRYPTO_DIR}/monocypher/monocypher-ed25519.c
+        ${TOOB_CRYPTO_DIR}/sha256/sha256.c
     )
     target_include_directories(toob_crypto_upstream PUBLIC 
-        bootloader/crypto/monocypher
-        bootloader/crypto/sha256
-        common/include
-        bootloader/core/include
+        ${TOOB_CRYPTO_DIR}/monocypher
+        ${TOOB_CRYPTO_DIR}/sha256
+        ${CMAKE_SOURCE_DIR}/common/include
+        ${TOOB_CORE_DIR}/include
     )
     
     # GAP Fix: Performance & Constant-Time Guarantee
@@ -45,10 +45,10 @@ endif()
 # Optionaler PQC Code (Zero-Allocation ML-DSA)
 if(TOOB_FEATURE_PQC_HYBRID)
     target_sources(toob_crypto_upstream PRIVATE
-        bootloader/crypto/pqc/ml_dsa_65.c
+        ${TOOB_CRYPTO_DIR}/pqc/ml_dsa_65.c
     )
     target_include_directories(toob_crypto_upstream PUBLIC 
-        bootloader/crypto/pqc
+        ${TOOB_CRYPTO_DIR}/pqc
     )
     target_compile_definitions(toob_crypto_upstream PUBLIC TOOB_FEATURE_PQC_HYBRID=1)
     
@@ -71,23 +71,23 @@ endif()
 # ------------------------------------------------------------------------------
 # ZWECK: P10-konformer Wrapper, der das crypto_hal_t Interface implementiert.
 add_library(toob_crypto STATIC
-    bootloader/crypto/monocypher/crypto_monocypher.c
+    ${TOOB_CRYPTO_DIR}/monocypher/crypto_monocypher.c
 )
 
 # Wrapper-Erweiterung für PQC, falls im Manifest aktiviert
 if(TOOB_FEATURE_PQC_HYBRID)
     target_sources(toob_crypto PRIVATE
-        bootloader/crypto/pqc/crypto_pqc.c
+        ${TOOB_CRYPTO_DIR}/pqc/crypto_pqc.c
     )
     target_compile_definitions(toob_crypto PUBLIC TOOB_FEATURE_PQC_HYBRID=1)
 endif()
 
 # Toob-Boot Core-Referenzen einspeisen (für boot_hal.h und generierte Header wie chip_config.h)
 target_include_directories(toob_crypto PUBLIC
-    common/include
-        bootloader/core/include
+    ${CMAKE_SOURCE_DIR}/common/include
+    ${TOOB_CORE_DIR}/include
     ${CMAKE_BINARY_DIR}/generated
-    sdk/libtoob/include
+    ${TOOB_SDK_DIR}/libtoob/include
 )
 
 # Linke den entspannten Upstream in unseren strengen Wrapper

@@ -51,7 +51,7 @@ MANIFEST_CLI="$PROJECT_ROOT/cli/manifest_compiler/toob_manifest.py"
 
 if [ -f "$MANIFEST_CLI" ]; then
     echo "[SUIT CodeGen] Executing Manifest-Compiler..."
-    if ! python "$MANIFEST_CLI" --toml "$DEVICE_MANIFEST" --hardware "$PROJECT_ROOT/bootloader/hal/chips/$TOOB_CHIP/hardware.json" --outdir "$OUTPUT_DIR"; then
+    if ! python "$MANIFEST_CLI" --toml "$DEVICE_MANIFEST" --hardware "$PROJECT_ROOT/toobloader/hal/chips/$TOOB_CHIP/hardware.json" --outdir "$OUTPUT_DIR"; then
         echo "[SUIT CodeGen] FATAL ERROR: Manifest-Compiler crashed or failed!"
         exit 1
     fi

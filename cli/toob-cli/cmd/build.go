@@ -15,6 +15,14 @@ import (
 	"github.com/toob-boot/toob/internal/paths"
 )
 
+func resolvePath(localRoot string, registryRoot string, relPath string) string {
+	localPath := filepath.Join(localRoot, relPath)
+	if _, err := os.Stat(localPath); err == nil {
+		return localPath
+	}
+	return filepath.Join(registryRoot, relPath)
+}
+
 var (
 	flagManifest      string
 	flagBuildDir      string
@@ -75,10 +83,12 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("[toob] Target: %s/%s\n", vendor, chip)
 
-	// 2. Resolve hardware.json
-	hwJSON := filepath.Join(root, "bootloader", "hal", "chips", chip, "hardware.json")
+	regDir, _ := paths.RegistryDir()
+
+	// 2. Resolve hardware.json (Inheritance Mode)
+	hwJSON := resolvePath(root, regDir, filepath.Join("toobloader", "hal", "chips", chip, "hardware.json"))
 	if _, err := os.Stat(hwJSON); err != nil {
-		return fmt.Errorf("hardware.json not found for chip '%s'. Run `toob chip add` first", chip)
+		return fmt.Errorf("hardware.json not found for chip '%s' (not in local or registry). Run `toob chip add` first", chip)
 	}
 
 	// 3. Determine build directory
@@ -91,8 +101,8 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// 4. Run manifest compiler
-	manifestPy := filepath.Join(root, "cli", "manifest_compiler", "toob_manifest.py")
+	// 4. Run manifest compiler (Inheritance Mode)
+	manifestPy := resolvePath(root, regDir, filepath.Join("cli", "manifest_compiler", "toob_manifest.py"))
 	if _, err := os.Stat(manifestPy); err != nil {
 		return fmt.Errorf("manifest compiler not found at %s", manifestPy)
 	}
@@ -103,7 +113,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Run SUIT code generator if bash is available
-	generateSh := filepath.Join(root, "cli", "suit", "generate.sh")
+	generateSh := resolvePath(root, regDir, filepath.Join("cli", "suit", "generate.sh"))
 	if _, err := os.Stat(generateSh); err == nil {
 		if bash := findBash(); bash != "" {
 			if pyScripts := findPythonScriptsBin(); pyScripts != "" {
@@ -124,7 +134,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	toolchainPrefix := "riscv32-unknown-elf-"
 	halVendor := vendor
 
-	cmPath := filepath.Join(root, "bootloader", "hal", "chips", chip, "chip_manifest.json")
+	cmPath := resolvePath(root, regDir, filepath.Join("toobloader", "hal", "chips", chip, "chip_manifest.json"))
 	if data, err := os.ReadFile(cmPath); err == nil {
 		var cm chipManifest
 		if err := json.Unmarshal(data, &cm); err == nil {
@@ -143,14 +153,30 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	toolchainFile := filepath.Join(root, "cmake", toolchainName)
+	toolchainFile := resolvePath(root, regDir, filepath.Join("cmake", toolchainName))
 
-	// 7. Generate toob_config.cmake
+	coreDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "core")))
+	cryptoDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "crypto")))
+	stage0Dir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "stage0")))
+	halChipDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "chips", chip)))
+	halArchDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "arch", arch)))
+	halVendorDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "vendor", halVendor)))
+	sdkDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("sdk")))
+	budgetCheckPy := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("cli", "manifest_compiler", "budget_check.py")))
+
 	configContent := fmt.Sprintf(
 		"set(TOOB_ARCH \"%s\")\nset(TOOB_VENDOR \"%s\")\nset(TOOB_CHIP \"%s\")\n"+
-			"set(CMAKE_TOOLCHAIN_FILE \"${CMAKE_SOURCE_DIR}/cmake/%s\")\n"+
-			"set(TOOLCHAIN_PREFIX \"%s\")\n",
-		arch, halVendor, chip, toolchainName, toolchainPrefix,
+			"set(TOOLCHAIN_PREFIX \"%s\")\n"+
+			"set(TOOB_CORE_DIR \"%s\")\n"+
+			"set(TOOB_CRYPTO_DIR \"%s\")\n"+
+			"set(TOOB_STAGE0_DIR \"%s\")\n"+
+			"set(TOOB_HAL_CHIP_DIR \"%s\")\n"+
+			"set(TOOB_HAL_ARCH_DIR \"%s\")\n"+
+			"set(TOOB_HAL_VENDOR_DIR \"%s\")\n"+
+			"set(TOOB_SDK_DIR \"%s\")\n"+
+			"set(TOOB_BUDGET_CHECK_SCRIPT \"%s\")\n",
+		arch, halVendor, chip, toolchainPrefix,
+		coreDir, cryptoDir, stage0Dir, halChipDir, halArchDir, halVendorDir, sdkDir, budgetCheckPy,
 	)
 	if err := os.WriteFile(filepath.Join(generatedDir, "toob_config.cmake"), []byte(configContent), 0o644); err != nil {
 		return err

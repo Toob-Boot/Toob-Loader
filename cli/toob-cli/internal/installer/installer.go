@@ -6,18 +6,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 )
 
-const (
-	giStart = "# >>> toob-managed (do not edit) >>>"
-	giEnd   = "# <<< toob-managed <<<"
-)
+
 
 // Installer orchestrates chip installation, spawning, and removal.
 type Installer struct {
@@ -54,13 +49,6 @@ func (inst *Installer) Add(name string) error {
 	if err != nil {
 		return err
 	}
-	if err := inst.installChip(ci); err != nil {
-		return err
-	}
-	if err := inst.installDeps(ci); err != nil {
-		return err
-	}
-
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
 	inst.lock.Chips[name] = lockfile.ChipEntry{
@@ -69,8 +57,8 @@ func (inst *Installer) Add(name string) error {
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
 	}
-	inst.updateGitignore()
-	fmt.Printf("Installed chip '%s' (v%s)  [arch=%s, vendor=%s]\n", name, ci.Version, ci.Arch, ci.Vendor)
+	fmt.Printf("Added chip '%s' (v%s) to lockfile [arch=%s, vendor=%s].\n", name, ci.Version, ci.Arch, ci.Vendor)
+	fmt.Println("No files copied (True IKEA Mode). Run `toob build` to compile directly from registry.")
 	return nil
 }
 
@@ -102,7 +90,6 @@ func (inst *Installer) Spawn(name string) error {
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
 	}
-	inst.updateGitignore()
 	fmt.Printf("Spawned chip '%s' (v%s)  [locally editable — tracked by git]\n", name, ci.Version)
 	return nil
 }
@@ -114,23 +101,24 @@ func (inst *Installer) Remove(name string) error {
 		return fmt.Errorf("chip '%s' is not installed", name)
 	}
 
-	// Remove chip files
-	chipDir := filepath.Join(inst.hal, "chips", name)
-	os.RemoveAll(chipDir)
+	// Only remove physical files if the chip was spawned.
+	if entry.Spawned {
+		chipDir := filepath.Join(inst.hal, "chips", name)
+		os.RemoveAll(chipDir)
 
-	// Remove arch/vendor only if no other chip shares them
-	if !inst.lock.IsArchShared(entry.Arch, name) {
-		os.RemoveAll(filepath.Join(inst.hal, "arch", entry.Arch))
-	}
-	if !inst.lock.IsVendorShared(entry.Vendor, name) {
-		os.RemoveAll(filepath.Join(inst.hal, "vendor", entry.Vendor))
+		// Remove arch/vendor only if no other chip shares them
+		if !inst.lock.IsArchShared(entry.Arch, name) {
+			os.RemoveAll(filepath.Join(inst.hal, "arch", entry.Arch))
+		}
+		if !inst.lock.IsVendorShared(entry.Vendor, name) {
+			os.RemoveAll(filepath.Join(inst.hal, "vendor", entry.Vendor))
+		}
 	}
 
 	delete(inst.lock.Chips, name)
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
 	}
-	inst.updateGitignore()
 	fmt.Printf("Removed chip '%s'.\n", name)
 	return nil
 }
@@ -213,91 +201,4 @@ func copyTree(src, dst string) error {
 	})
 }
 
-// updateGitignore rewrites the toob-managed section of .gitignore.
-func (inst *Installer) updateGitignore() {
-	managed := inst.computeGitignoreEntries()
-	giPath := paths.GitignorePath(inst.root)
 
-	var existing []string
-	if data, err := os.ReadFile(giPath); err == nil {
-		existing = strings.Split(string(data), "\n")
-	}
-
-	// Strip old managed section
-	var cleaned []string
-	inside := false
-	for _, line := range existing {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == giStart {
-			inside = true
-			continue
-		}
-		if trimmed == giEnd {
-			inside = false
-			continue
-		}
-		if !inside {
-			cleaned = append(cleaned, line)
-		}
-	}
-
-	// Remove trailing blank lines
-	for len(cleaned) > 0 && strings.TrimSpace(cleaned[len(cleaned)-1]) == "" {
-		cleaned = cleaned[:len(cleaned)-1]
-	}
-
-	if len(managed) > 0 {
-		cleaned = append(cleaned, "", giStart)
-		cleaned = append(cleaned, managed...)
-		cleaned = append(cleaned, giEnd)
-	}
-	cleaned = append(cleaned, "") // final newline
-
-	os.WriteFile(giPath, []byte(strings.Join(cleaned, "\n")), 0o644)
-}
-
-func (inst *Installer) computeGitignoreEntries() []string {
-	var entries []string
-
-	// Per-chip entries (non-spawned only)
-	for name, e := range inst.lock.Chips {
-		if !e.Spawned {
-			entries = append(entries, "bootloader/hal/chips/"+name+"/")
-		}
-	}
-
-	// Arch layers: gitignore only if ALL chips using it are non-spawned
-	archUsed := map[string]bool{}
-	for _, e := range inst.lock.Chips {
-		if _, ok := archUsed[e.Arch]; !ok {
-			archUsed[e.Arch] = true
-		}
-		if e.Spawned {
-			archUsed[e.Arch] = false
-		}
-	}
-	for arch, shouldIgnore := range archUsed {
-		if shouldIgnore {
-			entries = append(entries, "bootloader/hal/arch/"+arch+"/")
-		}
-	}
-
-	// Vendor layers: same logic
-	vendorUsed := map[string]bool{}
-	for _, e := range inst.lock.Chips {
-		if _, ok := vendorUsed[e.Vendor]; !ok {
-			vendorUsed[e.Vendor] = true
-		}
-		if e.Spawned {
-			vendorUsed[e.Vendor] = false
-		}
-	}
-	for vendor, shouldIgnore := range vendorUsed {
-		if shouldIgnore {
-			entries = append(entries, "bootloader/hal/vendor/"+vendor+"/")
-		}
-	}
-
-	sort.Strings(entries)
-	return entries
-}

@@ -3,7 +3,7 @@
 # 
 # Relevant Specs: 
 # - docs/concept_fusion.md (Schicht 3: Core Engine, Schicht 4b: Diagnostics)
-# - docs/structure_plan.md (Verzeichnisbaum `bootloader/core/`)
+# - docs/structure_plan.md (Verzeichnisbaum `toobloader/core/`)
 # - docs/merkle_spec.md (Chunk-based Verification)
 # - docs/stage_1_5_spec.md (UART Recovery)
 # - docs/wal_internals.md (Write-Ahead Log)
@@ -87,21 +87,21 @@ add_custom_target(generate_manifest
 
 
 add_library(toob_core STATIC
-    bootloader/core/boot_main.c
-    bootloader/core/boot_state.c
-    bootloader/core/boot_journal.c
-    bootloader/core/boot_verify.c
-    bootloader/core/boot_crc32.c
-    bootloader/core/boot_merkle.c
-    bootloader/core/boot_swap.c
-    bootloader/core/boot_delta.c
-    bootloader/core/boot_rollback.c
-    bootloader/core/boot_panic.c
-    bootloader/core/boot_confirm.c
-    bootloader/core/boot_diag.c
-    bootloader/core/boot_energy.c
-    bootloader/core/boot_multiimage.c
-    bootloader/core/boot_delay.c
+    ${TOOB_CORE_DIR}/boot_main.c
+    ${TOOB_CORE_DIR}/boot_state.c
+    ${TOOB_CORE_DIR}/boot_journal.c
+    ${TOOB_CORE_DIR}/boot_verify.c
+    ${TOOB_CORE_DIR}/boot_crc32.c
+    ${TOOB_CORE_DIR}/boot_merkle.c
+    ${TOOB_CORE_DIR}/boot_swap.c
+    ${TOOB_CORE_DIR}/boot_delta.c
+    ${TOOB_CORE_DIR}/boot_rollback.c
+    ${TOOB_CORE_DIR}/boot_panic.c
+    ${TOOB_CORE_DIR}/boot_confirm.c
+    ${TOOB_CORE_DIR}/boot_diag.c
+    ${TOOB_CORE_DIR}/boot_energy.c
+    ${TOOB_CORE_DIR}/boot_multiimage.c
+    ${TOOB_CORE_DIR}/boot_delay.c
     ${GENERATED_SUIT_C}
 )
 
@@ -112,11 +112,11 @@ add_dependencies(toob_core generate_manifest)
 # Architektur-bedingter Ausschluss: In der Sandbox (x86 host) können wir 
 # keine Bare-Metal (ARM/Xtensa) Assembler-Anweisungen ausführen.
 if(NOT TOOB_ARCH STREQUAL "host")
-    target_sources(toob_core PRIVATE bootloader/core/boot_secure_zeroize.S)
+    target_sources(toob_core PRIVATE ${TOOB_CORE_DIR}/boot_secure_zeroize.S)
 else()
     # M-BUILD GAP-Fix: Sandbox Host-Mock für Assembler-Dateien und Hardware Pointers!
     target_sources(toob_core PRIVATE 
-        bootloader/core/boot_secure_zeroize_host.c
+        ${TOOB_CORE_DIR}/boot_secure_zeroize_host.c
     )
     target_compile_definitions(toob_core PUBLIC TOOB_MOCK_TEST)
 endif()
@@ -127,10 +127,9 @@ endif()
 
 target_include_directories(toob_core PUBLIC 
     ${CMAKE_SOURCE_DIR}/common/include
-    ${CMAKE_SOURCE_DIR}/common/include
-        bootloader/core/include 
+    ${TOOB_CORE_DIR}/include 
     ${CMAKE_BINARY_DIR}/generated
-    ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
+    ${TOOB_SDK_DIR}/libtoob/include
 )
 
 # Bindung an Third-Party Libs und dynamische Feature-Verwendung

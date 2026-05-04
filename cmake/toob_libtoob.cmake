@@ -19,11 +19,11 @@
 # ------------------------------------------------------------------------------
 
 add_library(toob_libtoob STATIC
-    sdk/libtoob/toob_confirm.c
-    sdk/libtoob/toob_update.c
-    sdk/libtoob/toob_diag.c
-    sdk/libtoob/toob_handoff.c
-    sdk/libtoob/toob_ota.c
+    ${TOOB_SDK_DIR}/libtoob/toob_confirm.c
+    ${TOOB_SDK_DIR}/libtoob/toob_update.c
+    ${TOOB_SDK_DIR}/libtoob/toob_diag.c
+    ${TOOB_SDK_DIR}/libtoob/toob_handoff.c
+    ${TOOB_SDK_DIR}/libtoob/toob_ota.c
     # GAP-Integration: Die Datei `toob_telemetry_encode.c` wird von `cli/suit/generate.sh` (via `generate_manifest` Target) erstellt.
     ${CMAKE_BINARY_DIR}/generated/toob_telemetry_encode.c
 )
@@ -35,7 +35,7 @@ add_library(toob_libtoob STATIC
 # 1. Public Includes für das Feature-OS
 # Wenn ein RTOS gegen toob_libtoob linkt, erbt es automatisch libtoob.h.
 target_include_directories(toob_libtoob PUBLIC
-    sdk/libtoob/include
+    ${TOOB_SDK_DIR}/libtoob/include
 )
 
 # 2. Private Includes (Generierte Manifest-Brücke)

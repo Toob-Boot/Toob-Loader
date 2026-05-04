@@ -67,8 +67,8 @@ def find_project_root(start: Optional[Path] = None) -> Path:
 
 
 def get_hal_dir(project_root: Path) -> Path:
-    """Return ``<project>/bootloader/hal/``."""
-    return project_root / "bootloader" / "hal"
+    """Return ``<project>/toobloader/hal/``."""
+    return project_root / "toobloader" / "hal"
 
 
 def get_lockfile_path(project_root: Path) -> Path:

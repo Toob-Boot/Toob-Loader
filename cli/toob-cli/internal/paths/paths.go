@@ -74,9 +74,9 @@ func FindProjectRoot(start string) (string, error) {
 		projectMarker, projectSignature, start)
 }
 
-// HALDir returns <project>/bootloader/hal/.
+// HALDir returns <project>/toobloader/hal/.
 func HALDir(projectRoot string) string {
-	return filepath.Join(projectRoot, "bootloader", "hal")
+	return filepath.Join(projectRoot, "toobloader", "hal")
 }
 
 // LockfilePath returns <project>/toob.lock.

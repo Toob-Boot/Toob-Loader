@@ -3,7 +3,7 @@
 # 
 # Relevant Specs: 
 # - docs/concept_fusion.md (Stage 0: Immutable Core, Boot-Pointer, Fallback)
-# - docs/structure_plan.md (Verzeichnisbaum `bootloader/stage0/`)
+# - docs/structure_plan.md (Verzeichnisbaum `toobloader/stage0/`)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -20,35 +20,35 @@ option(TOOB_STAGE0_ED25519_SW "Bundle full Ed25519 stack into Stage 0 (Footprint
 # 1. Target Definition (Executable, keine Library)
 # Stage 0 stellt den Entry-Point der kompletten Firmware nach ROM-Exit dar.
 add_executable(toob_stage0
-    bootloader/stage0/stage0_main.c
-    bootloader/stage0/stage0_hash.c
-    bootloader/stage0/stage0_verify.c
-    bootloader/stage0/stage0_otp.c
-    bootloader/stage0/stage0_boot_pointer.c
-    bootloader/stage0/stage0_tentative.c
-    bootloader/core/boot_crc32.c
+    ${TOOB_STAGE0_DIR}/stage0_main.c
+    ${TOOB_STAGE0_DIR}/stage0_hash.c
+    ${TOOB_STAGE0_DIR}/stage0_verify.c
+    ${TOOB_STAGE0_DIR}/stage0_otp.c
+    ${TOOB_STAGE0_DIR}/stage0_boot_pointer.c
+    ${TOOB_STAGE0_DIR}/stage0_tentative.c
+    ${TOOB_CORE_DIR}/boot_crc32.c
 )
 
 if(TOOB_STAGE0_ED25519_SW)
     # GAP-Integration: Performance & Constant-Time in S0.
     set_source_files_properties(
-        bootloader/crypto/monocypher/monocypher.c 
-        bootloader/crypto/monocypher/monocypher-ed25519.c 
-        bootloader/crypto/sha256/sha256.c
+        ${TOOB_CRYPTO_DIR}/monocypher/monocypher.c 
+        ${TOOB_CRYPTO_DIR}/monocypher/monocypher-ed25519.c 
+        ${TOOB_CRYPTO_DIR}/sha256/sha256.c
         PROPERTIES COMPILE_FLAGS "-O3 -fno-lto"
     )
     target_sources(toob_stage0 PRIVATE
-        bootloader/crypto/monocypher/monocypher.c
-        bootloader/crypto/monocypher/monocypher-ed25519.c
-        bootloader/crypto/sha256/sha256.c
+        ${TOOB_CRYPTO_DIR}/monocypher/monocypher.c
+        ${TOOB_CRYPTO_DIR}/monocypher/monocypher-ed25519.c
+        ${TOOB_CRYPTO_DIR}/sha256/sha256.c
     )
-    target_include_directories(toob_stage0 PRIVATE bootloader/crypto/monocypher bootloader/crypto/sha256)
+    target_include_directories(toob_stage0 PRIVATE ${TOOB_CRYPTO_DIR}/monocypher ${TOOB_CRYPTO_DIR}/sha256)
 endif()
 
 if(NOT TOOB_ARCH STREQUAL "host")
-    target_sources(toob_stage0 PRIVATE bootloader/core/boot_secure_zeroize.S)
+    target_sources(toob_stage0 PRIVATE ${TOOB_CORE_DIR}/boot_secure_zeroize.S)
 else()
-    target_sources(toob_stage0 PRIVATE bootloader/core/boot_secure_zeroize_host.c)
+    target_sources(toob_stage0 PRIVATE ${TOOB_CORE_DIR}/boot_secure_zeroize_host.c)
     # M-BUILD GAP-Fix: Sandbox Host-Mock für Hardware Pointers
     target_compile_definitions(toob_stage0 PRIVATE 
         TOOB_WAL_SECTOR_ADDRS={0x4000,0x5000,0x6000,0x10000}
@@ -59,9 +59,9 @@ target_compile_definitions(toob_stage0 PRIVATE TOOB_MINIMAL_CRYPTO=1)
 
 # 2. Toob-Boot Core-Includes verfügbar machen (boot_types.h) + Generiertes Config
 target_include_directories(toob_stage0 PRIVATE
-    bootloader/stage0/include
-    common/include
-        bootloader/core/include
+    ${TOOB_STAGE0_DIR}/include
+    ${CMAKE_SOURCE_DIR}/common/include
+    ${TOOB_CORE_DIR}/include
     ${CMAKE_BINARY_DIR}/generated
 )
 
@@ -117,7 +117,7 @@ if(NOT TOOB_ARCH STREQUAL "host")
     add_custom_command(
         TARGET toob_stage0 POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_stage0> $<TARGET_FILE_DIR:toob_stage0>/toob_stage0.bin
-        COMMAND python ${CMAKE_SOURCE_DIR}/cli/manifest_compiler/budget_check.py --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage0>/toob_stage0.bin --stage stage0
+        COMMAND python ${TOOB_BUDGET_CHECK_SCRIPT} --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage0>/toob_stage0.bin --stage stage0
         COMMENT "Generating flashable RAW binary toob_stage0.bin and checking flash budget..."
     )
 endif()

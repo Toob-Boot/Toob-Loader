@@ -213,7 +213,7 @@ class ChipInstaller:
         # Per-chip entries
         for name, entry in self._lock.chips.items():
             if not entry.spawned:
-                entries.append(f"bootloader/hal/chips/{name}/")
+                entries.append(f"toobloader/hal/chips/{name}/")
 
         # Arch layers: gitignore only if every chip using it is non-spawned
         arches_used: dict[str, bool] = {}
@@ -225,7 +225,7 @@ class ChipInstaller:
 
         for arch, should_ignore in arches_used.items():
             if should_ignore:
-                entries.append(f"bootloader/hal/arch/{arch}/")
+                entries.append(f"toobloader/hal/arch/{arch}/")
 
         # Vendor layers: same logic
         vendors_used: dict[str, bool] = {}
@@ -237,6 +237,6 @@ class ChipInstaller:
 
         for vendor, should_ignore in vendors_used.items():
             if should_ignore:
-                entries.append(f"bootloader/hal/vendor/{vendor}/")
+                entries.append(f"toobloader/hal/vendor/{vendor}/")
 
         return entries

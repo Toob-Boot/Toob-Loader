@@ -442,8 +442,8 @@ def main():
     if "GENERATED_BOOT_CONFIG_H" in macros:
         macros.remove("GENERATED_BOOT_CONFIG_H")
 
-    # Scan all C/H files in bootloader/
-    bootloader_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "bootloader"))
+    # Scan all C/H files in toobloader/
+    bootloader_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "toobloader"))
     referenced_macros = set()
     
     for root_dir, _, files in os.walk(bootloader_dir):

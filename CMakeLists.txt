@@ -26,6 +26,15 @@ else()
     if(NOT CMAKE_TOOLCHAIN_FILE)
         set(CMAKE_TOOLCHAIN_FILE "${CMAKE_SOURCE_DIR}/cmake/toolchain-host.cmake")
     endif()
+
+    set(TOOB_CORE_DIR "${CMAKE_SOURCE_DIR}/toobloader/core")
+    set(TOOB_CRYPTO_DIR "${CMAKE_SOURCE_DIR}/toobloader/crypto")
+    set(TOOB_STAGE0_DIR "${CMAKE_SOURCE_DIR}/toobloader/stage0")
+    set(TOOB_HAL_CHIP_DIR "${CMAKE_SOURCE_DIR}/toobloader/hal/chips/${TOOB_CHIP}")
+    set(TOOB_HAL_ARCH_DIR "${CMAKE_SOURCE_DIR}/toobloader/hal/arch/${TOOB_ARCH}")
+    set(TOOB_HAL_VENDOR_DIR "${CMAKE_SOURCE_DIR}/toobloader/hal/vendor/${TOOB_VENDOR}")
+    set(TOOB_SDK_DIR "${CMAKE_SOURCE_DIR}/sdk")
+    set(TOOB_BUDGET_CHECK_SCRIPT "${CMAKE_SOURCE_DIR}/cli/manifest_compiler/budget_check.py")
 endif()
 
 # Set default manifest if not provided by the user
@@ -119,7 +128,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # 5.2 Define the final bootloader Target (toob_stage1)
-add_executable(toob_stage1 bootloader/core/boot_main.c)
+add_executable(toob_stage1 toobloader/core/boot_main.c)
 
 # 5.3 Architektur-Spezifische P10 Limitierungen und Globale Libraries
 toob_apply_strict_flags(toob_stage1 TRUE)
@@ -152,8 +161,8 @@ if(NOT TOOB_ARCH STREQUAL "host")
     # Prefer manifest-compiler generated layout; fall back to chip-specific script
     if(EXISTS "${CMAKE_BINARY_DIR}/generated/flash_layout.ld")
         set(TOOB_LINKER_SCRIPT "${CMAKE_BINARY_DIR}/generated/flash_layout.ld")
-    elseif(EXISTS "${CMAKE_SOURCE_DIR}/bootloader/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
-        set(TOOB_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/bootloader/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/toobloader/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
+        set(TOOB_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/toobloader/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
     else()
         message(FATAL_ERROR "No linker script found for chip '${TOOB_CHIP}'!")
     endif()
@@ -164,7 +173,7 @@ if(NOT TOOB_ARCH STREQUAL "host")
     add_custom_command(
         TARGET toob_stage1 POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_stage1> $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin
-        COMMAND python ${CMAKE_SOURCE_DIR}/cli/manifest_compiler/budget_check.py --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin --stage stage1
+        COMMAND python ${TOOB_BUDGET_CHECK_SCRIPT} --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin --stage stage1
         COMMENT "Generating flashable RAW binary toob_stage1.bin and checking flash budget..."
     )
 endif()

@@ -72,7 +72,7 @@ def build(
     click.echo(f"[toob] Target: {vendor}/{chip}")
 
     # 2. Resolve hardware.json (spawned chips in hal/chips/, or registry)
-    hw_json = root / "bootloader" / "hal" / "chips" / chip / "hardware.json"
+    hw_json = root / "toobloader" / "hal" / "chips" / chip / "hardware.json"
     if not hw_json.is_file():
         raise click.ClickException(
             f"hardware.json not found for chip '{chip}'. "
@@ -122,7 +122,7 @@ def build(
     hal_vendor = vendor  # CMake uses HAL directory names, not human-friendly ones
 
     chip_manifest_path = (
-        root / "bootloader" / "hal" / "chips" / chip / "chip_manifest.json"
+        root / "toobloader" / "hal" / "chips" / chip / "chip_manifest.json"
     )
     if chip_manifest_path.is_file():
         cm = json.loads(chip_manifest_path.read_text(encoding="utf-8"))
