@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: toob
-Version: 0.1.0
-Summary: Hardware Package Manager for the Toob-Boot ecosystem
-Requires-Python: >=3.11
-Requires-Dist: click>=8.1

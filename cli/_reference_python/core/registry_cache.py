@@ -1,6 +1,6 @@
 """Git-backed registry cache manager.
 
-Manages a shallow clone of the ``toob-chip-list`` repository under
+Manages a shallow clone of the ``toob-registry`` repository under
 ``~/.toob/registry/``.  All network access is confined to this module.
 """
 

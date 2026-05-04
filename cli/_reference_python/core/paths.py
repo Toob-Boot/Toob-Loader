@@ -14,7 +14,7 @@ from typing import Optional
 _PROJECT_MARKER = "CMakeLists.txt"
 _PROJECT_SIGNATURE = "toob-boot"
 
-DEFAULT_REGISTRY_URL = "https://github.com/toob-boot/toob-chip-list.git"
+DEFAULT_REGISTRY_URL = "https://github.com/toob-boot/toob-registry.git"
 
 
 def get_toob_home() -> Path:
