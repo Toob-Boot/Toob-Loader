@@ -14,9 +14,6 @@ import (
 const (
 	// DefaultRegistryURL is the upstream toob-registry repository.
 	DefaultRegistryURL = "https://github.com/toob-boot/toob-registry.git"
-
-	projectMarker    = "CMakeLists.txt"
-	projectSignature = "toob-boot"
 )
 
 // ToobHome returns ~/.toob/, creating it if necessary.
@@ -57,9 +54,18 @@ func FindProjectRoot(start string) (string, error) {
 	}
 
 	for {
-		candidate := filepath.Join(current, projectMarker)
-		data, err := os.ReadFile(candidate)
-		if err == nil && strings.Contains(string(data), projectSignature) {
+		// Check for Core Developer Monorepo
+		cmCandidate := filepath.Join(current, "CMakeLists.txt")
+		data, err := os.ReadFile(cmCandidate)
+		if err == nil && strings.Contains(string(data), "toob-boot") {
+			return current, nil
+		}
+
+		// Check for End User Project
+		if _, err := os.Stat(filepath.Join(current, "device.toml")); err == nil {
+			return current, nil
+		}
+		if _, err := os.Stat(filepath.Join(current, "toob.lock")); err == nil {
 			return current, nil
 		}
 
@@ -70,8 +76,7 @@ func FindProjectRoot(start string) (string, error) {
 		current = parent
 	}
 
-	return "", fmt.Errorf("no Toob-Loader project root found (no %s containing '%s' in any parent of %s)",
-		projectMarker, projectSignature, start)
+	return "", fmt.Errorf("no Toob-Loader project root found (no device.toml, toob.lock or CMakeLists.txt containing 'toob-boot' in any parent of %s)", start)
 }
 
 // HALDir returns <project>/toobloader/hal/.

@@ -13,14 +13,15 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/paths"
+	"github.com/toob-boot/toob/internal/registry"
 )
 
-func resolvePath(localRoot string, registryRoot string, relPath string) string {
+func resolvePath(localRoot string, fallbackRoot string, relPath string) string {
 	localPath := filepath.Join(localRoot, relPath)
 	if _, err := os.Stat(localPath); err == nil {
 		return localPath
 	}
-	return filepath.Join(registryRoot, relPath)
+	return filepath.Join(fallbackRoot, relPath)
 }
 
 var (
@@ -66,7 +67,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	// 1. Resolve device manifest
 	manifest := flagManifest
 	if manifest == "" {
-		manifest = filepath.Join(root, "cli", "examples", "manifests", "device.toml")
+		manifest = filepath.Join(root, "device.toml")
 	}
 	if _, err := os.Stat(manifest); err != nil {
 		return fmt.Errorf("device manifest not found: %s", manifest)
@@ -84,8 +85,28 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	fmt.Printf("[toob] Target: %s/%s\n", vendor, chip)
 
 	regDir, _ := paths.RegistryDir()
+	
+	cache := registry.NewCache("")
+	if !cache.IsInitialized() {
+		fmt.Println("[toob] Registry not initialized. Attempting auto-clone...")
+		if err := cache.Sync(); err != nil {
+			return fmt.Errorf("failed to sync registry (offline?): %w\nRun `toob chip add` when connected to the internet.", err)
+		}
+	}
 
-	// 2. Resolve hardware.json (Inheritance Mode)
+	// Determine compiler source directory
+	compilerRoot := root
+	if envDir := os.Getenv("TOOB_COMPILER_DIR"); envDir != "" {
+		compilerRoot = envDir
+	} else {
+		if _, err := os.Stat(filepath.Join(root, "CMakeLists.txt")); err != nil {
+			return fmt.Errorf("native build failed: compiler core not found at %s.\n"+
+				"End-users: Use 'toob build --docker' (recommended).\n"+
+				"Core-Devs: Set TOOB_COMPILER_DIR environment variable to your Toob-Loader git repository path.", root)
+		}
+	}
+
+	// 2. Resolve hardware.json (HAL Registry Inheritance)
 	hwJSON := resolvePath(root, regDir, filepath.Join("toobloader", "hal", "chips", chip, "hardware.json"))
 	if _, err := os.Stat(hwJSON); err != nil {
 		return fmt.Errorf("hardware.json not found for chip '%s' (not in local or registry). Run `toob chip add` first", chip)
@@ -101,8 +122,8 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// 4. Run manifest compiler (Inheritance Mode)
-	manifestPy := resolvePath(root, regDir, filepath.Join("cli", "manifest_compiler", "toob_manifest.py"))
+	// 4. Run manifest compiler (Compiler Inheritance Mode)
+	manifestPy := resolvePath(root, compilerRoot, filepath.Join("cli", "manifest_compiler", "toob_manifest.py"))
 	if _, err := os.Stat(manifestPy); err != nil {
 		return fmt.Errorf("manifest compiler not found at %s", manifestPy)
 	}
@@ -113,7 +134,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Run SUIT code generator if bash is available
-	generateSh := resolvePath(root, regDir, filepath.Join("cli", "suit", "generate.sh"))
+	generateSh := resolvePath(root, compilerRoot, filepath.Join("cli", "suit", "generate.sh"))
 	if _, err := os.Stat(generateSh); err == nil {
 		if bash := findBash(); bash != "" {
 			if pyScripts := findPythonScriptsBin(); pyScripts != "" {
@@ -153,16 +174,19 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	toolchainFile := resolvePath(root, regDir, filepath.Join("cmake", toolchainName))
+	toolchainFile := resolvePath(root, compilerRoot, filepath.Join("cmake", toolchainName))
 
-	coreDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "core")))
-	cryptoDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "crypto")))
-	stage0Dir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "stage0")))
+	coreDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "core")))
+	cryptoDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "crypto")))
+	stage0Dir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "stage0")))
+	
+	// HALs come from regDir
 	halChipDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "chips", chip)))
 	halArchDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "arch", arch)))
 	halVendorDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "vendor", halVendor)))
-	sdkDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("sdk")))
-	budgetCheckPy := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("cli", "manifest_compiler", "budget_check.py")))
+	
+	sdkDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("sdk")))
+	budgetCheckPy := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("cli", "manifest_compiler", "budget_check.py")))
 
 	configContent := fmt.Sprintf(
 		"set(TOOB_ARCH \"%s\")\nset(TOOB_VENDOR \"%s\")\nset(TOOB_CHIP \"%s\")\n"+
@@ -197,7 +221,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	if err := run(root, "cmake",
 		"-G", "Ninja",
 		"-B", buildDir,
-		"-S", root,
+		"-S", compilerRoot,
 		"-DCMAKE_TOOLCHAIN_FILE="+toolchainFile,
 		"-DTOOLCHAIN_PREFIX="+toolchainPrefix,
 		"-DCMAKE_SYSTEM_NAME=Generic",
