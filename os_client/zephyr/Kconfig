@@ -1,0 +1,21 @@
+menuconfig TOOB_NETWORK_CLIENT
+    bool "Toob Network Client (OTA Daemon)"
+    default y
+    help
+      Enables the OS-agnostic Network Client for Toob-Loader OTA updates.
+
+if TOOB_NETWORK_CLIENT
+
+config TOOB_SERVER_URL
+    string "OTA Server URL"
+    default "https://api.toob.io/v1/update"
+    help
+      The base URL for the OTA update server.
+
+config TOOB_POLL_INTERVAL_SEC
+    int "OTA Polling Interval (Seconds)"
+    default 86400
+    help
+      How often the daemon checks for new updates (default 24h).
+
+endif # TOOB_NETWORK_CLIENT

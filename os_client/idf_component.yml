@@ -1,0 +1,6 @@
+version: "1.0.0"
+description: "Toob Network Client for Zero-Bloat OTA Updates"
+url: "https://toob.io"
+dependencies:
+  idf:
+    version: ">=4.4.0"
