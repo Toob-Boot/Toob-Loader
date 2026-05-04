@@ -22,7 +22,7 @@ OUTPUT_DIR=$1
 DEVICE_MANIFEST=$2
 TOOB_CHIP=$3
 
-PROJECT_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+PROJECT_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 mkdir -p "$OUTPUT_DIR"
 
 echo "[SUIT CodeGen] Generating C artifacts in: $OUTPUT_DIR"
@@ -34,9 +34,9 @@ must_mock_zcbor=1
 
 if python3 -c "import zcbor; assert zcbor.__version__ >= '0.8.0'" 2>/dev/null; then
     echo "[SUIT CodeGen] Python zcbor >= 0.8.0 found. Generating strict parsers..."
-    python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_suit.cddl" --decode --type toob_suit --output-c "$OUTPUT_DIR/boot_suit.c" --output-h "$OUTPUT_DIR/boot_suit.h"
-    python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_telemetry.cddl" --decode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_decode.c" --output-h "$OUTPUT_DIR/toob_telemetry_decode.h"
-    python3 -m zcbor code -c "$PROJECT_ROOT/suit/toob_telemetry.cddl" --encode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_encode.c" --output-h "$OUTPUT_DIR/toob_telemetry_encode.h"
+    python3 -m zcbor code -c "$PROJECT_ROOT/cli/suit/toob_suit.cddl" --decode --type toob_suit --output-c "$OUTPUT_DIR/boot_suit.c" --output-h "$OUTPUT_DIR/boot_suit.h"
+    python3 -m zcbor code -c "$PROJECT_ROOT/cli/suit/toob_telemetry.cddl" --decode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_decode.c" --output-h "$OUTPUT_DIR/toob_telemetry_decode.h"
+    python3 -m zcbor code -c "$PROJECT_ROOT/cli/suit/toob_telemetry.cddl" --encode --type toob_telemetry --output-c "$OUTPUT_DIR/toob_telemetry_encode.c" --output-h "$OUTPUT_DIR/toob_telemetry_encode.h"
     must_mock_zcbor=0
 elif [ -f "$OUTPUT_DIR/boot_suit.h" ] && ! grep -q "BOOT_SUIT_MOCK_H" "$OUTPUT_DIR/boot_suit.h"; then
     echo "[SUIT CodeGen] zcbor not found, but real outputs exist. Preserving them! (Idempotence Guard)"
@@ -257,11 +257,11 @@ SECTIONS {
 EOF
 }
 
-MANIFEST_CLI="$PROJECT_ROOT/manifest_compiler/toob_manifest.py"
+MANIFEST_CLI="$PROJECT_ROOT/cli/manifest_compiler/toob_manifest.py"
 
 if [ -f "$MANIFEST_CLI" ]; then
     echo "[SUIT CodeGen] Executing Manifest-Compiler..."
-    if ! python "$MANIFEST_CLI" --toml "$DEVICE_MANIFEST" --hardware "$PROJECT_ROOT/hal/chips/$TOOB_CHIP/hardware.json" --outdir "$OUTPUT_DIR"; then
+    if ! python "$MANIFEST_CLI" --toml "$DEVICE_MANIFEST" --hardware "$PROJECT_ROOT/bootloader/hal/chips/$TOOB_CHIP/hardware.json" --outdir "$OUTPUT_DIR"; then
         echo "[SUIT CodeGen] ERROR: Manifest-Compiler crashed! Yielding to fallback mocks to preserve CI..."
         inject_hardware_mocks
     fi

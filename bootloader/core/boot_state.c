@@ -21,7 +21,9 @@
 
 #include "boot_state.h"
 #include "generated_boot_config.h"
+#ifdef TOOB_MOCK_TEST
 #include "boot_config_mock.h"
+#endif
 #include "boot_diag.h"
 #include "boot_delta.h"
 #include "boot_journal.h"

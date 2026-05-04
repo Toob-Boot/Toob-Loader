@@ -406,7 +406,7 @@ init_success:
   local_handoff.reset_reason = translate_reset_reason(platform->clock->get_reset_reason());
   local_handoff.booted_partition = target_out->boot_recovery_os ? TOOB_PARTITION_RECOVERY : TOOB_PARTITION_APP;
   local_handoff.net_search_accum_ms = target_out->net_search_accum_ms;
-  local_handoff._reserved_pad = 0;
+  local_handoff.resume_offset = target_out->resume_offset;
 
   platform->wdt->kick();
 

@@ -207,7 +207,6 @@ toob_status_t toob_get_handoff(toob_handoff_t *out_handoff) {
 
   /* P10 Zero-Trust: Sicherstellen, dass das Struct-Padding im OS-Heap
    * genullt ist (Verhindert subtiles Data-Leakage bei Serialisierung). */
-  out_handoff->_reserved_pad = 0;
 
   return TOOB_OK;
 }

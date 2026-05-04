@@ -20,6 +20,7 @@ typedef struct {
     uint32_t active_entry_point;  /**< Physikalischer Flash-Offset des OS Vector Tables */
     uint32_t active_image_size;   /**< Für XIP Bounds Verifikation via Stage 0 / MPU */
     uint32_t net_search_accum_ms; /**< Extrahierter Netzwerk-Suchzeit Akkumulator */
+    uint32_t resume_offset;       /**< Extrahierter Delta-Resume-Checkpoint */
     uint64_t generated_nonce;     /**< Dem OS bereitzustellende Anti-Replay Nonce */
     bool boot_recovery_os;        /**< Wahr, wenn das Recovery-OS (Fallback) gebootet wird */
     bool is_tentative_boot;       /**< Exported True if the boot is a trial (TXN_COMMIT) and unconfirmed */

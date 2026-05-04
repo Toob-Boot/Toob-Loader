@@ -248,7 +248,7 @@ def main():
         f.write(f"__APP_BUDGET_SIZE = 0x{app_budget:08X};\n")
 
     # Generate stage0_layout.ld
-    memory_info = hardware_data.get("memory", {})
+    memory_info = blueprint_data.get("memory", {})
     s0_ram_base = memory_info.get("ram_base", "0x20000000")
     s0_ram_size = memory_info.get("ram_size", "0x8000")
     

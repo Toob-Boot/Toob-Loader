@@ -158,6 +158,7 @@ boot_status_t boot_journal_append(const boot_platform_t *platform,
  */
 boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
                                            wal_entry_payload_t *out_state,
-                                           uint32_t *out_net_accum);
+                                           uint32_t *out_net_accum,
+                                           uint32_t *out_resume_offset);
 
 #endif /* BOOT_JOURNAL_H */

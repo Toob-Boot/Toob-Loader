@@ -25,17 +25,15 @@ set(CMAKE_C_COMPILER ${TOOLCHAIN_PREFIX}gcc)
 set(CMAKE_ASM_COMPILER ${CMAKE_C_COMPILER})
 
 # Utilities für Binary-Weaving und Analyse (z.B. OSV / P10 Checks)
-set(CMAKE_OBJCOPY ${TOOLCHAIN_PREFIX}objcopy CACHE INTERNAL "Objcopy tool")
-set(CMAKE_OBJDUMP ${TOOLCHAIN_PREFIX}objdump CACHE INTERNAL "Objdump tool")
-set(CMAKE_SIZE ${TOOLCHAIN_PREFIX}size CACHE INTERNAL "Size tool")
+find_program(CMAKE_OBJCOPY NAMES ${TOOLCHAIN_PREFIX}objcopy)
+find_program(CMAKE_OBJDUMP NAMES ${TOOLCHAIN_PREFIX}objdump)
+find_program(CMAKE_SIZE NAMES ${TOOLCHAIN_PREFIX}size)
 
 # BUGFIX/GAP: Da wir CMAKE_TRY_COMPILE_TARGET_TYPE auf STATIC_LIBRARY setzen,
-# MÜSSEN wir zwingend den ARM-Archiver setzen. Ansonsten nutzt CMake auf machen
-# Hosts `/usr/bin/ar` (Host-AR), was bei ARM-Objektdateien sofort zu Inkompatibilitäts-
-# Fehlern führt und den CMake-Init crasht!
-set(CMAKE_AR ${TOOLCHAIN_PREFIX}ar CACHE INTERNAL "Archiver tool")
-set(CMAKE_RANLIB ${TOOLCHAIN_PREFIX}ranlib CACHE INTERNAL "Ranlib tool")
-set(CMAKE_STRIP ${TOOLCHAIN_PREFIX}strip CACHE INTERNAL "Strip tool")
+# MÜSSEN wir zwingend den Archiver explizit setzen, da sonst der Host-Archiver crasht.
+find_program(CMAKE_AR NAMES ${TOOLCHAIN_PREFIX}ar)
+find_program(CMAKE_RANLIB NAMES ${TOOLCHAIN_PREFIX}ranlib)
+find_program(CMAKE_STRIP NAMES ${TOOLCHAIN_PREFIX}strip)
 
 # ------------------------------------------------------------------------------
 # 3. Compiler Test Bypass (Kritisch für Bare-Metal)

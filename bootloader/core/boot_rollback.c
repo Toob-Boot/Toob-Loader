@@ -457,7 +457,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
   /* 3. Resume-Logik (Brownout-Recovery) & Intent-Checkpointing */
   uint32_t dummy_accum = 0;
   status =
-      boot_journal_reconstruct_txn(platform, &pending_intent, &dummy_accum);
+      boot_journal_reconstruct_txn(platform, &pending_intent, &dummy_accum, NULL);
   if (status != BOOT_OK && status != BOOT_ERR_STATE) {
     goto revert_cleanup;
   }
