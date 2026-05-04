@@ -33,7 +33,8 @@ typedef enum {
   WAL_INTENT_NET_SEARCH_ACCUM = 8, /**< Anti-Lagerhaus Lockout: Persistiert die
                                       akkumulierte Netz-Suchzeit */
   WAL_INTENT_SLEEP_BACKOFF = 9, /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
-  WAL_INTENT_TXN_ROLLBACK_PENDING = 10 /**< 1-way Firmware restore in progress */
+  WAL_INTENT_TXN_ROLLBACK_PENDING = 10, /**< 1-way Firmware restore in progress */
+  WAL_INTENT_DOWNLOAD_CHECKPOINT = 11 /**< OS-Side Checkpoint for resumable OTA downloads */
 } wal_intent_t;
 
 /**

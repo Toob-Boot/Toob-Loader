@@ -109,6 +109,21 @@ static uint32_t s_bytes_queued = 0;
 static uint8_t s_align_buf[TOOB_OTA_BUF_SIZE] __attribute__((aligned(8)));
 static uint32_t s_buf_len = 0;
 
+static bool s_is_verified_stream = false;
+static uint8_t s_expected_sha256[32] __attribute__((aligned(8)));
+static toob_os_sha256_ctx_t s_sha_ctx __attribute__((aligned(8)));
+
+static void _reset_state(void) {
+    toob_ota_secure_zeroize(s_align_buf, TOOB_OTA_BUF_SIZE);
+    toob_ota_secure_zeroize(s_expected_sha256, sizeof(s_expected_sha256));
+    toob_ota_secure_zeroize(&s_sha_ctx, sizeof(s_sha_ctx));
+    s_state = TOOB_OTA_STATE_IDLE;
+    s_buf_len = 0;
+    s_bytes_queued = 0;
+    s_write_cursor = CHIP_STAGING_SLOT_ABS_ADDR;
+    s_is_verified_stream = false;
+}
+
 /* ==============================================================================
  * INTERNAL HELPER: Flush alignment buffer to flash with glitch-shielded verify
  * ==============================================================================
@@ -144,7 +159,7 @@ static toob_status_t _flush_buffer(uint32_t write_len) {
  * ==============================================================================
  */
 
-toob_status_t toob_ota_begin(uint32_t total_size, uint8_t image_type) {
+static toob_status_t _ota_begin_core(uint32_t total_size, uint8_t image_type) {
   (void)image_type; /* Stored by the SUIT manifest, not needed by the writer */
 
   if (total_size == 0 || total_size > CHIP_STAGING_SLOT_SIZE) {
@@ -156,16 +171,75 @@ toob_status_t toob_ota_begin(uint32_t total_size, uint8_t image_type) {
     return TOOB_ERR_INVALID_ARG;
   }
 
-  /* P10: Zeroize all mutable state before arming */
-  toob_ota_secure_zeroize(s_align_buf, TOOB_OTA_BUF_SIZE);
+  /* Erase Flash before write (Erase-Before-Write Hardware Constraint) */
+  /* P10 Fix: Align total size to flash erase sectors */
+  uint32_t erase_size = total_size;
+  uint32_t remainder = erase_size % 4096; /* Assumption: standard 4K sector */
+  if (remainder != 0) {
+      erase_size += (4096 - remainder);
+  }
+  if (erase_size > CHIP_STAGING_SLOT_SIZE) {
+      erase_size = CHIP_STAGING_SLOT_SIZE;
+  }
+  
+  toob_status_t res = toob_os_flash_erase(CHIP_STAGING_SLOT_ABS_ADDR, erase_size);
+  if (res != TOOB_OK) {
+      return res;
+  }
+
+  _reset_state();
 
   s_write_cursor = CHIP_STAGING_SLOT_ABS_ADDR;
   s_total_size = total_size;
-  s_bytes_queued = 0;
-  s_buf_len = 0;
   s_state = TOOB_OTA_STATE_RECEIVING;
 
   return TOOB_OK;
+}
+
+toob_status_t toob_ota_begin(uint32_t total_size, uint8_t image_type) {
+    return _ota_begin_core(total_size, image_type);
+}
+
+toob_status_t toob_ota_begin_verified(uint32_t total_size, uint8_t image_type, const uint8_t expected_sha256[32]) {
+    toob_status_t res = _ota_begin_core(total_size, image_type);
+    if (res != TOOB_OK) return res;
+
+    if (toob_os_sha256_init(&s_sha_ctx) != TOOB_OK) {
+        _reset_state();
+        return TOOB_ERR_NOT_SUPPORTED;
+    }
+
+    memcpy(s_expected_sha256, expected_sha256, 32);
+    s_is_verified_stream = true;
+    return TOOB_OK;
+}
+
+toob_status_t toob_ota_abort(void) {
+    _reset_state();
+    return TOOB_OK;
+}
+
+toob_status_t toob_ota_resume(uint32_t* resume_offset) {
+    if (!resume_offset) return TOOB_ERR_INVALID_ARG;
+    
+    if (s_state == TOOB_OTA_STATE_RECEIVING) {
+        *resume_offset = s_bytes_queued;
+        return TOOB_OK;
+    }
+    
+    /* GAP-02: Lese Checkpoint aus dem OS Handoff RAM */
+    if (toob_validate_handoff() == TOOB_OK) {
+        if (toob_handoff_state.resume_offset > 0 && toob_handoff_state.resume_offset <= CHIP_STAGING_SLOT_SIZE) {
+            /* Wir resumieren intern den State-Machine Cursor */
+            s_write_cursor = CHIP_STAGING_SLOT_ABS_ADDR + toob_handoff_state.resume_offset;
+            s_bytes_queued = toob_handoff_state.resume_offset;
+            s_state = TOOB_OTA_STATE_RECEIVING;
+            *resume_offset = s_bytes_queued;
+            return TOOB_OK;
+        }
+    }
+    
+    return TOOB_ERR_NOT_FOUND;
 }
 
 toob_status_t toob_ota_process_chunk(const uint8_t *chunk, uint32_t len) {
@@ -176,6 +250,13 @@ toob_status_t toob_ota_process_chunk(const uint8_t *chunk, uint32_t len) {
   }
   if (!chunk || len == 0) {
     return TOOB_ERR_INVALID_ARG;
+  }
+
+  if (s_is_verified_stream) {
+      if (toob_os_sha256_update(&s_sha_ctx, chunk, len) != TOOB_OK) {
+          s_state = TOOB_OTA_STATE_ERROR;
+          return TOOB_ERR_NOT_SUPPORTED;
+      }
   }
 
   /* Overflow guard: total bytes received must not exceed declared size */
@@ -212,6 +293,16 @@ toob_status_t toob_ota_process_chunk(const uint8_t *chunk, uint32_t len) {
       }
       s_buf_len = 0;
       toob_ota_secure_zeroize(s_align_buf, TOOB_OTA_BUF_SIZE);
+
+      /* GAP-02: Write Resume Checkpoint every 64KB to save WAL wear */
+      if ((s_bytes_queued % 65536) == 0) {
+          toob_wal_entry_payload_t ckpt;
+          toob_ota_secure_zeroize(&ckpt, sizeof(ckpt));
+          ckpt.magic = TOOB_WAL_ENTRY_MAGIC;
+          ckpt.intent = TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT;
+          ckpt.delta_chunk_id = s_bytes_queued;
+          (void)toob_wal_naive_append(&ckpt); /* Fire-and-forget, non-critical */
+      }
     }
   }
 
@@ -257,10 +348,33 @@ toob_status_t toob_ota_finalize(void) {
   /* P10: Zeroize alignment buffer before WAL transaction */
   toob_ota_secure_zeroize(s_align_buf, TOOB_OTA_BUF_SIZE);
 
+  if (s_is_verified_stream) {
+      uint8_t final_hash[32];
+      toob_ota_secure_zeroize(final_hash, sizeof(final_hash));
+      if (toob_os_sha256_finalize(&s_sha_ctx, final_hash) != TOOB_OK) {
+          _reset_state();
+          return TOOB_ERR_VERIFY;
+      }
+      
+      /* Constant-time (or near enough for this OS context) hash compare */
+      bool hash_ok = true;
+      for (int i = 0; i < 32; i++) {
+          if (final_hash[i] != s_expected_sha256[i]) {
+              hash_ok = false;
+          }
+      }
+      
+      toob_ota_secure_zeroize(final_hash, sizeof(final_hash));
+      
+      if (!hash_ok) {
+          _reset_state();
+          return TOOB_ERR_VERIFY;
+      }
+  }
+
   /* Reset state machine BEFORE WAL write (prevents re-entry on partial failure)
    */
-  s_state = TOOB_OTA_STATE_IDLE;
-  s_buf_len = 0;
+  _reset_state();
 
   /* Atomically register the update intent in the WAL */
   final_stat = toob_set_next_update(CHIP_STAGING_SLOT_ABS_ADDR);

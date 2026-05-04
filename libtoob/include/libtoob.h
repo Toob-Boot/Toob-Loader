@@ -139,6 +139,28 @@ toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
 toob_status_t toob_ota_begin(uint32_t total_size, uint8_t image_type);
 
 /**
+ * @brief Initializes the OTA Daemon with streaming SHA-256 verification (Zero-Bloat).
+ * @param total_size Expected total size.
+ * @param image_type 0 for OS Update, 3 for Bootloader.
+ * @param expected_sha256 32-byte hash to verify the stream against.
+ * @return TOOB_OK on success.
+ */
+toob_status_t toob_ota_begin_verified(uint32_t total_size, uint8_t image_type, const uint8_t expected_sha256[32]);
+
+/**
+ * @brief Resumes a partially downloaded OTA update.
+ * @param resume_offset Output pointer for the byte offset to resume from.
+ * @return TOOB_OK if resumable, TOOB_ERR_NOT_FOUND if no partial download exists.
+ */
+toob_status_t toob_ota_resume(uint32_t* resume_offset);
+
+/**
+ * @brief Aborts an active OTA download and securely zeroizes buffers.
+ * @return TOOB_OK.
+ */
+toob_status_t toob_ota_abort(void);
+
+/**
  * @brief Processes a chunk of incoming bytes, writing them linearly to Staging.
  * @param chunk Pointer to the downloaded bytes.
  * @param len Length of the chunk.
@@ -217,6 +239,26 @@ toob_status_t toob_os_flash_read(uint32_t addr, uint8_t* buf, uint32_t len);
  * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
  */
 toob_status_t toob_os_flash_write(uint32_t addr, const uint8_t* buf, uint32_t len);
+
+/**
+ * @brief Zero-Bloat Hook: Physikalischer Flash-Löschzugriff.
+ * @param addr Absolute Byte-Adresse im SPI Flash (Muss Sektor-bündig sein).
+ * @param len Länge der zu löschenden Daten (Muss Sektor-bündig sein).
+ * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
+ */
+toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len);
+
+/* ==============================================================================
+ * Zero-Bloat Cryptography Hooks (Hardware Acceleration OS-Side)
+ * ============================================================================== */
+
+typedef struct {
+    uint8_t opaque[128]; /* Context buffer for the OS hardware crypto driver */
+} toob_os_sha256_ctx_t;
+
+toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx);
+toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* data, uint32_t len);
+toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]);
 
 #ifdef __cplusplus
 }

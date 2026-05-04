@@ -71,7 +71,7 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t reset_reason;       /* Letzter Hardware-Reset-Grund (toob_reset_reason_t) */
     uint32_t boot_failure_count; /* Aktueller Stand des Edge-Recovery Counters */
     uint32_t net_search_accum_ms;/* Anti-Lagerhaus Netz-Suchzeit Akkumulator */
-    uint32_t _reserved_pad;      /* Erhält das 8-Byte P10 Alignment der Struktur */
+    uint32_t resume_offset;      /* Partielle Download Resume-Stelle (aus WAL Checkpoint) */
     uint32_t crc32_trailer;      /* Kryptographische Versiegelung in .noinit durch S1 */
 } toob_handoff_t;
 
@@ -166,6 +166,11 @@ _Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) > offsetof(toob_boot_di
 #define TOOB_WAL_SECTOR_MAGIC 0x57414C02
 #define TOOB_WAL_HEADER_SIZE  64
 
+/* OTA Network Failsafe Timeout (Default: 5 Minutes) */
+#ifndef TOOB_SMOKE_TEST_TIMEOUT_MS
+#define TOOB_SMOKE_TEST_TIMEOUT_MS 300000
+#endif
+
 typedef enum {
     TOOB_WAL_INTENT_NONE = 0,
     TOOB_WAL_INTENT_TXN_BEGIN = 1,
@@ -176,7 +181,9 @@ typedef enum {
     TOOB_WAL_INTENT_TXN_ROLLBACK = 6,
     TOOB_WAL_INTENT_DEPRECATED_NONCE = 7,  /**< Deprecated. Stored in TMR now */
     TOOB_WAL_INTENT_NET_SEARCH_ACCUM = 8,
-    TOOB_WAL_INTENT_SLEEP_BACKOFF = 9
+    TOOB_WAL_INTENT_SLEEP_BACKOFF = 9,
+    TOOB_WAL_INTENT_TXN_ROLLBACK_PENDING = 10,
+    TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT = 11 /**< OS-Side Checkpoint for resumable OTA downloads */
 } toob_wal_intent_t;
 
 /* 

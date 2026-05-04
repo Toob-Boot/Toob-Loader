@@ -588,8 +588,9 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
     goto state_cleanup;
 
   uint32_t active_net_accum = 0;
+  uint32_t resume_offset = 0;
   core_status =
-      boot_journal_reconstruct_txn(platform, &open_txn, &active_net_accum);
+      boot_journal_reconstruct_txn(platform, &open_txn, &active_net_accum, &resume_offset);
 
   if (core_status != BOOT_OK && core_status != BOOT_ERR_STATE) {
     goto state_cleanup;
@@ -670,6 +671,13 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
       core_status = boot_journal_append(platform, &open_txn);
       if (core_status != BOOT_OK)
         goto state_cleanup;
+        
+      /* GAP-07: Datenhygiene - Erase des Staging Slots nach erfolgreichem Boot! */
+      platform->wdt->kick();
+      /* Fire-and-Forget Erase des kompletten Staging Slots, um Firmware-Leaks zu verhindern */
+      /* P10 Fix: Wir ignorieren den Return-Code, da der Boot bereits als COMMITTED gilt.
+         Ein Fehler hier darf das OS nicht bricked lassen. */
+      (void)boot_swap_erase_safe(platform, CHIP_STAGING_SLOT_ABS_ADDR, CHIP_STAGING_SLOT_SIZE);
     }
   }
 
@@ -798,6 +806,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   }
 
   target_out->net_search_accum_ms = active_net_accum;
+  target_out->resume_offset = resume_offset;
   state_cfi ^= CFI_STEP_5;
 
 state_cleanup:

@@ -468,7 +468,8 @@ boot_status_t boot_journal_get_tmr(const boot_platform_t *platform,
 
 boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
                                            wal_entry_payload_t *out_state,
-                                           uint32_t *out_net_accum) {
+                                           uint32_t *out_net_accum,
+                                           uint32_t *out_resume_offset) {
   if (!platform || !platform->flash || !out_state)
     return BOOT_ERR_INVALID_ARG;
   if (!wal_initialized)
@@ -477,9 +478,12 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
   memset(out_state, 0, sizeof(wal_entry_payload_t));
   if (out_net_accum)
     *out_net_accum = 0;
+  if (out_resume_offset)
+    *out_resume_offset = 0;
 
   bool found_main_intent = false;
   bool found_accum = false;
+  bool found_resume = false;
 
   uint32_t search_seq = current_active_header.sequence_id;
 
@@ -568,8 +572,14 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
           *out_net_accum = entry.data.offset;
           found_accum = true;
         }
+      } else if (intent == WAL_INTENT_DOWNLOAD_CHECKPOINT) {
+        if (!found_resume && out_resume_offset) {
+          *out_resume_offset = entry.data.delta_chunk_id;
+          found_resume = true;
+        }
       } else if (intent == WAL_INTENT_SLEEP_BACKOFF ||
-                 intent == WAL_INTENT_DEPRECATED_NONCE) {
+                 intent == WAL_INTENT_DEPRECATED_NONCE ||
+                 intent == WAL_INTENT_TXN_ROLLBACK_PENDING) {
         /* Side-Band Intents haben keinen Einfluss auf den Haupt-Zustand des OS
          */
       } else {
@@ -583,13 +593,17 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
 
       boot_secure_zeroize(&entry, sizeof(entry)); /* P10 Stack Clean-up */
 
-      /* Vorzeitiger O(1) Abbruch, sobald beide gesuchten Komponenten gefunden
+      /* Vorzeitiger O(1) Abbruch, sobald alle gesuchten Komponenten gefunden
        * wurden */
-      if (found_main_intent && (found_accum || out_net_accum == NULL))
+      bool accum_ok = (found_accum || out_net_accum == NULL);
+      bool resume_ok = (found_resume || out_resume_offset == NULL);
+      if (found_main_intent && accum_ok && resume_ok)
         break;
     }
 
-    if (found_main_intent && (found_accum || out_net_accum == NULL))
+    bool accum_ok = (found_accum || out_net_accum == NULL);
+    bool resume_ok = (found_resume || out_resume_offset == NULL);
+    if (found_main_intent && accum_ok && resume_ok)
       break;
 
     if (search_seq <= 1 &&
