@@ -5,7 +5,7 @@
 # - docs/libtoob_api.md (API, Handoff-Memory Definition)
 # - docs/concept_fusion.md (Confirm-Flag System, Telemetrie)
 # - docs/toob_telemetry.md (CBOR Extraction)
-# - docs/structure_plan.md (Verzeichnisbaum `libtoob/`)
+# - docs/structure_plan.md (Verzeichnisbaum `sdk/libtoob/`)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -19,23 +19,23 @@
 # ------------------------------------------------------------------------------
 
 add_library(toob_libtoob STATIC
-    libtoob/toob_confirm.c
-    libtoob/toob_update.c
-    libtoob/toob_diag.c
-    libtoob/toob_handoff.c
-    libtoob/toob_ota.c
-    # GAP-Integration: Die Datei `toob_telemetry_encode.c` wird von `suit/generate.sh` (via `generate_manifest` Target) erstellt.
+    sdk/libtoob/toob_confirm.c
+    sdk/libtoob/toob_update.c
+    sdk/libtoob/toob_diag.c
+    sdk/libtoob/toob_handoff.c
+    sdk/libtoob/toob_ota.c
+    # GAP-Integration: Die Datei `toob_telemetry_encode.c` wird von `cli/suit/generate.sh` (via `generate_manifest` Target) erstellt.
     ${CMAKE_BINARY_DIR}/generated/toob_telemetry_encode.c
 )
 
 # GAP-Fix OS Shim:
 # Die OS Shim Integration für `toob_os_flash_write` wurde nun formal in
-# `libtoob/include/libtoob.h` als `__attribute__((weak))` deklariert.
+# `sdk/libtoob/include/libtoob.h` als `__attribute__((weak))` deklariert.
 
 # 1. Public Includes für das Feature-OS
 # Wenn ein RTOS gegen toob_libtoob linkt, erbt es automatisch libtoob.h.
 target_include_directories(toob_libtoob PUBLIC
-    libtoob/include
+    sdk/libtoob/include
 )
 
 # 2. Private Includes (Generierte Manifest-Brücke)

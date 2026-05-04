@@ -30,7 +30,7 @@ endif()
 
 # Set default manifest if not provided by the user
 if(NOT TOOB_DEVICE_MANIFEST)
-    set(TOOB_DEVICE_MANIFEST "${CMAKE_SOURCE_DIR}/manifests/device.toml")
+    set(TOOB_DEVICE_MANIFEST "${CMAKE_SOURCE_DIR}/cli/examples/manifests/device.toml")
 endif()
 
 # ------------------------------------------------------------------------------
@@ -119,7 +119,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # 5.2 Define the final bootloader Target (toob_stage1)
-add_executable(toob_stage1 core/boot_main.c)
+add_executable(toob_stage1 bootloader/core/boot_main.c)
 
 # 5.3 Architektur-Spezifische P10 Limitierungen und Globale Libraries
 toob_apply_strict_flags(toob_stage1 TRUE)
@@ -152,8 +152,8 @@ if(NOT TOOB_ARCH STREQUAL "host")
     # Prefer manifest-compiler generated layout; fall back to chip-specific script
     if(EXISTS "${CMAKE_BINARY_DIR}/generated/flash_layout.ld")
         set(TOOB_LINKER_SCRIPT "${CMAKE_BINARY_DIR}/generated/flash_layout.ld")
-    elseif(EXISTS "${CMAKE_SOURCE_DIR}/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
-        set(TOOB_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
+    elseif(EXISTS "${CMAKE_SOURCE_DIR}/bootloader/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
+        set(TOOB_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/bootloader/hal/chips/${TOOB_CHIP}/${TOOB_CHIP}_stage1.ld")
     else()
         message(FATAL_ERROR "No linker script found for chip '${TOOB_CHIP}'!")
     endif()
@@ -164,7 +164,7 @@ if(NOT TOOB_ARCH STREQUAL "host")
     add_custom_command(
         TARGET toob_stage1 POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_stage1> $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin
-        COMMAND python ${CMAKE_SOURCE_DIR}/manifest_compiler/budget_check.py --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin --stage stage1
+        COMMAND python ${CMAKE_SOURCE_DIR}/cli/manifest_compiler/budget_check.py --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin --stage stage1
         COMMENT "Generating flashable RAW binary toob_stage1.bin and checking flash budget..."
     )
 endif()

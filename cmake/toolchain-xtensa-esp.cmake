@@ -14,7 +14,7 @@ set(CMAKE_SYSTEM_PROCESSOR xtensa)
 # ------------------------------------------------------------------------------
 # HINWEIS: Im Gegensatz zu ARM/RISC-V haben Xtensa SDKs extrem chip-spezifische 
 # Prefixe (ESP32-S3 hat nen anderen als S2). Wir verankern hier `esp32s3` als Default.
-# Der tools/manifest_compiler/vendors/esp32.py überschreibt das via -DTOOLCHAIN_PREFIX
+# Der tools/cli/manifest_compiler/vendors/esp32.py überschreibt das via -DTOOLCHAIN_PREFIX
 # dynamisch, wenn ein S2 oder reiner ESP32 gefordert ist!
 set(TOOLCHAIN_PREFIX "xtensa-esp32s3-elf-" CACHE STRING "Xtensa ESP Toolchain Prefix")
 

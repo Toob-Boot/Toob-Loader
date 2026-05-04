@@ -1,0 +1,91 @@
+{
+    "esp32-c6": {
+        "arch": "1/1",
+        "boot_vectors": {
+            "rom_base": "1/1",
+            "user_app_base": "1/1"
+        },
+        "crypto_capabilities": {
+            "hw_aes": "1/1",
+            "hw_ed25519": "1/1",
+            "hw_rng": "1/1",
+            "hw_sha256": "1/1",
+            "pka_present": "1/1"
+        },
+        "factory_identity": {
+            "has_mac_address": "1/1",
+            "uid_address": {}
+        },
+        "flash_capabilities": {
+            "app_alignment_bytes": "1/1",
+            "bank_size_bytes": {},
+            "is_dual_bank": "1/1",
+            "read_while_write_supported": "1/1",
+            "write_alignment_bytes": "1/1"
+        },
+        "flash_controller": {
+            "analytical_notes": "1/1",
+            "base_address": {},
+            "erase_sector_sequence": "1/1",
+            "unlock_sequence": "1/1",
+            "write_word_sequence": "1/1"
+        },
+        "memory": {
+            "alignment_bytes": "1/1",
+            "bootrom_reserved_data_bytes": "1/1",
+            "data_segment": "1/1",
+            "executable_segment": "1/1",
+            "memory_regions": "1/1",
+            "vector_alignment_section": "1/1",
+            "vector_table_offset_bytes": "1/1"
+        },
+        "multi_core_topology": {
+            "coprocessors": "1/1",
+            "ipc_mechanism": "1/1",
+            "is_multi_core": "1/1"
+        },
+        "reset_reason": {
+            "power_on_reset_mask": {},
+            "register_address": {},
+            "software_reset_mask": {},
+            "wdt_reset_mask": {}
+        },
+        "security_registers": {
+            "flash_encryption": {
+                "active_if_true": {},
+                "bit_mask": {},
+                "register_addr": {}
+            },
+            "jtag_disabled": {
+                "active_if_true": {},
+                "bit_mask": {},
+                "register_addr": {}
+            },
+            "rdp_level": {
+                "bit_mask": {},
+                "register_addr": {}
+            }
+        },
+        "startup": {
+            "abi_initialization_instructions": "1/1",
+            "bss_init_required": "1/1",
+            "stack_top_expression": "1/1"
+        },
+        "survival_mechanisms": {
+            "needs_vbat_pin": "1/1",
+            "recommended_storage_type": "1/1"
+        },
+        "toolchain_requirements": {
+            "compiler_prefix": "1/1",
+            "core_architecture": "1/1",
+            "flashing": {
+                "flash_offset": "1/1",
+                "method": "1/1",
+                "tool": "1/1",
+                "write_command": "1/1"
+            },
+            "packaging": "1/1"
+        },
+        "watchdog_kill_registers": "1/1"
+    }
+}

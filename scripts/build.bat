@@ -16,11 +16,11 @@ if errorlevel 1 (
 cd /d "%~dp0\.."
 
 REM Build-Ordner anlegen, falls noch nicht vorhanden
-if not exist "build_c6_ninja" (
+if not exist "builds\build_c6_ninja" (
     echo [INFO] Build-Ordner fehlt. Führe Initiale Konfiguration aus...
-    python scripts\configure.py
+    python cli\configure.py
 )
 
 REM Build starten und Argumente weiterreichen
 echo [INFO] Starte Build...
-cmake --build build_c6_ninja %*
+cmake --build builds\build_c6_ninja %*

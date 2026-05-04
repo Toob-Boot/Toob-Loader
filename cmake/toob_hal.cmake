@@ -13,7 +13,7 @@
 # ------------------------------------------------------------------------------
 # P10/Ninja-GAP: Niemals nacktes GLOB nutzen! `CONFIGURE_DEPENDS` zwingt das
 # Buildsystem, bei neu hinzugefügten Architektur-Files CMake neu auszuführen.
-file(GLOB_RECURSE ARCH_SOURCES CONFIGURE_DEPENDS "hal/arch/${TOOB_ARCH}/*.c")
+file(GLOB_RECURSE ARCH_SOURCES CONFIGURE_DEPENDS "bootloader/hal/arch/${TOOB_ARCH}/*.c")
 
 # GAP-Integration: Sandbox Crash-Protection
 # Die Sandbox (Host) hat keine arch-Dateien ("kein arch/vendor"). 
@@ -21,26 +21,28 @@ file(GLOB_RECURSE ARCH_SOURCES CONFIGURE_DEPENDS "hal/arch/${TOOB_ARCH}/*.c")
 if(ARCH_SOURCES)
     add_library(toob_arch STATIC ${ARCH_SOURCES})
     target_include_directories(toob_arch PUBLIC 
-        hal/arch/${TOOB_ARCH}/include
-        core/include                  # Unverzichtbar für boot_hal.h!
+        bootloader/hal/arch/${TOOB_ARCH}/include
+        common/include
+        bootloader/core/include                  # Unverzichtbar für boot_hal.h!
         ${CMAKE_BINARY_DIR}/generated # Unverzichtbar für chip_config.h!
-        libtoob/include
+        sdk/libtoob/include
     )
 endif()
 
 # ------------------------------------------------------------------------------
 # Ebene 2: Vendor-Abstraktion (Hersteller Familie)
 # ------------------------------------------------------------------------------
-file(GLOB_RECURSE VENDOR_SOURCES CONFIGURE_DEPENDS "hal/vendor/${TOOB_VENDOR}/*.c")
+file(GLOB_RECURSE VENDOR_SOURCES CONFIGURE_DEPENDS "bootloader/hal/vendor/${TOOB_VENDOR}/*.c")
 
 if(VENDOR_SOURCES)
     add_library(toob_vendor STATIC ${VENDOR_SOURCES})
     target_include_directories(toob_vendor PUBLIC 
-        hal/vendor/${TOOB_VENDOR}/include
-        hal/chips/${TOOB_CHIP}
-        core/include
+        bootloader/hal/vendor/${TOOB_VENDOR}/include
+        bootloader/hal/chips/${TOOB_CHIP}
+        common/include
+        bootloader/core/include
         ${CMAKE_BINARY_DIR}/generated
-        libtoob/include
+        sdk/libtoob/include
     )
     if(TARGET toob_arch)
         target_link_libraries(toob_vendor PUBLIC toob_arch)
@@ -50,7 +52,7 @@ endif()
 # ------------------------------------------------------------------------------
 # Ebene 3: Chip-Abstraktion (Spezifisches Ziel-Silicon)
 # ------------------------------------------------------------------------------
-file(GLOB_RECURSE CHIP_SOURCES CONFIGURE_DEPENDS "hal/chips/${TOOB_CHIP}/*.c")
+file(GLOB_RECURSE CHIP_SOURCES CONFIGURE_DEPENDS "bootloader/hal/chips/${TOOB_CHIP}/*.c")
 # GAP-Integration: Analog zu arch_sources bewahrt uns dieser Block davor,
 # den Build auf der Host-Sandbox zu crashen, da TOOB_CHIP dort leer ist.
 if(CHIP_SOURCES)
@@ -58,10 +60,11 @@ if(CHIP_SOURCES)
 
     # Sichtbarkeit der Bootloader Core-Interfaces für die Chip-Ebene
     target_include_directories(toob_chip PUBLIC 
-        hal/chips/${TOOB_CHIP}
-        core/include
+        bootloader/hal/chips/${TOOB_CHIP}
+        common/include
+        bootloader/core/include
         ${CMAKE_BINARY_DIR}/generated
-        libtoob/include
+        sdk/libtoob/include
     )
     if(TOOB_CHIP STREQUAL "sandbox")
         target_include_directories(toob_chip PUBLIC test/mocks)

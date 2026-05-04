@@ -3,7 +3,7 @@
 # 
 # Relevant Specs: 
 # - docs/concept_fusion.md (Schicht 3: Core Engine, Schicht 4b: Diagnostics)
-# - docs/structure_plan.md (Verzeichnisbaum `core/`)
+# - docs/structure_plan.md (Verzeichnisbaum `bootloader/core/`)
 # - docs/merkle_spec.md (Chunk-based Verification)
 # - docs/stage_1_5_spec.md (UART Recovery)
 # - docs/wal_internals.md (Write-Ahead Log)
@@ -18,11 +18,11 @@
 
 # zcbor (Apache-2.0)
 add_library(toob_zcbor STATIC 
-    lib/zcbor/src/zcbor_decode.c
-    lib/zcbor/src/zcbor_common.c
-    lib/zcbor/src/zcbor_encode.c
+    common/lib/zcbor/src/zcbor_decode.c
+    common/lib/zcbor/src/zcbor_common.c
+    common/lib/zcbor/src/zcbor_encode.c
 )
-target_include_directories(toob_zcbor PUBLIC lib/zcbor/include)
+target_include_directories(toob_zcbor PUBLIC common/lib/zcbor/include)
 
 # P10 Manifest Malleability Defense (GAP Fix)
 # Erzwingt kanonisches CBOR. Verhindert, dass identische Daten
@@ -33,7 +33,7 @@ target_compile_options(toob_zcbor PRIVATE -Os -ffunction-sections -fdata-section
 
 # heatshrink (ISC License)
 add_library(toob_heatshrink STATIC 
-    lib/heatshrink/heatshrink_decoder.c
+    common/lib/heatshrink/heatshrink_decoder.c
 )
 # WICHTIG (Zero-Allocation Limit): Ohne dieses Define würde heatshrink via malloc
 # dynamisch Dictionary-Speicher anfordern, was das P10-Setup hart crashen würde!
@@ -44,7 +44,7 @@ target_compile_definitions(toob_heatshrink PUBLIC
     HEATSHRINK_STATIC_LOOKAHEAD_BITS=4
 )
 target_compile_options(toob_heatshrink PRIVATE -Os -ffunction-sections -fdata-sections)
-target_include_directories(toob_heatshrink PUBLIC lib/heatshrink)
+target_include_directories(toob_heatshrink PUBLIC common/lib/heatshrink)
 
 # ------------------------------------------------------------------------------
 # 2. Toob-Boot Kern (Die State-Machine)
@@ -74,7 +74,7 @@ add_custom_command(
     # Fehlt Python oder ZCBOR, generiert das Skript C-Mocks und das rettende
     # `stage0_layout.ld` Dummy-File, um Windows-Linker Abstürze zu verhindern.
     # -------------------------------------------------------------------------
-    COMMAND sh ${CMAKE_SOURCE_DIR}/suit/generate.sh ${CMAKE_BINARY_DIR}/generated ${TOOB_DEVICE_MANIFEST} ${TOOB_CHIP}
+    COMMAND sh ${CMAKE_SOURCE_DIR}/cli/suit/generate.sh ${CMAKE_BINARY_DIR}/generated ${TOOB_DEVICE_MANIFEST} ${TOOB_CHIP}
     COMMENT "Executing SUIT ZCBOR CodeGen & Config-Bridge..."
 )
 
@@ -89,21 +89,21 @@ add_custom_target(generate_manifest
 
 
 add_library(toob_core STATIC
-    core/boot_main.c
-    core/boot_state.c
-    core/boot_journal.c
-    core/boot_verify.c
-    core/boot_crc32.c
-    core/boot_merkle.c
-    core/boot_swap.c
-    core/boot_delta.c
-    core/boot_rollback.c
-    core/boot_panic.c
-    core/boot_confirm.c
-    core/boot_diag.c
-    core/boot_energy.c
-    core/boot_multiimage.c
-    core/boot_delay.c
+    bootloader/core/boot_main.c
+    bootloader/core/boot_state.c
+    bootloader/core/boot_journal.c
+    bootloader/core/boot_verify.c
+    bootloader/core/boot_crc32.c
+    bootloader/core/boot_merkle.c
+    bootloader/core/boot_swap.c
+    bootloader/core/boot_delta.c
+    bootloader/core/boot_rollback.c
+    bootloader/core/boot_panic.c
+    bootloader/core/boot_confirm.c
+    bootloader/core/boot_diag.c
+    bootloader/core/boot_energy.c
+    bootloader/core/boot_multiimage.c
+    bootloader/core/boot_delay.c
     ${GENERATED_SUIT_C}
 )
 
@@ -114,11 +114,11 @@ add_dependencies(toob_core generate_manifest)
 # Architektur-bedingter Ausschluss: In der Sandbox (x86 host) können wir 
 # keine Bare-Metal (ARM/Xtensa) Assembler-Anweisungen ausführen.
 if(NOT TOOB_ARCH STREQUAL "host")
-    target_sources(toob_core PRIVATE core/boot_secure_zeroize.S)
+    target_sources(toob_core PRIVATE bootloader/core/boot_secure_zeroize.S)
 else()
     # M-BUILD GAP-Fix: Sandbox Host-Mock für Assembler-Dateien und Hardware Pointers!
     target_sources(toob_core PRIVATE 
-        core/boot_secure_zeroize_host.c
+        bootloader/core/boot_secure_zeroize_host.c
         ${CMAKE_BINARY_DIR}/generated/chip_config_mock.c
     )
     target_compile_definitions(toob_core PUBLIC TOOB_MOCK_TEST)
@@ -129,9 +129,11 @@ endif()
 # ------------------------------------------------------------------------------
 
 target_include_directories(toob_core PUBLIC 
-    ${CMAKE_SOURCE_DIR}/core/include 
+    ${CMAKE_SOURCE_DIR}/common/include
+    ${CMAKE_SOURCE_DIR}/common/include
+        bootloader/core/include 
     ${CMAKE_BINARY_DIR}/generated
-    ${CMAKE_SOURCE_DIR}/libtoob/include
+    ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
 )
 
 # Bindung an Third-Party Libs und dynamische Feature-Verwendung

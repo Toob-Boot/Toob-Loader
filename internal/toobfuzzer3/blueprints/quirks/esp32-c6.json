@@ -1,0 +1,64 @@
+{
+    "flash_controller": {
+        "erase_sector_sequence": [
+            {
+                "type": "rom_function_call",
+                "function_name": "esp_rom_spiflash_erase_sector",
+                "rom_address": "0x40000144",
+                "args_csv": "sector_addr / 4096",
+                "requires_physical_offset": true,
+                "desc": "Hardware BootROM Erase (from ESP-IDF ROM linker)"
+            }
+        ],
+        "write_word_sequence": [
+            {
+                "type": "rom_function_call",
+                "function_name": "esp_rom_spiflash_write",
+                "rom_address": "0x4000014c",
+                "args_csv": "sector_addr, &data_word, 4",
+                "requires_physical_offset": true,
+                "desc": "Hardware BootROM Write (from ESP-IDF ROM linker)"
+            }
+        ],
+        "unlock_sequence": [
+            {
+                "type": "rom_function_call",
+                "function_name": "esp_rom_spiflash_unlock",
+                "rom_address": "0x40000154",
+                "args_csv": "",
+                "requires_physical_offset": true,
+                "desc": "Hardware BootROM Unlock (from ESP-IDF ROM linker)"
+            }
+        ]
+    },
+    "watchdog_kill_registers": [
+        {
+            "name": "TIMG0_WDT",
+            "config_addr": "0x60008048",
+            "address": "0x60008064",
+            "disable_val": "0x0",
+            "unlock_val": "0x50D83AA1"
+        },
+        {
+            "name": "TIMG1_WDT",
+            "config_addr": "0x60009048",
+            "address": "0x60009064",
+            "disable_val": "0x0",
+            "unlock_val": "0x50D83AA1"
+        },
+        {
+            "name": "LP_WDT",
+            "config_addr": "0x600B1C00",
+            "address": "0x600B1C18",
+            "disable_val": "0x0",
+            "unlock_val": "0x50D83AA1"
+        }
+    ],
+    "watchdog_feed_sequence": [
+        {
+            "type": "raw_c",
+            "code": "(*((volatile uint32_t*)(0x600B1C20))) = 0x50D83AA1;\n    uint32_t swd_cfg = (*((volatile uint32_t*)(0x600B1C1C)));\n    swd_cfg |= (1 << 30);\n    (*((volatile uint32_t*)(0x600B1C1C))) = swd_cfg;\n    fz_log(\" [SWD DISABLED] \\n\");",
+            "desc": "Disable SWD with correct key 0x50D83AA1"
+        }
+    ]
+}

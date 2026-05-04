@@ -1,9 +1,6 @@
 # CMake Build Directories & Files
 archive/
-build/
-build-*/
-build_c6/
-build_c6_ninja/
+builds/
 CMakeCache.txt
 CMakeFiles/
 Makefile
