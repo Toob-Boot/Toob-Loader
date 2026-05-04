@@ -5,15 +5,10 @@
 
 #include <string.h>
 
-toob_status_t rtos_http_check_update(const char* url, uint32_t current_svn,
-                                     toob_update_info_t* out_info) {
-    (void)url; (void)current_svn;
-    if (out_info) memset(out_info, 0, sizeof(toob_update_info_t));
-    return TOOB_ERR_NOT_SUPPORTED;
-}
-
-toob_status_t rtos_http_download_payload(const char* url, uint32_t resume_offset) {
-    (void)url; (void)resume_offset;
+/* GAP-N04: Implement correct rtos_http_get stub signature */
+toob_status_t rtos_http_get(const char* url, uint32_t resume_offset,
+                            toob_http_chunk_cb_t callback, void* ctx) {
+    (void)url; (void)resume_offset; (void)callback; (void)ctx;
     return TOOB_ERR_NOT_SUPPORTED;
 }
 

@@ -1,5 +1,6 @@
 menuconfig TOOB_NETWORK_CLIENT
     bool "Toob Network Client (OTA Daemon)"
+    # GAP-N23: Mirrored configuration for Zephyr. Keep symmetric with Kconfig!
     default y
     help
       Enables the OS-agnostic Network Client for Toob-Loader OTA updates.

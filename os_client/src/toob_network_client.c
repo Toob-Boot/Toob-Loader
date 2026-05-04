@@ -4,16 +4,18 @@
 #include <string.h>
 #include <stdio.h>
 
-/* Assume zcbor is available as requested */
+/* ZCBOR API for SUIT/Meta Parsing */
 #include <zcbor_decode.h>
 
 /* GAP-08: Zephyr requires LOG_MODULE_REGISTER for logging to work */
 #if defined(__ZEPHYR__)
     #include <zephyr/kernel.h>
+    #include <zephyr/sys/reboot.h>
     LOG_MODULE_REGISTER(toob_client, LOG_LEVEL_INF);
 #elif defined(ESP_PLATFORM)
     #include "freertos/FreeRTOS.h"
     #include "freertos/task.h"
+    #include "esp_system.h"
 #else
     #include <unistd.h>
 #endif
@@ -59,7 +61,8 @@ typedef struct {
 
 static toob_status_t _manifest_chunk_cb(const uint8_t* chunk, uint32_t len, void* ctx) {
     cbor_manifest_buf_t* mbuf = (cbor_manifest_buf_t*)ctx;
-    if (mbuf->len + len > sizeof(mbuf->buf)) {
+    /* GAP-N16: Integer overflow protection */
+    if (len > sizeof(mbuf->buf) || mbuf->len > sizeof(mbuf->buf) - len) {
         return TOOB_ERR_INVALID_ARG; /* Manifest zu groß */
     }
     memcpy(&mbuf->buf[mbuf->len], chunk, len);
@@ -70,7 +73,8 @@ static toob_status_t _manifest_chunk_cb(const uint8_t* chunk, uint32_t len, void
 /* Parsed ein Meta-CBOR Map mit den Keys 1=svn, 2=size, 3=sha256, 4=image_type */
 static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_info_t* out) {
     zcbor_state_t state[2];
-    zcbor_new_decode_state(state, 2, data, len, 1);
+    /* GAP-N01: Korrekte zcbor_new_decode_state Signatur (7 Parameter) */
+    zcbor_new_decode_state(state, 2, data, len, 1, NULL, 0);
     
     if (!zcbor_map_start_decode(state)) return false;
     
@@ -79,7 +83,8 @@ static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_in
     bool has_sha256 = false;
     bool has_svn = false;
 
-    while (ok && !zcbor_list_or_map_end(state)) {
+    /* GAP-N02: zcbor_array_at_end existiert, list_or_map_end nicht */
+    while (ok && !zcbor_array_at_end(state)) {
         uint32_t key;
         if (!zcbor_uint32_decode(state, &key)) { ok = false; break; }
         
@@ -143,13 +148,19 @@ static toob_status_t _payload_chunk_cb(const uint8_t* chunk, uint32_t len, void*
 toob_status_t toob_network_trigger_ota(const char* server_url) {
     if (!server_url) server_url = CONFIG_TOOB_SERVER_URL;
     
-    /* 1. L1 Smoke Test */
-    toob_status_t stat = toob_network_init();
-    if (stat != TOOB_OK) {
-        TOOB_LOGE(TAG, "L1 Smoke Test failed");
-        return stat;
+    /* 1. L1 Smoke Test (GAP-N11: Init nur einmalig) */
+    static bool s_net_init = false;
+    if (!s_net_init) {
+        toob_status_t stat = toob_network_init();
+        if (stat != TOOB_OK) {
+            TOOB_LOGE(TAG, "L1 Smoke Test failed");
+            return stat;
+        }
+        TOOB_LOGI(TAG, "L1 Smoke Test passed");
+        s_net_init = true;
     }
-    TOOB_LOGI(TAG, "L1 Smoke Test passed");
+    
+    toob_status_t stat = TOOB_OK;
 
     /* Extract current SVN */
     uint32_t current_svn = 0;
@@ -160,7 +171,12 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
 
     /* Phase 1: Fetch CBOR Manifest */
     char check_url[256];
-    snprintf(check_url, sizeof(check_url), "%s/check?svn=%u", server_url, current_svn);
+    /* GAP-N10: URL Truncation Check */
+    int written = snprintf(check_url, sizeof(check_url), "%s/check?svn=%u", server_url, current_svn);
+    if (written < 0 || (size_t)written >= sizeof(check_url)) {
+        TOOB_LOGE(TAG, "Check URL truncated");
+        return TOOB_ERR_INVALID_ARG;
+    }
     
     cbor_manifest_buf_t mbuf = { .len = 0 };
     stat = rtos_http_get(check_url, 0, _manifest_chunk_cb, &mbuf);
@@ -206,7 +222,13 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
 
     /* Phase 3: Download Payload */
     char download_url[256];
-    snprintf(download_url, sizeof(download_url), "%s/download", server_url);
+    /* GAP-N10: URL Truncation Check */
+    written = snprintf(download_url, sizeof(download_url), "%s/download", server_url);
+    if (written < 0 || (size_t)written >= sizeof(download_url)) {
+        TOOB_LOGE(TAG, "Download URL truncated");
+        toob_ota_abort();
+        return TOOB_ERR_INVALID_ARG;
+    }
     
     stat = rtos_http_get(download_url, resume_offset, _payload_chunk_cb, NULL);
     if (stat != TOOB_OK) {
@@ -223,6 +245,14 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
     }
 
     TOOB_LOGI(TAG, "OTA update staged successfully. Rebooting...");
+    
+    /* GAP-N12: Tatsächlicher Reboot nach OTA Erfolg */
+#if defined(__ZEPHYR__)
+    sys_reboot(SYS_REBOOT_COLD);
+#elif defined(ESP_PLATFORM)
+    esp_restart();
+#endif
+
     return TOOB_OK;
 }
 
@@ -241,9 +271,16 @@ _Noreturn void toob_network_daemon_loop(void) {
         }
 
 #if defined(__ZEPHYR__)
+        /* GAP-N19: Chunked Sleep (nicht zwingend für Zephyr nötig, aber konsistent) */
         k_sleep(K_SECONDS(sleep_sec));
 #elif defined(ESP_PLATFORM)
-        vTaskDelay(pdMS_TO_TICKS((uint64_t)sleep_sec * 1000));
+        /* GAP-N19: Defensiver Sleep in Blöcken gegen Integer Overflow in FreeRTOS */
+        uint32_t remaining = sleep_sec;
+        while (remaining > 0) {
+            uint32_t chunk = (remaining > 60) ? 60 : remaining;
+            vTaskDelay(pdMS_TO_TICKS(chunk * 1000));
+            remaining -= chunk;
+        }
 #else
         sleep(sleep_sec);
 #endif

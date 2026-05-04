@@ -64,8 +64,11 @@ toob_status_t rtos_http_get(const char* url, uint32_t resume_offset,
         return TOOB_ERR_NOT_FOUND;
     }
 
+    /* GAP-N07: Log chunked transfer correctly when content_length is -1 */
     if (content_length > 0) {
         TOOB_LOGI(TAG, "Streaming %d bytes...", content_length);
+    } else {
+        TOOB_LOGI(TAG, "Streaming (chunked/unknown length)...");
     }
 
     uint8_t buf[1024];

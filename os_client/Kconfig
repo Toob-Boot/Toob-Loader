@@ -1,4 +1,5 @@
 menu "Toob Network Client"
+    # GAP-N23: Mirrored configuration for ESP-IDF. Keep symmetric with zephyr/Kconfig!
 
     config TOOB_NETWORK_CLIENT
         bool "Enable Toob Network Client"

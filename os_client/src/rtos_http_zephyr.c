@@ -7,7 +7,8 @@
 #include <string.h>
 #include <stdio.h>
 
-LOG_MODULE_REGISTER(toob_http, LOG_LEVEL_INF);
+/* GAP-N08: Declare instead of register to avoid duplicates */
+LOG_MODULE_DECLARE(toob_client, LOG_LEVEL_INF);
 
 static const char *TAG = "toob_http";
 
@@ -43,7 +44,8 @@ static void _http_response_cb(struct http_response *rsp,
     if (ctx->stat != TOOB_OK) return;
 
     if (rsp->data_len > 0) {
-        ctx->stat = ctx->callback(rsp->recv_buf, rsp->data_len, ctx->ctx);
+        /* GAP-N20: Explicit narrowing cast to avoid ABI warnings on 64-bit platforms */
+        ctx->stat = ctx->callback((const uint8_t *)rsp->recv_buf, (uint32_t)rsp->data_len, ctx->ctx);
         if (ctx->stat != TOOB_OK) {
             TOOB_LOGE(TAG, "Callback rejected chunk: 0x%08X", ctx->stat);
         }
@@ -60,8 +62,21 @@ toob_status_t rtos_http_get(const char* url, uint32_t resume_offset,
     host_start = (host_start) ? (host_start + 3) : url;
 
     const char *host_end = strchr(host_start, '/');
-    size_t host_len = host_end ? (size_t)(host_end - host_start) : strlen(host_start);
     const char *path = host_end ? host_end : "/";
+
+    /* GAP-N09: URL Port Parsing */
+    const char *port_start = strchr(host_start, ':');
+    char port_str[8] = "443";
+    size_t host_len = host_end ? (size_t)(host_end - host_start) : strlen(host_start);
+
+    if (port_start && (!host_end || port_start < host_end)) {
+        host_len = (size_t)(port_start - host_start);
+        size_t port_len = host_end ? (size_t)(host_end - port_start - 1) : strlen(port_start + 1);
+        if (port_len < sizeof(port_str)) {
+            memcpy(port_str, port_start + 1, port_len);
+            port_str[port_len] = '\0';
+        }
+    }
 
     char hostname[64];
     if (host_len >= sizeof(hostname)) host_len = sizeof(hostname) - 1;
@@ -72,8 +87,8 @@ toob_status_t rtos_http_get(const char* url, uint32_t resume_offset,
     struct zsock_addrinfo *res;
     struct zsock_addrinfo hints = { .ai_family = AF_INET, .ai_socktype = SOCK_STREAM };
     
-    if (zsock_getaddrinfo(hostname, "443", &hints, &res) != 0) {
-        TOOB_LOGE(TAG, "DNS failed for %s", hostname);
+    if (zsock_getaddrinfo(hostname, port_str, &hints, &res) != 0) {
+        TOOB_LOGE(TAG, "DNS failed for %s:%s", hostname, port_str);
         return TOOB_ERR_TIMEOUT;
     }
 
@@ -86,6 +101,11 @@ toob_status_t rtos_http_get(const char* url, uint32_t resume_offset,
     sec_tag_t sec_tag_list[] = { CONFIG_TOOB_TLS_SEC_TAG };
     zsock_setsockopt(sock, SOL_TLS, TLS_SEC_TAG_LIST, sec_tag_list, sizeof(sec_tag_list));
     zsock_setsockopt(sock, SOL_TLS, TLS_HOSTNAME, hostname, strlen(hostname));
+
+    /* GAP-N22: Socket Timeout for TCP/TLS Connect */
+    struct timeval tv = { .tv_sec = 15, .tv_usec = 0 };
+    zsock_setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    zsock_setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     if (zsock_connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
         TOOB_LOGE(TAG, "TLS connect failed");
@@ -114,11 +134,14 @@ toob_status_t rtos_http_get(const char* url, uint32_t resume_offset,
         .recv_buf_len = sizeof(recv_buffer),
     };
 
+    /* GAP-N05 / N21: optional_headers expects a NULL-terminated array of strings, not a single char* */
     char range_hdr[48] = {0};
+    const char *headers[] = { range_hdr, NULL };
+    
     if (resume_offset > 0) {
-        snprintf(range_hdr, sizeof(range_hdr), "bytes=%u-", resume_offset);
-        req.optional_headers = range_hdr;
-        TOOB_LOGI(TAG, "HTTP GET %s (Range: %s)", url, range_hdr);
+        snprintf(range_hdr, sizeof(range_hdr), "Range: bytes=%u-\r\n", resume_offset);
+        req.optional_headers = headers;
+        TOOB_LOGI(TAG, "HTTP GET %s (Range: bytes=%u-)", url, resume_offset);
     } else {
         TOOB_LOGI(TAG, "HTTP GET %s", url);
     }

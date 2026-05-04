@@ -48,13 +48,17 @@ typedef toob_status_t (*toob_http_chunk_cb_t)(const uint8_t* chunk, uint32_t len
  *     ? 4: uint .size 1             ; image_type (0=OS, 3=Bootloader)
  * }
  */
-typedef struct {
+typedef struct __attribute__((aligned(4))) {
     uint32_t total_size;       /**< Payload size in bytes */
     uint8_t  sha256[32];       /**< Expected SHA-256 digest of the payload */
     uint8_t  image_type;       /**< 0 = OS Update, 3 = Bootloader */
+    uint8_t  _padding[3];      /**< GAP-N15: Explicit padding for ABI safety */
     uint32_t remote_svn;       /**< Server-side Security Version Number */
     bool     update_available; /**< True if the server has a newer version */
+    uint8_t  _padding2[3];     /**< GAP-N15: Explicit padding for ABI safety */
 } toob_update_info_t;
+
+_Static_assert(sizeof(toob_update_info_t) == 48, "toob_update_info_t ABI size drift");
 
 /**
  * @brief Initialize the RTOS specific network stack (L1 Smoke Test).

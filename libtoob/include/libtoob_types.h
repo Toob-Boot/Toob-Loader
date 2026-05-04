@@ -33,7 +33,10 @@ typedef enum {
     TOOB_ERR_VERIFY     = 0xE6601CAE, /* RAM Korruption / CRC-32 Mismatch */
     TOOB_ERR_REQUIRES_RESET = 0xE7701CAE, /* Fataler WAL Lock (Reset zwingend) */
     TOOB_ERR_COUNTER_EXHAUSTED = 0xE8801CAE, 
-    TOOB_ERR_FLASH_HW   = 0xE9901CAE
+    TOOB_ERR_FLASH_HW   = 0xE9901CAE,
+    TOOB_ERR_STATE      = 0xEAA01CAE, /* GAP-N03: Invalid State/Initialization */
+    TOOB_ERR_TIMEOUT    = 0xEBB01CAE, /* GAP-N03: Network/Operation Timeout */
+    TOOB_ERR_NOT_SUPPORTED = 0xECC01CAE /* GAP-N03: Feature not implemented */
 } toob_status_t;
 
 /* Partition Layout für boot_target Auswertung */

@@ -11,8 +11,10 @@ if(DEFINED ENV{ZEPHYR_BASE} OR DEFINED ZEPHYR_BASE)
     
     zephyr_library_include_directories(include)
     
-    # GAP-04: CBOR parsing requires zcbor
-    zephyr_library_link_libraries(zcbor)
+    # GAP-04 / GAP-N14: CBOR parsing requires zcbor
+    zephyr_library_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../lib/zcbor/include)
+    zephyr_library_sources(${CMAKE_CURRENT_SOURCE_DIR}/../lib/zcbor/src/zcbor_decode.c)
+    zephyr_library_sources(${CMAKE_CURRENT_SOURCE_DIR}/../lib/zcbor/src/zcbor_common.c)
     
 elseif(DEFINED ENV{IDF_PATH} OR DEFINED IDF_PATH)
     # -------------------------------------------------------------------------
@@ -28,6 +30,7 @@ elseif(DEFINED ENV{IDF_PATH} OR DEFINED IDF_PATH)
         REQUIRES 
             "esp_http_client" 
             "esp_netif"
+            "esp_event" # GAP-N13: Explicit event loop requirement
             "mbedtls"
             "zcbor"
     )
