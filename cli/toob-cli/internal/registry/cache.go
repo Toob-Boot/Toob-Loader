@@ -25,8 +25,10 @@ type ChipInfo struct {
 
 // Index is the parsed content of registry.json.
 type Index struct {
-	Version int                 `json:"version"`
-	Chips   map[string]ChipInfo `json:"chips"`
+	Version           int                 `json:"version"`
+	RegistryVersion   string              `json:"registry_version"`
+	CoreCompatibility string              `json:"core_compatibility"`
+	Chips             map[string]ChipInfo `json:"chips"`
 }
 
 // Cache manages the local registry clone.
@@ -51,20 +53,41 @@ func (c *Cache) Dir() string { return c.dir }
 
 // IsInitialized returns true if a git repo exists in the cache.
 func (c *Cache) IsInitialized() bool {
-	info, err := os.Stat(filepath.Join(c.dir, ".git"))
-	return err == nil && info.IsDir()
+	_, err := os.Stat(filepath.Join(c.dir, ".git"))
+	return err == nil
 }
 
 // Sync clones or fast-forward pulls the registry.
 func (c *Cache) Sync() error {
 	c.index = nil
 	if c.IsInitialized() {
+		// Submodules shouldn't be pulled blindly, but caching repos should
+		info, err := os.Stat(filepath.Join(c.dir, ".git"))
+		if err == nil && !info.IsDir() {
+			// It's a submodule (.git is a file). Do not git pull.
+			return nil
+		}
 		return runGit(c.dir, "pull", "--ff-only")
 	}
 	if err := os.MkdirAll(filepath.Dir(c.dir), 0o755); err != nil {
 		return err
 	}
-	return runGit(filepath.Dir(c.dir), "clone", "--depth", "1", c.remote, c.dir)
+	return runGit(filepath.Dir(c.dir), "clone", c.remote, c.dir)
+}
+
+// Checkout switches the registry to a specific tag or commit.
+func (c *Cache) Checkout(version string) error {
+	info, err := os.Stat(filepath.Join(c.dir, ".git"))
+	if err == nil && !info.IsDir() {
+		// Submodule - skip checkout, assume the monorepo has it correct.
+		return nil
+	}
+	c.index = nil
+	// Fetch the specific tag or commit
+	if err := runGit(c.dir, "fetch", "origin", version); err != nil {
+		// Ignore error, might already have it locally
+	}
+	return runGit(c.dir, "checkout", version)
 }
 
 // LoadIndex parses registry.json and returns a typed index.

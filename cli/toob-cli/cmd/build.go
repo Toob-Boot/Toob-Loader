@@ -10,8 +10,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 )
@@ -73,6 +75,32 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	root, err := paths.FindProjectRoot("")
 	if err != nil {
 		return err
+	}
+
+	// 1. Enforce lockfile registry version and compatibility
+	cache := registry.NewCache("")
+	lfPath := paths.LockfilePath(root)
+	if lf, err := lockfile.Load(lfPath); err == nil {
+		if lf.Registry.Version != "" {
+			if err := cache.Checkout(lf.Registry.Version); err != nil {
+				return fmt.Errorf("failed to checkout locked registry version %s: %w", lf.Registry.Version, err)
+			}
+		} else if lf.Registry.Commit != "" {
+			if err := cache.Checkout(lf.Registry.Commit); err != nil {
+				return fmt.Errorf("failed to checkout locked registry commit %s: %w", lf.Registry.Commit, err)
+			}
+		}
+	}
+
+	if idx, err := cache.LoadIndex(); err == nil && idx.CoreCompatibility != "" {
+		constraint, err := semver.NewConstraint(idx.CoreCompatibility)
+		if err != nil {
+			return fmt.Errorf("invalid core_compatibility in registry: %w", err)
+		}
+		cliVer, err := semver.NewVersion(version)
+		if err == nil && !constraint.Check(cliVer) {
+			return fmt.Errorf("HAL Registry requires Core Version %s. You are using CLI v%s. Please upgrade your CLI or use an older registry version.", idx.CoreCompatibility, version)
+		}
 	}
 
 	useNative := flagNative

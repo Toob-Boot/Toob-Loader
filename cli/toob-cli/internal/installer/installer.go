@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/paths"
@@ -36,8 +37,17 @@ func New(root string, cache *registry.Cache) *Installer {
 	}
 }
 
+func parseChipArg(arg string) (string, string) {
+	parts := strings.SplitN(arg, "@", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return parts[0], ""
+}
+
 // Add installs a chip from the registry (not tracked by git).
-func (inst *Installer) Add(name string) error {
+func (inst *Installer) Add(arg string) error {
+	name, version := parseChipArg(arg)
 	if inst.lock.HasChip(name) {
 		e := inst.lock.GetChip(name)
 		if e != nil && e.Spawned {
@@ -45,12 +55,25 @@ func (inst *Installer) Add(name string) error {
 		}
 		return fmt.Errorf("chip '%s' is already installed", name)
 	}
+	
+	if version != "" {
+		if err := inst.cache.Checkout(version); err != nil {
+			return fmt.Errorf("failed to checkout registry version '%s': %w", version, err)
+		}
+	}
+
 	ci, err := inst.cache.GetChip(name)
 	if err != nil {
 		return err
 	}
+	idx, _ := inst.cache.LoadIndex()
+	
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
+	if idx != nil {
+		inst.lock.Registry.Version = idx.RegistryVersion
+	}
+	
 	inst.lock.Chips[name] = lockfile.ChipEntry{
 		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, Spawned: false,
 	}
@@ -63,7 +86,8 @@ func (inst *Installer) Add(name string) error {
 }
 
 // Spawn installs a chip as locally editable (tracked by git).
-func (inst *Installer) Spawn(name string) error {
+func (inst *Installer) Spawn(arg string) error {
+	name, version := parseChipArg(arg)
 	if inst.lock.HasChip(name) {
 		e := inst.lock.GetChip(name)
 		if e != nil && !e.Spawned {
@@ -71,6 +95,13 @@ func (inst *Installer) Spawn(name string) error {
 		}
 		return fmt.Errorf("chip '%s' is already spawned", name)
 	}
+
+	if version != "" {
+		if err := inst.cache.Checkout(version); err != nil {
+			return fmt.Errorf("failed to checkout registry version '%s': %w", version, err)
+		}
+	}
+
 	ci, err := inst.cache.GetChip(name)
 	if err != nil {
 		return err
@@ -82,8 +113,13 @@ func (inst *Installer) Spawn(name string) error {
 		return err
 	}
 
+	idx, _ := inst.cache.LoadIndex()
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
+	if idx != nil {
+		inst.lock.Registry.Version = idx.RegistryVersion
+	}
+	
 	inst.lock.Chips[name] = lockfile.ChipEntry{
 		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, Spawned: true,
 	}

@@ -29,13 +29,29 @@ func ToobHome() (string, error) {
 	return dir, nil
 }
 
-// RegistryDir returns ~/.toob/registry/.
+// RegistryDir returns the local cache directory for the chip registry.
 func RegistryDir() (string, error) {
+	if envDir := os.Getenv("TOOB_REGISTRY_DIR"); envDir != "" {
+		return envDir, nil
+	}
+
+	// If we are inside the Toob-Loader monorepo, use the local submodule to avoid cloning.
+	if root, err := FindProjectRoot(""); err == nil {
+		submodulePath := filepath.Join(root, "toob-registry")
+		if _, err := os.Stat(filepath.Join(submodulePath, "registry.json")); err == nil {
+			return submodulePath, nil
+		}
+	}
+
 	home, err := ToobHome()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "registry"), nil
+	dir := filepath.Join(home, "registry")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // FindProjectRoot walks upward from start (or cwd if empty) to locate
