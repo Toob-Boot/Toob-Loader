@@ -19,6 +19,18 @@ extern uint32_t stage0_evaluate_tentative(const boot_platform_t *platform,
                                           uint32_t current_slot);
 extern uint8_t stage0_get_active_otp_key_index(const boot_platform_t *platform);
 
+/* --- STAGE 0 STUBS (To satisfy linker without pulling in core/libtoob) --- */
+#include "libtoob_types.h"
+#include "boot_panic.h"
+TOOB_NOINIT toob_handoff_t toob_handoff_state;
+
+_Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
+    (void)platform;
+    (void)reason;
+    while(1) { BOOT_GLITCH_DELAY(); } /* Hardware Trap */
+}
+/* -------------------------------------------------------------------------- */
+
 /* P10 Rule: O(1) Memory layout, Assembler Jump */
 static void __attribute__((naked)) jump_to_payload(uint32_t vector_table_addr) {
   (void)vector_table_addr;

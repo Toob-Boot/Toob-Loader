@@ -62,6 +62,10 @@
         "ipc_mechanism": "shared_ram",
         "is_multi_core": true
     },
+    "memory": {
+        "ram_base": "0x40800000",
+        "ram_size": "0x8000"
+    },
     "registers": {
         "uart0_base": "0x60000000",
         "uart_sclk_freq": 40000000,
