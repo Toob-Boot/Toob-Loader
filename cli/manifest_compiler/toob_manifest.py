@@ -5,18 +5,23 @@ import json
 import argparse
 import tomllib
 
+
 def align_up(val, alignment):
     return (val + alignment - 1) & ~(alignment - 1)
 
+
 def align_down(val, alignment):
     return val & ~(alignment - 1)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Toob-Boot Manifest Compiler")
     parser.add_argument("--toml", required=True, help="Path to device.toml")
     parser.add_argument("--hardware", required=True, help="Path to hardware.json")
-    parser.add_argument("--outdir", required=True, help="Output directory for headers and ld scripts")
-    
+    parser.add_argument(
+        "--outdir", required=True, help="Output directory for headers and ld scripts"
+    )
+
     args = parser.parse_args()
 
     # Load inputs
@@ -26,7 +31,7 @@ def main():
     except Exception as e:
         print(f"FATAL: Could not read {args.toml}: {e}")
         sys.exit(1)
-        
+
     try:
         with open(args.hardware, "r") as f:
             blueprint_data = json.load(f)
@@ -36,7 +41,7 @@ def main():
 
     # Hardware facts
     flash_info = blueprint_data.get("flash", {})
-    flash_size = flash_info.get("size", 4 * 1024 * 1024) # Fallback 4MB
+    flash_size = flash_info.get("size", 4 * 1024 * 1024)  # Fallback 4MB
     write_align = flash_info.get("write_alignment", 32)
     regions = flash_info.get("regions", [])
 
@@ -45,8 +50,22 @@ def main():
         sector_size = flash_info.get("sector_size", 4096)
         bootrom_reserved = flash_info.get("bootrom_reserved", 0)
         if bootrom_reserved > 0:
-            regions.append({"base": 0, "size": bootrom_reserved, "type": "reserved", "description": "Legacy BootROM"})
-        regions.append({"base": bootrom_reserved, "sector_size": sector_size, "count": 999999, "type": "writable"})
+            regions.append(
+                {
+                    "base": 0,
+                    "size": bootrom_reserved,
+                    "type": "reserved",
+                    "description": "Legacy BootROM",
+                }
+            )
+        regions.append(
+            {
+                "base": bootrom_reserved,
+                "sector_size": sector_size,
+                "count": 999999,
+                "type": "writable",
+            }
+        )
 
     def get_sector_size_at(addr):
         for r in regions:
@@ -56,7 +75,15 @@ def main():
                 count = r.get("count", 0)
                 if base <= addr < base + sec_sz * count:
                     return sec_sz
-        return 4096 # Fallback
+        return 4096  # Fallback
+
+    # Determine absolute max sector size for buffer allocations
+    max_sector_size = 0
+    if regions:
+        for r in regions:
+            max_sector_size = max(max_sector_size, r.get("sector_size", 4096))
+    if max_sector_size == 0:
+        max_sector_size = flash_info.get("sector_size", 4096)
 
     def advance_to_writable(addr):
         while True:
@@ -71,12 +98,14 @@ def main():
                         break
             if not in_reserved:
                 break
-        
+
         # Align to sector
         sec_sz = get_sector_size_at(addr)
         if addr % sec_sz != 0:
             addr = ((addr + sec_sz - 1) // sec_sz) * sec_sz
-            return advance_to_writable(addr) # Re-check if alignment pushed us into reserved
+            return advance_to_writable(
+                addr
+            )  # Re-check if alignment pushed us into reserved
         return addr
 
     current_offset = 0
@@ -84,16 +113,18 @@ def main():
     def allocate(budget_req, force_align=0):
         nonlocal current_offset
         if force_align > 0:
-            current_offset = ((current_offset + force_align - 1) // force_align) * force_align
-        
+            current_offset = (
+                (current_offset + force_align - 1) // force_align
+            ) * force_align
+
         current_offset = advance_to_writable(current_offset)
-        
+
         sec_sz = get_sector_size_at(current_offset)
         budget = ((budget_req + sec_sz - 1) // sec_sz) * sec_sz
-        
+
         addr = current_offset
         current_offset += budget
-        
+
         # Fast-forward past any reserved regions we might have hit
         for r in regions:
             if r.get("type", "writable") == "reserved":
@@ -102,12 +133,20 @@ def main():
                 if addr < base + size and current_offset > base:
                     current_offset = advance_to_writable(base + size)
                     return allocate(budget_req, force_align)
-        
+
         return addr, budget
 
     # Budgets from user
     partitions = toml_data.get("partitions", {})
     enable_deltas = partitions.get("enable_deltas", True)
+    wal_sectors = partitions.get("wal_sectors", 4)
+
+    boot_config = toml_data.get("boot_config", {})
+    max_retries = boot_config.get("max_retries", 3)
+    max_recovery_retries = boot_config.get("max_recovery_retries", 3)
+    edge_unattended_mode = str(boot_config.get("edge_unattended_mode", False)).lower()
+    backoff_base_s = boot_config.get("backoff_base_s", 3600)
+    wdt_timeout_ms = boot_config.get("wdt_timeout_ms", 4100)
 
     # Phase 2: Memory Allocation Engine (Sequential Flash Pack)
     s0_addr, s0_budget = allocate(partitions.get("stage0_size", 16384))
@@ -116,8 +155,12 @@ def main():
 
     # Apply dynamic APP alignment from hardware.json
     app_align = flash_info.get("app_alignment", 65536)
-    app_addr, app_budget = allocate(partitions.get("app_size", 384 * 1024), force_align=app_align)
-    staging_addr, _ = allocate(partitions.get("app_size", 384 * 1024), force_align=app_align)
+    app_addr, app_budget = allocate(
+        partitions.get("app_size", 384 * 1024), force_align=app_align
+    )
+    staging_addr, _ = allocate(
+        partitions.get("app_size", 384 * 1024), force_align=app_align
+    )
 
     if partitions.get("recovery_size"):
         rec_addr, rec_budget = allocate(partitions.get("recovery_size", 128 * 1024))
@@ -132,8 +175,7 @@ def main():
     # Scratch Slot
     scratch_addr, scratch_size = allocate(app_budget)
 
-    # WAL Configuration (Fixed 4 sectors)
-    wal_sectors = 4
+    # WAL Configuration
     wal_addr_temp = advance_to_writable(current_offset)
     wal_size_req = 0
     tmp_addr = wal_addr_temp
@@ -141,11 +183,13 @@ def main():
         sec_sz = get_sector_size_at(tmp_addr)
         wal_size_req += sec_sz
         tmp_addr += sec_sz
-    
+
     wal_addr, wal_size = allocate(wal_size_req)
 
     if current_offset > flash_size:
-        print(f"FATAL [FLASH_003]: Partitions exceed physical flash size! Required: {current_offset} bytes, Available: {flash_size} bytes")
+        print(
+            f"FATAL [FLASH_003]: Partitions exceed physical flash size! Required: {current_offset} bytes, Available: {flash_size} bytes"
+        )
         sys.exit(1)
 
     # Output Generation
@@ -162,12 +206,19 @@ def main():
         f.write("#include <stdint.h>\n\n")
 
         # Find absolute max sector size for fallback definitions
-        max_sector_size = max([r.get("sector_size", 4096) for r in regions if r.get("type", "writable") == "writable"], default=4096)
+        max_sector_size = max(
+            [
+                r.get("sector_size", 4096)
+                for r in regions
+                if r.get("type", "writable") == "writable"
+            ],
+            default=4096,
+        )
 
         f.write(f"#define CHIP_FLASH_MAX_SECTOR_SIZE  {max_sector_size}U\n")
         f.write(f"#define CHIP_FLASH_WRITE_ALIGNMENT  {write_align}U\n")
         f.write(f"#define CHIP_FLASH_BASE_ADDR        0x00000000U\n")
-        
+
         # Calculate bootrom_reserved dynamically from reserved regions starting at 0
         bootrom_end = 0
         for r in regions:
@@ -193,7 +244,9 @@ def main():
         f.write(f"#define CHIP_NETCORE_SLOT_ABS_ADDR  0x{net_addr:08X}U\n")
         f.write(f"#define CHIP_NETCORE_SLOT_SIZE      0x{net_budget:08X}U\n\n")
 
-        f.write(f"/* CRITICAL: Must be >= CHIP_APP_SLOT_SIZE for boot_delta_apply output */\n")
+        f.write(
+            f"/* CRITICAL: Must be >= CHIP_APP_SLOT_SIZE for boot_delta_apply output */\n"
+        )
         f.write(f"#define CHIP_SCRATCH_SLOT_ABS_ADDR  0x{scratch_addr:08X}U\n")
         f.write(f"#define CHIP_SCRATCH_SLOT_SIZE      0x{scratch_size:08X}U\n\n")
 
@@ -211,7 +264,7 @@ def main():
             sz = get_sector_size_at(tmp)
             wal_sizes.append(sz)
             tmp += sz
-            
+
         f.write("#define TOOB_WAL_SECTOR_ADDRS { \\\n")
         for i, a in enumerate(wal_addrs):
             f.write(f"    0x{a:08X}U{',' if i < wal_sectors - 1 else ''} \\\n")
@@ -223,16 +276,25 @@ def main():
         f.write("}\n\n")
 
         # Crypto Arena (Derived from blueprint)
-        crypto_size = blueprint_data.get("crypto_capabilities", {}).get("arena_size", 2048)
+        crypto_size = blueprint_data.get("crypto_capabilities", {}).get(
+            "arena_size", 2048
+        )
         f.write(f"#define BOOT_CRYPTO_ARENA_SIZE      {crypto_size}U\n\n")
 
         # WDT Timeout
-        f.write(f"#define BOOT_WDT_TIMEOUT_MS         4100U\n\n")
+        f.write(f"#define BOOT_WDT_TIMEOUT_MS         {wdt_timeout_ms}U\n\n")
 
         # Dynamic XIP Base from hardware.json
         xip_base_str = flash_info.get("xip_base", "0x0")
         f.write(f"#define CHIP_FLASH_XIP_BASE         {xip_base_str}U\n\n")
-        f.write(f"#define CHIP_FLASH_TOTAL_SIZE       0x{flash_size:08X}U\n\n")
+        f.write(f"#define CHIP_FLASH_TOTAL_SIZE       0x{flash_size:08X}U\n")
+
+        # Global Boot Config Constants
+        f.write(f"#define CHIP_FLASH_MAX_SECTOR_SIZE  {max_sector_size}U\n")
+        f.write(f"#define BOOT_CONFIG_MAX_RETRIES     {max_retries}U\n")
+        f.write(f"#define BOOT_CONFIG_MAX_RECOVERY_RETRIES {max_recovery_retries}U\n")
+        f.write(f"#define BOOT_CONFIG_EDGE_UNATTENDED_MODE {edge_unattended_mode}\n")
+        f.write(f"#define BOOT_CONFIG_BACKOFF_BASE_S  {backoff_base_s}U\n\n")
 
         f.write("#endif /* GENERATED_BOOT_CONFIG_H */\n")
 
@@ -251,7 +313,7 @@ def main():
     memory_info = blueprint_data.get("memory", {})
     s0_ram_base = memory_info.get("ram_base", "0x20000000")
     s0_ram_size = memory_info.get("ram_size", "0x8000")
-    
+
     stage0_ld_path = os.path.join(args.outdir, "stage0_layout.ld")
     with open(stage0_ld_path, "w") as f:
         f.write("/* AUTO-GENERATED BY TOOB MANIFEST COMPILER */\n")
@@ -260,7 +322,9 @@ def main():
         f.write("INCLUDE generated_memory.ld\n\n")
         f.write("MEMORY {\n")
         f.write(f"    S0_RAM (rwx) : ORIGIN = {s0_ram_base}, LENGTH = {s0_ram_size}\n")
-        f.write("    S0_ROM (rx)  : ORIGIN = __S0_BUDGET_START, LENGTH = __S0_BUDGET_SIZE\n")
+        f.write(
+            "    S0_ROM (rx)  : ORIGIN = __S0_BUDGET_START, LENGTH = __S0_BUDGET_SIZE\n"
+        )
         f.write("}\n\n")
         f.write("SECTIONS {\n")
         f.write("    .text : {\n")
@@ -285,7 +349,10 @@ def main():
         f.write("    } > S0_ROM\n")
         f.write("}\n")
 
-    print(f"Manifest Compiler: Successfully generated generated_boot_config.h, generated_memory.ld and stage0_layout.ld to {args.outdir}")
+    print(
+        f"Manifest Compiler: Successfully generated generated_boot_config.h, generated_memory.ld and stage0_layout.ld to {args.outdir}"
+    )
+
 
 if __name__ == "__main__":
     main()

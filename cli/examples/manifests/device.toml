@@ -10,3 +10,11 @@ app_size = 393216          # 384 KB
 recovery_size = 131072     # 128 KB
 netcore_size = 65536       # 64 KB
 enable_deltas = true       # Force Scratch Slot Generation
+wal_sectors = 4            # Number of sectors for the Write-Ahead Log
+
+[boot_config]
+max_retries = 3
+max_recovery_retries = 3
+edge_unattended_mode = false
+backoff_base_s = 3600
+wdt_timeout_ms = 4100

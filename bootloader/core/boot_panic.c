@@ -25,7 +25,10 @@
  */
 
 #include "boot_panic.h"
+#include "generated_boot_config.h"
+#ifdef TOOB_MOCK_TEST
 #include "boot_config_mock.h"
+#endif
 #include "boot_crc32.h"
 #include "boot_delay.h"
 #include "boot_secure_zeroize.h"

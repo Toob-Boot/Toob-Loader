@@ -24,7 +24,9 @@
  * mathematisch gegen Instruction-Skips durch Fault-Injection-Angriffe.
  */
 
+#ifdef TOOB_MOCK_TEST
 #include "boot_config_mock.h"
+#endif
 #include "boot_energy.h"
 #include "boot_delay.h"
 #include "boot_hal.h"
