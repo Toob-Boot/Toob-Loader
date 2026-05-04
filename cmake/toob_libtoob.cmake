@@ -23,6 +23,7 @@ add_library(toob_libtoob STATIC
     libtoob/toob_update.c
     libtoob/toob_diag.c
     libtoob/toob_handoff.c
+    libtoob/toob_ota.c
     # GAP-Integration: Die Datei `toob_telemetry_encode.c` wird von `suit/generate.sh` (via `generate_manifest` Target) erstellt.
     ${CMAKE_BINARY_DIR}/generated/toob_telemetry_encode.c
 )

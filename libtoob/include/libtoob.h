@@ -113,6 +113,46 @@ toob_status_t toob_recovery_resolved(void);
 toob_status_t toob_accumulate_net_search(uint32_t active_search_ms);
 
 /**
+ * @brief Extrahiert die rohen Hardware-Metriken aus dem .noinit RAM.
+ * 
+ * @note  [CRA Regulatorik & CBOR Extraktion]
+ *        Liest die `toob_boot_diag_t` Struktur. Diese enthält u.A. den 
+ *        kryptographischen SHA-256 Digest der SBOM, was direkt der Erfüllung
+ *        des EU Cyber Resilience Acts 2027 (CRA) dient. Die weiterführende 
+ *        Telemetrie zur Hardware-Lebensdauer ist optional via CBOR verpackt.
+ *
+ * @param diag Zeiger auf die vom OS bereitgestellte Struct-Instanz.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY bei gebrochener Checksumme.
+ */
+toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
+
+/* ==============================================================================
+ * Toob-Boot OTA Daemon (Network-Agnostic Stream Writer)
+ * ============================================================================== */
+
+/**
+ * @brief Initializes the OTA Daemon for receiving a new update stream.
+ * @param total_size Expected total size of the incoming image (Manifest + Payload).
+ * @param image_type 0 for OS Update (App), 3 for Bootloader Update (Stage 1).
+ * @return TOOB_OK on success, TOOB_ERR_INVALID_ARG if size exceeds staging slot.
+ */
+toob_status_t toob_ota_begin(uint32_t total_size, uint8_t image_type);
+
+/**
+ * @brief Processes a chunk of incoming bytes, writing them linearly to Staging.
+ * @param chunk Pointer to the downloaded bytes.
+ * @param len Length of the chunk.
+ * @return TOOB_OK, or TOOB_ERR_FLASH on write error.
+ */
+toob_status_t toob_ota_process_chunk(const uint8_t* chunk, uint32_t len);
+
+/**
+ * @brief Finalizes the OTA process and registers the update intent in the WAL.
+ * @return TOOB_OK on success. The system should be rebooted immediately after.
+ */
+toob_status_t toob_ota_finalize(void);
+
+/**
  * @brief Registriert ein empfangenes SUIT-Manifest im Write-Ahead-Log (WAL).
  * 
  * @note  [GAP-37: P10 WAL-Atomarität]
