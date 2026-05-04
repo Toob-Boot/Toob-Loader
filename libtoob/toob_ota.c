@@ -356,17 +356,15 @@ toob_status_t toob_ota_finalize(void) {
           return TOOB_ERR_VERIFY;
       }
       
-      /* Constant-time (or near enough for this OS context) hash compare */
-      bool hash_ok = true;
+      /* GAP-20: Provably constant-time hash comparison via XOR accumulator */
+      volatile uint8_t diff = 0;
       for (int i = 0; i < 32; i++) {
-          if (final_hash[i] != s_expected_sha256[i]) {
-              hash_ok = false;
-          }
+          diff |= final_hash[i] ^ s_expected_sha256[i];
       }
       
       toob_ota_secure_zeroize(final_hash, sizeof(final_hash));
       
-      if (!hash_ok) {
+      if (diff != 0) {
           _reset_state();
           return TOOB_ERR_VERIFY;
       }

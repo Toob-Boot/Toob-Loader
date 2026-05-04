@@ -1,0 +1,23 @@
+menu "Toob Network Client"
+
+    config TOOB_NETWORK_CLIENT
+        bool "Enable Toob Network Client"
+        default y
+        help
+          Enables the Toob OTA Network Client component.
+
+    config TOOB_SERVER_URL
+        string "OTA Server URL"
+        default "https://api.toob.io/v1/update"
+        depends on TOOB_NETWORK_CLIENT
+        help
+          The base URL for the OTA update server.
+
+    config TOOB_POLL_INTERVAL_SEC
+        int "OTA Polling Interval (Seconds)"
+        default 86400
+        depends on TOOB_NETWORK_CLIENT
+        help
+          How often the daemon checks for new updates (default 24h).
+
+endmenu

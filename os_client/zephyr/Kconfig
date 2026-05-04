@@ -18,4 +18,12 @@ config TOOB_POLL_INTERVAL_SEC
     help
       How often the daemon checks for new updates (default 24h).
 
+config TOOB_TLS_SEC_TAG
+    int "TLS Security Tag for Server CA"
+    default 1
+    help
+      The sec_tag used by the TLS subsystem to reference the provisioned
+      Server Root CA certificate. Must be provisioned via
+      tls_credential_add() during boot.
+
 endif # TOOB_NETWORK_CLIENT

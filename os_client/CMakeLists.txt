@@ -11,9 +11,8 @@ if(DEFINED ENV{ZEPHYR_BASE} OR DEFINED ZEPHYR_BASE)
     
     zephyr_library_include_directories(include)
     
-    # HINWEIS: libtoob muss in Zephyr ebenfalls als Modul/Library verf\u00fcgbar sein.
-    # Abhängigkeiten zum Netzwerk-Stack
-    # zephyr_library_link_libraries(net)
+    # GAP-04: CBOR parsing requires zcbor
+    zephyr_library_link_libraries(zcbor)
     
 elseif(DEFINED ENV{IDF_PATH} OR DEFINED IDF_PATH)
     # -------------------------------------------------------------------------
@@ -29,14 +28,16 @@ elseif(DEFINED ENV{IDF_PATH} OR DEFINED IDF_PATH)
         REQUIRES 
             "esp_http_client" 
             "esp_netif"
-            "esp_wifi"
+            "mbedtls"
+            "zcbor"
     )
 else()
     # -------------------------------------------------------------------------
-    # Generic / Fuzzer / POSIX Build
+    # Generic / Fuzzer / POSIX Build (GAP-16)
     # -------------------------------------------------------------------------
     add_library(toob_network_client STATIC 
         src/toob_network_client.c
+        src/rtos_stub_posix.c
     )
     target_include_directories(toob_network_client PUBLIC include)
 endif()

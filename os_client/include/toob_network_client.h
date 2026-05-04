@@ -3,7 +3,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "libtoob_types.h" /* provided by libtoob */
+#include <stddef.h>
+#include "libtoob_types.h"
 
 /* --- UNIFIED LOGGING MACROS --- */
 #if defined(ESP_PLATFORM)
@@ -28,26 +29,56 @@ extern "C" {
 #endif
 
 /**
- * @brief Initialize the RTOS specific network stack and DNS (L1 Smoke Test).
- *        This function is implemented in rtos_glue_*.c.
- * @return TOOB_OK on success, or a specific error code.
+ * @brief Unified Callback für HTTP-Daten (Manifest oder Payload).
+ * @param chunk Der empfangene Byte-Chunk
+ * @param len Länge des Chunks
+ * @param ctx User-definierter Kontext
+ * @return TOOB_OK bei Erfolg, sonst bricht der HTTP-Client ab
+ */
+typedef toob_status_t (*toob_http_chunk_cb_t)(const uint8_t* chunk, uint32_t len, void* ctx);
+
+/**
+ * @brief SUIT-CBOR basierte Update Metadaten (Phase 1 Meta-Check)
+ * 
+ * CDDL Definition für den /check Endpoint:
+ * toob_meta_check = {
+ *     1: uint .size 4,              ; remote_svn (Security Version Number)
+ *     2: uint .size 4,              ; total_size (Blob Size in Bytes)
+ *     3: bstr .size 32,             ; sha256 (Full Blob SHA-256 für den OS-Stream)
+ *     ? 4: uint .size 1             ; image_type (0=OS, 3=Bootloader)
+ * }
+ */
+typedef struct {
+    uint32_t total_size;       /**< Payload size in bytes */
+    uint8_t  sha256[32];       /**< Expected SHA-256 digest of the payload */
+    uint8_t  image_type;       /**< 0 = OS Update, 3 = Bootloader */
+    uint32_t remote_svn;       /**< Server-side Security Version Number */
+    bool     update_available; /**< True if the server has a newer version */
+} toob_update_info_t;
+
+/**
+ * @brief Initialize the RTOS specific network stack (L1 Smoke Test).
+ *        Implemented in rtos_glue_*.c.
  */
 toob_status_t toob_network_init(void);
 
 /**
- * @brief Manually trigger an OTA update check.
- * @param server_url The URL of the OTA server. If NULL, uses Kconfig default.
- * @return TOOB_OK if update started, TOOB_ERR_NOT_FOUND if no update, etc.
+ * @brief Führt einen HTTP GET Request aus und streamt die Antwort asynchron.
+ *        Dies ist die EINZIGE Funktion, die das RTOS in rtos_http_*.c implementieren muss!
+ * 
+ * @param url           Komplette URL (z.B. check oder download Endpunkt)
+ * @param resume_offset Range-Header Offset (0 für neuen Download)
+ * @param callback      Wird für jeden empfangenen Chunk aufgerufen
+ * @param ctx           User-Context Pointer (wird an callback gereicht)
+ * @return TOOB_OK bei erfolgreichem HTTP 200/206 und vollständig verarbeitetem Stream
  */
-toob_status_t toob_network_trigger_ota(const char* server_url);
+toob_status_t rtos_http_get(const char* url, uint32_t resume_offset, 
+                            toob_http_chunk_cb_t callback, void* ctx);
 
 /**
- * @brief RTOS specific Native HTTP/TLS Download.
- *        Implemented in rtos_http_*.c to utilize zero-bloat native network stacks.
- * @param url The URL to download
- * @return TOOB_OK on success, or specific error code
+ * @brief Manually trigger an OTA update check and download if available.
  */
-toob_status_t rtos_http_download(const char* url);
+toob_status_t toob_network_trigger_ota(const char* server_url);
 
 /**
  * @brief Start the daemon polling loop. Usually run in a separate RTOS thread.
