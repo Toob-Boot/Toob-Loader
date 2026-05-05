@@ -18,6 +18,7 @@ const (
 	repoURL        = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/latest"
 	cacheFileName  = "update_check.json"
 	checkInterval  = 24 * time.Hour
+	cooldownLimit  = 2 * time.Hour // Cooldown if HTTP 403 (Rate Limit) occurs
 )
 
 type ReleaseInfo struct {
@@ -36,11 +37,11 @@ type CacheData struct {
 	DownloadURL string    `json:"download_url"`
 }
 
-// CheckResult contains the outcome of an update check.
 type CheckResult struct {
 	Available   bool
 	Version     string
 	DownloadURL string
+	ChecksumURL string
 }
 
 func getCachePath() (string, error) {
@@ -51,8 +52,30 @@ func getCachePath() (string, error) {
 	return filepath.Join(home, cacheFileName), nil
 }
 
-// CheckForUpdate returns CheckResult if an update is available.
-func CheckForUpdate(currentVersion string) (*CheckResult, error) {
+func writeCache(cache CacheData) {
+	cachePath, err := getCachePath()
+	if err != nil {
+		return
+	}
+	
+	// Gap 3: Missing directory
+	_ = os.MkdirAll(filepath.Dir(cachePath), 0o755)
+
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return
+	}
+
+	// Gap 2: Race Condition (Atomic Write)
+	tmpPath := cachePath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o644); err == nil {
+		_ = os.Rename(tmpPath, cachePath)
+	}
+}
+
+// CheckForUpdate returns CheckResult *instantly*. If cache is expired, it spawns a background fetch and returns nil.
+// If forceNetwork is true (for manual `toob update`), it blocks and runs the fetch immediately.
+func CheckForUpdate(currentVersion string, forceNetwork bool) (*CheckResult, error) {
 	if !strings.HasPrefix(currentVersion, "v") {
 		currentVersion = "v" + currentVersion
 	}
@@ -63,25 +86,38 @@ func CheckForUpdate(currentVersion string) (*CheckResult, error) {
 	}
 
 	var cache CacheData
+	cacheValid := false
 	if data, err := os.ReadFile(cachePath); err == nil {
 		if err := json.Unmarshal(data, &cache); err == nil {
-			// If we checked recently, just return cached result
 			if time.Since(cache.LastCheck) < checkInterval {
-				if semver.Compare(cache.LatestVer, currentVersion) > 0 {
-					return &CheckResult{Available: true, Version: cache.LatestVer, DownloadURL: cache.DownloadURL}, nil
-				}
-				return &CheckResult{Available: false}, nil
+				cacheValid = true
 			}
 		}
 	}
 
-	// Fetch from GitHub API
+	if cacheValid && !forceNetwork {
+		if semver.Compare(cache.LatestVer, currentVersion) > 0 {
+			return &CheckResult{Available: true, Version: cache.LatestVer, DownloadURL: cache.DownloadURL}, nil
+		}
+		return &CheckResult{Available: false}, nil
+	}
+
+	if !forceNetwork {
+		// Gap 6: Zero Blocking. Start background fetch and return immediately.
+		go fetchUpdateFromGitHub(currentVersion)
+		return nil, nil
+	}
+
+	// Manual force check
+	return fetchUpdateFromGitHub(currentVersion)
+}
+
+func fetchUpdateFromGitHub(currentVersion string) (*CheckResult, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	req, err := http.NewRequest("GET", repoURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	// Important for GitHub API to receive JSON
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := client.Do(req)
@@ -91,6 +127,10 @@ func CheckForUpdate(currentVersion string) (*CheckResult, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// Gap 4: Rate Limiting
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+			writeCache(CacheData{LastCheck: time.Now().Add(-checkInterval + cooldownLimit)}) // Retry in 2 hours
+		}
 		return nil, fmt.Errorf("github api returned %d", resp.StatusCode)
 	}
 
@@ -99,22 +139,26 @@ func CheckForUpdate(currentVersion string) (*CheckResult, error) {
 		return nil, err
 	}
 
-	// Find the correct asset for this OS/Arch
-	expectedName := fmt.Sprintf("toob-%s-%s", runtime.GOOS, runtime.GOARCH)
+	// Gap 7: Robust Asset Matching
+	osArchPart := fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH)
+	ext := ""
 	if runtime.GOOS == "windows" {
-		expectedName += ".exe"
+		ext = ".exe"
 	}
 
-	var downloadURL string
+	var downloadURL, checksumURL string
 	for _, a := range release.Assets {
-		if strings.EqualFold(a.Name, expectedName) {
+		lowerName := strings.ToLower(a.Name)
+		if strings.Contains(lowerName, osArchPart) && strings.HasSuffix(lowerName, ext) {
 			downloadURL = a.BrowserDownloadURL
-			break
+		}
+		if strings.Contains(lowerName, osArchPart) && strings.HasSuffix(lowerName, ext+".sha256") {
+			checksumURL = a.BrowserDownloadURL
 		}
 	}
 
 	if downloadURL == "" {
-		// No compatible asset found for our OS, we can't update
+		writeCache(CacheData{LastCheck: time.Now(), LatestVer: currentVersion}) // Prevents spam if no asset exists
 		return &CheckResult{Available: false}, nil
 	}
 
@@ -123,18 +167,14 @@ func CheckForUpdate(currentVersion string) (*CheckResult, error) {
 		latestVer = "v" + latestVer
 	}
 
-	// Save to cache
-	cache = CacheData{
+	writeCache(CacheData{
 		LastCheck:   time.Now(),
 		LatestVer:   latestVer,
 		DownloadURL: downloadURL,
-	}
-	if data, err := json.Marshal(cache); err == nil {
-		_ = os.WriteFile(cachePath, data, 0o644)
-	}
+	})
 
 	if semver.Compare(latestVer, currentVersion) > 0 {
-		return &CheckResult{Available: true, Version: latestVer, DownloadURL: downloadURL}, nil
+		return &CheckResult{Available: true, Version: latestVer, DownloadURL: downloadURL, ChecksumURL: checksumURL}, nil
 	}
 
 	return &CheckResult{Available: false}, nil

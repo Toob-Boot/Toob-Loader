@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/updater"
@@ -23,11 +22,12 @@ and orchestrates the full build pipeline for Toob-Boot firmware.`,
 		if cmd.Name() == "update" {
 			return
 		}
-		updateResult = make(chan *updater.CheckResult, 1)
-		go func() {
-			res, _ := updater.CheckForUpdate(Version)
+		// Zero-blocking async check
+		res, _ := updater.CheckForUpdate(Version, false)
+		if res != nil {
+			updateResult = make(chan *updater.CheckResult, 1)
 			updateResult <- res
-		}()
+		}
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
 		if updateResult == nil {
@@ -43,7 +43,8 @@ and orchestrates the full build pipeline for Toob-Boot firmware.`,
 				fmt.Printf("\033[36m│\033[0m                                                          \033[36m│\033[0m\n")
 				fmt.Printf("\033[36m╰──────────────────────────────────────────────────────────╯\033[0m\n\n")
 			}
-		case <-time.After(150 * time.Millisecond):
+		default:
+			// Non-blocking fallback
 		}
 	},
 }
