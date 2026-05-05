@@ -133,10 +133,16 @@ func runDockerBuild(root string) error {
 		"run", "--rm",
 		"-v", fmt.Sprintf("%s:/workspace", root),
 		"-v", fmt.Sprintf("%s:/root/.toob/registry", regDir),
-		"-w", "/workspace",
-		"repowatt/toob-compiler:latest",
-		"toob", "build", "--native",
 	}
+
+	// Pass through proxy variables
+	for _, envVar := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
+		if val := os.Getenv(envVar); val != "" {
+			args = append(args, "-e", fmt.Sprintf("%s=%s", envVar, val))
+		}
+	}
+
+	args = append(args, "-w", "/workspace", "repowatt/toob-compiler:latest", "toob", "build", "--native")
 
 	if flagManifest != "" {
 		relManifest, err := filepath.Rel(root, flagManifest)
@@ -221,6 +227,11 @@ func runNativeBuild(root string) error {
 	if _, err := os.Stat(manifestPy); err != nil {
 		return fmt.Errorf("manifest compiler not found at %s", manifestPy)
 	}
+	// Pre-flight check: Python environment
+	if err := exec.Command(pythonBin(), "-c", "import cbor2, cryptography").Run(); err != nil {
+		return fmt.Errorf("python environment missing required dependencies (cbor2, cryptography).\nPlease install them: %s -m pip install cbor2 cryptography", pythonBin())
+	}
+
 	fmt.Println("[toob] Running manifest compiler ...")
 	if err := run(root, pythonBin(), manifestPy,
 		"--toml", manifest, "--hardware", hwJSON, "--outdir", generatedDir); err != nil {
@@ -239,7 +250,7 @@ func runNativeBuild(root string) error {
 				return err
 			}
 		} else {
-			fmt.Println("[toob] Skipping SUIT code generator (bash not found).")
+			return fmt.Errorf("bash not found! SUIT code generator requires bash. Please install Git Bash or set TOOB_BASH_PATH")
 		}
 	}
 
@@ -354,6 +365,9 @@ func pythonBin() string {
 
 // findBash locates a working bash binary.
 func findBash() string {
+	if p := os.Getenv("TOOB_BASH_PATH"); p != "" {
+		return p
+	}
 	if runtime.GOOS == "windows" {
 		gitBash := `C:\Program Files\Git\bin\bash.exe`
 		if _, err := os.Stat(gitBash); err == nil {

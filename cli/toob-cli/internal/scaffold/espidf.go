@@ -183,7 +183,29 @@ toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_has
 		return err
 	}
 
-	// 8. Generate .gitignore
+	// 8. Generate CMakePresets.json
+	presets := `{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "espidf",
+      "displayName": "ESP-IDF Build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build"
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "espidf",
+      "configurePreset": "espidf"
+    }
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, "CMakePresets.json"), []byte(presets), 0o644); err != nil {
+		return err
+	}
+
+	// 9. Generate .gitignore
 	gitignore := `# ESP-IDF Build
 build/
 sdkconfig

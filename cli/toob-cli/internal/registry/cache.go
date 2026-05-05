@@ -64,7 +64,7 @@ func (c *Cache) Sync() error {
 		// Submodules shouldn't be pulled blindly, but caching repos should
 		info, err := os.Stat(filepath.Join(c.dir, ".git"))
 		if err == nil && !info.IsDir() {
-			// It's a submodule (.git is a file). Do not git pull.
+			fmt.Println("[toob] Registry is a git submodule. Bypassing sync to preserve monorepo integrity.")
 			return nil
 		}
 		return runGit(c.dir, "pull", "--ff-only")
@@ -79,7 +79,7 @@ func (c *Cache) Sync() error {
 func (c *Cache) Checkout(version string) error {
 	info, err := os.Stat(filepath.Join(c.dir, ".git"))
 	if err == nil && !info.IsDir() {
-		// Submodule - skip checkout, assume the monorepo has it correct.
+		fmt.Println("[toob] Registry is a git submodule. Bypassing checkout to preserve monorepo integrity.")
 		return nil
 	}
 	c.index = nil
@@ -160,6 +160,17 @@ func (c *Cache) HeadCommit() (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// VerifyHead runs git verify-commit on the current HEAD to ensure supply chain security.
+func (c *Cache) VerifyHead() error {
+	cmd := exec.Command("git", "-C", c.dir, "verify-commit", "HEAD")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git verify-commit failed. The registry HEAD might be compromised! Error: %w", err)
+	}
+	return nil
 }
 
 func runGit(dir string, args ...string) error {

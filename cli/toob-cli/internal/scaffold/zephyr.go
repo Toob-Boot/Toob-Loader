@@ -215,7 +215,32 @@ toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_has
 		return err
 	}
 
-	// 5. Generate .gitignore
+	// 5. Generate CMakePresets.json
+	presets := `{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "zephyr",
+      "displayName": "Zephyr Build",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "ZEPHYR_BASE": "${sourceDir}/.west/zephyr"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "zephyr",
+      "configurePreset": "zephyr"
+    }
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, "CMakePresets.json"), []byte(presets), 0o644); err != nil {
+		return err
+	}
+
+	// 6. Generate .gitignore
 	gitignore := `# CMake
 build/
 CMakeCache.txt

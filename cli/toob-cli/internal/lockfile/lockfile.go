@@ -21,12 +21,12 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// ChipEntry holds the state of a single installed chip.
 type ChipEntry struct {
-	Version string `toml:"version"`
-	Arch    string `toml:"arch"`
-	Vendor  string `toml:"vendor"`
-	Spawned bool   `toml:"spawned"`
+	Version        string `toml:"version"`
+	Arch           string `toml:"arch"`
+	Vendor         string `toml:"vendor"`
+	RegistryCommit string `toml:"registry_commit,omitempty"`
+	Spawned        bool   `toml:"spawned"`
 }
 
 // Lockfile is the in-memory representation of toob.lock.
@@ -76,6 +76,9 @@ func (lf *Lockfile) Save(path string) error {
 		b.WriteString(fmt.Sprintf("version = %q\n", e.Version))
 		b.WriteString(fmt.Sprintf("arch = %q\n", e.Arch))
 		b.WriteString(fmt.Sprintf("vendor = %q\n", e.Vendor))
+		if e.RegistryCommit != "" {
+			b.WriteString(fmt.Sprintf("registry_commit = %q\n", e.RegistryCommit))
+		}
 		if e.Spawned {
 			b.WriteString("spawned = true\n")
 		} else {
@@ -84,7 +87,11 @@ func (lf *Lockfile) Save(path string) error {
 		b.WriteString("\n")
 	}
 
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // HasChip checks if a chip is installed.

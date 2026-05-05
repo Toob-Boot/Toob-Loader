@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/paths"
@@ -75,7 +76,7 @@ func (inst *Installer) Add(arg string) error {
 	}
 	
 	inst.lock.Chips[name] = lockfile.ChipEntry{
-		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, Spawned: false,
+		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, RegistryCommit: commit, Spawned: false,
 	}
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
@@ -157,7 +158,7 @@ func (inst *Installer) Spawn(arg string) error {
 	}
 	
 	inst.lock.Chips[name] = lockfile.ChipEntry{
-		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, Spawned: true,
+		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, RegistryCommit: commit, Spawned: true,
 	}
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		spawnErr = err
@@ -165,6 +166,16 @@ func (inst *Installer) Spawn(arg string) error {
 	}
 	fmt.Printf("Spawned chip '%s' (v%s)  [locally editable]\n", name, ci.Version)
 	return nil
+}
+
+// moveToTrash renames a directory to a .trash folder instead of deleting it.
+func moveToTrash(dir string) {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return
+	}
+	trashDir := filepath.Join(filepath.Dir(filepath.Dir(dir)), ".trash", filepath.Base(filepath.Dir(dir)), filepath.Base(dir)+"-"+time.Now().Format("20060102150405"))
+	os.MkdirAll(filepath.Dir(trashDir), 0o755)
+	os.Rename(dir, trashDir)
 }
 
 // Remove uninstalls a chip and cleans up unshared dependencies.
@@ -177,14 +188,14 @@ func (inst *Installer) Remove(name string) error {
 	// Only remove physical files if the chip was spawned.
 	if entry.Spawned {
 		chipDir := filepath.Join(inst.hal, "chips", name)
-		os.RemoveAll(chipDir)
+		moveToTrash(chipDir)
 
 		// Remove arch/vendor only if no other chip shares them
 		if !inst.lock.IsArchShared(entry.Arch, name) {
-			os.RemoveAll(filepath.Join(inst.hal, "arch", entry.Arch))
+			moveToTrash(filepath.Join(inst.hal, "arch", entry.Arch))
 		}
 		if !inst.lock.IsVendorShared(entry.Vendor, name) {
-			os.RemoveAll(filepath.Join(inst.hal, "vendor", entry.Vendor))
+			moveToTrash(filepath.Join(inst.hal, "vendor", entry.Vendor))
 		}
 	}
 

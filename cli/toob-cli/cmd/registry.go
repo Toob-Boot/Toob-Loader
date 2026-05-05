@@ -12,6 +12,8 @@ var registryCmd = &cobra.Command{
 	Short: "Manage the chip registry cache",
 }
 
+var flagVerifySignature bool
+
 var registrySyncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Synchronize the local registry cache with the remote repository",
@@ -27,6 +29,14 @@ var registrySyncCmd = &cobra.Command{
 			return fmt.Errorf("registry sync failed: %w", err)
 		}
 
+		if flagVerifySignature {
+			fmt.Println("[toob] Verifying GPG signature of HEAD...")
+			if err := cache.VerifyHead(); err != nil {
+				return fmt.Errorf("signature verification failed: %w", err)
+			}
+			fmt.Println("[toob] Signature OK.")
+		}
+
 		commit, _ := cache.HeadCommit()
 		fmt.Printf("[toob] Registry synced.  HEAD = %s\n", commit)
 		return nil
@@ -34,5 +44,6 @@ var registrySyncCmd = &cobra.Command{
 }
 
 func init() {
+	registrySyncCmd.Flags().BoolVar(&flagVerifySignature, "verify-signature", false, "Verify GPG signature of the registry HEAD commit")
 	registryCmd.AddCommand(registrySyncCmd)
 }
