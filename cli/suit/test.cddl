@@ -1,2 +1,0 @@
-test_map = { my_field }
-my_field = (100: uint)
