@@ -73,7 +73,9 @@ jobs:
           done
 
       - name: Extract Tag Name
-        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+        run: |
+          REF=$(jq -r '.ref' "$GITHUB_EVENT_PATH")
+          echo "TAG_NAME=${REF#refs/tags/}" >> $GITHUB_ENV
 
       - name: Upload to Target Release Repository (Draft)
         uses: softprops/action-gh-release@v2
