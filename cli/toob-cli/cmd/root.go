@@ -23,7 +23,7 @@ and orchestrates the full build pipeline for Toob-Boot firmware.`,
 			return
 		}
 		// Zero-blocking async check
-		res, _ := updater.CheckForUpdate(Version, false)
+		res, _ := updater.CheckForUpdate(Version, false, false)
 		if res != nil {
 			updateResult = make(chan *updater.CheckResult, 1)
 			updateResult <- res

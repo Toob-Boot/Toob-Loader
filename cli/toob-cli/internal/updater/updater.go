@@ -1,7 +1,9 @@
 package updater
 
 import (
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,10 +18,13 @@ import (
 
 const (
 	repoURL        = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/latest"
+	repoTagURL     = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/tags/%s"
 	cacheFileName  = "update_check.json"
 	checkInterval  = 24 * time.Hour
 	cooldownLimit  = 2 * time.Hour // Cooldown if HTTP 403 (Rate Limit) occurs
 )
+
+var ErrUnsupportedArch = errors.New("unsupported architecture for this release")
 
 type ReleaseInfo struct {
 	TagName string  `json:"tag_name"`
@@ -58,7 +63,6 @@ func writeCache(cache CacheData) {
 		return
 	}
 	
-	// Gap 3: Missing directory
 	_ = os.MkdirAll(filepath.Dir(cachePath), 0o755)
 
 	data, err := json.Marshal(cache)
@@ -66,7 +70,6 @@ func writeCache(cache CacheData) {
 		return
 	}
 
-	// Gap 2: Race Condition (Atomic Write)
 	tmpPath := cachePath + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err == nil {
 		_ = os.Rename(tmpPath, cachePath)
@@ -75,7 +78,7 @@ func writeCache(cache CacheData) {
 
 // CheckForUpdate returns CheckResult *instantly*. If cache is expired, it spawns a background fetch and returns nil.
 // If forceNetwork is true (for manual `toob update`), it blocks and runs the fetch immediately.
-func CheckForUpdate(currentVersion string, forceNetwork bool) (*CheckResult, error) {
+func CheckForUpdate(currentVersion string, forceNetwork bool, insecure bool) (*CheckResult, error) {
 	if !strings.HasPrefix(currentVersion, "v") {
 		currentVersion = "v" + currentVersion
 	}
@@ -103,18 +106,39 @@ func CheckForUpdate(currentVersion string, forceNetwork bool) (*CheckResult, err
 	}
 
 	if !forceNetwork {
-		// Gap 6: Zero Blocking. Start background fetch and return immediately.
-		go fetchUpdateFromGitHub(currentVersion)
+		go fetchUpdateFromGitHub(currentVersion, repoURL, insecure)
 		return nil, nil
 	}
 
 	// Manual force check
-	return fetchUpdateFromGitHub(currentVersion)
+	return fetchUpdateFromGitHub(currentVersion, repoURL, insecure)
 }
 
-func fetchUpdateFromGitHub(currentVersion string) (*CheckResult, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("GET", repoURL, nil)
+// FetchReleaseByTag ignores cache and forcefully fetches a specific version for rollback/targeted update.
+func FetchReleaseByTag(tag string, insecure bool) (*CheckResult, error) {
+	if !strings.HasPrefix(tag, "v") {
+		tag = "v" + tag
+	}
+	url := fmt.Sprintf(repoTagURL, tag)
+	// We pass empty string for currentVersion so semver comparison always returns true
+	return fetchUpdateFromGitHub("", url, insecure)
+}
+
+func fetchUpdateFromGitHub(currentVersion, url string, insecure bool) (*CheckResult, error) {
+	// Gap 6: Proxy/MITM support via ProxyFromEnvironment and InsecureSkipVerify
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+	}
+	if insecure {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+
+	client := &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -127,9 +151,11 @@ func fetchUpdateFromGitHub(currentVersion string) (*CheckResult, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// Gap 4: Rate Limiting
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 			writeCache(CacheData{LastCheck: time.Now().Add(-checkInterval + cooldownLimit)}) // Retry in 2 hours
+		}
+		if resp.StatusCode == http.StatusNotFound && url != repoURL {
+			return nil, fmt.Errorf("release not found (HTTP 404)")
 		}
 		return nil, fmt.Errorf("github api returned %d", resp.StatusCode)
 	}
@@ -139,7 +165,6 @@ func fetchUpdateFromGitHub(currentVersion string) (*CheckResult, error) {
 		return nil, err
 	}
 
-	// Gap 7: Robust Asset Matching
 	osArchPart := fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH)
 	ext := ""
 	if runtime.GOOS == "windows" {
@@ -158,7 +183,11 @@ func fetchUpdateFromGitHub(currentVersion string) (*CheckResult, error) {
 	}
 
 	if downloadURL == "" {
-		writeCache(CacheData{LastCheck: time.Now(), LatestVer: currentVersion}) // Prevents spam if no asset exists
+		if len(release.Assets) > 0 {
+			// Gap 5: Fallback warning if release exists but arch is missing
+			return nil, ErrUnsupportedArch
+		}
+		writeCache(CacheData{LastCheck: time.Now(), LatestVer: currentVersion}) 
 		return &CheckResult{Available: false}, nil
 	}
 
@@ -167,13 +196,17 @@ func fetchUpdateFromGitHub(currentVersion string) (*CheckResult, error) {
 		latestVer = "v" + latestVer
 	}
 
-	writeCache(CacheData{
-		LastCheck:   time.Now(),
-		LatestVer:   latestVer,
-		DownloadURL: downloadURL,
-	})
+	// Only update cache if we are fetching the latest release
+	if url == repoURL {
+		writeCache(CacheData{
+			LastCheck:   time.Now(),
+			LatestVer:   latestVer,
+			DownloadURL: downloadURL,
+		})
+	}
 
-	if semver.Compare(latestVer, currentVersion) > 0 {
+	// If currentVersion is empty (FetchReleaseByTag), always return Available: true
+	if currentVersion == "" || semver.Compare(latestVer, currentVersion) > 0 {
 		return &CheckResult{Available: true, Version: latestVer, DownloadURL: downloadURL, ChecksumURL: checksumURL}, nil
 	}
 
