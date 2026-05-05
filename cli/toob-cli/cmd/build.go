@@ -339,13 +339,6 @@ func run(dir string, name string, args ...string) error {
 	return c.Run()
 }
 
-// pythonBin returns the Python interpreter name for the current OS.
-func pythonBin() string {
-	if runtime.GOOS == "windows" {
-		return "python"
-	}
-	return "python3"
-}
 
 
 // findToolchainBin auto-detects the cross-compiler bin directory.
