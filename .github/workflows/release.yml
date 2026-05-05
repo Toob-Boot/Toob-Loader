@@ -12,27 +12,11 @@ jobs:
   build-and-release:
     name: Build & Release
     runs-on: ubuntu-latest # Act runs this locally in a container
-    strategy:
-      matrix:
-        include:
-          - goos: windows
-            goarch: amd64
-            ext: .exe
-          - goos: linux
-            goarch: amd64
-            ext: ""
-          - goos: darwin
-            goarch: amd64
-            ext: ""
-          - goos: darwin
-            goarch: arm64
-            ext: ""
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1 # We only need the latest commit of the tag
+          fetch-depth: 1
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -40,16 +24,24 @@ jobs:
           go-version: "1.26.2" # Ensure hermetic go version
           cache: true
 
-      - name: Hermetic Build
+      - name: Hermetic Cross-Compilation (Sequential)
         working-directory: cli/toob-cli
         run: |
-          # Use -mod=readonly to prevent fetching compromised dependencies during build
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -mod=readonly -ldflags="-s -w -X github.com/toob-boot/toob/cmd.Version=${GITHUB_REF_NAME#v}" -o toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} .
+          # Sequential build to prevent 4x Container OOM on bare-metal servers
+          TARGETS="windows/amd64/.exe linux/amd64/ darwin/amd64/ darwin/arm64/"
 
-      - name: Generate Checksum (Supply Chain Security)
-        working-directory: cli/toob-cli
-        run: |
-          sha256sum toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} > toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
+          for TARGET in $TARGETS; do
+            OS=$(echo $TARGET | cut -d/ -f1)
+            ARCH=$(echo $TARGET | cut -d/ -f2)
+            EXT=$(echo $TARGET | cut -d/ -f3)
+            
+            echo ">>> Building $OS-$ARCH..."
+            # Use -mod=readonly to prevent fetching compromised dependencies during build
+            GOOS=$OS GOARCH=$ARCH go build -mod=readonly -ldflags="-s -w -X github.com/toob-boot/toob/cmd.Version=${GITHUB_REF_NAME#v}" -o "toob-$OS-$ARCH$EXT" .
+            
+            # Signatures
+            sha256sum "toob-$OS-$ARCH$EXT" > "toob-$OS-$ARCH$EXT.sha256"
+          done
 
       - name: Upload to Target Release Repository
         uses: softprops/action-gh-release@v2
@@ -58,5 +50,4 @@ jobs:
           token: ${{ secrets.RELEASE_TARGET_TOKEN }} # Highly scoped PAT for the target repo
           tag_name: ${{ github.ref_name }}
           files: |
-            cli/toob-cli/toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-            cli/toob-cli/toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
+            cli/toob-cli/toob-*
