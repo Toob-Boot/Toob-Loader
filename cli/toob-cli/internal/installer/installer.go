@@ -81,7 +81,7 @@ func (inst *Installer) Add(arg string) error {
 		return err
 	}
 	fmt.Printf("Added chip '%s' (v%s) to lockfile [arch=%s, vendor=%s].\n", name, ci.Version, ci.Arch, ci.Vendor)
-	fmt.Println("No files copied (True IKEA Mode). Run `toob build` to compile directly from registry.")
+	fmt.Println("Registry link established. Run `toob build` to compile.")
 	return nil
 }
 
