@@ -18,6 +18,15 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Set GitHub Status (Pending)
+        run: |
+          curl -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.RELEASE_TARGET_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -d '{"state":"pending","description":"CLI compilation and UPX compression in progress...","context":"Publisher Daemon"}'
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -62,3 +71,23 @@ jobs:
           prerelease: false
           files: |
             cli/toob-cli/toob-*
+
+      - name: Set GitHub Status (Success)
+        if: success()
+        run: |
+          curl -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.RELEASE_TARGET_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -d '{"state":"success","description":"Build and upload finished successfully!","context":"Publisher Daemon"}'
+
+      - name: Set GitHub Status (Failure)
+        if: failure()
+        run: |
+          curl -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.RELEASE_TARGET_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/${{ github.repository }}/statuses/${{ github.sha }} \
+            -d '{"state":"error","description":"Publisher Daemon encountered a fatal error.","context":"Publisher Daemon"}'
