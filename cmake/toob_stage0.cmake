@@ -117,7 +117,7 @@ if(NOT TOOB_ARCH STREQUAL "host")
     add_custom_command(
         TARGET toob_stage0 POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_stage0> $<TARGET_FILE_DIR:toob_stage0>/toob_stage0.bin
-        COMMAND python ${TOOB_BUDGET_CHECK_SCRIPT} --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage0>/toob_stage0.bin --stage stage0
+        COMMAND ${TOOB_CLI_PATH} budget --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage0>/toob_stage0.bin --stage stage0
         COMMENT "Generating flashable RAW binary toob_stage0.bin and checking flash budget..."
     )
 endif()

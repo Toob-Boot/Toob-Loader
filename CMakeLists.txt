@@ -34,7 +34,7 @@ else()
     set(TOOB_HAL_ARCH_DIR "${CMAKE_SOURCE_DIR}/toobloader/hal/arch/${TOOB_ARCH}")
     set(TOOB_HAL_VENDOR_DIR "${CMAKE_SOURCE_DIR}/toobloader/hal/vendor/${TOOB_VENDOR}")
     set(TOOB_SDK_DIR "${CMAKE_SOURCE_DIR}/sdk")
-    set(TOOB_BUDGET_CHECK_SCRIPT "${CMAKE_SOURCE_DIR}/cli/manifest_compiler/budget_check.py")
+    set(TOOB_CLI_PATH "toob")
 endif()
 
 # Set default manifest if not provided by the user
@@ -173,7 +173,7 @@ if(NOT TOOB_ARCH STREQUAL "host")
     add_custom_command(
         TARGET toob_stage1 POST_BUILD
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_stage1> $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin
-        COMMAND python ${TOOB_BUDGET_CHECK_SCRIPT} --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin --stage stage1
+        COMMAND ${TOOB_CLI_PATH} budget --toml ${TOOB_DEVICE_MANIFEST} --bin $<TARGET_FILE_DIR:toob_stage1>/toob_stage1.bin --stage stage1
         COMMENT "Generating flashable RAW binary toob_stage1.bin and checking flash budget..."
     )
 endif()

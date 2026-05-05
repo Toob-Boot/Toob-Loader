@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/lockfile"
+	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 )
@@ -222,19 +223,10 @@ func runNativeBuild(root string) error {
 		return err
 	}
 
-	// 4. Run manifest compiler (Compiler Inheritance Mode)
-	manifestPy := resolvePath(root, compilerRoot, filepath.Join("cli", "manifest_compiler", "toob_manifest.py"))
-	if _, err := os.Stat(manifestPy); err != nil {
-		return fmt.Errorf("manifest compiler not found at %s", manifestPy)
-	}
-	// Pre-flight check: Python environment
-	if err := exec.Command(pythonBin(), "-c", "import cbor2, cryptography").Run(); err != nil {
-		return fmt.Errorf("python environment missing required dependencies (cbor2, cryptography).\nPlease install them: %s -m pip install cbor2 cryptography", pythonBin())
-	}
-
-	fmt.Println("[toob] Running manifest compiler ...")
-	if err := run(root, pythonBin(), manifestPy,
-		"--toml", manifest, "--hardware", hwJSON, "--outdir", generatedDir); err != nil {
+	// 4. Run manifest compiler (Go Native)
+	fmt.Println("[toob] Running manifest compiler (Go Native)...")
+	bootloaderDir := resolvePath(root, compilerRoot, "toobloader")
+	if err := manifestpkg.Compile(manifest, hwJSON, generatedDir, bootloaderDir); err != nil {
 		return err
 	}
 
@@ -291,7 +283,12 @@ func runNativeBuild(root string) error {
 	halVendorDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "vendor", halVendor)))
 	
 	sdkDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("sdk")))
-	budgetCheckPy := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("cli", "manifest_compiler", "budget_check.py")))
+	
+	toobCLIPath, err := os.Executable()
+	if err != nil {
+		toobCLIPath = "toob"
+	}
+	toobCLIPath = filepath.ToSlash(toobCLIPath)
 
 	configContent := fmt.Sprintf(
 		"set(TOOB_ARCH \"%s\")\nset(TOOB_VENDOR \"%s\")\nset(TOOB_CHIP \"%s\")\n"+
@@ -303,9 +300,9 @@ func runNativeBuild(root string) error {
 			"set(TOOB_HAL_ARCH_DIR \"%s\")\n"+
 			"set(TOOB_HAL_VENDOR_DIR \"%s\")\n"+
 			"set(TOOB_SDK_DIR \"%s\")\n"+
-			"set(TOOB_BUDGET_CHECK_SCRIPT \"%s\")\n",
+			"set(TOOB_CLI_PATH \"%s\")\n",
 		arch, halVendor, chip, toolchainPrefix,
-		coreDir, cryptoDir, stage0Dir, halChipDir, halArchDir, halVendorDir, sdkDir, budgetCheckPy,
+		coreDir, cryptoDir, stage0Dir, halChipDir, halArchDir, halVendorDir, sdkDir, toobCLIPath,
 	)
 	if err := os.WriteFile(filepath.Join(generatedDir, "toob_config.cmake"), []byte(configContent), 0o644); err != nil {
 		return err
