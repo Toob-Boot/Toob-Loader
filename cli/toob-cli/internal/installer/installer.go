@@ -100,17 +100,53 @@ func (inst *Installer) Spawn(arg string) error {
 		if err := inst.cache.Checkout(version); err != nil {
 			return fmt.Errorf("failed to checkout registry version '%s': %w", version, err)
 		}
+	} else if inst.lock.Registry.Version != "" {
+		// Enforce current lockfile version to prevent shared dependency drift
+		if err := inst.cache.Checkout(inst.lock.Registry.Version); err != nil {
+			return fmt.Errorf("failed to checkout locked registry version '%s': %w", inst.lock.Registry.Version, err)
+		}
 	}
 
 	ci, err := inst.cache.GetChip(name)
 	if err != nil {
 		return err
 	}
-	if err := inst.installChip(ci); err != nil {
+
+	var rollback []string
+	var spawnErr error
+	defer func() {
+		if spawnErr != nil {
+			fmt.Println("[toob] Spawn failed. Rolling back created directories...")
+			for _, dir := range rollback {
+				os.RemoveAll(dir)
+			}
+		}
+	}()
+
+	created, err := inst.installChip(ci)
+	if err != nil {
+		spawnErr = err
 		return err
 	}
-	if err := inst.installDeps(ci); err != nil {
+	rollback = append(rollback, created...)
+
+	createdDeps, err := inst.installDeps(ci)
+	if err != nil {
+		spawnErr = err
 		return err
+	}
+	rollback = append(rollback, createdDeps...)
+
+	// Auto-Gitignore
+	gitignorePath := filepath.Join(inst.root, ".gitignore")
+	if data, err := os.ReadFile(gitignorePath); err == nil {
+		if !strings.Contains(string(data), "toobloader/hal/") {
+			f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_WRONLY, 0o644)
+			if err == nil {
+				f.WriteString("\n# Toob-Loader Spawned HALs\ntoobloader/hal/\n")
+				f.Close()
+			}
+		}
 	}
 
 	idx, _ := inst.cache.LoadIndex()
@@ -124,9 +160,10 @@ func (inst *Installer) Spawn(arg string) error {
 		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, Spawned: true,
 	}
 	if err := inst.lock.Save(inst.lockPath); err != nil {
+		spawnErr = err
 		return err
 	}
-	fmt.Printf("Spawned chip '%s' (v%s)  [locally editable — tracked by git]\n", name, ci.Version)
+	fmt.Printf("Spawned chip '%s' (v%s)  [locally editable]\n", name, ci.Version)
 	return nil
 }
 
@@ -159,23 +196,32 @@ func (inst *Installer) Remove(name string) error {
 	return nil
 }
 
-func (inst *Installer) installChip(ci *registry.ChipInfo) error {
+func (inst *Installer) installChip(ci *registry.ChipInfo) ([]string, error) {
 	src, err := inst.cache.ChipSourcePath(ci.Name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dst := filepath.Join(inst.hal, "chips", ci.Name)
-	return copyTree(src, dst)
+	return []string{dst}, copyTree(src, dst)
 }
 
-func (inst *Installer) installDeps(ci *registry.ChipInfo) error {
+func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
+	var created []string
+
 	// Architecture layer
 	archDst := filepath.Join(inst.hal, "arch", ci.Arch)
 	if _, err := os.Stat(archDst); os.IsNotExist(err) {
 		archSrc := inst.cache.ArchSourcePath(ci.Arch)
 		if err := copyTree(archSrc, archDst); err != nil {
-			return err
+			return created, err
 		}
+		created = append(created, archDst)
+	} else if inst.lock.Registry.Version != "" {
+		// If it exists, but the registry version in lockfile differs from what we are spawning...
+		// Actually, we forced checkout to Lockfile version or specific version above.
+		// If they forced a new version, the existing dependency might be outdated!
+		// For now, we print a warning, as we are not overwriting it.
+		fmt.Printf("[toob] Warning: shared dependency '%s' already exists. Not overwriting to preserve local edits.\n", archDst)
 	}
 
 	// Vendor layer
@@ -183,8 +229,11 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) error {
 	if _, err := os.Stat(vendorDst); os.IsNotExist(err) {
 		vendorSrc := inst.cache.VendorSourcePath(ci.Vendor)
 		if err := copyTree(vendorSrc, vendorDst); err != nil {
-			return err
+			return created, err
 		}
+		created = append(created, vendorDst)
+	} else if inst.lock.Registry.Version != "" {
+		fmt.Printf("[toob] Warning: shared dependency '%s' already exists. Not overwriting to preserve local edits.\n", vendorDst)
 	}
 
 	// Toolchain file
@@ -194,16 +243,17 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) error {
 		if _, err := os.Stat(tcSrc); err == nil {
 			data, err := os.ReadFile(tcSrc)
 			if err != nil {
-				return err
+				return created, err
 			}
 			os.MkdirAll(filepath.Dir(tcDst), 0o755)
 			if err := os.WriteFile(tcDst, data, 0o644); err != nil {
-				return err
+				return created, err
 			}
+			created = append(created, tcDst)
 		}
 	}
 
-	return nil
+	return created, nil
 }
 
 // copyTree recursively copies src to dst.
@@ -216,8 +266,10 @@ func copyTree(src, dst string) error {
 		return fmt.Errorf("%s is not a directory", src)
 	}
 
-	// Remove existing destination
-	os.RemoveAll(dst)
+	// Overwrite Protection
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("directory %s already exists. Please remove it manually to respawn or update", dst)
+	}
 
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
