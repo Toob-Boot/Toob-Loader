@@ -63,7 +63,7 @@ jobs:
                 END_TIME=$(date +%s)
                 DURATION=$((END_TIME - START_TIME))
                 NEW_SIZE=$(stat -c%s "toob-$OS-$ARCH$EXT")
-                SAVED_MB=$(echo "scale=2; ($ORIG_SIZE - $NEW_SIZE) / 1048576" | bc -l)
+                SAVED_MB=$(awk "BEGIN {printf \"%.2f\", ($ORIG_SIZE - $NEW_SIZE) / 1048576}")
                 
                 echo ">>> [STATS] UPX finished in ${DURATION}s. Saved ${SAVED_MB}MB for $OS-$ARCH."
             fi
