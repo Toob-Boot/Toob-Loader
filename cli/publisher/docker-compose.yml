@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  toob-publisher:
+    build: .
+    container_name: toob-publisher
+    restart: unless-stopped
+    ports:
+      # Expose webhook listener on port 9000
+      - "9000:9000"
+    environment:
+      # This secret MUST match the Webhook Secret you configure in GitHub
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-SuperSecretDefaultTokenPleaseChangeMe}
+    volumes:
+      # Allow Act to spawn sibling Docker containers on the host
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the root of the Toob-Loader repository so Act can read the workflow
+      - ../../:/repo

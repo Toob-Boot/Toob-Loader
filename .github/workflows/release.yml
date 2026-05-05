@@ -1,0 +1,62 @@
+name: Secure Publisher Pipeline
+
+on:
+  push:
+    tags:
+      - "v*" # Trigger ONLY on version tags, mitigating PR malware injection
+
+permissions:
+  contents: read # Least privilege by default
+
+jobs:
+  build-and-release:
+    name: Build & Release
+    runs-on: ubuntu-latest # Act runs this locally in a container
+    strategy:
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            ext: .exe
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1 # We only need the latest commit of the tag
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2" # Ensure hermetic go version
+          cache: true
+
+      - name: Hermetic Build
+        working-directory: cli/toob-cli
+        run: |
+          # Use -mod=readonly to prevent fetching compromised dependencies during build
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -mod=readonly -ldflags="-s -w -X github.com/toob-boot/toob/cmd.Version=${GITHUB_REF_NAME#v}" -o toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} .
+
+      - name: Generate Checksum (Supply Chain Security)
+        working-directory: cli/toob-cli
+        run: |
+          sha256sum toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} > toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
+
+      - name: Upload to Target Release Repository
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: Toob-Boot/Toob-CLI-Release
+          token: ${{ secrets.RELEASE_TARGET_TOKEN }} # Highly scoped PAT for the target repo
+          tag_name: ${{ github.ref_name }}
+          files: |
+            cli/toob-cli/toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+            cli/toob-cli/toob-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}.sha256
