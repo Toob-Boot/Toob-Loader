@@ -27,6 +27,7 @@ func init() {
 	rootCmd.Version = version
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
+	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(registryCmd)
 	rootCmd.AddCommand(chipCmd)
 	rootCmd.AddCommand(buildCmd)
