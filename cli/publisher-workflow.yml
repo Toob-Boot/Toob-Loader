@@ -51,7 +51,7 @@ jobs:
             # Use -mod=readonly to prevent fetching compromised dependencies during build
             GOOS=$OS GOARCH=$ARCH go build -mod=readonly -ldflags="-s -w -X github.com/toob-boot/toob/cmd.Version=${GITHUB_REF_NAME#v}" -o "toob-$OS-$ARCH$EXT" .
             
-            # UPX Compression (Gap 4) & Performance Tracking
+            # UPX Compression & Performance Tracking
             if [ "$OS" != "darwin" ]; then
                 echo ">>> [STATS] Compressing $OS-$ARCH with UPX..."
                 START_TIME=$(date +%s)
@@ -78,7 +78,7 @@ jobs:
           repository: Toob-Boot/Toob-CLI-Release
           token: ${{ secrets.RELEASE_TARGET_TOKEN }} # Highly scoped PAT for the target repo
           tag_name: ${{ github.ref_name }}
-          draft: true       # Gap 2: Human-in-the-Loop Validation
+          draft: true # Gap 2: Human-in-the-Loop Validation
           prerelease: false
           files: |
             cli/toob-cli/toob-*
