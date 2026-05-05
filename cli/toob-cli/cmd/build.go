@@ -92,9 +92,9 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid core_compatibility in registry: %w", err)
 		}
-		cliVer, err := semver.NewVersion(version)
+		cliVer, err := semver.NewVersion(Version)
 		if err == nil && !constraint.Check(cliVer) {
-			return fmt.Errorf("HAL Registry requires Core Version %s. You are using CLI v%s. Please upgrade your CLI or use an older registry version.", idx.CoreCompatibility, version)
+			return fmt.Errorf("HAL Registry requires Core Version %s. You are using CLI v%s. Please upgrade your CLI or use an older registry version.", idx.CoreCompatibility, Version)
 		}
 	}
 
@@ -137,7 +137,7 @@ func runDockerBuild(root string) error {
 		}
 	}
 
-	args = append(args, "-w", "/workspace", "repowatt/toob-compiler:v"+version, "toob", "build", "--native")
+	args = append(args, "-w", "/workspace", "repowatt/toob-compiler:v"+Version, "toob", "build", "--native")
 
 	if flagManifest != "" {
 		relManifest, err := filepath.Rel(root, flagManifest)

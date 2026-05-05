@@ -30,6 +30,10 @@ coverage/
 # lockfiles
 */toob.lock
 
+# local utility repos
+.release-repo/
+
+
 
 # Export Scripts and Review Files
 *.ps1
