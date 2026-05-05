@@ -17,6 +17,7 @@ import (
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
+	"github.com/toob-boot/toob/internal/suit"
 )
 
 func resolvePath(localRoot string, fallbackRoot string, relPath string) string {
@@ -230,20 +231,12 @@ func runNativeBuild(root string) error {
 		return err
 	}
 
-	// 5. Run SUIT code generator if bash is available
-	generateSh := resolvePath(root, compilerRoot, filepath.Join("cli", "suit", "generate.sh"))
-	if _, err := os.Stat(generateSh); err == nil {
-		if bash := findBash(); bash != "" {
-			if pyScripts := findPythonScriptsBin(); pyScripts != "" {
-				os.Setenv("PATH", pyScripts+string(os.PathListSeparator)+os.Getenv("PATH"))
-			}
-			fmt.Println("[toob] Running SUIT code generator ...")
-			if err := run(root, bash, generateSh, generatedDir, manifest, chip); err != nil {
-				return err
-			}
-		} else {
-			return fmt.Errorf("bash not found! SUIT code generator requires bash. Please install Git Bash or set TOOB_BASH_PATH")
-		}
+	// 5. Run SUIT code generator
+	if pyScripts := findPythonScriptsBin(); pyScripts != "" {
+		os.Setenv("PATH", pyScripts+string(os.PathListSeparator)+os.Getenv("PATH"))
+	}
+	if err := suit.Generate(generatedDir, compilerRoot); err != nil {
+		return err
 	}
 
 	// 6. Resolve toolchain from chip metadata
@@ -360,22 +353,6 @@ func pythonBin() string {
 	return "python3"
 }
 
-// findBash locates a working bash binary.
-func findBash() string {
-	if p := os.Getenv("TOOB_BASH_PATH"); p != "" {
-		return p
-	}
-	if runtime.GOOS == "windows" {
-		gitBash := `C:\Program Files\Git\bin\bash.exe`
-		if _, err := os.Stat(gitBash); err == nil {
-			return gitBash
-		}
-	}
-	if p, err := exec.LookPath("bash"); err == nil {
-		return p
-	}
-	return ""
-}
 
 // findToolchainBin auto-detects the cross-compiler bin directory.
 func findToolchainBin(prefix string) string {
