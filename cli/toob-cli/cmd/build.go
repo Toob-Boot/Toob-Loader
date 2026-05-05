@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/BurntSushi/toml"
+
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/lockfile"
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
@@ -48,13 +48,6 @@ func init() {
 	buildCmd.Flags().BoolVar(&flagNative, "native", false, "Force native build (use local toolchains instead of Docker)")
 }
 
-// deviceToml mirrors the [device] section of device.toml.
-type deviceToml struct {
-	Device struct {
-		Vendor string `toml:"vendor"`
-		Chip   string `toml:"chip"`
-	} `toml:"device"`
-}
 
 // chipManifest mirrors chip_manifest.json.
 type chipManifest struct {
@@ -144,7 +137,7 @@ func runDockerBuild(root string) error {
 		}
 	}
 
-	args = append(args, "-w", "/workspace", "repowatt/toob-compiler:latest", "toob", "build", "--native")
+	args = append(args, "-w", "/workspace", "repowatt/toob-compiler:v"+version, "toob", "build", "--native")
 
 	if flagManifest != "" {
 		relManifest, err := filepath.Rel(root, flagManifest)
@@ -175,10 +168,11 @@ func runNativeBuild(root string) error {
 		return fmt.Errorf("device manifest not found: %s", manifest)
 	}
 
-	var dt deviceToml
-	if _, err := toml.DecodeFile(manifest, &dt); err != nil {
+	dt, err := manifestpkg.ParseToml(manifest)
+	if err != nil {
 		return fmt.Errorf("failed to parse %s: %w", manifest, err)
 	}
+	
 	chip := dt.Device.Chip
 	vendor := dt.Device.Vendor
 	if chip == "" || vendor == "" {
@@ -364,20 +358,30 @@ func findToolchainBin(prefix string) string {
 	// Espressif IDF standard layout
 	if runtime.GOOS == "windows" {
 		triplet := strings.TrimSuffix(prefix, "-")
-		base := filepath.Join("C:\\", "Espressif", "tools", triplet)
-		entries, err := os.ReadDir(base)
-		if err != nil {
-			return ""
+		var bases []string
+		if p := os.Getenv("IDF_TOOLS_PATH"); p != "" {
+			bases = append(bases, filepath.Join(p, "tools", triplet))
 		}
-		// Sort reverse to pick the newest version
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].Name() > entries[j].Name()
-		})
-		for _, e := range entries {
-			candidate := filepath.Join(base, e.Name(), triplet, "bin")
-			exe := filepath.Join(candidate, compiler+".exe")
-			if _, err := os.Stat(exe); err == nil {
-				return candidate
+		if p, err := os.UserHomeDir(); err == nil {
+			bases = append(bases, filepath.Join(p, ".espressif", "tools", triplet))
+		}
+		bases = append(bases, filepath.Join("C:\\", "Espressif", "tools", triplet))
+
+		for _, base := range bases {
+			entries, err := os.ReadDir(base)
+			if err != nil {
+				continue
+			}
+			// Sort reverse to pick the newest version
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].Name() > entries[j].Name()
+			})
+			for _, e := range entries {
+				candidate := filepath.Join(base, e.Name(), triplet, "bin")
+				exe := filepath.Join(candidate, compiler+".exe")
+				if _, err := os.Stat(exe); err == nil {
+					return candidate
+				}
 			}
 		}
 	}

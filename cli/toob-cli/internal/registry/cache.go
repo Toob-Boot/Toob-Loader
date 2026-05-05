@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/toob-boot/toob/internal/paths"
 )
@@ -57,8 +58,28 @@ func (c *Cache) IsInitialized() bool {
 	return err == nil
 }
 
+func (c *Cache) lock() (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(c.dir), 0o755); err != nil {
+		return nil, err
+	}
+	lockDir := filepath.Join(filepath.Dir(c.dir), "registry.lock")
+	for i := 0; i < 100; i++ { // wait up to 10 seconds
+		if err := os.Mkdir(lockDir, 0o755); err == nil {
+			return func() { os.Remove(lockDir) }, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timeout waiting for registry lock. Is another toob process running? (If not, delete %s)", lockDir)
+}
+
 // Sync clones or fast-forward pulls the registry.
 func (c *Cache) Sync() error {
+	unlock, err := c.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	c.index = nil
 	if c.IsInitialized() {
 		// Submodules shouldn't be pulled blindly, but caching repos should
@@ -77,6 +98,12 @@ func (c *Cache) Sync() error {
 
 // Checkout switches the registry to a specific tag or commit.
 func (c *Cache) Checkout(version string) error {
+	unlock, err := c.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	info, err := os.Stat(filepath.Join(c.dir, ".git"))
 	if err == nil && !info.IsDir() {
 		fmt.Println("[toob] Registry is a git submodule. Bypassing checkout to preserve monorepo integrity.")

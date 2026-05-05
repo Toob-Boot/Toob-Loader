@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
 // Generate runs the zcbor parser generation for SUIT and telemetry CDDLs.
@@ -17,14 +16,7 @@ func Generate(outputDir, compilerRoot string) error {
 
 	zcborPath, err := exec.LookPath("zcbor")
 	if err != nil {
-		suitH := filepath.Join(outputDir, "boot_suit.h")
-		if data, err := os.ReadFile(suitH); err == nil {
-			if !strings.Contains(string(data), "BOOT_SUIT_MOCK_H") {
-				fmt.Println("[SUIT CodeGen] zcbor not found, but real outputs exist. Preserving them! (Idempotence Guard)")
-				return nil
-			}
-		}
-		return fmt.Errorf("[SUIT CodeGen] FATAL ERROR: Valid Python zcbor CLI not found!\nPlease ensure zcbor is installed ('pip install zcbor') and available in your PATH")
+		return fmt.Errorf("FATAL ERROR: Valid Python zcbor CLI not found!\nPlease ensure zcbor is installed ('pip install zcbor') and available in your PATH")
 	}
 
 	fmt.Println("[SUIT CodeGen] zcbor CLI found. Generating strict parsers...")

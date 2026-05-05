@@ -10,7 +10,8 @@ import (
 
 type DeviceToml struct {
 	Device struct {
-		Chip string `toml:"chip"`
+		Vendor string `toml:"vendor"`
+		Chip   string `toml:"chip"`
 	} `toml:"device"`
 	Partitions struct {
 		Stage0Size    uint32 `toml:"stage0_size"`
@@ -21,6 +22,7 @@ type DeviceToml struct {
 		NetcoreSize   uint32 `toml:"netcore_size"`
 		WalSectors    uint32 `toml:"wal_sectors"`
 		StagingSlotID uint32 `toml:"staging_slot_id"`
+		EnableDeltas  bool   `toml:"enable_deltas"`
 	} `toml:"partitions"`
 	BootConfig struct {
 		MaxRetries         uint32 `toml:"max_retries"`
@@ -59,9 +61,21 @@ type HardwareJson struct {
 	} `json:"memory"`
 }
 
-func LoadConfig(tomlPath, jsonPath string) (*DeviceToml, *HardwareJson, error) {
+func ParseToml(path string) (*DeviceToml, error) {
 	var dt DeviceToml
-	if _, err := toml.DecodeFile(tomlPath, &dt); err != nil {
+	meta, err := toml.DecodeFile(path, &dt)
+	if err != nil {
+		return nil, err
+	}
+	if len(meta.Undecoded()) > 0 {
+		return nil, fmt.Errorf("FATAL [TOML_STRICT]: Unknown fields in %s: %v", path, meta.Undecoded())
+	}
+	return &dt, nil
+}
+
+func LoadConfig(tomlPath, jsonPath string) (*DeviceToml, *HardwareJson, error) {
+	dt, err := ParseToml(tomlPath)
+	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse TOML %s: %w", tomlPath, err)
 	}
 
@@ -75,5 +89,5 @@ func LoadConfig(tomlPath, jsonPath string) (*DeviceToml, *HardwareJson, error) {
 		return nil, nil, fmt.Errorf("failed to parse JSON %s: %w", jsonPath, err)
 	}
 
-	return &dt, &hj, nil
+	return dt, &hj, nil
 }
