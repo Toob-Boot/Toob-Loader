@@ -8,8 +8,9 @@ type Context struct {
 	ProjectDir  string
 	ChipName    string
 	ChipInfo    *registry.ChipInfo
-	RegistryDir string
-	NoVSCode    bool
+	RegistryDir     string
+	NoVSCode        bool
+	UseDevContainer bool
 }
 
 // Generator defines the interface for framework-specific scaffolders.

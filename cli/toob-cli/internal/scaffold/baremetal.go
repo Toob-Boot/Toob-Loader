@@ -164,7 +164,7 @@ toobloader/
 			filepath.Join(vendorSrc, "include"),
 		)
 		
-		rootLibtoob := filepath.Join(ctx.RegistryDir, "..", "..", "sdk", "libtoob", "include")
+		rootLibtoob := filepath.Join(ctx.RegistryDir, "..", "sdk", "libtoob", "include")
 		includePaths = append(includePaths, rootLibtoob)
 		includePaths = append(includePaths, "${workspaceFolder}/**")
 

@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	initChip      string
-	initNoVSCode  bool
-	initFramework string
+	initChip         string
+	initNoVSCode     bool
+	initFramework    string
+	initDevContainer bool
 )
 
 var initCmd = &cobra.Command{
@@ -55,12 +56,13 @@ var initCmd = &cobra.Command{
 		}
 
 		ctx := scaffold.Context{
-			ProjectName: projectName,
-			ProjectDir:  projectDir,
-			ChipName:    initChip,
-			ChipInfo:    ci,
-			RegistryDir: regDir,
-			NoVSCode:    initNoVSCode,
+			ProjectName:     projectName,
+			ProjectDir:      projectDir,
+			ChipName:        initChip,
+			ChipInfo:        ci,
+			RegistryDir:     regDir,
+			NoVSCode:        initNoVSCode,
+			UseDevContainer: initDevContainer,
 		}
 
 		// 3. Delegate to specific Generator
@@ -104,4 +106,5 @@ func init() {
 	initCmd.Flags().StringVarP(&initChip, "chip", "c", "", "Target chip for the project (e.g., esp32c6)")
 	initCmd.Flags().BoolVar(&initNoVSCode, "no-vscode", false, "Disable generation of VS Code IntelliSense configurations")
 	initCmd.Flags().StringVar(&initFramework, "framework", "baremetal", "Target RTOS framework (baremetal, zephyr)")
+	initCmd.Flags().BoolVar(&initDevContainer, "devcontainer", false, "Generate VS Code DevContainer configuration for isolated builds")
 }

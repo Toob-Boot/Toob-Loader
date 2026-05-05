@@ -10,17 +10,10 @@ import (
 type ZephyrGenerator struct{}
 
 func (g *ZephyrGenerator) Generate(ctx Context) error {
-	// 1. Generate CMakeLists.txt (Zephyr App)
 	cmakeLists := fmt.Sprintf(`cmake_minimum_required(VERSION 3.20.0)
 
-# Module Integration: Register the global Toob-Loader SDK as a Zephyr module
-# This ensures Zephyr automatically includes libtoob and os_client!
-# Ensure TOOB_SDK_DIR environment variable is set, or hardcode path.
-if(NOT DEFINED ENV{TOOB_SDK_DIR})
-    set(TOOB_SDK_DIR "%s/../../sdk")
-endif()
-list(APPEND ZEPHYR_EXTRA_MODULES $ENV{TOOB_SDK_DIR}/os_client)
-
+# The Toob-Loader SDK is automatically pulled via west.yml and 
+# registered as a Zephyr module. No manual paths needed!
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(%s)
 
@@ -28,7 +21,7 @@ target_sources(app PRIVATE
     src/main.c 
     src/toob_zero_bloat_hooks.c
 )
-`, filepath.ToSlash(ctx.RegistryDir), ctx.ProjectName)
+`, ctx.ProjectName)
 	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, "CMakeLists.txt"), []byte(cmakeLists), 0o644); err != nil {
 		return err
 	}
@@ -89,7 +82,24 @@ CONFIG_TOOB_NETWORK_CLIENT=y
 		return err
 	}
 
-	// 4. Generate src/main.c & src/toob_zero_bloat_hooks.c
+	// 4. Generate west.yml (Dependency Management)
+	westYml := fmt.Sprintf(`manifest:
+  remotes:
+    - name: toob-boot
+      url-base: https://github.com/Toob-Boot
+  projects:
+    - name: Toob-Loader
+      remote: toob-boot
+      revision: main
+      path: modules/toob-loader
+  self:
+    path: %s
+`, ctx.ProjectName)
+	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, "west.yml"), []byte(westYml), 0o644); err != nil {
+		return err
+	}
+
+	// 5. Generate src/main.c & src/toob_zero_bloat_hooks.c
 	if err := os.MkdirAll(filepath.Join(ctx.ProjectDir, "src"), 0o755); err != nil {
 		return err
 	}
@@ -206,7 +216,9 @@ toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_has
 build/
 CMakeCache.txt
 CMakeFiles/
-
+`
+	if ctx.UseDevContainer {
+		gitignore += `
 # Zephyr DevContainer Workspace (Keeps PC clean)
 .west/
 zephyr/
@@ -214,16 +226,18 @@ modules/
 tools/
 bootloader/
 `
+	}
 	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, ".gitignore"), []byte(gitignore), 0o644); err != nil {
 		return err
 	}
 
 	// 6. Generate DevContainer configuration (Modern & Clean PC)
-	if err := os.MkdirAll(filepath.Join(ctx.ProjectDir, ".devcontainer"), 0o755); err != nil {
-		return err
-	}
+	if ctx.UseDevContainer {
+		if err := os.MkdirAll(filepath.Join(ctx.ProjectDir, ".devcontainer"), 0o755); err != nil {
+			return err
+		}
 
-	devcontainer := `{
+		devcontainer := `{
     "name": "Toob-Loader Zephyr SDK",
     "image": "zephyrprojectrtos/zephyr-build:latest",
     
@@ -249,8 +263,9 @@ bootloader/
     "remoteUser": "user"
 }
 `
-	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, ".devcontainer", "devcontainer.json"), []byte(devcontainer), 0o644); err != nil {
-		return err
+		if err := os.WriteFile(filepath.Join(ctx.ProjectDir, ".devcontainer", "devcontainer.json"), []byte(devcontainer), 0o644); err != nil {
+			return err
+		}
 	}
 
 	// 7. VS Code Integration
@@ -263,7 +278,7 @@ bootloader/
 		
 		// For Zephyr, Intellisense mostly depends on the Zephyr SDK and west build output.
 		// However, we explicitly include libtoob headers.
-		rootLibtoob := filepath.Join(ctx.RegistryDir, "..", "..", "sdk", "libtoob", "include")
+		rootLibtoob := filepath.Join(ctx.RegistryDir, "..", "sdk", "libtoob", "include")
 		includePaths = append(includePaths, rootLibtoob)
 		includePaths = append(includePaths, "${workspaceFolder}/**")
 
