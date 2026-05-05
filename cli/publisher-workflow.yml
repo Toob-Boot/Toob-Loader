@@ -72,12 +72,15 @@ jobs:
             sha256sum "toob-$OS-$ARCH$EXT" > "toob-$OS-$ARCH$EXT.sha256"
           done
 
+      - name: Extract Tag Name
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+
       - name: Upload to Target Release Repository (Draft)
         uses: softprops/action-gh-release@v2
         with:
           repository: Toob-Boot/Toob-CLI-Release
           token: ${{ secrets.RELEASE_TARGET_TOKEN }} # Highly scoped PAT for the target repo
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ env.TAG_NAME }}
           draft: true # Gap 2: Human-in-the-Loop Validation
           prerelease: false
           files: |
