@@ -206,12 +206,54 @@ toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_has
 build/
 CMakeCache.txt
 CMakeFiles/
+
+# Zephyr DevContainer Workspace (Keeps PC clean)
+.west/
+zephyr/
+modules/
+tools/
+bootloader/
 `
 	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, ".gitignore"), []byte(gitignore), 0o644); err != nil {
 		return err
 	}
 
-	// 6. VS Code Integration
+	// 6. Generate DevContainer configuration (Modern & Clean PC)
+	if err := os.MkdirAll(filepath.Join(ctx.ProjectDir, ".devcontainer"), 0o755); err != nil {
+		return err
+	}
+
+	devcontainer := `{
+    "name": "Toob-Loader Zephyr SDK",
+    "image": "zephyrprojectrtos/zephyr-build:latest",
+    
+    // Install the C/C++ Extension for Autocompletion
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-vscode.cpptools",
+                "ms-vscode.cmake-tools"
+            ]
+        }
+    },
+
+    // This command keeps your workspace up to date automatically!
+    // It downloads the OS source code ONLY inside the container context.
+    "postCreateCommand": "west init && west update",
+    
+    // Map Zephyr Base automatically
+    "remoteEnv": {
+        "ZEPHYR_BASE": "${containerWorkspaceFolder}/zephyr"
+    },
+
+    "remoteUser": "user"
+}
+`
+	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, ".devcontainer", "devcontainer.json"), []byte(devcontainer), 0o644); err != nil {
+		return err
+	}
+
+	// 7. VS Code Integration
 	if !ctx.NoVSCode {
 		if err := os.MkdirAll(filepath.Join(ctx.ProjectDir, ".vscode"), 0o755); err != nil {
 			return err
