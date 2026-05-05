@@ -292,7 +292,7 @@ bootloader/
 					"name": "Zephyr",
 					"includePath": includePaths,
 					"compilerPath": "",
-					"cStandard": "c11",
+					"cStandard": "c17",
 					"intelliSenseMode": "gcc-arm",
 				},
 			},

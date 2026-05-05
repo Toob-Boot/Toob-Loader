@@ -243,7 +243,7 @@ managed_components/
 						"${workspaceFolder}/**",
 					},
 					"compilerPath": "",
-					"cStandard": "c11",
+					"cStandard": "c17",
 					"intelliSenseMode": "gcc-arm",
 				},
 			},

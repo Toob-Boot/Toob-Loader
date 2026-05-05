@@ -184,7 +184,7 @@ toobloader/
 					"name": "Toob-Loader (Baremetal)",
 					"includePath": includePaths,
 					"compilerPath": "",
-					"cStandard": "c11",
+					"cStandard": "c17",
 					"intelliSenseMode": "gcc-arm",
 				},
 			},
