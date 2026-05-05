@@ -2,6 +2,7 @@
 package registry
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -88,7 +89,23 @@ func (c *Cache) Sync() error {
 			fmt.Println("[toob] Registry is a git submodule. Bypassing sync to preserve monorepo integrity.")
 			return nil
 		}
-		return runGit(c.dir, "pull", "--ff-only")
+		if err := runGit(c.dir, "pull", "--ff-only"); err != nil {
+			head, _ := c.HeadCommit()
+			fmt.Printf("\n[toob] \033[33mWARN: Failed to sync registry from upstream (Network error?).\033[0m\n")
+			fmt.Printf("[toob] Local cache is available at commit: %s\n", head)
+			fmt.Print("Do you want to continue using the offline cache? [Y/n]: ")
+
+			reader := bufio.NewReader(os.Stdin)
+			response, _ := reader.ReadString('\n')
+			response = strings.TrimSpace(strings.ToLower(response))
+			
+			if response == "" || response == "y" || response == "yes" {
+				fmt.Println("[toob] Proceeding with offline cache...")
+				return nil
+			}
+			return fmt.Errorf("registry sync failed and offline fallback was rejected: %w", err)
+		}
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(c.dir), 0o755); err != nil {
 		return err

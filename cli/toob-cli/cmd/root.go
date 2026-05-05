@@ -31,4 +31,6 @@ func init() {
 	rootCmd.AddCommand(registryCmd)
 	rootCmd.AddCommand(chipCmd)
 	rootCmd.AddCommand(buildCmd)
+	rootCmd.AddCommand(cleanCmd)
+	rootCmd.AddCommand(doctorCmd)
 }
