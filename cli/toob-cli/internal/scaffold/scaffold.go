@@ -11,6 +11,8 @@ type Context struct {
 	RegistryDir     string
 	NoVSCode        bool
 	UseDevContainer bool
+	SdkUrl          string
+	SdkRevision     string
 }
 
 // Generator defines the interface for framework-specific scaffolders.

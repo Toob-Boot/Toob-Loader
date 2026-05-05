@@ -3,7 +3,9 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -18,6 +20,8 @@ var (
 	initNoVSCode     bool
 	initFramework    string
 	initDevContainer bool
+	initSdkUrl       string
+	initSdkRevision  string
 )
 
 var initCmd = &cobra.Command{
@@ -26,6 +30,12 @@ var initCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectName := args[0]
+		
+		validNamePattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+		if !validNamePattern.MatchString(projectName) {
+			return fmt.Errorf("invalid project name '%s'. Only alphanumeric characters, dashes, and underscores are allowed", projectName)
+		}
+
 		if initChip == "" {
 			return fmt.Errorf("please specify a chip using the --chip flag (e.g., --chip esp32c6)")
 		}
@@ -39,20 +49,33 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
+		// Rollback on failure
+		var initErr error
+		defer func() {
+			if initErr != nil {
+				fmt.Printf("[toob] ERROR: Scaffolding failed: %v\n", initErr)
+				fmt.Printf("[toob] Rolling back... removing directory %s\n", projectDir)
+				os.RemoveAll(projectDir)
+			}
+		}()
+
 		fmt.Printf("[toob] Initializing Zero-Bloat project '%s' for chip '%s' (Framework: %s)...\n", projectName, initChip, initFramework)
 
 		// 2. Fetch Registry Context
 		regDir, err := paths.RegistryDir()
 		if err != nil {
+			initErr = err
 			return err
 		}
 		cache := registry.NewCache(regDir)
 		if err := cache.Sync(); err != nil {
+			initErr = err
 			return err
 		}
 		ci, err := cache.GetChip(initChip)
 		if err != nil {
-			return fmt.Errorf("chip %s not found in registry", initChip)
+			initErr = fmt.Errorf("chip %s not found in registry", initChip)
+			return initErr
 		}
 
 		ctx := scaffold.Context{
@@ -63,6 +86,8 @@ var initCmd = &cobra.Command{
 			RegistryDir:     regDir,
 			NoVSCode:        initNoVSCode,
 			UseDevContainer: initDevContainer,
+			SdkUrl:          initSdkUrl,
+			SdkRevision:     initSdkRevision,
 		}
 
 		// 3. Delegate to specific Generator
@@ -72,12 +97,16 @@ var initCmd = &cobra.Command{
 			generator = &scaffold.BaremetalGenerator{}
 		case "zephyr":
 			generator = &scaffold.ZephyrGenerator{}
+		case "espidf":
+			generator = &scaffold.EspIdfGenerator{}
 		default:
-			return fmt.Errorf("unsupported framework '%s'. Supported: baremetal, zephyr", initFramework)
+			initErr = fmt.Errorf("unsupported framework '%s'. Supported: baremetal, zephyr, espidf", initFramework)
+			return initErr
 		}
 
 		if err := generator.Generate(ctx); err != nil {
-			return fmt.Errorf("scaffolding failed: %w", err)
+			initErr = fmt.Errorf("scaffolding failed: %w", err)
+			return initErr
 		}
 
 		// 4. Run installer.Add (True IKEA Mode)
@@ -88,7 +117,16 @@ var initCmd = &cobra.Command{
 
 		inst := installer.New(".", cache)
 		if err := inst.Add(initChip); err != nil {
-			return fmt.Errorf("failed to add chip '%s': %w", initChip, err)
+			initErr = fmt.Errorf("failed to add chip '%s': %w", initChip, err)
+			return initErr
+		}
+
+		// 5. Initialize Git Repository
+		gitCmd := exec.Command("git", "init")
+		gitCmd.Stdout = os.Stdout
+		gitCmd.Stderr = os.Stderr
+		if err := gitCmd.Run(); err != nil {
+			fmt.Printf("[toob] WARN: Failed to initialize git repository: %v\n", err)
 		}
 
 		fmt.Println("\n[toob] Project initialized successfully!")
@@ -105,6 +143,8 @@ var initCmd = &cobra.Command{
 func init() {
 	initCmd.Flags().StringVarP(&initChip, "chip", "c", "", "Target chip for the project (e.g., esp32c6)")
 	initCmd.Flags().BoolVar(&initNoVSCode, "no-vscode", false, "Disable generation of VS Code IntelliSense configurations")
-	initCmd.Flags().StringVar(&initFramework, "framework", "baremetal", "Target RTOS framework (baremetal, zephyr)")
+	initCmd.Flags().StringVar(&initFramework, "framework", "baremetal", "Target RTOS framework (baremetal, zephyr, espidf)")
 	initCmd.Flags().BoolVar(&initDevContainer, "devcontainer", false, "Generate VS Code DevContainer configuration for isolated builds")
+	initCmd.Flags().StringVar(&initSdkUrl, "sdk-url", "https://github.com/Toob-Boot/Toob-Loader.git", "URL to fetch the Toob-Loader SDK from")
+	initCmd.Flags().StringVar(&initSdkRevision, "sdk-version", "main", "Git branch or tag to use for the Toob-Loader SDK")
 }

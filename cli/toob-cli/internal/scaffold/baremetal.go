@@ -25,13 +25,19 @@ project(%s C CXX ASM)
 # ==============================================================================
 # OS & Framework Integration (Baremetal)
 # ==============================================================================
-# For Generic/Baremetal Builds (via Toob-Loader CLI):
-include(cmake/toob_paths.cmake OPTIONAL)
-add_executable(${PROJECT_NAME} src/main.c src/toob_zero_bloat_hooks.c)
+include(FetchContent)
+FetchContent_Declare(
+  toob_sdk
+  GIT_REPOSITORY "%s"
+  GIT_TAG        "%s"
+)
+FetchContent_MakeAvailable(toob_sdk)
 
-# If integrating libtoob directly, ensure its headers are in the include path.
-# target_include_directories(${PROJECT_NAME} PRIVATE ${TOOB_CORE_DIR}/sdk/libtoob/include)
-`, ctx.ProjectName)
+# Include libtoob headers
+target_include_directories(${PROJECT_NAME} PRIVATE ${toob_sdk_SOURCE_DIR}/sdk/libtoob/include)
+
+add_executable(${PROJECT_NAME} src/main.c src/toob_zero_bloat_hooks.c)
+`, ctx.ProjectName, ctx.SdkUrl, ctx.SdkRevision)
 	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, "CMakeLists.txt"), []byte(cmakeLists), 0o644); err != nil {
 		return err
 	}
@@ -78,6 +84,7 @@ int main(void) {
      * This MUST be the very first call in your application!
      */
     TOOB_OS_INIT_OR_PANIC();
+    // IMPORTANT: Ensure your RTOS feeds or disables the hardware watchdog passed by Toob-Boot!
 
     printf("Toob-Loader Baremetal App Booted Successfully!\n");
 
@@ -126,7 +133,10 @@ toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len) {
     return TOOB_ERR_NOT_SUPPORTED;
 }
 
-toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx) { return TOOB_ERR_NOT_SUPPORTED; }
+toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx) { 
+    printf("[toob_hooks] CRITICAL: toob_os_sha256_init not implemented. Secure boot/OTA will fail!\n");
+    return TOOB_ERR_NOT_SUPPORTED; 
+}
 toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* data, uint32_t len) { return TOOB_ERR_NOT_SUPPORTED; }
 toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]) { return TOOB_ERR_NOT_SUPPORTED; }
 `

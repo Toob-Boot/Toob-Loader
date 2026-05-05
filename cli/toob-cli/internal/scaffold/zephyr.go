@@ -86,15 +86,15 @@ CONFIG_TOOB_NETWORK_CLIENT=y
 	westYml := fmt.Sprintf(`manifest:
   remotes:
     - name: toob-boot
-      url-base: https://github.com/Toob-Boot
+      url-base: %s
   projects:
     - name: Toob-Loader
       remote: toob-boot
-      revision: main
+      revision: %s
       path: modules/toob-loader
   self:
     path: %s
-`, ctx.ProjectName)
+`, ctx.SdkUrl, ctx.SdkRevision, ctx.ProjectName)
 	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, "west.yml"), []byte(westYml), 0o644); err != nil {
 		return err
 	}
@@ -140,6 +140,7 @@ int main(void) {
      * This MUST be the very first call in your application!
      */
     TOOB_OS_INIT_OR_PANIC();
+    // IMPORTANT: Ensure your RTOS feeds or disables the hardware watchdog passed by Toob-Boot!
 
     printk("Toob-Loader Zephyr App Booted Successfully!\n");
 
@@ -203,7 +204,10 @@ toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len) {
     return TOOB_OK;
 }
 
-toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx) { return TOOB_ERR_NOT_SUPPORTED; }
+toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx) { 
+    printk("[toob_hooks] CRITICAL: toob_os_sha256_init not implemented. Secure boot/OTA will fail!\n");
+    return TOOB_ERR_NOT_SUPPORTED; 
+}
 toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* data, uint32_t len) { return TOOB_ERR_NOT_SUPPORTED; }
 toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]) { return TOOB_ERR_NOT_SUPPORTED; }
 `
@@ -253,7 +257,7 @@ bootloader/
 
     // This command keeps your workspace up to date automatically!
     // It downloads the OS source code ONLY inside the container context.
-    "postCreateCommand": "west init && west update",
+    "postCreateCommand": "[ -d .west ] || west init && west update",
     
     // Map Zephyr Base automatically
     "remoteEnv": {
