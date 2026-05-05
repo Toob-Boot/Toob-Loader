@@ -52,7 +52,7 @@ jobs:
             GOOS=$OS GOARCH=$ARCH go build -mod=readonly -ldflags="-s -w -X github.com/toob-boot/toob/cmd.Version=${GITHUB_REF_NAME#v}" -o "toob-$OS-$ARCH$EXT" .
             
             # UPX Compression (Gap 4)
-            if [ "$OS" != "darwin" ] || [ "$ARCH" != "arm64" ]; then
+            if [ "$OS" != "darwin" ]; then
                 echo ">>> Compressing with UPX..."
                 upx --best "toob-$OS-$ARCH$EXT"
             fi
