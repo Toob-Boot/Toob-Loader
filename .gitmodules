@@ -5,3 +5,7 @@
 [submodule "cli/.pipeline-repo"]
 	path = cli/.pipeline-repo
 	url = https://github.com/Toob-Boot/Toob-CLI-Pipeline.git
+
+[submodule "common/lib/heatshrink"]
+	path = common/lib/heatshrink
+	url = https://github.com/atomicobject/heatshrink.git
