@@ -1,3 +1,7 @@
 [submodule "toob-registry"]
 	path = toob-registry
 	url = https://github.com/Toob-Boot/Toob-Registry.git
+
+[submodule "cli/.pipeline-repo"]
+	path = cli/.pipeline-repo
+	url = https://github.com/Toob-Boot/Toob-CLI-Pipeline.git

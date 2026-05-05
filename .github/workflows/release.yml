@@ -51,10 +51,21 @@ jobs:
             # Use -mod=readonly to prevent fetching compromised dependencies during build
             GOOS=$OS GOARCH=$ARCH go build -mod=readonly -ldflags="-s -w -X github.com/toob-boot/toob/cmd.Version=${GITHUB_REF_NAME#v}" -o "toob-$OS-$ARCH$EXT" .
             
-            # UPX Compression (Gap 4)
+            # UPX Compression (Gap 4) & Performance Tracking
             if [ "$OS" != "darwin" ]; then
-                echo ">>> Compressing with UPX..."
-                upx --best "toob-$OS-$ARCH$EXT"
+                echo ">>> [STATS] Compressing $OS-$ARCH with UPX..."
+                START_TIME=$(date +%s)
+                ORIG_SIZE=$(stat -c%s "toob-$OS-$ARCH$EXT")
+                
+                # Using -5 instead of --best to drastically reduce compression time while keeping 90% of the savings
+                upx -5 "toob-$OS-$ARCH$EXT" > /dev/null
+                
+                END_TIME=$(date +%s)
+                DURATION=$((END_TIME - START_TIME))
+                NEW_SIZE=$(stat -c%s "toob-$OS-$ARCH$EXT")
+                SAVED_MB=$(echo "scale=2; ($ORIG_SIZE - $NEW_SIZE) / 1048576" | bc -l)
+                
+                echo ">>> [STATS] UPX finished in ${DURATION}s. Saved ${SAVED_MB}MB for $OS-$ARCH."
             fi
             
             # Signatures
