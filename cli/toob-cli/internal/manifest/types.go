@@ -9,6 +9,8 @@ import (
 )
 
 type DeviceToml struct {
+	Name    string `toml:"name"`
+	Version string `toml:"version"`
 	Device struct {
 		Vendor string `toml:"vendor"`
 		Chip   string `toml:"chip"`
