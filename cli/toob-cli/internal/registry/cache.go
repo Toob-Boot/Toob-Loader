@@ -29,17 +29,20 @@ type ChipInfo struct {
 
 type VendorInfo struct {
 	Name        string `json:"name"`
+	Path        string `json:"path"`
 	Version     string `json:"version"`
 	Description string `json:"description"`
 }
 
 type ArchInfo struct {
 	Name        string `json:"name"`
+	Path        string `json:"path"`
 	Version     string `json:"version"`
 	Description string `json:"description"`
 }
 
 type ToolchainInfo struct {
+	Path    string `json:"path"`
 	Version string `json:"version"`
 }
 
@@ -206,13 +209,29 @@ func (c *Cache) ChipSourcePath(name string) (string, error) {
 }
 
 // ArchSourcePath returns the absolute path to an architecture's source in the cache.
-func (c *Cache) ArchSourcePath(arch string) string {
-	return filepath.Join(c.dir, "arch", arch)
+func (c *Cache) ArchSourcePath(arch string) (string, error) {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return "", err
+	}
+	info, ok := idx.Archs[arch]
+	if !ok || info.Path == "" {
+		return filepath.Join(c.dir, "arch", arch), nil // fallback for backwards compatibility
+	}
+	return filepath.Join(c.dir, info.Path), nil
 }
 
 // VendorSourcePath returns the absolute path to a vendor's source in the cache.
-func (c *Cache) VendorSourcePath(vendor string) string {
-	return filepath.Join(c.dir, "vendor", vendor)
+func (c *Cache) VendorSourcePath(vendor string) (string, error) {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return "", err
+	}
+	info, ok := idx.Vendors[vendor]
+	if !ok || info.Path == "" {
+		return filepath.Join(c.dir, "vendor", vendor), nil // fallback for backwards compatibility
+	}
+	return filepath.Join(c.dir, info.Path), nil
 }
 
 // HeadCommit returns the short SHA of the current HEAD.

@@ -291,7 +291,10 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 	// Architecture layer
 	archDst := filepath.Join(inst.hal, "arch", ci.Arch)
 	if _, err := os.Stat(archDst); os.IsNotExist(err) {
-		archSrc := inst.cache.ArchSourcePath(ci.Arch)
+		archSrc, err := inst.cache.ArchSourcePath(ci.Arch)
+		if err != nil {
+			return created, err
+		}
 		if err := copyTree(archSrc, archDst); err != nil {
 			return created, err
 		}
@@ -307,7 +310,10 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 	// Vendor layer
 	vendorDst := filepath.Join(inst.hal, "vendor", ci.Vendor)
 	if _, err := os.Stat(vendorDst); os.IsNotExist(err) {
-		vendorSrc := inst.cache.VendorSourcePath(ci.Vendor)
+		vendorSrc, err := inst.cache.VendorSourcePath(ci.Vendor)
+		if err != nil {
+			return created, err
+		}
 		if err := copyTree(vendorSrc, vendorDst); err != nil {
 			return created, err
 		}
