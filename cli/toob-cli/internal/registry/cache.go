@@ -123,7 +123,8 @@ func (c *Cache) Checkout(version string) error {
 
 	info, err := os.Stat(filepath.Join(c.dir, ".git"))
 	if err == nil && !info.IsDir() {
-		fmt.Println("[toob] Registry is a git submodule. Bypassing checkout to preserve monorepo integrity.")
+		fmt.Printf("[toob] Registry Source: Local Monorepo (%s)\n", c.dir)
+		fmt.Println("[toob] Registry checkout bypassed (using local monorepo files)")
 		return nil
 	}
 	c.index = nil
@@ -131,7 +132,11 @@ func (c *Cache) Checkout(version string) error {
 	if err := runGit(c.dir, "fetch", "origin", version); err != nil {
 		// Ignore error, might already have it locally
 	}
-	return runGit(c.dir, "checkout", version)
+	err = runGit(c.dir, "checkout", version)
+	if err == nil {
+		fmt.Printf("[toob] Registry Source: GitHub Remote (Version: %s)\n", version)
+	}
+	return err
 }
 
 // LoadIndex parses registry.json and returns a typed index.
