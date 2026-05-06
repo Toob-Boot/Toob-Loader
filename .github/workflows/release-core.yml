@@ -28,6 +28,9 @@ jobs:
           RAW_VERSION=${TAG_NAME#core/v}
           echo "RAW_VERSION=$RAW_VERSION" >> $GITHUB_ENV
 
+      - name: Install ZIP
+        run: sudo apt-get update && sudo apt-get install -y zip
+
       - name: Create Core SDK Archive
         run: |
           echo ">>> Packaging Core SDK v${RAW_VERSION}..."
