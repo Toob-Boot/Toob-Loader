@@ -40,7 +40,6 @@ cli/.pipeline-repo/
 .secrets
 
 # Third-party libraries
-common/lib/heatshrink/
 
 # CLI Build Artifacts
 cli/toob-cli/toob.exe
