@@ -75,13 +75,13 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	cache := registry.NewCache("")
 	lfPath := paths.LockfilePath(root)
 	if lf, err := lockfile.Load(lfPath); err == nil {
-		if lf.Registry.Version != "" {
-			if err := cache.Checkout(lf.Registry.Version); err != nil {
-				return fmt.Errorf("failed to checkout locked registry version %s: %w", lf.Registry.Version, err)
-			}
-		} else if lf.Registry.Commit != "" {
+		if lf.Registry.Commit != "" {
 			if err := cache.Checkout(lf.Registry.Commit); err != nil {
 				return fmt.Errorf("failed to checkout locked registry commit %s: %w", lf.Registry.Commit, err)
+			}
+		} else if lf.Registry.Version != "" {
+			if err := cache.Checkout(lf.Registry.Version); err != nil {
+				return fmt.Errorf("failed to checkout locked registry version %s: %w", lf.Registry.Version, err)
 			}
 		}
 	}
