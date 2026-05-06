@@ -258,9 +258,11 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 	}
 
 	// Toolchain file
-	tcDst := filepath.Join(inst.root, "cmake", ci.CMakeToolchainFile)
+	tcName := "toolchain.cmake"
+	tcDst := filepath.Join(inst.root, "cmake", tcName)
 	if _, err := os.Stat(tcDst); os.IsNotExist(err) {
-		tcSrc := inst.cache.ToolchainSourcePath(ci.CMakeToolchainFile)
+		tcDirName := strings.TrimSuffix(ci.CompilerPrefix, "-")
+		tcSrc := filepath.Join(inst.cache.Dir(), "toolchains", tcDirName, "toolchain.cmake")
 		if _, err := os.Stat(tcSrc); err == nil {
 			data, err := os.ReadFile(tcSrc)
 			if err != nil {

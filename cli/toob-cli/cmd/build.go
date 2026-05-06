@@ -53,7 +53,6 @@ func init() {
 type chipManifest struct {
 	Vendor             string `json:"vendor"`
 	Arch               string `json:"arch"`
-	CMakeToolchainFile string `json:"cmake_toolchain_file"`
 	CompilerPrefix     string `json:"compiler_prefix"`
 }
 
@@ -245,7 +244,7 @@ func runNativeBuild(root string) error {
 	}
 
 	// 6. Resolve toolchain from chip metadata
-	toolchainName := "toolchain-riscv32.cmake"
+	toolchainName := "toolchain.cmake"
 	arch := "riscv32"
 	toolchainPrefix := "riscv32-unknown-elf-"
 	halVendor := vendor
@@ -258,9 +257,6 @@ func runNativeBuild(root string) error {
 	if data, err := os.ReadFile(cmPath); err == nil {
 		var cm chipManifest
 		if err := json.Unmarshal(data, &cm); err == nil {
-			if cm.CMakeToolchainFile != "" {
-				toolchainName = cm.CMakeToolchainFile
-			}
 			if cm.Arch != "" {
 				arch = cm.Arch
 			}

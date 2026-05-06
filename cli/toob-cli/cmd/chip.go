@@ -51,7 +51,8 @@ var chipInfoCmd = &cobra.Command{
 		fmt.Printf("  Version:       %s\n", ci.Version)
 		fmt.Printf("  Vendor:        %s\n", ci.Vendor)
 		fmt.Printf("  Architecture:  %s\n", ci.Arch)
-		fmt.Printf("  CMake Toolchain: %s\n", ci.CMakeToolchainFile)
+		fmt.Printf("  Compiler Prefix: %s\n", ci.CompilerPrefix)
+		fmt.Printf("  Registry Path:   %s\n", ci.Path)
 		fmt.Printf("  Description:   %s\n", ci.Description)
 		return nil
 	},

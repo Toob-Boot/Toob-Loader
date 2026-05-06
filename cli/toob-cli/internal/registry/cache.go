@@ -19,7 +19,6 @@ type ChipInfo struct {
 	Name        string `json:"name"`
 	Vendor      string `json:"vendor"`
 	Arch        string `json:"arch"`
-	CMakeToolchainFile string `json:"cmake_toolchain_file"`
 	CompilerPrefix     string `json:"compiler_prefix"`
 	Path               string `json:"path"`
 	Version            string `json:"version"`
@@ -195,11 +194,6 @@ func (c *Cache) ArchSourcePath(arch string) string {
 // VendorSourcePath returns the absolute path to a vendor's source in the cache.
 func (c *Cache) VendorSourcePath(vendor string) string {
 	return filepath.Join(c.dir, "vendor", vendor)
-}
-
-// ToolchainSourcePath returns the absolute path to a toolchain cmake file.
-func (c *Cache) ToolchainSourcePath(filename string) string {
-	return filepath.Join(c.dir, "toolchains", filename)
 }
 
 // HeadCommit returns the short SHA of the current HEAD.
