@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -231,11 +232,23 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 
 	var extractErr error
 	if strings.HasSuffix(url, ".zip") {
-		extractErr = extractZip(tmpFile.Name(), tmpDestDir)
-	} else if strings.HasSuffix(url, ".tar.gz") {
-		extractErr = extractTarGz(tmpFile, tmpDestDir)
-	} else if strings.HasSuffix(url, ".tar.xz") {
-		extractErr = extractTarXz(tmpFile, tmpDestDir)
+		extractErr = extractZipFast(tmpFile.Name(), tmpDestDir)
+		if extractErr != nil {
+			fmt.Printf("\n[toob] Fast native zip failed. Falling back to Go extraction...\n")
+			tmpFile.Seek(0, 0)
+			extractErr = extractZip(tmpFile.Name(), tmpDestDir)
+		}
+	} else if strings.HasSuffix(url, ".tar.gz") || strings.HasSuffix(url, ".tar.xz") {
+		extractErr = extractTarFast(tmpFile.Name(), tmpDestDir)
+		if extractErr != nil {
+			fmt.Printf("\n[toob] Fast native tar failed. Falling back to Go extraction...\n")
+			tmpFile.Seek(0, 0)
+			if strings.HasSuffix(url, ".tar.gz") {
+				extractErr = extractTarGz(tmpFile, tmpDestDir)
+			} else {
+				extractErr = extractTarXz(tmpFile, tmpDestDir)
+			}
+		}
 	} else {
 		extractErr = fmt.Errorf("unsupported archive format for url: %s", url)
 	}
@@ -264,6 +277,16 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 	}
 
 	return nil
+}
+
+func extractTarFast(archivePath, destDir string) error {
+	cmd := exec.Command("tar", "-xf", archivePath, "-C", destDir)
+	return cmd.Run()
+}
+
+func extractZipFast(archivePath, destDir string) error {
+	cmd := exec.Command("unzip", "-q", archivePath, "-d", destDir)
+	return cmd.Run()
 }
 
 func extractZip(zipPath, destDir string) error {
