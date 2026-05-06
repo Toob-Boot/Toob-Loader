@@ -54,6 +54,7 @@ type chipManifest struct {
 	Vendor             string `json:"vendor"`
 	Arch               string `json:"arch"`
 	CompilerPrefix     string `json:"compiler_prefix"`
+	ToolchainPrefix    string `json:"toolchain_prefix"` // Legacy support for local toobloader/hal configs
 	Version            string `json:"version"`
 }
 
@@ -181,8 +182,13 @@ func runNativeBuild(root string) error {
 	fmt.Printf("[toob] Target: %s/%s\n", vendor, chip)
 
 	regDir, _ := paths.RegistryDir()
+	
+	registryURL := ""
+	if dt.Build.Registry != "" {
+		registryURL = dt.Build.Registry
+	}
 
-	cache := registry.NewCache("")
+	cache := registry.NewCache(registryURL)
 	if !cache.IsInitialized() {
 		fmt.Println("[toob] Registry not initialized. Attempting auto-clone...")
 		if err := cache.Sync(); err != nil {
@@ -300,6 +306,8 @@ func runNativeBuild(root string) error {
 			}
 			if cm.CompilerPrefix != "" {
 				toolchainPrefix = cm.CompilerPrefix
+			} else if cm.ToolchainPrefix != "" {
+				toolchainPrefix = cm.ToolchainPrefix
 			}
 			if cm.Vendor != "" {
 				halVendor = cm.Vendor

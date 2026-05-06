@@ -35,14 +35,6 @@ func RegistryDir() (string, error) {
 		return envDir, nil
 	}
 
-	// If we are inside the Toob-Loader monorepo, use the local submodule to avoid cloning.
-	if root, err := FindProjectRoot(""); err == nil {
-		submodulePath := filepath.Join(root, "toob-registry")
-		if _, err := os.Stat(filepath.Join(submodulePath, "registry.json")); err == nil {
-			return submodulePath, nil
-		}
-	}
-
 	home, err := ToobHome()
 	if err != nil {
 		return "", err

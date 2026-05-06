@@ -18,6 +18,7 @@ type DeviceToml struct {
 	Build struct {
 		Compiler string `toml:"compiler"`
 		CoreSDK  string `toml:"core_sdk"`
+		Registry string `toml:"registry"`
 	} `toml:"build"`
 	Partitions struct {
 		Stage0Size    uint32 `toml:"stage0_size"`
