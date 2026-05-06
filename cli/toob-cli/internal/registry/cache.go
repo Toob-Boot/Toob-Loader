@@ -22,7 +22,7 @@ type ChipInfo struct {
 	CompilerPrefix     string `json:"compiler_prefix"`
 	Path               string `json:"path"`
 	Version            string `json:"version"`
-	CoreCompatibility  string `json:"core_compatibility"`
+	CliCompatibility   string `json:"cli_compatibility"`
 	Description        string `json:"description,omitempty"`
 	Verified           bool   `json:"verified"`
 }
@@ -50,7 +50,7 @@ type ToolchainInfo struct {
 type Index struct {
 	FormatVersion     int                 `json:"format_version"`
 	RegistryVersion   string              `json:"registry_version"`
-	CoreCompatibility string              `json:"core_compatibility"`
+	CliCompatibility  string              `json:"cli_compatibility"`
 	Chips             map[string]ChipInfo `json:"chips"`
 	Vendors           map[string]VendorInfo `json:"vendors"`
 	Archs             map[string]ArchInfo   `json:"archs"`

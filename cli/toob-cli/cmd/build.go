@@ -86,14 +86,14 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if idx, err := cache.LoadIndex(); err == nil && idx.CoreCompatibility != "" {
-		constraint, err := semver.NewConstraint(idx.CoreCompatibility)
+	if idx, err := cache.LoadIndex(); err == nil && idx.CliCompatibility != "" {
+		constraint, err := semver.NewConstraint(idx.CliCompatibility)
 		if err != nil {
-			return fmt.Errorf("invalid core_compatibility in registry: %w", err)
+			return fmt.Errorf("invalid cli_compatibility in registry: %w", err)
 		}
 		cliVer, err := semver.NewVersion(Version)
 		if err == nil && !constraint.Check(cliVer) {
-			return fmt.Errorf("HAL Registry requires Core Version %s. You are using CLI v%s. Please upgrade your CLI or use an older registry version.", idx.CoreCompatibility, Version)
+			return fmt.Errorf("HAL Registry requires CLI Version %s. You are using CLI v%s. Please upgrade your CLI or use an older registry version.", idx.CliCompatibility, Version)
 		}
 	}
 
