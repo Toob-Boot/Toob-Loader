@@ -66,4 +66,5 @@ func init() {
 	rootCmd.AddCommand(buildCmd)
 	rootCmd.AddCommand(cleanCmd)
 	rootCmd.AddCommand(doctorCmd)
+	rootCmd.AddCommand(abiCmd)
 }
