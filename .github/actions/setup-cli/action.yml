@@ -34,6 +34,8 @@ runs:
         if [ -d "cli/toob-cli" ]; then
           echo ">>> Detected Toob-Loader monorepo. Using local source."
           TOOB_DIR="."
+          echo ">>> Initializing toob-registry submodule..."
+          git submodule update --init toob-registry
         else
           echo ">>> External repository detected. Cloning Toob-Loader to /tmp/Toob-Loader..."
           git clone https://github.com/Toob-Boot/Toob-Loader.git /tmp/Toob-Loader
