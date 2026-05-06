@@ -54,6 +54,7 @@ type chipManifest struct {
 	Vendor             string `json:"vendor"`
 	Arch               string `json:"arch"`
 	CompilerPrefix     string `json:"compiler_prefix"`
+	Version            string `json:"version"`
 }
 
 func isMonorepo(root string) bool {
@@ -253,6 +254,7 @@ func runNativeBuild(root string) error {
 		cmPath = filepath.Join(regDir, "chips", chip, "chip_manifest.json")
 	}
 
+	chipVersion := "1.0.0"
 	if data, err := os.ReadFile(cmPath); err == nil {
 		var cm chipManifest
 		if err := json.Unmarshal(data, &cm); err == nil {
@@ -264,6 +266,32 @@ func runNativeBuild(root string) error {
 			}
 			if cm.Vendor != "" {
 				halVendor = cm.Vendor
+			}
+			if cm.Version != "" {
+				chipVersion = cm.Version
+			}
+		}
+	}
+
+	// 7. CLI Blocker Logic: Check Compatibility Matrix
+	matrix, err := cache.FetchLiveMatrix()
+	if err != nil {
+		fmt.Printf("\033[33m[toob] WARNING: Could not fetch Compatibility Matrix: %v\033[0m\n", err)
+	} else if matrix != nil {
+		if chipEntry, hasChip := (*matrix)[chip]; hasChip {
+			if versionEntry, hasVer := chipEntry.Versions[chipVersion]; hasVer {
+				cliVer := Version
+				if !strings.HasPrefix(cliVer, "v") && cliVer != "main" && cliVer != "dev" {
+					cliVer = "v" + cliVer
+				}
+				
+				if cliEntry, hasCli := versionEntry.VerifiedCliVersions[cliVer]; hasCli {
+					if cliEntry.Status == "FAILED" {
+						return fmt.Errorf("FATAL: Der Chip %s (v%s) ist laut aktueller Ledger Matrix explizit inkompatibel mit deiner CLI Version (%s). Build abgebrochen!", chip, chipVersion, cliVer)
+					}
+				} else {
+					fmt.Printf("\033[33m[toob] WARNING: The combination of Chip %s (v%s) and CLI %s has not been verified by the CI yet.\033[0m\n", chip, chipVersion, cliVer)
+				}
 			}
 		}
 	}

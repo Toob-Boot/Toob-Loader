@@ -5,6 +5,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,6 +58,29 @@ type Index struct {
 	Archs             map[string]ArchInfo   `json:"archs"`
 	Toolchains        map[string]ToolchainInfo `json:"toolchains"`
 }
+
+type MatrixDependencies struct {
+	Toolchain string `json:"toolchain"`
+	Vendor    string `json:"vendor"`
+	Arch      string `json:"arch"`
+}
+
+type MatrixVerifiedCli struct {
+	Status     string `json:"status"`
+	LastTested string `json:"last_tested"`
+}
+
+type MatrixVersion struct {
+	EnvironmentHash     string                       `json:"environment_hash"`
+	Dependencies        MatrixDependencies           `json:"dependencies"`
+	VerifiedCliVersions map[string]MatrixVerifiedCli `json:"verified_cli_versions"`
+}
+
+type MatrixChip struct {
+	Versions map[string]MatrixVersion `json:"versions"`
+}
+
+type Matrix map[string]MatrixChip
 
 // Cache manages the local registry clone.
 type Cache struct {
@@ -179,6 +204,41 @@ func (c *Cache) LoadIndex() (*Index, error) {
 	}
 	c.index = &idx
 	return &idx, nil
+}
+
+// FetchLiveMatrix downloads the compatibility matrix directly from GitHub's main branch,
+// bypassing the local locked registry. If offline, it falls back to the local copy.
+func (c *Cache) FetchLiveMatrix() (*Matrix, error) {
+	matrix := make(Matrix)
+
+	url := "https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/compatibility_matrix.json"
+	
+	client := http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err == nil {
+		req.Header.Set("User-Agent", "Toob-CLI")
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if json.Unmarshal(body, &matrix) == nil {
+				return &matrix, nil
+			}
+		}
+	}
+
+	// Fallback to local locked file if HTTP fails
+	localPath := filepath.Join(c.dir, "compatibility_matrix.json")
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch live matrix and local fallback failed: %w", err)
+	}
+
+	if err := json.Unmarshal(data, &matrix); err != nil {
+		return nil, fmt.Errorf("failed to parse local matrix: %w", err)
+	}
+
+	return &matrix, nil
 }
 
 // GetChip looks up a single chip by name.
