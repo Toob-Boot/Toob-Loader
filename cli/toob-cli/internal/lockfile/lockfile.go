@@ -22,13 +22,15 @@ import (
 )
 
 type ChipEntry struct {
-	Version        string `toml:"version"`
-	Arch           string `toml:"arch"`
-	ArchVersion    string `toml:"arch_version"`
-	Vendor         string `toml:"vendor"`
-	VendorVersion  string `toml:"vendor_version"`
-	RegistryCommit string `toml:"registry_commit,omitempty"`
-	Spawned        bool   `toml:"spawned"`
+	Name             string `toml:"name"`
+	Version          string `toml:"version"`
+	Arch             string `toml:"arch"`
+	ArchVersion      string `toml:"arch_version"`
+	Vendor           string `toml:"vendor"`
+	VendorVersion    string `toml:"vendor_version"`
+	Toolchain        string `toml:"toolchain"`
+	ToolchainVersion string `toml:"toolchain_version"`
+	Spawned          bool   `toml:"spawned"`
 }
 
 type ToolchainEntry struct {
@@ -41,14 +43,14 @@ type Lockfile struct {
 		Version string `toml:"version"`
 		Commit  string `toml:"commit"`
 	} `toml:"registry"`
-	Chips      map[string]ChipEntry      `toml:"chips"`
+	Chips      []ChipEntry               `toml:"chip"`
 	Toolchains map[string]ToolchainEntry `toml:"toolchains"`
 }
 
 // Load parses an existing toob.lock. Returns an empty Lockfile if not found.
 func Load(path string) (*Lockfile, error) {
 	lf := &Lockfile{
-		Chips:      make(map[string]ChipEntry),
+		Chips:      make([]ChipEntry, 0),
 		Toolchains: make(map[string]ToolchainEntry),
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -58,7 +60,7 @@ func Load(path string) (*Lockfile, error) {
 		return nil, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
 	if lf.Chips == nil {
-		lf.Chips = make(map[string]ChipEntry)
+		lf.Chips = make([]ChipEntry, 0)
 	}
 	if lf.Toolchains == nil {
 		lf.Toolchains = make(map[string]ToolchainEntry)
@@ -77,15 +79,14 @@ func (lf *Lockfile) Save(path string) error {
 	}
 	b.WriteString(fmt.Sprintf("commit = %q\n\n", lf.Registry.Commit))
 
-	names := make([]string, 0, len(lf.Chips))
-	for n := range lf.Chips {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	// Sort chips by name for deterministic output
+	sort.Slice(lf.Chips, func(i, j int) bool {
+		return lf.Chips[i].Name < lf.Chips[j].Name
+	})
 
-	for _, name := range names {
-		e := lf.Chips[name]
-		b.WriteString(fmt.Sprintf("[chips.%s]\n", name))
+	for _, e := range lf.Chips {
+		b.WriteString("[[chip]]\n")
+		b.WriteString(fmt.Sprintf("name = %q\n", e.Name))
 		b.WriteString(fmt.Sprintf("version = %q\n", e.Version))
 		b.WriteString(fmt.Sprintf("arch = %q\n", e.Arch))
 		if e.ArchVersion != "" {
@@ -95,8 +96,11 @@ func (lf *Lockfile) Save(path string) error {
 		if e.VendorVersion != "" {
 			b.WriteString(fmt.Sprintf("vendor_version = %q\n", e.VendorVersion))
 		}
-		if e.RegistryCommit != "" {
-			b.WriteString(fmt.Sprintf("registry_commit = %q\n", e.RegistryCommit))
+		if e.Toolchain != "" {
+			b.WriteString(fmt.Sprintf("toolchain = %q\n", e.Toolchain))
+		}
+		if e.ToolchainVersion != "" {
+			b.WriteString(fmt.Sprintf("toolchain_version = %q\n", e.ToolchainVersion))
 		}
 		if e.Spawned {
 			b.WriteString("spawned = true\n")
@@ -128,23 +132,23 @@ func (lf *Lockfile) Save(path string) error {
 
 // HasChip checks if a chip is installed.
 func (lf *Lockfile) HasChip(name string) bool {
-	_, ok := lf.Chips[name]
-	return ok
+	return lf.GetChip(name) != nil
 }
 
 // GetChip returns a chip entry or nil.
 func (lf *Lockfile) GetChip(name string) *ChipEntry {
-	e, ok := lf.Chips[name]
-	if !ok {
-		return nil
+	for i := range lf.Chips {
+		if lf.Chips[i].Name == name {
+			return &lf.Chips[i]
+		}
 	}
-	return &e
+	return nil
 }
 
 // IsArchShared returns true if any chip other than exclude uses the given arch.
 func (lf *Lockfile) IsArchShared(arch, exclude string) bool {
-	for name, e := range lf.Chips {
-		if name != exclude && e.Arch == arch {
+	for _, e := range lf.Chips {
+		if e.Name != exclude && e.Arch == arch {
 			return true
 		}
 	}
@@ -153,8 +157,8 @@ func (lf *Lockfile) IsArchShared(arch, exclude string) bool {
 
 // IsVendorShared returns true if any chip other than exclude uses the given vendor.
 func (lf *Lockfile) IsVendorShared(vendor, exclude string) bool {
-	for name, e := range lf.Chips {
-		if name != exclude && e.Vendor == vendor {
+	for _, e := range lf.Chips {
+		if e.Name != exclude && e.Vendor == vendor {
 			return true
 		}
 	}

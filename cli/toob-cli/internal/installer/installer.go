@@ -74,6 +74,7 @@ func (inst *Installer) Add(arg string) error {
 	
 	vVer := ""
 	aVer := ""
+	tcVer := ""
 	if idx != nil {
 		inst.lock.Registry.Version = idx.RegistryVersion
 		if vInfo, ok := idx.Vendors[ci.Vendor]; ok {
@@ -82,10 +83,28 @@ func (inst *Installer) Add(arg string) error {
 		if aInfo, ok := idx.Archs[ci.Arch]; ok {
 			aVer = aInfo.Version
 		}
+		// toolchain version is stored globally in lockfile, but let's grab it for the chip entry
+		tcName := strings.TrimSuffix(ci.CompilerPrefix, "-")
+		if tcInfo, ok := idx.Toolchains[tcName]; ok {
+			tcVer = tcInfo.Version
+		}
 	}
 	
-	inst.lock.Chips[name] = lockfile.ChipEntry{
-		Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Vendor: ci.Vendor, VendorVersion: vVer, RegistryCommit: commit, Spawned: false,
+	entry := lockfile.ChipEntry{
+		Name: name, Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Vendor: ci.Vendor, VendorVersion: vVer, Toolchain: strings.TrimSuffix(ci.CompilerPrefix, "-"), ToolchainVersion: tcVer, Spawned: false,
+	}
+	
+	// Replace or append
+	found := false
+	for i := range inst.lock.Chips {
+		if inst.lock.Chips[i].Name == name {
+			inst.lock.Chips[i] = entry
+			found = true
+			break
+		}
+	}
+	if !found {
+		inst.lock.Chips = append(inst.lock.Chips, entry)
 	}
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
@@ -170,6 +189,7 @@ func (inst *Installer) Spawn(arg string) error {
 	
 	vVer := ""
 	aVer := ""
+	tcVer := ""
 	if idx != nil {
 		inst.lock.Registry.Version = idx.RegistryVersion
 		if vInfo, ok := idx.Vendors[ci.Vendor]; ok {
@@ -178,10 +198,26 @@ func (inst *Installer) Spawn(arg string) error {
 		if aInfo, ok := idx.Archs[ci.Arch]; ok {
 			aVer = aInfo.Version
 		}
+		tcName := strings.TrimSuffix(ci.CompilerPrefix, "-")
+		if tcInfo, ok := idx.Toolchains[tcName]; ok {
+			tcVer = tcInfo.Version
+		}
 	}
 	
-	inst.lock.Chips[name] = lockfile.ChipEntry{
-		Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Vendor: ci.Vendor, VendorVersion: vVer, RegistryCommit: commit, Spawned: true,
+	entry := lockfile.ChipEntry{
+		Name: name, Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Vendor: ci.Vendor, VendorVersion: vVer, Toolchain: strings.TrimSuffix(ci.CompilerPrefix, "-"), ToolchainVersion: tcVer, Spawned: true,
+	}
+	
+	found := false
+	for i := range inst.lock.Chips {
+		if inst.lock.Chips[i].Name == name {
+			inst.lock.Chips[i] = entry
+			found = true
+			break
+		}
+	}
+	if !found {
+		inst.lock.Chips = append(inst.lock.Chips, entry)
 	}
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		spawnErr = err
@@ -227,7 +263,12 @@ func (inst *Installer) Remove(name string) error {
 		}
 	}
 
-	delete(inst.lock.Chips, name)
+	for i, c := range inst.lock.Chips {
+		if c.Name == name {
+			inst.lock.Chips = append(inst.lock.Chips[:i], inst.lock.Chips[i+1:]...)
+			break
+		}
+	}
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
 	}

@@ -39,6 +39,10 @@ type ArchInfo struct {
 	Description string `json:"description"`
 }
 
+type ToolchainInfo struct {
+	Version string `json:"version"`
+}
+
 // Index is the parsed content of registry.json.
 type Index struct {
 	FormatVersion     int                 `json:"format_version"`
@@ -47,6 +51,7 @@ type Index struct {
 	Chips             map[string]ChipInfo `json:"chips"`
 	Vendors           map[string]VendorInfo `json:"vendors"`
 	Archs             map[string]ArchInfo   `json:"archs"`
+	Toolchains        map[string]ToolchainInfo `json:"toolchains"`
 }
 
 // Cache manages the local registry clone.
