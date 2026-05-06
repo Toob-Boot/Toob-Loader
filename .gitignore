@@ -45,4 +45,3 @@ common/lib/heatshrink/
 # CLI Build Artifacts
 cli/toob-cli/toob.exe
 cli/toob-cli/toob
-cli/toob-cli/toob-*
