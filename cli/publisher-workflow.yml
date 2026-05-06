@@ -80,11 +80,14 @@ jobs:
       - name: Upload to Target Release Repository (Draft)
         uses: softprops/action-gh-release@v2
         with:
-          repository: Toob-Boot/Toob-CLI-Release
+          repository: ${{ env.TARGET_RELEASE_REPO }}
           token: ${{ secrets.RELEASE_TARGET_TOKEN }} # Highly scoped PAT for the target repo
           tag_name: ${{ env.TAG_NAME }}
-          draft: true # Gap 2: Human-in-the-Loop Validation
+          draft: true # Human-in-the-Loop Validation
           prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          append_body: true
           files: |
             cli/toob-cli/toob-*
 
