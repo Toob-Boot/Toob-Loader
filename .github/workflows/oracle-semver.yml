@@ -57,26 +57,27 @@ jobs:
           echo "Vendors changed: $CHECK_VENDORS"
 
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version: "1.26.2"
+          cache: true
 
-      - name: ⚙️ ABI Orakel (Core SDK)
+      - name: ABI Orakel (Core SDK)
         if: env.CHECK_CORE == 'true'
         run: |
           echo ">>> [Core Oracle] Starting ABI analysis for Core, SDK, and Common..."
-          
+
           # 1. Compile the Toob CLI
           echo ">>> Compiling Toob CLI..."
           cd cli/toob-cli
           go build -o ../../toob.exe
           cd ../../
           chmod +x toob.exe
-          
+
           # 2. Find last tag
           LAST_TAG=$(git describe --tags --match "core/v*" --abbrev=0 2>/dev/null || echo "core/v0.0.0")
           echo "Last tag was $LAST_TAG"
-          
+
           RAW_VERSION=${LAST_TAG#core/v}
           MAJOR=$(echo $RAW_VERSION | cut -d. -f1)
           MINOR=$(echo $RAW_VERSION | cut -d. -f2)
@@ -84,44 +85,44 @@ jobs:
 
           mkdir -p abi_workspace/current
           mkdir -p abi_workspace/old
-          
+
           # 3. Build CURRENT Code
           echo ">>> Building CURRENT Code with toob CLI..."
           # Running with a generic template manifest to ensure generated_boot_config.h exists
           ./toob.exe build --manifest toob-registry/chips/esp32c6/template_device.toml
-          
+
           # Extract only the Core/SDK/Common static libraries (Isolating them from the HAL)
           find builds/ -name "libtoob_core.a" -exec cp {} abi_workspace/current/ \;
           find builds/ -name "libtoob_libtoob.a" -exec cp {} abi_workspace/current/ \;
           find builds/ -name "libtoob_zcbor.a" -exec cp {} abi_workspace/current/ \;
           find builds/ -name "libtoob_heatshrink.a" -exec cp {} abi_workspace/current/ \;
-          
+
           # Clean build directory so we don't mix up files
           rm -rf builds/
-          
+
           # 4. Build OLD Code
           echo ">>> Cloning and building OLD Code from $LAST_TAG..."
           git clone . abi_workspace/old_repo
           cd abi_workspace/old_repo
-          
+
           if [ "$LAST_TAG" != "core/v0.0.0" ]; then
               git checkout $LAST_TAG
           fi
-          
+
           # Build the old code
           ./cli/toob-cli/toob.exe build --manifest toob-registry/chips/esp32c6/template_device.toml || true
-          
+
           find builds/ -name "libtoob_core.a" -exec cp {} ../old/ \; || touch ../old/libtoob_core.a
           find builds/ -name "libtoob_libtoob.a" -exec cp {} ../old/ \; || touch ../old/libtoob_libtoob.a
           find builds/ -name "libtoob_zcbor.a" -exec cp {} ../old/ \; || touch ../old/libtoob_zcbor.a
           find builds/ -name "libtoob_heatshrink.a" -exec cp {} ../old/ \; || touch ../old/libtoob_heatshrink.a
-          
+
           cd ../../
-          
+
           # 5. Run ABIDIFF on all core libraries
           echo ">>> Running abidiff on Core, SDK, and Common libraries..."
           ABI_EXIT_CODE=0
-          
+
           set +e
           for lib in libtoob_core.a libtoob_libtoob.a libtoob_zcbor.a libtoob_heatshrink.a; do
               if [ -f "abi_workspace/current/$lib" ] && [ -f "abi_workspace/old/$lib" ]; then
@@ -135,9 +136,9 @@ jobs:
               fi
           done
           set -e
-          
+
           echo "Combined abidiff Exit Code: $ABI_EXIT_CODE"
-          
+
           # 6. Calculate SemVer via Bitmask
           if [ $((ABI_EXIT_CODE & 1)) -ne 0 ] || [ $((ABI_EXIT_CODE & 2)) -ne 0 ]; then
               echo ">>> [FATAL] abidiff encountered an internal error. Aborting."
@@ -157,10 +158,10 @@ jobs:
               echo ">>> [RESULT] No ABI changes detected. Only internal logic modified (PATCH)."
               PATCH=$((PATCH + 1))
           fi
-          
+
           NEW_TAG="core/v${MAJOR}.${MINOR}.${PATCH}"
           echo ">>> [Orakel] Calculated new Core version: $NEW_TAG"
-          
+
           # 7. Push Tag
           git config user.name "Toob ABI Oracle"
           git config user.email "oracle@toob-boot.io"
