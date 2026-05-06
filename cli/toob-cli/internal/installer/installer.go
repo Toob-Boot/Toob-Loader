@@ -71,12 +71,21 @@ func (inst *Installer) Add(arg string) error {
 	
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
+	
+	vVer := ""
+	aVer := ""
 	if idx != nil {
 		inst.lock.Registry.Version = idx.RegistryVersion
+		if vInfo, ok := idx.Vendors[ci.Vendor]; ok {
+			vVer = vInfo.Version
+		}
+		if aInfo, ok := idx.Archs[ci.Arch]; ok {
+			aVer = aInfo.Version
+		}
 	}
 	
 	inst.lock.Chips[name] = lockfile.ChipEntry{
-		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, RegistryCommit: commit, Spawned: false,
+		Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Vendor: ci.Vendor, VendorVersion: vVer, RegistryCommit: commit, Spawned: false,
 	}
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
@@ -158,12 +167,21 @@ func (inst *Installer) Spawn(arg string) error {
 	idx, _ := inst.cache.LoadIndex()
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
+	
+	vVer := ""
+	aVer := ""
 	if idx != nil {
 		inst.lock.Registry.Version = idx.RegistryVersion
+		if vInfo, ok := idx.Vendors[ci.Vendor]; ok {
+			vVer = vInfo.Version
+		}
+		if aInfo, ok := idx.Archs[ci.Arch]; ok {
+			aVer = aInfo.Version
+		}
 	}
 	
 	inst.lock.Chips[name] = lockfile.ChipEntry{
-		Version: ci.Version, Arch: ci.Arch, Vendor: ci.Vendor, RegistryCommit: commit, Spawned: true,
+		Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Vendor: ci.Vendor, VendorVersion: vVer, RegistryCommit: commit, Spawned: true,
 	}
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		spawnErr = err

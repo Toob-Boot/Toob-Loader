@@ -49,8 +49,21 @@ var chipInfoCmd = &cobra.Command{
 		}
 		fmt.Printf("  Name:          %s\n", ci.Name)
 		fmt.Printf("  Version:       %s\n", ci.Version)
-		fmt.Printf("  Vendor:        %s\n", ci.Vendor)
-		fmt.Printf("  Architecture:  %s\n", ci.Arch)
+		
+		idx, _ := cache.LoadIndex()
+		vVer := "unknown"
+		aVer := "unknown"
+		if idx != nil {
+			if vInfo, ok := idx.Vendors[ci.Vendor]; ok {
+				vVer = vInfo.Version
+			}
+			if aInfo, ok := idx.Archs[ci.Arch]; ok {
+				aVer = aInfo.Version
+			}
+		}
+		
+		fmt.Printf("  Vendor:        %s (v%s)\n", ci.Vendor, vVer)
+		fmt.Printf("  Architecture:  %s (v%s)\n", ci.Arch, aVer)
 		fmt.Printf("  Compiler Prefix: %s\n", ci.CompilerPrefix)
 		fmt.Printf("  Registry Path:   %s\n", ci.Path)
 		fmt.Printf("  Description:   %s\n", ci.Description)

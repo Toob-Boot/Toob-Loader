@@ -27,12 +27,26 @@ type ChipInfo struct {
 	Verified           bool   `json:"verified"`
 }
 
+type VendorInfo struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+}
+
+type ArchInfo struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+}
+
 // Index is the parsed content of registry.json.
 type Index struct {
 	FormatVersion     int                 `json:"format_version"`
 	RegistryVersion   string              `json:"registry_version"`
 	CoreCompatibility string              `json:"core_compatibility"`
 	Chips             map[string]ChipInfo `json:"chips"`
+	Vendors           map[string]VendorInfo `json:"vendors"`
+	Archs             map[string]ArchInfo   `json:"archs"`
 }
 
 // Cache manages the local registry clone.

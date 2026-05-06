@@ -24,7 +24,9 @@ import (
 type ChipEntry struct {
 	Version        string `toml:"version"`
 	Arch           string `toml:"arch"`
+	ArchVersion    string `toml:"arch_version"`
 	Vendor         string `toml:"vendor"`
+	VendorVersion  string `toml:"vendor_version"`
 	RegistryCommit string `toml:"registry_commit,omitempty"`
 	Spawned        bool   `toml:"spawned"`
 }
@@ -86,7 +88,13 @@ func (lf *Lockfile) Save(path string) error {
 		b.WriteString(fmt.Sprintf("[chips.%s]\n", name))
 		b.WriteString(fmt.Sprintf("version = %q\n", e.Version))
 		b.WriteString(fmt.Sprintf("arch = %q\n", e.Arch))
+		if e.ArchVersion != "" {
+			b.WriteString(fmt.Sprintf("arch_version = %q\n", e.ArchVersion))
+		}
 		b.WriteString(fmt.Sprintf("vendor = %q\n", e.Vendor))
+		if e.VendorVersion != "" {
+			b.WriteString(fmt.Sprintf("vendor_version = %q\n", e.VendorVersion))
+		}
 		if e.RegistryCommit != "" {
 			b.WriteString(fmt.Sprintf("registry_commit = %q\n", e.RegistryCommit))
 		}
