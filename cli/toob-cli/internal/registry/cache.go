@@ -20,9 +20,12 @@ type ChipInfo struct {
 	Vendor      string `json:"vendor"`
 	Arch        string `json:"arch"`
 	CMakeToolchainFile string `json:"cmake_toolchain_file"`
-	Path        string `json:"path"`
-	Version     string `json:"version"`
-	Description string `json:"description,omitempty"`
+	CompilerPrefix     string `json:"compiler_prefix"`
+	Path               string `json:"path"`
+	Version            string `json:"version"`
+	CoreCompatibility  string `json:"core_compatibility"`
+	Description        string `json:"description,omitempty"`
+	Verified           bool   `json:"verified"`
 }
 
 // Index is the parsed content of registry.json.

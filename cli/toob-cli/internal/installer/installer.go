@@ -82,6 +82,11 @@ func (inst *Installer) Add(arg string) error {
 		return err
 	}
 	fmt.Printf("Added chip '%s' (v%s) to lockfile [arch=%s, vendor=%s].\n", name, ci.Version, ci.Arch, ci.Vendor)
+	
+	if !ci.Verified {
+		fmt.Println("\n\033[33mWarning: This hardware configuration is marked as UNVERIFIED by the CI Compatibility Matrix. Build stability is not guaranteed.\033[0m")
+	}
+
 	fmt.Println("Registry link established. Run `toob build` to compile.")
 	return nil
 }
@@ -165,6 +170,11 @@ func (inst *Installer) Spawn(arg string) error {
 		return err
 	}
 	fmt.Printf("Spawned chip '%s' (v%s)  [locally editable]\n", name, ci.Version)
+	
+	if !ci.Verified {
+		fmt.Println("\n\033[33mWarning: This hardware configuration is marked as UNVERIFIED by the CI Compatibility Matrix. Build stability is not guaranteed.\033[0m")
+	}
+
 	return nil
 }
 
