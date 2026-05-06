@@ -229,4 +229,5 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
   }
 
   return BOOT_OK;
-}
+}/ /   T r i g g e r  
+ 
