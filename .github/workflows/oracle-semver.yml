@@ -13,6 +13,11 @@ jobs:
     name: Calculate ABI and Bump Version
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # Full history needed for abidiff against previous tags
+
       - name: Setup Toob Ecosystem
         uses: ./.github/actions/setup-cli
 
@@ -85,7 +90,7 @@ jobs:
           # 3. Build CURRENT Code
           echo ">>> Building CURRENT Code with toob CLI..."
           # Running with a generic template manifest to ensure generated_boot_config.h exists
-          ./toob.exe build --manifest toob-registry/chips/esp32c6/template_device.toml
+          toob build --manifest toob-registry/chips/esp32c6/template_device.toml
 
           # Extract only the Core/SDK/Common static libraries (Isolating them from the HAL)
           find builds/ -name "libtoob_core.a" -exec cp {} abi_workspace/current/ \;
@@ -107,8 +112,8 @@ jobs:
               git submodule update --init toob-registry
           fi
 
-          # Build the old code using the current toob CLI executable
-          ../../toob.exe build --manifest toob-registry/chips/esp32c6/template_device.toml || true
+          # Build the old code using the current global toob CLI executable
+          toob build --manifest toob-registry/chips/esp32c6/template_device.toml || true
 
           find builds/ -name "libtoob_core.a" -exec cp {} ../old/ \; || touch ../old/libtoob_core.a
           find builds/ -name "libtoob_libtoob.a" -exec cp {} ../old/ \; || touch ../old/libtoob_libtoob.a

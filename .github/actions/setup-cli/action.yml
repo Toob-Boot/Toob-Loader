@@ -1,28 +1,58 @@
 name: "Setup Toob Ecosystem"
-description: "Initialisiert das Repo, lädt Go und kompiliert die CLI (toob.exe) für Folge-Skripte."
+description: "Richtet die Toob CLI und Native-Build-Abhängigkeiten ein."
+
+inputs:
+  cli-version:
+    description: "Version der CLI ('main' kompiliert vom Source, alles andere lädt Release)"
+    required: false
+    default: "main"
+  install-native-deps:
+    description: "Wenn 'true', werden System- (cmake, ninja) und Python-Abhängigkeiten installiert"
+    required: false
+    default: "false"
+
 runs:
   using: "composite"
   steps:
-    - name: Checkout Code
-      uses: actions/checkout@v6
-      with:
-        fetch-depth: 0
-
-    - name: Initialize Registry Submodule
-      shell: bash
-      run: git submodule update --init toob-registry
-
     - name: Setup Go
       uses: actions/setup-go@v6
       with:
         go-version: "1.26.2"
-        cache: true
 
-    - name: Compile Toob CLI
+    - name: Install System Dependencies
+      if: ${{ inputs.install-native-deps == 'true' }}
       shell: bash
       run: |
-        echo ">>> Compiling internal Toob CLI..."
-        cd cli/toob-cli
-        go build -o ../../toob.exe
-        cd ../../
-        chmod +x toob.exe
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential libusb-1.0-0 ninja-build cmake python3-pip
+        pip3 install cryptography "cbor2<6.0.0" ecdsa zcbor --break-system-packages
+
+    - name: Fetch and Install Toob CLI
+      shell: bash
+      run: |
+        # Check if we are already inside the Toob-Loader monorepo
+        if [ -d "cli/toob-cli" ]; then
+          echo ">>> Detected Toob-Loader monorepo. Using local source."
+          TOOB_DIR="."
+        else
+          echo ">>> External repository detected. Cloning Toob-Loader to /tmp/Toob-Loader..."
+          git clone https://github.com/Toob-Boot/Toob-Loader.git /tmp/Toob-Loader
+          TOOB_DIR="/tmp/Toob-Loader"
+        fi
+        
+        if [ "${{ inputs.cli-version }}" != "main" ] && [ "${{ inputs.cli-version }}" != "" ]; then
+          echo ">>> Fetching Release ${{ inputs.cli-version }}..."
+          wget -qO toob https://github.com/Toob-Boot/Toob-CLI-Release/releases/download/${{ inputs.cli-version }}/toob-linux-amd64
+        else
+          echo ">>> Compiling from main..."
+          cd $TOOB_DIR/cli/toob-cli
+          go build -o ../../../toob || go build -o toob
+          # If we are in ., ../../../toob puts it outside the repo. Let's just build it in the current dir and move it
+          go build -o /tmp/toob_bin
+          cd -
+          mv /tmp/toob_bin toob
+        fi
+        
+        chmod +x toob
+        sudo mv toob /usr/local/bin/toob
+        echo ">>> Toob CLI installed at /usr/local/bin/toob"
