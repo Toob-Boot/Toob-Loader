@@ -51,10 +51,10 @@ func init() {
 
 // chipManifest mirrors chip_manifest.json.
 type chipManifest struct {
-	Vendor          string `json:"vendor"`
-	Arch            string `json:"arch"`
-	Toolchain       string `json:"toolchain"`
-	ToolchainPrefix string `json:"toolchain_prefix"`
+	Vendor             string `json:"vendor"`
+	Arch               string `json:"arch"`
+	CMakeToolchainFile string `json:"cmake_toolchain_file"`
+	CompilerPrefix     string `json:"compiler_prefix"`
 }
 
 func isMonorepo(root string) bool {
@@ -208,7 +208,15 @@ func runNativeBuild(root string) error {
 		hwJSON = filepath.Join(regDir, "chips", chip, "hardware.json")
 	}
 	if _, err := os.Stat(hwJSON); err != nil {
-		return fmt.Errorf("hardware.json not found for chip '%s' (not in local or registry). Run `toob chip add` first", chip)
+		fmt.Printf("[toob] Chip '%s' not found locally. Auto-syncing registry...\n", chip)
+		if err := cache.Sync(); err == nil {
+			// Reload index to check if chip exists now
+			if _, statErr := os.Stat(hwJSON); statErr != nil {
+				return fmt.Errorf("hardware.json not found for chip '%s' even after registry sync. Is the chip name correct?", chip)
+			}
+		} else {
+			return fmt.Errorf("hardware.json not found for chip '%s' and registry sync failed: %w", chip, err)
+		}
 	}
 
 	// 3. Determine build directory
@@ -232,7 +240,7 @@ func runNativeBuild(root string) error {
 	if pyScripts := findPythonScriptsBin(); pyScripts != "" {
 		os.Setenv("PATH", pyScripts+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
-	if err := suit.Generate(generatedDir, compilerRoot); err != nil {
+	if err := suit.Generate(generatedDir, compilerRoot, root, Version); err != nil {
 		return err
 	}
 
@@ -250,14 +258,14 @@ func runNativeBuild(root string) error {
 	if data, err := os.ReadFile(cmPath); err == nil {
 		var cm chipManifest
 		if err := json.Unmarshal(data, &cm); err == nil {
-			if cm.Toolchain != "" {
-				toolchainName = cm.Toolchain
+			if cm.CMakeToolchainFile != "" {
+				toolchainName = cm.CMakeToolchainFile
 			}
 			if cm.Arch != "" {
 				arch = cm.Arch
 			}
-			if cm.ToolchainPrefix != "" {
-				toolchainPrefix = cm.ToolchainPrefix
+			if cm.CompilerPrefix != "" {
+				toolchainPrefix = cm.CompilerPrefix
 			}
 			if cm.Vendor != "" {
 				halVendor = cm.Vendor
@@ -319,17 +327,42 @@ func runNativeBuild(root string) error {
 
 	// 8. Ensure cross-compiler is in PATH
 	tcPath := flagToolchainPath
+	expectedVersion := toolchain.GetExpectedVersion(toolchainPrefix)
+	
+	lfPath := filepath.Join(root, "toob.lock")
+	if lf, err := lockfile.Load(lfPath); err == nil {
+		tcName := strings.TrimSuffix(toolchainPrefix, "-")
+		if entry, ok := lf.Toolchains[tcName]; ok && entry.Version != "" {
+			expectedVersion = entry.Version
+		}
+	}
+
 	if tcPath == "" {
-		// tcPath = findToolchainBin(toolchainPrefix)
+		tcPath = findToolchainBin(toolchainPrefix, expectedVersion)
 		if tcPath == "" {
 			// Auto-provision via Registry
 			var err error
-			tcPath, err = toolchain.EnsureAvailable(toolchainPrefix)
+			tcPath, err = toolchain.EnsureAvailable(toolchainPrefix, expectedVersion)
 			if err != nil {
 				return fmt.Errorf("failed to auto-provision toolchain: %w\nIf you prefer to install it manually, use --toolchain-path.", err)
 			}
 		}
+	} else {
+		compilerExe := filepath.Join(tcPath, toolchainPrefix+"gcc")
+		if runtime.GOOS == "windows" {
+			compilerExe += ".exe"
+		}
+		if _, err := os.Stat(compilerExe); err != nil {
+			return fmt.Errorf("custom toolchain compiler not found at %s", compilerExe)
+		}
+		if expectedVersion != "" {
+			out, err := exec.Command(compilerExe, "--version").CombinedOutput()
+			if err != nil || !strings.Contains(string(out), expectedVersion) {
+				return fmt.Errorf("FATAL: Custom toolchain version mismatch!\nExpected: %s\nTo prevent tainted lockfiles and non-reproducible builds, please use a matching toolchain or use auto-provisioning.", expectedVersion)
+			}
+		}
 	}
+
 	if tcPath != "" {
 		os.Setenv("PATH", tcPath+string(os.PathListSeparator)+os.Getenv("PATH"))
 		fmt.Printf("[toob] Toolchain: %s\n", tcPath)
@@ -357,6 +390,16 @@ func runNativeBuild(root string) error {
 	}
 
 	fmt.Println("[toob] Build complete.")
+
+	// 11. Update Lockfile with Toolchain info
+	if lf, err := lockfile.Load(lfPath); err == nil {
+		tcName := strings.TrimSuffix(toolchainPrefix, "-")
+		lf.Toolchains[tcName] = lockfile.ToolchainEntry{
+			Version: expectedVersion,
+		}
+		_ = lf.Save(lfPath)
+	}
+
 	return nil
 }
 
@@ -370,10 +413,16 @@ func run(dir string, name string, args ...string) error {
 }
 
 // findToolchainBin auto-detects the cross-compiler bin directory.
-func findToolchainBin(prefix string) string {
+func findToolchainBin(prefix string, expectedVersion string) string {
 	compiler := prefix + "gcc"
-	if _, err := exec.LookPath(compiler); err == nil {
-		return "" // already in PATH
+	if path, err := exec.LookPath(compiler); err == nil {
+		if expectedVersion == "" {
+			return ""
+		}
+		out, err := exec.Command(path, "--version").CombinedOutput()
+		if err == nil && strings.Contains(string(out), expectedVersion) {
+			return "" // already in PATH and version matches
+		}
 	}
 
 	// Espressif IDF standard layout
@@ -398,9 +447,13 @@ func findToolchainBin(prefix string) string {
 				return entries[i].Name() > entries[j].Name()
 			})
 			for _, e := range entries {
+				if expectedVersion != "" && !strings.Contains(e.Name(), expectedVersion) {
+					continue
+				}
 				candidate := filepath.Join(base, e.Name(), triplet, "bin")
 				exe := filepath.Join(candidate, compiler+".exe")
 				if _, err := os.Stat(exe); err == nil {
+					fmt.Println("[toob] Warning: Using unhashed local toolchain. For guaranteed reproducible CI builds, consider using the auto-provisioned toolchain.")
 					return candidate
 				}
 			}
@@ -418,9 +471,13 @@ func findToolchainBin(prefix string) string {
 				return entries[i].Name() > entries[j].Name()
 			})
 			for _, e := range entries {
+				if expectedVersion != "" && !strings.Contains(e.Name(), expectedVersion) {
+					continue
+				}
 				candidate := filepath.Join(base, e.Name(), triplet, "bin")
 				exe := filepath.Join(candidate, compiler)
 				if _, err := os.Stat(exe); err == nil {
+					fmt.Println("[toob] Warning: Using unhashed local toolchain. For guaranteed reproducible CI builds, consider using the auto-provisioned toolchain.")
 					return candidate
 				}
 			}

@@ -248,9 +248,9 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 	}
 
 	// Toolchain file
-	tcDst := filepath.Join(inst.root, "cmake", ci.Toolchain)
+	tcDst := filepath.Join(inst.root, "cmake", ci.CMakeToolchainFile)
 	if _, err := os.Stat(tcDst); os.IsNotExist(err) {
-		tcSrc := inst.cache.ToolchainSourcePath(ci.Toolchain)
+		tcSrc := inst.cache.ToolchainSourcePath(ci.CMakeToolchainFile)
 		if _, err := os.Stat(tcSrc); err == nil {
 			data, err := os.ReadFile(tcSrc)
 			if err != nil {

@@ -29,18 +29,26 @@ type ChipEntry struct {
 	Spawned        bool   `toml:"spawned"`
 }
 
+type ToolchainEntry struct {
+	Version string `toml:"version"`
+}
+
 // Lockfile is the in-memory representation of toob.lock.
 type Lockfile struct {
 	Registry struct {
 		Version string `toml:"version"`
 		Commit  string `toml:"commit"`
 	} `toml:"registry"`
-	Chips map[string]ChipEntry `toml:"chips"`
+	Chips      map[string]ChipEntry      `toml:"chips"`
+	Toolchains map[string]ToolchainEntry `toml:"toolchains"`
 }
 
 // Load parses an existing toob.lock. Returns an empty Lockfile if not found.
 func Load(path string) (*Lockfile, error) {
-	lf := &Lockfile{Chips: make(map[string]ChipEntry)}
+	lf := &Lockfile{
+		Chips:      make(map[string]ChipEntry),
+		Toolchains: make(map[string]ToolchainEntry),
+	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return lf, nil
 	}
@@ -49,6 +57,9 @@ func Load(path string) (*Lockfile, error) {
 	}
 	if lf.Chips == nil {
 		lf.Chips = make(map[string]ChipEntry)
+	}
+	if lf.Toolchains == nil {
+		lf.Toolchains = make(map[string]ToolchainEntry)
 	}
 	return lf, nil
 }
@@ -84,6 +95,19 @@ func (lf *Lockfile) Save(path string) error {
 		} else {
 			b.WriteString("spawned = false\n")
 		}
+		b.WriteString("\n")
+	}
+
+	tcNames := make([]string, 0, len(lf.Toolchains))
+	for n := range lf.Toolchains {
+		tcNames = append(tcNames, n)
+	}
+	sort.Strings(tcNames)
+
+	for _, name := range tcNames {
+		e := lf.Toolchains[name]
+		b.WriteString(fmt.Sprintf("[toolchains.%s]\n", name))
+		b.WriteString(fmt.Sprintf("version = %q\n", e.Version))
 		b.WriteString("\n")
 	}
 

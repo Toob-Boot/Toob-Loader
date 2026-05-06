@@ -4,9 +4,12 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,43 +26,96 @@ import (
 type RegistryToolchain struct {
 	Version string            `json:"version"`
 	URLs    map[string]string `json:"urls"`
+	Sha256  map[string]string `json:"sha256"`
 }
 
 // RegistryConfig represents the root of registry.json
 type RegistryConfig struct {
-	Toolchains map[string]RegistryToolchain `json:"toolchains"`
+	FormatVersion int                          `json:"format_version"`
+	Toolchains    map[string]RegistryToolchain `json:"toolchains"`
 }
 
 
 
+// GetExpectedVersion returns the version specified in registry.json for a toolchain
+func GetExpectedVersion(prefix string) string {
+	tcName := strings.TrimSuffix(prefix, "-")
+	regDir, err := paths.RegistryDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(regDir, "registry.json"))
+	if err != nil {
+		return ""
+	}
+	var reg RegistryConfig
+	if err := json.Unmarshal(data, &reg); err != nil {
+		return ""
+	}
+	if tcInfo, ok := reg.Toolchains[tcName]; ok {
+		return tcInfo.Version
+	}
+	return ""
+}
+
+// GetExpectedSha256 returns the sha256 specified in registry.json for a toolchain
+func GetExpectedSha256(prefix string) string {
+	tcName := strings.TrimSuffix(prefix, "-")
+	regDir, err := paths.RegistryDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(regDir, "registry.json"))
+	if err != nil {
+		return ""
+	}
+	var reg RegistryConfig
+	if err := json.Unmarshal(data, &reg); err != nil {
+		return ""
+	}
+	if tcInfo, ok := reg.Toolchains[tcName]; ok {
+		osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
+		return tcInfo.Sha256[osArch]
+	}
+	return ""
+}
+
 // EnsureAvailable checks if the toolchain exists, and if not, downloads and extracts it.
 // Returns the absolute path to the toolchain's /bin directory.
-func EnsureAvailable(prefix string) (string, error) {
+func EnsureAvailable(prefix string, expectedVersion string) (string, error) {
 	tcName := strings.TrimSuffix(prefix, "-")
 
-	// 1. Check if already installed
+	// 1. Cache Invalidation Check
+	// If a folder exists, verify its .toob_version matches expectedVersion.
+	// If not, we wipe it and re-download.
 	homeDir, err := paths.ToobHome()
 	if err != nil {
 		return "", err
 	}
-
 	localDir := filepath.Join(homeDir, "toolchains")
-	tcPath := filepath.Join(localDir, tcName, "bin")
-	if _, err := os.Stat(tcPath); err == nil {
-		return tcPath, nil
-	}
-
-	// 1b. Check if already installed but wrapped in a top-level folder
-	entries, err := os.ReadDir(filepath.Join(localDir, tcName))
-	if err == nil && len(entries) == 1 && entries[0].IsDir() && entries[0].Name() != "bin" {
-		wrappedPath := filepath.Join(localDir, tcName, entries[0].Name(), "bin")
-		if _, err := os.Stat(wrappedPath); err == nil {
-			return wrappedPath, nil
+	tcRoot := filepath.Join(localDir, tcName)
+	var tcPath string
+	if expectedVersion != "" {
+		versionFile := filepath.Join(tcRoot, ".toob_version")
+		cachedVersionBytes, err := os.ReadFile(versionFile)
+		if err == nil {
+			cachedVersion := strings.TrimSpace(string(cachedVersionBytes))
+			if cachedVersion == expectedVersion {
+				tcPath = findBinDir(tcRoot)
+				if tcPath != "" {
+					return tcPath, nil
+				}
+			} else {
+				fmt.Printf("[toob] Auto-provisioned toolchain cache is outdated (v%s). Upgrading to v%s...\n", cachedVersion, expectedVersion)
+			}
 		}
 	}
+	
+	// Ensure a clean slate for extraction if it's outdated or corrupted.
+	_ = os.RemoveAll(tcRoot)
 
-	// 2. Not found, we must auto-provision it.
-	fmt.Printf("[toob] Toolchain '%s' not found locally.\n", tcName)
+	// 2. Not found or outdated, we must auto-provision it.
+	fmt.Printf("[toob] Toolchain '%s' not found locally or outdated.\n", tcName)
 	fmt.Printf("[toob] Looking up auto-provisioning URL in registry...\n")
 
 	regDir, err := paths.RegistryDir()
@@ -91,27 +147,23 @@ func EnsureAvailable(prefix string) (string, error) {
 
 	fmt.Printf("[toob] Found toolchain v%s for %s\n", tcInfo.Version, osArch)
 
-	if err := downloadAndExtract(downloadURL, filepath.Join(localDir, tcName)); err != nil {
+	expectedSha256 := tcInfo.Sha256[osArch]
+
+	if err := downloadAndExtract(downloadURL, filepath.Join(localDir, tcName), expectedSha256, expectedVersion); err != nil {
 		return "", fmt.Errorf("failed to download and extract toolchain: %w", err)
 	}
 
-	// After extraction, check if bin exists. Often archives have a top-level wrapper folder.
-	// We might need to handle wrapper folders (e.g. `riscv32-esp-elf/riscv32-esp-elf/bin`).
-	entries, err = os.ReadDir(filepath.Join(localDir, tcName))
-	if err == nil && len(entries) == 1 && entries[0].IsDir() && entries[0].Name() != "bin" {
-		// Unwrap the top level folder
-		tcPath = filepath.Join(localDir, tcName, entries[0].Name(), "bin")
-	}
-
-	if _, err := os.Stat(tcPath); err != nil {
-		return "", fmt.Errorf("auto-provisioning completed but /bin directory not found at %s", tcPath)
+	// 3. Find the actual /bin directory recursively
+	tcPath = findBinDir(filepath.Join(localDir, tcName))
+	if tcPath == "" {
+		return "", fmt.Errorf("auto-provisioning completed but /bin directory not found inside %s", filepath.Join(localDir, tcName))
 	}
 
 	fmt.Printf("[toob] Successfully installed toolchain to %s\n", tcPath)
 	return tcPath, nil
 }
 
-func downloadAndExtract(url, destDir string) error {
+func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) error {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
@@ -154,22 +206,64 @@ func downloadAndExtract(url, destDir string) error {
 		return err
 	}
 
+	// Check SHA256 if expected
+	if expectedSha256 != "" {
+		tmpFile.Seek(0, 0)
+		hasher := sha256.New()
+		if _, err := io.Copy(hasher, tmpFile); err != nil {
+			return fmt.Errorf("failed to compute hash: %w", err)
+		}
+		actualSha256 := hex.EncodeToString(hasher.Sum(nil))
+		if actualSha256 != expectedSha256 {
+			return fmt.Errorf("SHA256 mismatch!\nExpected: %s\nGot:      %s", expectedSha256, actualSha256)
+		}
+		fmt.Printf("[toob] Checksum verified.\n")
+	}
+
 	// Seek back to start for extraction
 	tmpFile.Seek(0, 0)
 
-	if err := os.MkdirAll(destDir, 0755); err != nil {
+	tmpDestDir := destDir + ".tmp"
+	_ = os.RemoveAll(tmpDestDir)
+	if err := os.MkdirAll(tmpDestDir, 0755); err != nil {
 		return err
 	}
 
+	var extractErr error
 	if strings.HasSuffix(url, ".zip") {
-		return extractZip(tmpFile.Name(), destDir)
+		extractErr = extractZip(tmpFile.Name(), tmpDestDir)
 	} else if strings.HasSuffix(url, ".tar.gz") {
-		return extractTarGz(tmpFile, destDir)
+		extractErr = extractTarGz(tmpFile, tmpDestDir)
 	} else if strings.HasSuffix(url, ".tar.xz") {
-		return extractTarXz(tmpFile, destDir)
+		extractErr = extractTarXz(tmpFile, tmpDestDir)
+	} else {
+		extractErr = fmt.Errorf("unsupported archive format for url: %s", url)
 	}
 
-	return fmt.Errorf("unsupported archive format for url: %s", url)
+	if extractErr != nil {
+		os.RemoveAll(tmpDestDir)
+		return extractErr
+	}
+
+	// Atomic commit
+	_ = os.RemoveAll(destDir)
+	if err := os.Rename(tmpDestDir, destDir); err != nil {
+		if strings.Contains(err.Error(), "cross-device link") {
+			// Fallback to recursive copy for cross-volume mounts (e.g. Docker/Windows)
+			if copyErr := copyTree(tmpDestDir, destDir); copyErr != nil {
+				return fmt.Errorf("failed to finalize installation (cross-device fallback failed): %w", copyErr)
+			}
+			os.RemoveAll(tmpDestDir)
+		} else {
+			return fmt.Errorf("failed to finalize installation: %w", err)
+		}
+	}
+
+	if expectedVersion != "" {
+		_ = os.WriteFile(filepath.Join(destDir, ".toob_version"), []byte(expectedVersion), 0o644)
+	}
+
+	return nil
 }
 
 func extractZip(zipPath, destDir string) error {
@@ -303,4 +397,47 @@ func extractTar(tr *tar.Reader, destDir string) error {
 		}
 	}
 	return nil
+}
+
+// findBinDir recursively searches for a directory named "bin" containing executables
+func findBinDir(root string) string {
+	var binDir string
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && info.Name() == "bin" {
+			binDir = path
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return binDir
+}
+
+// copyTree recursively copies src to dst. Used as fallback for EXDEV errors.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, path)
+		target := filepath.Join(dst, rel)
+
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		
+		sInfo, err := d.Info()
+		if err != nil {
+			return err
+		}
+		
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		
+		return os.WriteFile(target, data, sInfo.Mode())
+	})
 }

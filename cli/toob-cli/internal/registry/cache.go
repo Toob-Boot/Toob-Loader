@@ -19,7 +19,7 @@ type ChipInfo struct {
 	Name        string `json:"name"`
 	Vendor      string `json:"vendor"`
 	Arch        string `json:"arch"`
-	Toolchain   string `json:"toolchain"`
+	CMakeToolchainFile string `json:"cmake_toolchain_file"`
 	Path        string `json:"path"`
 	Version     string `json:"version"`
 	Description string `json:"description,omitempty"`
@@ -27,7 +27,7 @@ type ChipInfo struct {
 
 // Index is the parsed content of registry.json.
 type Index struct {
-	Version           int                 `json:"version"`
+	FormatVersion     int                 `json:"format_version"`
 	RegistryVersion   string              `json:"registry_version"`
 	CoreCompatibility string              `json:"core_compatibility"`
 	Chips             map[string]ChipInfo `json:"chips"`
