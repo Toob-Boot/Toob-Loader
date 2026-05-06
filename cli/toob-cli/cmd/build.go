@@ -244,7 +244,6 @@ func runNativeBuild(root string) error {
 	}
 
 	// 6. Resolve toolchain from chip metadata
-	toolchainName := "toolchain.cmake"
 	arch := "riscv32"
 	toolchainPrefix := "riscv32-unknown-elf-"
 	halVendor := vendor
@@ -269,6 +268,8 @@ func runNativeBuild(root string) error {
 		}
 	}
 
+	// Calculate toolchain.cmake name based on architecture
+	toolchainName := fmt.Sprintf("toolchain-%s.cmake", arch)
 	toolchainFile := resolvePath(root, compilerRoot, filepath.Join("cmake", toolchainName))
 
 	coreDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "core")))
