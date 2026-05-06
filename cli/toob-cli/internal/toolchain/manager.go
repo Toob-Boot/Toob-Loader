@@ -102,7 +102,7 @@ func EnsureAvailable(prefix string, expectedVersion string) (string, error) {
 		if err == nil {
 			cachedVersion := strings.TrimSpace(string(cachedVersionBytes))
 			if cachedVersion == expectedVersion {
-				tcPath = findBinDir(tcRoot)
+				tcPath = findBinDir(tcRoot, prefix)
 				if tcPath != "" {
 					return tcPath, nil
 				}
@@ -155,9 +155,9 @@ func EnsureAvailable(prefix string, expectedVersion string) (string, error) {
 	}
 
 	// 3. Find the actual /bin directory recursively
-	tcPath = findBinDir(filepath.Join(localDir, tcName))
+	tcPath = findBinDir(filepath.Join(localDir, tcName), prefix)
 	if tcPath == "" {
-		return "", fmt.Errorf("auto-provisioning completed but /bin directory not found inside %s", filepath.Join(localDir, tcName))
+		return "", fmt.Errorf("auto-provisioning completed but /bin directory with %sgcc not found inside %s", prefix, filepath.Join(localDir, tcName))
 	}
 
 	fmt.Printf("[toob] Successfully installed toolchain to %s\n", tcPath)
@@ -422,16 +422,27 @@ func extractTar(tr *tar.Reader, destDir string) error {
 	return nil
 }
 
-// findBinDir recursively searches for a directory named "bin" containing executables
-func findBinDir(root string) string {
+// findBinDir recursively searches for a directory named "bin" containing the prefixed gcc
+func findBinDir(root string, prefix string) string {
 	var binDir string
+	expectedExe := prefix + "gcc"
+	if runtime.GOOS == "windows" {
+		expectedExe += ".exe"
+	}
+
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
 		}
+		if binDir != "" {
+			return filepath.SkipDir // Abort further traversal once found
+		}
 		if info.IsDir() && info.Name() == "bin" {
-			binDir = path
-			return filepath.SkipDir
+			// Check if this bin directory contains the compiler
+			if stat, err := os.Stat(filepath.Join(path, expectedExe)); err == nil && !stat.IsDir() {
+				binDir = path
+			}
+			return filepath.SkipDir // Skip traversing inside bin
 		}
 		return nil
 	})
