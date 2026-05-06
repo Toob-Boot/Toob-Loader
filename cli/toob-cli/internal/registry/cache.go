@@ -60,9 +60,11 @@ type Index struct {
 }
 
 type MatrixDependencies struct {
-	Toolchain string `json:"toolchain"`
-	Vendor    string `json:"vendor"`
-	Arch      string `json:"arch"`
+	Toolchain       string `json:"toolchain"`
+	Vendor          string `json:"vendor"`
+	Arch            string `json:"arch"`
+	Compiler        string `json:"compiler_container,omitempty"`
+	CoreSDK         string `json:"core_sdk,omitempty"`
 }
 
 type MatrixVerifiedCli struct {

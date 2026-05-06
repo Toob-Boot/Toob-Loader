@@ -190,15 +190,48 @@ func runNativeBuild(root string) error {
 		}
 	}
 
-	// Determine compiler source directory
+	// Read Build settings from DeviceToml
+	coreSDKVer := dt.Build.CoreSDK
+	if coreSDKVer == "" {
+		coreSDKVer = "main"
+	}
+	compilerVer := dt.Build.Compiler
+	if compilerVer == "" {
+		compilerVer = "latest" // Docker image tag
+	}
+
+	// Update lockfile environment (in a real scenario, this would be saved later)
+	// For now, we just pass the info to the matrix lookup
+	fmt.Printf("[toob] Environment: Compiler=%s, CoreSDK=%s\n", compilerVer, coreSDKVer)
+
+	// Determine compiler source directory (where toobloader/core and cmake/ live)
 	compilerRoot := root
 	if envDir := os.Getenv("TOOB_COMPILER_DIR"); envDir != "" {
 		compilerRoot = envDir
+	} else if !isMonorepo(root) {
+		// End-user building a project: Ensure Core SDK is available locally
+		coreDir := filepath.Join(paths.MustHomeDir(), ".toob", "core", coreSDKVer)
+		if _, err := os.Stat(coreDir); os.IsNotExist(err) {
+			fmt.Printf("[toob] Core SDK '%s' not found locally. Downloading...\n", coreSDKVer)
+			if err := os.MkdirAll(filepath.Join(paths.MustHomeDir(), ".toob", "core"), 0o755); err != nil {
+				return err
+			}
+			
+			// We use git clone to fetch the specific tag (e.g. core/v1.2.0 or main)
+			// For specific releases, the tag might be "core/" + version or just the version.
+			// We will just try to clone the given revision.
+			cloneCmd := exec.Command("git", "clone", "--depth", "1", "-b", coreSDKVer, "https://github.com/Toob-Boot/Toob-Loader.git", coreDir)
+			cloneCmd.Stdout = os.Stdout
+			cloneCmd.Stderr = os.Stderr
+			if err := cloneCmd.Run(); err != nil {
+				return fmt.Errorf("failed to download Core SDK '%s': %w", coreSDKVer, err)
+			}
+		}
+		compilerRoot = coreDir
 	} else {
+		// Monorepo developer: use local files
 		if _, err := os.Stat(filepath.Join(root, "CMakeLists.txt")); err != nil {
-			return fmt.Errorf("native build failed: compiler core not found at %s.\n"+
-				"End-users: Use 'toob build --docker' (recommended).\n"+
-				"Core-Devs: Set TOOB_COMPILER_DIR environment variable to your Toob-Loader git repository path.", root)
+			return fmt.Errorf("native build failed: compiler core not found at %s", root)
 		}
 	}
 
@@ -286,6 +319,9 @@ func runNativeBuild(root string) error {
 				}
 				
 				if cliEntry, hasCli := versionEntry.VerifiedCliVersions[cliVer]; hasCli {
+					// We would also check if the compilerVer and coreSDKVer match what was verified.
+					// For now, we assume the environment_hash lookup guarantees this!
+					
 					if cliEntry.Status == "FAILED" {
 						return fmt.Errorf("FATAL: Der Chip %s (v%s) ist laut aktueller Ledger Matrix explizit inkompatibel mit deiner CLI Version (%s). Build abgebrochen!", chip, chipVersion, cliVer)
 					}

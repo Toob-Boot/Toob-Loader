@@ -43,6 +43,10 @@ type Lockfile struct {
 		Version string `toml:"version"`
 		Commit  string `toml:"commit"`
 	} `toml:"registry"`
+	Environment struct {
+		Compiler string `toml:"compiler"`
+		CoreSDK  string `toml:"core_sdk"`
+	} `toml:"environment"`
 	Chips      []ChipEntry               `toml:"chip"`
 	Toolchains map[string]ToolchainEntry `toml:"toolchains"`
 }
@@ -78,6 +82,17 @@ func (lf *Lockfile) Save(path string) error {
 		b.WriteString(fmt.Sprintf("version = %q\n", lf.Registry.Version))
 	}
 	b.WriteString(fmt.Sprintf("commit = %q\n\n", lf.Registry.Commit))
+
+	if lf.Environment.Compiler != "" || lf.Environment.CoreSDK != "" {
+		b.WriteString("[environment]\n")
+		if lf.Environment.Compiler != "" {
+			b.WriteString(fmt.Sprintf("compiler = %q\n", lf.Environment.Compiler))
+		}
+		if lf.Environment.CoreSDK != "" {
+			b.WriteString(fmt.Sprintf("core_sdk = %q\n", lf.Environment.CoreSDK))
+		}
+		b.WriteString("\n")
+	}
 
 	// Sort chips by name for deterministic output
 	sort.Slice(lf.Chips, func(i, j int) bool {
