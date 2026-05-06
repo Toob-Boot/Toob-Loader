@@ -226,14 +226,17 @@ func runNativeBuild(root string) error {
 				return err
 			}
 			
-			// We use git clone to fetch the specific tag (e.g. core/v1.2.0 or main)
-			// For specific releases, the tag might be "core/" + version or just the version.
-			// We will just try to clone the given revision.
-			cloneCmd := exec.Command("git", "clone", "--depth", "1", "-b", coreSDKVer, "https://github.com/Toob-Boot/Toob-Loader.git", coreDir)
+			// Map raw semver to internal Git tags.
+			gitTarget := coreSDKVer
+			if coreSDKVer != "main" && coreSDKVer != "latest" && !strings.HasPrefix(coreSDKVer, "core/v") {
+				gitTarget = "core/v" + coreSDKVer
+			}
+			
+			cloneCmd := exec.Command("git", "clone", "--depth", "1", "-b", gitTarget, "https://github.com/Toob-Boot/Toob-Loader.git", coreDir)
 			cloneCmd.Stdout = os.Stdout
 			cloneCmd.Stderr = os.Stderr
 			if err := cloneCmd.Run(); err != nil {
-				return fmt.Errorf("failed to download Core SDK '%s': %w", coreSDKVer, err)
+				return fmt.Errorf("failed to download Core SDK tag '%s': %w", gitTarget, err)
 			}
 		}
 		compilerRoot = coreDir
