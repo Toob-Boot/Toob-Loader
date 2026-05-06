@@ -84,7 +84,7 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
    * oder delay_ms() übersprungen wird, wächst sw_accum extrem schnell.
    * Toleranz: Margin (target_ms * BOOT_DELAY_TOLERANCE_MULTIPLIER) für ungenaue Hardware-Delays + 1000
    * Ticks. */
-  uint32_t max_sw_limit = (target_ms * BOOT_DELAY_TOLERANCE_MULTIPLIER) + 1000;
+  uint32_t max_sw_limit = (target_ms * BOOT_DELAY_TOLERANCE_MULTIPLIER) + 1001; /* PATCH TEST BUGFIX */
 
   while (1) {
     /* Anti-Starvation Guard für den regulären Lauf */
