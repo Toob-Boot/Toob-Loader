@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0 # Full history needed for abidiff against previous tags
+          submodules: recursive
 
       - name: Install ABI Tools
         run: sudo apt-get update && sudo apt-get install -y abigail-tools gcc jq
@@ -111,15 +112,16 @@ jobs:
 
           # 4. Build OLD Code
           echo ">>> Cloning and building OLD Code from $LAST_TAG..."
-          git clone . abi_workspace/old_repo
+          git clone --recurse-submodules . abi_workspace/old_repo
           cd abi_workspace/old_repo
 
           if [ "$LAST_TAG" != "core/v0.0.0" ]; then
               git checkout $LAST_TAG
+              git submodule update --init --recursive
           fi
 
-          # Build the old code
-          ./cli/toob-cli/toob.exe build --manifest toob-registry/chips/esp32c6/template_device.toml || true
+          # Build the old code using the current toob CLI executable
+          ../../toob.exe build --manifest toob-registry/chips/esp32c6/template_device.toml || true
 
           find builds/ -name "libtoob_core.a" -exec cp {} ../old/ \; || touch ../old/libtoob_core.a
           find builds/ -name "libtoob_libtoob.a" -exec cp {} ../old/ \; || touch ../old/libtoob_libtoob.a
