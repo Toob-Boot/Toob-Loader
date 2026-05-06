@@ -54,7 +54,6 @@ type chipManifest struct {
 	Vendor             string `json:"vendor"`
 	Arch               string `json:"arch"`
 	CompilerPrefix     string `json:"compiler_prefix"`
-	ToolchainPrefix    string `json:"toolchain_prefix"` // Legacy support for local toobloader/hal configs
 	Version            string `json:"version"`
 }
 
@@ -306,8 +305,6 @@ func runNativeBuild(root string) error {
 			}
 			if cm.CompilerPrefix != "" {
 				toolchainPrefix = cm.CompilerPrefix
-			} else if cm.ToolchainPrefix != "" {
-				toolchainPrefix = cm.ToolchainPrefix
 			}
 			if cm.Vendor != "" {
 				halVendor = cm.Vendor
