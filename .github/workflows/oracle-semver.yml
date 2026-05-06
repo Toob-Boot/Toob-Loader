@@ -5,6 +5,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 jobs:
   abi-oracle:
     name: Calculate ABI and Bump Version
@@ -13,59 +16,152 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0 # We need full history to find the previous tag
+          fetch-depth: 0 # Full history needed for abidiff against previous tags
 
       - name: Install ABI Tools
-        run: sudo apt-get update && sudo apt-get install -y libabigail-tools gcc jq
+        run: sudo apt-get update && sudo apt-get install -y abigail-tools gcc jq
 
-      - name: Extract Last Core Tag
-        id: last_tag
+      - name: Detect Monorepo Changes
+        id: changes
         run: |
+          echo ">>> Detecting changes in recent commit..."
+          
+          # Check which paths were modified in the latest commit
+          MODIFIED_FILES=$(git diff --name-only HEAD HEAD~1)
+          
+          CHECK_CORE="false"
+          CHECK_CHIPS="false"
+          CHECK_ARCH="false"
+          CHECK_VENDORS="false"
+
+          for file in $MODIFIED_FILES; do
+            if [[ "$file" == toobloader/core/* ]] || [[ "$file" == sdk/* ]] || [[ "$file" == common/* ]]; then
+              CHECK_CORE="true"
+            elif [[ "$file" == toob-registry/chips/* ]]; then
+              CHECK_CHIPS="true"
+            elif [[ "$file" == toob-registry/arch/* ]]; then
+              CHECK_ARCH="true"
+            elif [[ "$file" == toob-registry/vendors/* ]]; then
+              CHECK_VENDORS="true"
+            fi
+          done
+
+          echo "CHECK_CORE=$CHECK_CORE" >> $GITHUB_ENV
+          echo "CHECK_CHIPS=$CHECK_CHIPS" >> $GITHUB_ENV
+          echo "CHECK_ARCH=$CHECK_ARCH" >> $GITHUB_ENV
+          echo "CHECK_VENDORS=$CHECK_VENDORS" >> $GITHUB_ENV
+          
+          echo "Core changed: $CHECK_CORE"
+          echo "Chips changed: $CHECK_CHIPS"
+          echo "Arch changed: $CHECK_ARCH"
+          echo "Vendors changed: $CHECK_VENDORS"
+
+      - name: ⚙️ ABI Orakel (Core SDK)
+        if: env.CHECK_CORE == 'true'
+        run: |
+          echo ">>> [Core Oracle] Starting ABI analysis for Core SDK..."
+          
+          # 1. Find last tag
           LAST_TAG=$(git describe --tags --match "core/v*" --abbrev=0 2>/dev/null || echo "core/v0.0.0")
-          echo "LAST_TAG=$LAST_TAG" >> $GITHUB_ENV
           echo "Last tag was $LAST_TAG"
-
-      - name: Compile Current Core (Object Files Only)
-        run: |
-          echo ">>> Compiling Core C-Code to Object Files (-c) for ABI Analysis..."
-          mkdir -p abi_out/current
           
-          # Wir nutzen -c (kein Linken) und -g (Debug Symbols für abidiff)
-          # Dies ignoriert alle fehlenden HAL-Implementierungen!
+          # 2. Extract versions
+          RAW_VERSION=${LAST_TAG#core/v}
+          MAJOR=$(echo $RAW_VERSION | cut -d. -f1)
+          MINOR=$(echo $RAW_VERSION | cut -d. -f2)
+          PATCH=$(echo $RAW_VERSION | cut -d. -f3)
+
+          # 3. Setup temporary workspace
+          mkdir -p abi_workspace/current
+          mkdir -p abi_workspace/old
+          
+          # 4. Compile CURRENT object files
+          echo ">>> Compiling CURRENT object files..."
           gcc -c -g -I sdk/libtoob/include toobloader/core/*.c
+          ld -r -o abi_workspace/current/core.o *.o
+          rm *.o
           
-          # Führe alle Object Files zu einem 'Relocatable Object' zusammen
-          ld -r -o abi_out/current/core_combined.o *.o
+          # 5. Extract and compile OLD object files
+          echo ">>> Cloning and compiling OLD object files from $LAST_TAG..."
+          git clone . abi_workspace/old_repo
+          cd abi_workspace/old_repo
+          
+          if [ "$LAST_TAG" != "core/v0.0.0" ]; then
+              git checkout $LAST_TAG
+          fi
+          
+          gcc -c -g -I sdk/libtoob/include toobloader/core/*.c || true # Ignore build errors if files were missing in old version
+          ld -r -o ../old/core.o *.o || touch ../old/core.o # Fallback if empty
+          cd ../../
+          
+          # 6. Run ABIDIFF
+          echo ">>> Running abidiff..."
+          set +e
+          abidiff abi_workspace/old/core.o abi_workspace/current/core.o
+          ABI_EXIT_CODE=$?
+          set -e
+          
+          echo "abidiff Exit Code: $ABI_EXIT_CODE"
+          
+          # 7. Calculate SemVer via Bitmask
+          # Bit 0 (1): Error
+          # Bit 1 (2): Usage Error
+          # Bit 2 (4): ABI Change (Compatible)
+          # Bit 3 (8): ABI Incompatible Change (Breaking)
+          
+          if [ $((ABI_EXIT_CODE & 1)) -ne 0 ] || [ $((ABI_EXIT_CODE & 2)) -ne 0 ]; then
+              echo ">>> [FATAL] abidiff encountered an internal error. Aborting."
+              exit 1
+          fi
 
-      - name: Run ABI Diff & Calculate SemVer
-        id: semver
-        run: |
-          # Dies ist der Kern des Orakels. 
-          # In der finalen Version lädt es die 'core_combined.o' der LAST_TAG herunter 
-          # und führt 'abidiff' aus:
-          # abidiff old/core_combined.o abi_out/current/core_combined.o
+          if [ $((ABI_EXIT_CODE & 8)) -ne 0 ]; then
+              echo ">>> [RESULT] Incompatible ABI changes detected (e.g. removed functions, changed structs)."
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+          elif [ $((ABI_EXIT_CODE & 4)) -ne 0 ]; then
+              echo ">>> [RESULT] Compatible ABI changes detected (e.g. added functions)."
+              MINOR=$((MINOR + 1))
+              PATCH=0
+          else
+              echo ">>> [RESULT] No ABI changes detected. Only internal logic modified."
+              PATCH=$((PATCH + 1))
+          fi
           
-          echo ">>> [Orakel] Führe abidiff aus..."
+          NEW_TAG="core/v${MAJOR}.${MINOR}.${PATCH}"
+          echo ">>> [Orakel] Calculated new Core version: $NEW_TAG"
           
-          # DUMMY LOGIK (Bis das C-Code Artifact Repository steht):
-          # Wir bumpen vorerst immer PATCH, wenn sich Code ändert.
-          CURRENT_VERSION=${LAST_TAG#core/v}
-          MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
-          MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
-          PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
-          
-          NEW_PATCH=$((PATCH + 1))
-          NEW_TAG="core/v${MAJOR}.${MINOR}.${NEW_PATCH}"
-          
-          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
-          echo ">>> [Orakel] Berechnetes neues Release: $NEW_TAG"
-
-      - name: Auto-Tag and Push
-        run: |
+          # 8. Push Tag
           git config user.name "Toob ABI Oracle"
           git config user.email "oracle@toob-boot.io"
-          
-          # Das Pushen dieses Tags triggert sofort den nächsten Webhook auf eurem Daemon!
           git tag "$NEW_TAG"
           git push origin "$NEW_TAG"
-          echo ">>> [Orakel] Tag $NEW_TAG erfolgreich gepusht. Der Release-Builder übernimmt jetzt!"
+          echo ">>> [Orakel] Core Tag $NEW_TAG successfully pushed!"
+
+      - name: ⚙️ ABI Orakel (Chips)
+        if: env.CHECK_CHIPS == 'true'
+        run: |
+          echo ">>> [Chips Oracle] Changes in chips/ detected."
+          # TODO: Implement multi-chip detection
+          # 1. Identify which specific chip folders changed (e.g., toob-registry/chips/esp32c6)
+          # 2. Extract LAST_TAG for that specific chip (e.g., chip-esp32c6/v1.0.0)
+          # 3. gcc -c -g on the chip's HAL mapping files
+          # 4. abidiff bitmask logic
+          # 5. Push new tag (e.g., chip-esp32c6/v1.1.0)
+          echo "Chips SemVer logic placeholder reached."
+
+      - name: ⚙️ ABI Orakel (Architectures)
+        if: env.CHECK_ARCH == 'true'
+        run: |
+          echo ">>> [Arch Oracle] Changes in arch/ detected."
+          # TODO: Implement multi-arch detection
+          # Logic identical to Chips Oracle. Tags: arch-riscv32/v1.0.0
+          echo "Arch SemVer logic placeholder reached."
+
+      - name: ⚙️ ABI Orakel (Vendors)
+        if: env.CHECK_VENDORS == 'true'
+        run: |
+          echo ">>> [Vendors Oracle] Changes in vendors/ detected."
+          # TODO: Implement multi-vendor detection
+          # Logic identical to Chips Oracle. Tags: vendor-espressif/v1.0.0
+          echo "Vendors SemVer logic placeholder reached."
