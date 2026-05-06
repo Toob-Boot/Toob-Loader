@@ -38,3 +38,6 @@ coverage/
 *_review_export.txt
 cli/.pipeline-repo/
 .secrets
+
+# Third-party libraries
+common/lib/heatshrink/

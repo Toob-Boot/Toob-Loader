@@ -9,3 +9,4 @@
 [submodule "common/lib/heatshrink"]
 	path = common/lib/heatshrink
 	url = https://github.com/atomicobject/heatshrink.git
+	ignore = dirty
