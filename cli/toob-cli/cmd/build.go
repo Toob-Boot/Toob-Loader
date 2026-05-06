@@ -210,10 +210,14 @@ func runNativeBuild(root string) error {
 		compilerRoot = envDir
 	} else if !isMonorepo(root) {
 		// End-user building a project: Ensure Core SDK is available locally
-		coreDir := filepath.Join(paths.MustHomeDir(), ".toob", "core", coreSDKVer)
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("cannot determine home directory: %w", err)
+		}
+		coreDir := filepath.Join(homeDir, ".toob", "core", coreSDKVer)
 		if _, err := os.Stat(coreDir); os.IsNotExist(err) {
 			fmt.Printf("[toob] Core SDK '%s' not found locally. Downloading...\n", coreSDKVer)
-			if err := os.MkdirAll(filepath.Join(paths.MustHomeDir(), ".toob", "core"), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Join(homeDir, ".toob", "core"), 0o755); err != nil {
 				return err
 			}
 			
