@@ -11,10 +11,7 @@ type BaremetalGenerator struct{}
 
 func (g *BaremetalGenerator) Generate(ctx Context) error {
 	// 1. Generate device.toml
-	deviceToml := fmt.Sprintf(`name = "%s"
-version = "0.1.0"
-`, ctx.ProjectName)
-	if err := os.WriteFile(filepath.Join(ctx.ProjectDir, "device.toml"), []byte(deviceToml), 0o644); err != nil {
+	if err := GenerateDeviceToml(ctx); err != nil {
 		return err
 	}
 

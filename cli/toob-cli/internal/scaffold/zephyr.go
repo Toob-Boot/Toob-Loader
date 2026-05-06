@@ -10,6 +10,10 @@ import (
 type ZephyrGenerator struct{}
 
 func (g *ZephyrGenerator) Generate(ctx Context) error {
+	if err := GenerateDeviceToml(ctx); err != nil {
+		return err
+	}
+
 	cmakeLists := fmt.Sprintf(`cmake_minimum_required(VERSION 3.20.0)
 
 # The Toob-Loader SDK is automatically pulled via west.yml and 
