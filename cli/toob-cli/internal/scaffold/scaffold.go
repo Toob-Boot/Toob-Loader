@@ -11,10 +11,10 @@ import (
 
 // Context contains all the necessary parameters for generating a project.
 type Context struct {
-	ProjectName string
-	ProjectDir  string
-	ChipName    string
-	ChipInfo    *registry.ChipInfo
+	ProjectName     string
+	ProjectDir      string
+	ChipName        string
+	ChipInfo        *registry.ChipInfo
 	RegistryDir     string
 	NoVSCode        bool
 	UseDevContainer bool
@@ -29,7 +29,7 @@ type Generator interface {
 
 func GenerateDeviceToml(ctx Context) error {
 	tmplPath := filepath.Join(ctx.RegistryDir, "chips", ctx.ChipName, "template_device.toml")
-	
+
 	// Fallback Template (Minimal with instructions)
 	fallbackTmpl := `name = "{{.ProjectName}}"
 version = "0.1.0"
@@ -40,7 +40,7 @@ chip = "{{.ChipName}}"
 
 [partitions]
 # FATAL: No template found in registry for this chip.
-# You MUST configure these partition sizes (in bytes) for your specific hardware flash size!
+# You MUST configure these following partition sizes (in bytes) for your specific hardware flash size!
 stage0_size = 0
 stage1_size = 0
 app_size = 0
