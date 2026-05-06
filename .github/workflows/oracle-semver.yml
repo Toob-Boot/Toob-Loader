@@ -20,6 +20,8 @@ jobs:
 
       - name: Setup Toob Ecosystem
         uses: ./.github/actions/setup-cli
+        with:
+          install-native-deps: 'true'
 
       - name: Install ABI Tools
         run: sudo apt-get update && sudo apt-get install -y abigail-tools gcc jq
