@@ -61,6 +61,10 @@ func (inst *Installer) Add(arg string) error {
 		if err := inst.cache.Checkout(version); err != nil {
 			return fmt.Errorf("failed to checkout registry version '%s': %w", version, err)
 		}
+	} else if inst.lock.Registry.Commit != "" {
+		if err := inst.cache.Checkout(inst.lock.Registry.Commit); err != nil {
+			return fmt.Errorf("failed to checkout locked registry commit '%s': %w", inst.lock.Registry.Commit, err)
+		}
 	}
 
 	ci, err := inst.cache.GetChip(name)
@@ -134,10 +138,10 @@ func (inst *Installer) Spawn(arg string) error {
 		if err := inst.cache.Checkout(version); err != nil {
 			return fmt.Errorf("failed to checkout registry version '%s': %w", version, err)
 		}
-	} else if inst.lock.Registry.Version != "" {
-		// Enforce current lockfile version to prevent shared dependency drift
-		if err := inst.cache.Checkout(inst.lock.Registry.Version); err != nil {
-			return fmt.Errorf("failed to checkout locked registry version '%s': %w", inst.lock.Registry.Version, err)
+	} else if inst.lock.Registry.Commit != "" {
+		// Enforce current lockfile commit to prevent shared dependency drift
+		if err := inst.cache.Checkout(inst.lock.Registry.Commit); err != nil {
+			return fmt.Errorf("failed to checkout locked registry commit '%s': %w", inst.lock.Registry.Commit, err)
 		}
 	}
 
