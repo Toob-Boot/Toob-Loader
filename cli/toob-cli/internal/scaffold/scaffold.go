@@ -30,13 +30,20 @@ type Generator interface {
 func GenerateDeviceToml(ctx Context) error {
 	tmplPath := filepath.Join(ctx.RegistryDir, "chips", ctx.ChipName, "template_device.toml")
 	
-	// Fallback Template (Minimal)
+	// Fallback Template (Minimal with instructions)
 	fallbackTmpl := `name = "{{.ProjectName}}"
 version = "0.1.0"
 
 [device]
 vendor = "{{.ChipInfo.Vendor}}"
 chip = "{{.ChipName}}"
+
+[partitions]
+# FATAL: No template found in registry for this chip.
+# You MUST configure these partition sizes (in bytes) for your specific hardware flash size!
+stage0_size = 0
+stage1_size = 0
+app_size = 0
 `
 
 	var tmpl *template.Template
