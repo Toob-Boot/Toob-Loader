@@ -1,0 +1,28 @@
+name: "Setup Toob Ecosystem"
+description: "Initialisiert das Repo, lädt Go und kompiliert die CLI (toob.exe) für Folge-Skripte."
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout Code
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Initialize Registry Submodule
+      shell: bash
+      run: git submodule update --init toob-registry
+
+    - name: Setup Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: "1.26.2"
+        cache: true
+
+    - name: Compile Toob CLI
+      shell: bash
+      run: |
+        echo ">>> Compiling internal Toob CLI..."
+        cd cli/toob-cli
+        go build -o ../../toob.exe
+        cd ../../
+        chmod +x toob.exe
