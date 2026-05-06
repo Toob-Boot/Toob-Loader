@@ -27,7 +27,16 @@ jobs:
           echo ">>> Detecting changes in recent commit..."
 
           # Check which paths were modified in the latest commit
-          MODIFIED_FILES=$(git diff --name-only HEAD HEAD~1)
+          # Fetch all history and tags so git describe works
+          git fetch --prune --unshallow || git fetch --all || true
+          
+          LAST_TAG=$(git describe --tags --match "core/v*" --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            # No tag found, assume everything changed
+            MODIFIED_FILES=$(git ls-files)
+          else
+            MODIFIED_FILES=$(git diff --name-only $LAST_TAG HEAD || echo "")
+          fi
 
           CHECK_CORE="false"
           CHECK_CHIPS="false"
