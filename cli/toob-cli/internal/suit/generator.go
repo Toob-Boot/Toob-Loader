@@ -29,6 +29,7 @@ func Generate(outputDir, compilerRoot string) error {
 
 	for _, args := range commands {
 		cmd := exec.Command(zcborPath, args...)
+		cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {

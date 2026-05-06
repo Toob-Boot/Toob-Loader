@@ -18,6 +18,7 @@ import (
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/suit"
+	"github.com/toob-boot/toob/internal/toolchain"
 )
 
 func resolvePath(localRoot string, fallbackRoot string, relPath string) string {
@@ -47,7 +48,6 @@ func init() {
 	buildCmd.Flags().StringVar(&flagToolchainPath, "toolchain-path", "", "Path to the cross-compiler bin/ directory")
 	buildCmd.Flags().BoolVar(&flagNative, "native", false, "Force native build (use local toolchains instead of Docker)")
 }
-
 
 // chipManifest mirrors chip_manifest.json.
 type chipManifest struct {
@@ -172,7 +172,7 @@ func runNativeBuild(root string) error {
 	if err != nil {
 		return fmt.Errorf("failed to parse %s: %w", manifest, err)
 	}
-	
+
 	chip := dt.Device.Chip
 	vendor := dt.Device.Vendor
 	if chip == "" || vendor == "" {
@@ -181,7 +181,7 @@ func runNativeBuild(root string) error {
 	fmt.Printf("[toob] Target: %s/%s\n", vendor, chip)
 
 	regDir, _ := paths.RegistryDir()
-	
+
 	cache := registry.NewCache("")
 	if !cache.IsInitialized() {
 		fmt.Println("[toob] Registry not initialized. Attempting auto-clone...")
@@ -203,7 +203,10 @@ func runNativeBuild(root string) error {
 	}
 
 	// 2. Resolve hardware.json (HAL Registry Inheritance)
-	hwJSON := resolvePath(root, regDir, filepath.Join("toobloader", "hal", "chips", chip, "hardware.json"))
+	hwJSON := filepath.Join(root, "toobloader", "hal", "chips", chip, "hardware.json")
+	if _, err := os.Stat(hwJSON); err != nil {
+		hwJSON = filepath.Join(regDir, "chips", chip, "hardware.json")
+	}
 	if _, err := os.Stat(hwJSON); err != nil {
 		return fmt.Errorf("hardware.json not found for chip '%s' (not in local or registry). Run `toob chip add` first", chip)
 	}
@@ -239,7 +242,11 @@ func runNativeBuild(root string) error {
 	toolchainPrefix := "riscv32-unknown-elf-"
 	halVendor := vendor
 
-	cmPath := resolvePath(root, regDir, filepath.Join("toobloader", "hal", "chips", chip, "chip_manifest.json"))
+	cmPath := filepath.Join(root, "toobloader", "hal", "chips", chip, "chip_manifest.json")
+	if _, err := os.Stat(cmPath); err != nil {
+		cmPath = filepath.Join(regDir, "chips", chip, "chip_manifest.json")
+	}
+
 	if data, err := os.ReadFile(cmPath); err == nil {
 		var cm chipManifest
 		if err := json.Unmarshal(data, &cm); err == nil {
@@ -263,14 +270,29 @@ func runNativeBuild(root string) error {
 	coreDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "core")))
 	cryptoDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "crypto")))
 	stage0Dir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "stage0")))
-	
-	// HALs come from regDir
-	halChipDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "chips", chip)))
-	halArchDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "arch", arch)))
-	halVendorDir := filepath.ToSlash(resolvePath(root, regDir, filepath.Join("toobloader", "hal", "vendor", halVendor)))
-	
+
+	// HALs: local first, fallback to registry
+	halChipDir := filepath.Join(root, "toobloader", "hal", "chips", chip)
+	if _, err := os.Stat(halChipDir); err != nil {
+		halChipDir = filepath.Join(regDir, "chips", chip)
+	}
+
+	halArchDir := filepath.Join(root, "toobloader", "hal", "arch", arch)
+	if _, err := os.Stat(halArchDir); err != nil {
+		halArchDir = filepath.Join(regDir, "arch", arch)
+	}
+
+	halVendorDir := filepath.Join(root, "toobloader", "hal", "vendor", halVendor)
+	if _, err := os.Stat(halVendorDir); err != nil {
+		halVendorDir = filepath.Join(regDir, "vendor", halVendor)
+	}
+
+	halChipDir = filepath.ToSlash(halChipDir)
+	halArchDir = filepath.ToSlash(halArchDir)
+	halVendorDir = filepath.ToSlash(halVendorDir)
+
 	sdkDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("sdk")))
-	
+
 	toobCLIPath, err := os.Executable()
 	if err != nil {
 		toobCLIPath = "toob"
@@ -298,7 +320,15 @@ func runNativeBuild(root string) error {
 	// 8. Ensure cross-compiler is in PATH
 	tcPath := flagToolchainPath
 	if tcPath == "" {
-		tcPath = findToolchainBin(toolchainPrefix)
+		// tcPath = findToolchainBin(toolchainPrefix)
+		if tcPath == "" {
+			// Auto-provision via Registry
+			var err error
+			tcPath, err = toolchain.EnsureAvailable(toolchainPrefix)
+			if err != nil {
+				return fmt.Errorf("failed to auto-provision toolchain: %w\nIf you prefer to install it manually, use --toolchain-path.", err)
+			}
+		}
 	}
 	if tcPath != "" {
 		os.Setenv("PATH", tcPath+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -338,8 +368,6 @@ func run(dir string, name string, args ...string) error {
 	c.Stderr = os.Stderr
 	return c.Run()
 }
-
-
 
 // findToolchainBin auto-detects the cross-compiler bin directory.
 func findToolchainBin(prefix string) string {
