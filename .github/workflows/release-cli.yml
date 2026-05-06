@@ -1,0 +1,71 @@
+name: CLI Publisher Pipeline
+
+on:
+  push:
+    tags:
+      - "cli/v*" # Trigger ONLY on CLI version tags
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-release:
+    name: Build & Release CLI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.2"
+          cache: true
+
+      - name: Install UPX
+        run: sudo apt-get update && sudo apt-get install -y upx-ucl
+
+      - name: Hermetic Cross-Compilation (Sequential)
+        working-directory: cli/toob-cli
+        run: |
+          TARGETS="windows/amd64/.exe linux/amd64/ darwin/amd64/ darwin/arm64/"
+          
+          # Remove 'cli/v' prefix to get raw version
+          RAW_VERSION=${GITHUB_REF_NAME#cli/v}
+
+          for TARGET in $TARGETS; do
+            OS=$(echo $TARGET | cut -d/ -f1)
+            ARCH=$(echo $TARGET | cut -d/ -f2)
+            EXT=$(echo $TARGET | cut -d/ -f3)
+            
+            echo ">>> Building $OS-$ARCH..."
+            GOOS=$OS GOARCH=$ARCH go build -mod=readonly -ldflags="-s -w -X github.com/toob-boot/toob/cmd.Version=${RAW_VERSION}" -o "toob-$OS-$ARCH$EXT" .
+            
+            if [ "$OS" != "darwin" ]; then
+                echo ">>> [STATS] Compressing $OS-$ARCH with UPX..."
+                upx -5 "toob-$OS-$ARCH$EXT" > /dev/null
+            fi
+            
+            sha256sum "toob-$OS-$ARCH$EXT" > "toob-$OS-$ARCH$EXT.sha256"
+          done
+
+      - name: Extract Tag Name
+        run: |
+          REF=$(jq -r '.ref' "$GITHUB_EVENT_PATH")
+          echo "TAG_NAME=${REF#refs/tags/}" >> $GITHUB_ENV
+
+      - name: Upload to Target Release Repository
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ env.TARGET_RELEASE_REPO }}
+          token: ${{ secrets.RELEASE_TARGET_TOKEN }}
+          tag_name: ${{ env.TAG_NAME }}
+          draft: true
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          append_body: true
+          files: |
+            cli/toob-cli/toob-*

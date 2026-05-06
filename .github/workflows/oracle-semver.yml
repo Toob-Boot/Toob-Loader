@@ -1,0 +1,71 @@
+name: ABI Oracle (SemVer Auto-Tagger)
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  abi-oracle:
+    name: Calculate ABI and Bump Version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # We need full history to find the previous tag
+
+      - name: Install ABI Tools
+        run: sudo apt-get update && sudo apt-get install -y libabigail-tools gcc jq
+
+      - name: Extract Last Core Tag
+        id: last_tag
+        run: |
+          LAST_TAG=$(git describe --tags --match "core/v*" --abbrev=0 2>/dev/null || echo "core/v0.0.0")
+          echo "LAST_TAG=$LAST_TAG" >> $GITHUB_ENV
+          echo "Last tag was $LAST_TAG"
+
+      - name: Compile Current Core (Object Files Only)
+        run: |
+          echo ">>> Compiling Core C-Code to Object Files (-c) for ABI Analysis..."
+          mkdir -p abi_out/current
+          
+          # Wir nutzen -c (kein Linken) und -g (Debug Symbols für abidiff)
+          # Dies ignoriert alle fehlenden HAL-Implementierungen!
+          gcc -c -g -I sdk/libtoob/include toobloader/core/*.c
+          
+          # Führe alle Object Files zu einem 'Relocatable Object' zusammen
+          ld -r -o abi_out/current/core_combined.o *.o
+
+      - name: Run ABI Diff & Calculate SemVer
+        id: semver
+        run: |
+          # Dies ist der Kern des Orakels. 
+          # In der finalen Version lädt es die 'core_combined.o' der LAST_TAG herunter 
+          # und führt 'abidiff' aus:
+          # abidiff old/core_combined.o abi_out/current/core_combined.o
+          
+          echo ">>> [Orakel] Führe abidiff aus..."
+          
+          # DUMMY LOGIK (Bis das C-Code Artifact Repository steht):
+          # Wir bumpen vorerst immer PATCH, wenn sich Code ändert.
+          CURRENT_VERSION=${LAST_TAG#core/v}
+          MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
+          MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
+          PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
+          
+          NEW_PATCH=$((PATCH + 1))
+          NEW_TAG="core/v${MAJOR}.${MINOR}.${NEW_PATCH}"
+          
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo ">>> [Orakel] Berechnetes neues Release: $NEW_TAG"
+
+      - name: Auto-Tag and Push
+        run: |
+          git config user.name "Toob ABI Oracle"
+          git config user.email "oracle@toob-boot.io"
+          
+          # Das Pushen dieses Tags triggert sofort den nächsten Webhook auf eurem Daemon!
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
+          echo ">>> [Orakel] Tag $NEW_TAG erfolgreich gepusht. Der Release-Builder übernimmt jetzt!"
