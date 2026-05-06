@@ -25,10 +25,10 @@ jobs:
         id: changes
         run: |
           echo ">>> Detecting changes in recent commit..."
-          
+
           # Check which paths were modified in the latest commit
           MODIFIED_FILES=$(git diff --name-only HEAD HEAD~1)
-          
+
           CHECK_CORE="false"
           CHECK_CHIPS="false"
           CHECK_ARCH="false"
@@ -50,21 +50,21 @@ jobs:
           echo "CHECK_CHIPS=$CHECK_CHIPS" >> $GITHUB_ENV
           echo "CHECK_ARCH=$CHECK_ARCH" >> $GITHUB_ENV
           echo "CHECK_VENDORS=$CHECK_VENDORS" >> $GITHUB_ENV
-          
+
           echo "Core changed: $CHECK_CORE"
           echo "Chips changed: $CHECK_CHIPS"
           echo "Arch changed: $CHECK_ARCH"
           echo "Vendors changed: $CHECK_VENDORS"
 
-      - name: ⚙️ ABI Orakel (Core SDK)
+      - name: ABI Orakel (Core SDK)
         if: env.CHECK_CORE == 'true'
         run: |
           echo ">>> [Core Oracle] Starting ABI analysis for Core SDK..."
-          
+
           # 1. Find last tag
           LAST_TAG=$(git describe --tags --match "core/v*" --abbrev=0 2>/dev/null || echo "core/v0.0.0")
           echo "Last tag was $LAST_TAG"
-          
+
           # 2. Extract versions
           RAW_VERSION=${LAST_TAG#core/v}
           MAJOR=$(echo $RAW_VERSION | cut -d. -f1)
@@ -74,41 +74,41 @@ jobs:
           # 3. Setup temporary workspace
           mkdir -p abi_workspace/current
           mkdir -p abi_workspace/old
-          
+
           # 4. Compile CURRENT object files
           echo ">>> Compiling CURRENT object files..."
-          gcc -c -g -I sdk/libtoob/include toobloader/core/*.c
+          gcc -c -g -I sdk/libtoob/include -I toobloader/core/include -I common/include toobloader/core/*.c
           ld -r -o abi_workspace/current/core.o *.o
           rm *.o
-          
+
           # 5. Extract and compile OLD object files
           echo ">>> Cloning and compiling OLD object files from $LAST_TAG..."
           git clone . abi_workspace/old_repo
           cd abi_workspace/old_repo
-          
+
           if [ "$LAST_TAG" != "core/v0.0.0" ]; then
               git checkout $LAST_TAG
           fi
-          
-          gcc -c -g -I sdk/libtoob/include toobloader/core/*.c || true # Ignore build errors if files were missing in old version
+
+          gcc -c -g -I sdk/libtoob/include -I toobloader/core/include -I common/include toobloader/core/*.c || true # Ignore build errors if files were missing in old version
           ld -r -o ../old/core.o *.o || touch ../old/core.o # Fallback if empty
           cd ../../
-          
+
           # 6. Run ABIDIFF
           echo ">>> Running abidiff..."
           set +e
           abidiff abi_workspace/old/core.o abi_workspace/current/core.o
           ABI_EXIT_CODE=$?
           set -e
-          
+
           echo "abidiff Exit Code: $ABI_EXIT_CODE"
-          
+
           # 7. Calculate SemVer via Bitmask
           # Bit 0 (1): Error
           # Bit 1 (2): Usage Error
           # Bit 2 (4): ABI Change (Compatible)
           # Bit 3 (8): ABI Incompatible Change (Breaking)
-          
+
           if [ $((ABI_EXIT_CODE & 1)) -ne 0 ] || [ $((ABI_EXIT_CODE & 2)) -ne 0 ]; then
               echo ">>> [FATAL] abidiff encountered an internal error. Aborting."
               exit 1
@@ -127,10 +127,10 @@ jobs:
               echo ">>> [RESULT] No ABI changes detected. Only internal logic modified."
               PATCH=$((PATCH + 1))
           fi
-          
+
           NEW_TAG="core/v${MAJOR}.${MINOR}.${PATCH}"
           echo ">>> [Orakel] Calculated new Core version: $NEW_TAG"
-          
+
           # 8. Push Tag
           git config user.name "Toob ABI Oracle"
           git config user.email "oracle@toob-boot.io"
@@ -138,7 +138,7 @@ jobs:
           git push origin "$NEW_TAG"
           echo ">>> [Orakel] Core Tag $NEW_TAG successfully pushed!"
 
-      - name: ⚙️ ABI Orakel (Chips)
+      - name: ABI Orakel (Chips)
         if: env.CHECK_CHIPS == 'true'
         run: |
           echo ">>> [Chips Oracle] Changes in chips/ detected."
@@ -150,7 +150,7 @@ jobs:
           # 5. Push new tag (e.g., chip-esp32c6/v1.1.0)
           echo "Chips SemVer logic placeholder reached."
 
-      - name: ⚙️ ABI Orakel (Architectures)
+      - name: ABI Orakel (Architectures)
         if: env.CHECK_ARCH == 'true'
         run: |
           echo ">>> [Arch Oracle] Changes in arch/ detected."
@@ -158,7 +158,7 @@ jobs:
           # Logic identical to Chips Oracle. Tags: arch-riscv32/v1.0.0
           echo "Arch SemVer logic placeholder reached."
 
-      - name: ⚙️ ABI Orakel (Vendors)
+      - name: ABI Orakel (Vendors)
         if: env.CHECK_VENDORS == 'true'
         run: |
           echo ">>> [Vendors Oracle] Changes in vendors/ detected."
