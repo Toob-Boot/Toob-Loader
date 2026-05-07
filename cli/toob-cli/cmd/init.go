@@ -67,7 +67,7 @@ var initCmd = &cobra.Command{
 			initErr = err
 			return err
 		}
-		cache := registry.NewCache(regDir)
+		cache := registry.NewCache("")
 		if err := cache.Sync(); err != nil {
 			initErr = err
 			return err
