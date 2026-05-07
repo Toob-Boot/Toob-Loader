@@ -1,7 +1,9 @@
 name: CLI Publisher Pipeline
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - "cli/v*" # Trigger ONLY on CLI version tags
 
 permissions:
   contents: read
@@ -10,6 +12,7 @@ jobs:
   build-and-release:
     name: Build & Release CLI
     runs-on: ubuntu-latest
+    if: ${{ github.event.act }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6

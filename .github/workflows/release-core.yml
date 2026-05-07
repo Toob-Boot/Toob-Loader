@@ -1,7 +1,9 @@
 name: Core SDK Publisher Pipeline
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - "core/v*" # Trigger ONLY on Core SDK version tags
 
 permissions:
   contents: write
@@ -10,6 +12,7 @@ jobs:
   build-and-release:
     name: Package & Release Core SDK
     runs-on: ubuntu-latest
+    if: ${{ github.event.act }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6
@@ -21,7 +24,7 @@ jobs:
           REF=$(jq -r '.ref' "$GITHUB_EVENT_PATH")
           TAG_NAME=${REF#refs/tags/}
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
-          
+
           # Remove 'core/v' prefix for the zip filename
           RAW_VERSION=${TAG_NAME#core/v}
           echo "RAW_VERSION=$RAW_VERSION" >> $GITHUB_ENV
@@ -33,10 +36,10 @@ jobs:
         run: |
           echo ">>> Packaging Core SDK v${RAW_VERSION}..."
           ZIP_NAME="toob-core-v${RAW_VERSION}.zip"
-          
+
           # Zip only the necessary C-Code directories
           zip -r "$ZIP_NAME" toobloader/ sdk/ common/ cmake/
-          
+
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo ">>> Created $ZIP_NAME"
 

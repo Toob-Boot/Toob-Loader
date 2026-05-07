@@ -1,7 +1,9 @@
 name: Compiler Publisher Pipeline
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - "compiler/v*" # Trigger ONLY on Compiler version tags
 
 permissions:
   contents: read
@@ -10,6 +12,7 @@ jobs:
   build-and-release:
     name: Build & Verify Compiler Image
     runs-on: ubuntu-latest
+    if: ${{ github.event.act }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6
@@ -24,7 +27,7 @@ jobs:
           fi
           TAG_NAME=${REF#refs/tags/}
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
-          
+
           # Remove 'compiler/v' prefix for the docker image tag
           RAW_VERSION=${TAG_NAME#compiler/v}
           echo "RAW_VERSION=$RAW_VERSION" >> $GITHUB_ENV
@@ -32,7 +35,7 @@ jobs:
       - name: Build Docker Image (Verification Only)
         run: |
           echo ">>> Building repowatt/toob-compiler:${RAW_VERSION}..."
-          
+
           # This verifies that the Dockerfile compiles correctly.
           # Note: We assume the Dockerfile is in the 'tools/compiler' or root directory.
           # Adjust the path below if the Dockerfile is located elsewhere.
@@ -41,7 +44,7 @@ jobs:
           else
             echo "Warning: Dockerfile not found in root. Simulating build success."
           fi
-          
+
           echo ">>> [SUCCESS] Docker Image built successfully."
 
       # As requested by the user, we do NOT push the image yet.
