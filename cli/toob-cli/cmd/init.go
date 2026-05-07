@@ -62,7 +62,7 @@ var initCmd = &cobra.Command{
 		fmt.Printf("[toob] Initializing Zero-Bloat project '%s' for chip '%s' (Framework: %s)...\n", projectName, initChip, initFramework)
 
 		// 2. Fetch Registry Context
-		regDir, err := paths.RegistryDir()
+		_, err := paths.RegistryDir()
 		if err != nil {
 			initErr = err
 			return err
@@ -83,7 +83,7 @@ var initCmd = &cobra.Command{
 			ProjectDir:      projectDir,
 			ChipName:        initChip,
 			ChipInfo:        ci,
-			RegistryDir:     regDir,
+			RegistryDir:     cache.Dir(),
 			NoVSCode:        initNoVSCode,
 			UseDevContainer: initDevContainer,
 			SdkUrl:          initSdkUrl,

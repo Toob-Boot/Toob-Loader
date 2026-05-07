@@ -39,12 +39,8 @@ type RegistryConfig struct {
 
 
 // GetExpectedVersion returns the version specified in registry.json for a toolchain
-func GetExpectedVersion(prefix string) string {
+func GetExpectedVersion(prefix string, regDir string) string {
 	tcName := strings.TrimSuffix(prefix, "-")
-	regDir, err := paths.RegistryDir()
-	if err != nil {
-		return ""
-	}
 	data, err := os.ReadFile(filepath.Join(regDir, "registry.json"))
 	if err != nil {
 		return ""
@@ -60,12 +56,8 @@ func GetExpectedVersion(prefix string) string {
 }
 
 // GetExpectedSha256 returns the sha256 specified in registry.json for a toolchain
-func GetExpectedSha256(prefix string) string {
+func GetExpectedSha256(prefix string, regDir string) string {
 	tcName := strings.TrimSuffix(prefix, "-")
-	regDir, err := paths.RegistryDir()
-	if err != nil {
-		return ""
-	}
 	data, err := os.ReadFile(filepath.Join(regDir, "registry.json"))
 	if err != nil {
 		return ""
@@ -83,7 +75,7 @@ func GetExpectedSha256(prefix string) string {
 
 // EnsureAvailable checks if the toolchain exists, and if not, downloads and extracts it.
 // Returns the absolute path to the toolchain's /bin directory.
-func EnsureAvailable(prefix string, expectedVersion string) (string, error) {
+func EnsureAvailable(prefix string, expectedVersion string, regDir string) (string, error) {
 	tcName := strings.TrimSuffix(prefix, "-")
 
 	// 1. Cache Invalidation Check
@@ -119,10 +111,7 @@ func EnsureAvailable(prefix string, expectedVersion string) (string, error) {
 	fmt.Printf("[toob] Toolchain '%s' not found locally or outdated.\n", tcName)
 	fmt.Printf("[toob] Looking up auto-provisioning URL in registry...\n")
 
-	regDir, err := paths.RegistryDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to locate registry: %w", err)
-	}
+
 
 	regJSON := filepath.Join(regDir, "registry.json")
 	data, err := os.ReadFile(regJSON)

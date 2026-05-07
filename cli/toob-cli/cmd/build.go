@@ -137,7 +137,7 @@ func runDockerBuild(root string) error {
 		}
 	}
 
-	args = append(args, "-w", "/workspace", "repowatt/toob-compiler:v"+Version, "toob", "build", "--native")
+	args = append(args, "-w", "/workspace", "toob-boot/toob-compiler:v"+Version, "toob", "build", "--native")
 
 	if flagManifest != "" {
 		relManifest, err := filepath.Rel(root, flagManifest)
@@ -152,7 +152,7 @@ func runDockerBuild(root string) error {
 		}
 	}
 
-	fmt.Println("[toob] Starting Docker container (repowatt/toob-compiler)...")
+	fmt.Println("[toob] Starting Docker container (toob-boot/toob-compiler)...")
 	return run(root, "docker", args...)
 }
 
@@ -194,6 +194,7 @@ func runNativeBuild(root string) error {
 			return fmt.Errorf("failed to sync registry (offline?): %w\nRun `toob chip add` when connected to the internet.", err)
 		}
 	}
+	regDir = cache.Dir()
 
 	// Read Build settings from DeviceToml
 	coreSDKVer := dt.Build.CoreSDK
@@ -400,7 +401,7 @@ func runNativeBuild(root string) error {
 
 	// 8. Ensure cross-compiler is in PATH
 	tcPath := flagToolchainPath
-	expectedVersion := toolchain.GetExpectedVersion(toolchainPrefix)
+	expectedVersion := toolchain.GetExpectedVersion(toolchainPrefix, cache.Dir())
 	
 	lfPath := filepath.Join(root, "toob.lock")
 	if lf, err := lockfile.Load(lfPath); err == nil {
@@ -415,7 +416,10 @@ func runNativeBuild(root string) error {
 		if tcPath == "" {
 			// Auto-provision via Registry
 			var err error
-			tcPath, err = toolchain.EnsureAvailable(toolchainPrefix, expectedVersion)
+			if expectedVersion == "" {
+				expectedVersion = toolchain.GetExpectedVersion(toolchainPrefix, cache.Dir())
+			}
+			tcPath, err = toolchain.EnsureAvailable(toolchainPrefix, expectedVersion, cache.Dir())
 			if err != nil {
 				return fmt.Errorf("failed to auto-provision toolchain: %w\nIf you prefer to install it manually, use --toolchain-path.", err)
 			}
