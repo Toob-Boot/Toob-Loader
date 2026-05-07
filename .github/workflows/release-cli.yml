@@ -28,15 +28,16 @@ jobs:
       - name: Install UPX
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
 
-      - name: Hermetic Cross-Compilation (Sequential)
+      - name: Hermetic Cross-Compilation (Parallel)
         working-directory: cli/toob-cli
         run: |
           TARGETS="windows/amd64/.exe linux/amd64/ darwin/amd64/ darwin/arm64/"
 
           # Remove 'cli/v' prefix to get raw version
           RAW_VERSION=${GITHUB_REF_NAME#cli/v}
-
-          for TARGET in $TARGETS; do
+          
+          build_target() {
+            TARGET=$1
             OS=$(echo $TARGET | cut -d/ -f1)
             ARCH=$(echo $TARGET | cut -d/ -f2)
             EXT=$(echo $TARGET | cut -d/ -f3)
@@ -50,7 +51,15 @@ jobs:
             fi
             
             sha256sum "toob-$OS-$ARCH$EXT" > "toob-$OS-$ARCH$EXT.sha256"
+            echo ">>> Finished $OS-$ARCH"
+          }
+
+          for TARGET in $TARGETS; do
+            build_target $TARGET &
           done
+          
+          wait
+          echo ">>> All parallel builds completed successfully."
 
       - name: Extract Tag Name
         run: |
