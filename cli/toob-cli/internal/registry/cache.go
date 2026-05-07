@@ -2,13 +2,11 @@
 package registry
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,15 +16,15 @@ import (
 
 // ChipInfo holds immutable metadata for a single chip.
 type ChipInfo struct {
-	Name        string `json:"name"`
-	Vendor      string `json:"vendor"`
-	Arch        string `json:"arch"`
-	CompilerPrefix     string `json:"compiler_prefix"`
-	Path               string `json:"path"`
-	Version            string `json:"version"`
-	CliCompatibility   string `json:"cli_compatibility"`
-	Description        string `json:"description,omitempty"`
-	Verified           bool   `json:"verified"`
+	Name             string `json:"name"`
+	Vendor           string `json:"vendor"`
+	Arch             string `json:"arch"`
+	CompilerPrefix   string `json:"compiler_prefix"`
+	Path             string `json:"path"`
+	Version          string `json:"version"`
+	CliCompatibility string `json:"cli_compatibility"`
+	Description      string `json:"description,omitempty"`
+	Verified         bool   `json:"verified"`
 }
 
 type VendorInfo struct {
@@ -50,21 +48,21 @@ type ToolchainInfo struct {
 
 // Index is the parsed content of registry.json.
 type Index struct {
-	FormatVersion     int                 `json:"format_version"`
-	RegistryVersion   string              `json:"registry_version"`
-	CliCompatibility  string              `json:"cli_compatibility"`
-	Chips             map[string]ChipInfo `json:"chips"`
-	Vendors           map[string]VendorInfo `json:"vendors"`
-	Archs             map[string]ArchInfo   `json:"archs"`
-	Toolchains        map[string]ToolchainInfo `json:"toolchains"`
+	FormatVersion    int                      `json:"format_version"`
+	RegistryVersion  string                   `json:"registry_version"`
+	CliCompatibility string                   `json:"cli_compatibility"`
+	Chips            map[string]ChipInfo      `json:"chips"`
+	Vendors          map[string]VendorInfo    `json:"vendors"`
+	Archs            map[string]ArchInfo      `json:"archs"`
+	Toolchains       map[string]ToolchainInfo `json:"toolchains"`
 }
 
 type MatrixDependencies struct {
-	Toolchain       string `json:"toolchain"`
-	Vendor          string `json:"vendor"`
-	Arch            string `json:"arch"`
-	Compiler        string `json:"compiler_container,omitempty"`
-	CoreSDK         string `json:"core_sdk,omitempty"`
+	Toolchain string `json:"toolchain"`
+	Vendor    string `json:"vendor"`
+	Arch      string `json:"arch"`
+	Compiler  string `json:"compiler_container,omitempty"`
+	CoreSDK   string `json:"core_sdk,omitempty"`
 }
 
 type MatrixVerifiedCli struct {
@@ -104,9 +102,9 @@ func NewCache(remoteOverride string) *Cache {
 // Dir returns the cache directory path.
 func (c *Cache) Dir() string { return c.dir }
 
-// IsInitialized returns true if a git repo exists in the cache.
+// IsInitialized returns true if the registry has been downloaded.
 func (c *Cache) IsInitialized() bool {
-	_, err := os.Stat(filepath.Join(c.dir, ".git"))
+	_, err := os.Stat(filepath.Join(c.dir, "registry.json"))
 	return err == nil
 }
 
@@ -124,70 +122,72 @@ func (c *Cache) lock() (func(), error) {
 	return nil, fmt.Errorf("timeout waiting for registry lock. Is another toob process running? (If not, delete %s)", lockDir)
 }
 
-// Sync clones or fast-forward pulls the registry.
-func (c *Cache) Sync() error {
-	unlock, err := c.lock()
-	if err != nil {
-		return err
+// getHubURL returns the URL of the Toob Hub API
+func getHubURL() string {
+	if url := os.Getenv("TOOB_HUB_URL"); url != "" {
+		return url
 	}
-	defer unlock()
-
-	c.index = nil
-	if c.IsInitialized() {
-		// Submodules shouldn't be pulled blindly, but caching repos should
-		info, err := os.Stat(filepath.Join(c.dir, ".git"))
-		if err == nil && !info.IsDir() {
-			fmt.Println("[toob] Registry is a git submodule. Bypassing sync to preserve monorepo integrity.")
-			return nil
-		}
-		if err := runGit(c.dir, "pull", "--ff-only"); err != nil {
-			head, _ := c.HeadCommit()
-			fmt.Printf("\n[toob] \033[33mWARN: Failed to sync registry from upstream (Network error?).\033[0m\n")
-			fmt.Printf("[toob] Local cache is available at commit: %s\n", head)
-			fmt.Print("Do you want to continue using the offline cache? [Y/n]: ")
-
-			reader := bufio.NewReader(os.Stdin)
-			response, _ := reader.ReadString('\n')
-			response = strings.TrimSpace(strings.ToLower(response))
-			
-			if response == "" || response == "y" || response == "yes" {
-				fmt.Println("[toob] Proceeding with offline cache...")
-				return nil
-			}
-			return fmt.Errorf("registry sync failed and offline fallback was rejected: %w", err)
-		}
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(c.dir), 0o755); err != nil {
-		return err
-	}
-	return runGit(filepath.Dir(c.dir), "clone", c.remote, c.dir)
+	return "http://178.105.106.59:9000" // Default Hetzner CI Daemon
 }
 
-// Checkout switches the registry to a specific tag or commit.
+// Sync updates the registry to the latest version.
+func (c *Cache) Sync() error {
+	return c.Checkout("latest")
+}
+
+// Checkout switches the registry to a specific version via the Toob Hub API.
 func (c *Cache) Checkout(version string) error {
+	hubURL := fmt.Sprintf("%s/api/v1/resolve/registry?version=%s", getHubURL(), version)
+	
+	resp, err := http.Get(hubURL)
+	if err != nil {
+		fmt.Printf("\n[toob] \033[33mWARN: Failed to reach Toob Hub API (Offline?).\033[0m\n")
+		return fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("Toob Hub API returned status %d for version %s", resp.StatusCode, version)
+	}
+
+	var result struct {
+		Version     string `json:"version"`
+		DownloadURL string `json:"download_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+
+	// We extract to a versioned subdirectory
+	targetDir := filepath.Join(c.dir, "versions", result.Version)
+	
+	// If it already exists, just update our active directory
+	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
+		c.dir = targetDir
+		fmt.Printf("[toob] Registry Source: Local Cache (%s)\n", result.Version)
+		return nil
+	}
+
 	unlock, err := c.lock()
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	info, err := os.Stat(filepath.Join(c.dir, ".git"))
-	if err == nil && !info.IsDir() {
-		fmt.Printf("[toob] Registry Source: Local Monorepo (%s)\n", c.dir)
-		fmt.Println("[toob] Registry checkout bypassed (using local monorepo files)")
+	// Double check after lock
+	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
+		c.dir = targetDir
 		return nil
 	}
-	c.index = nil
-	// Fetch the specific tag or commit
-	if err := runGit(c.dir, "fetch", "origin", version); err != nil {
-		// Ignore error, might already have it locally
+
+	fmt.Printf("[toob] Downloading Registry %s from GitHub...\n", result.Version)
+	if err := downloadAndExtractZip(result.DownloadURL, targetDir); err != nil {
+		return fmt.Errorf("failed to extract registry: %w", err)
 	}
-	err = runGit(c.dir, "checkout", version)
-	if err == nil {
-		fmt.Printf("[toob] Registry Source: GitHub Remote (Version: %s)\n", version)
-	}
-	return err
+
+	c.dir = targetDir
+	c.index = nil // invalidate cache
+	return nil
 }
 
 // LoadIndex parses registry.json and returns a typed index.
@@ -214,7 +214,7 @@ func (c *Cache) FetchLiveMatrix() (*Matrix, error) {
 	matrix := make(Matrix)
 
 	url := "https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/compatibility_matrix.json"
-	
+
 	client := http.Client{Timeout: 5 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
 	if err == nil {
@@ -296,36 +296,17 @@ func (c *Cache) VendorSourcePath(vendor string) (string, error) {
 	return filepath.Join(c.dir, info.Path), nil
 }
 
-// HeadCommit returns the short SHA of the current HEAD.
+// HeadCommit returns the version of the currently checked out registry.
 func (c *Cache) HeadCommit() (string, error) {
 	if !c.IsInitialized() {
 		return "uninitialized", nil
 	}
-	out, err := exec.Command("git", "-C", c.dir, "rev-parse", "--short", "HEAD").Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
+	return filepath.Base(c.dir), nil
 }
 
-// VerifyHead runs git verify-commit on the current HEAD to ensure supply chain security.
+// VerifyHead would normally verify git signatures. With ZIP downloads,
+// this should verify the SHA256 sum of the zip file against the API.
 func (c *Cache) VerifyHead() error {
-	cmd := exec.Command("git", "-C", c.dir, "verify-commit", "HEAD")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git verify-commit failed. The registry HEAD might be compromised! Error: %w", err)
-	}
-	return nil
-}
-
-func runGit(dir string, args ...string) error {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git %s failed: %w", strings.Join(args, " "), err)
-	}
+	// TODO: Verify SHA256 from Toob Hub API
 	return nil
 }
