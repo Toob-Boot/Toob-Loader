@@ -53,8 +53,14 @@ jobs:
 
       - name: Extract Tag Name
         run: |
-          REF=$(jq -r '.ref' "$GITHUB_EVENT_PATH")
-          echo "TAG_NAME=${REF#refs/tags/}" >> $GITHUB_ENV
+          # Try to get ref from GITHUB_REF first, fallback to event JSON
+          REF="${GITHUB_REF}"
+          if [ -z "$REF" ] || [ "$REF" = "master" ] || [ "$REF" = "main" ]; then
+            REF=$(jq -r '.ref // empty' "$GITHUB_EVENT_PATH")
+          fi
+          TAG=${REF#refs/tags/}
+          echo "TAG_NAME=${TAG}" >> $GITHUB_ENV
+          echo "Extracted Tag: ${TAG}"
 
       - name: Upload to Target Release Repository
         uses: softprops/action-gh-release@v2
@@ -71,8 +77,10 @@ jobs:
             cli/toob-cli/toob-*
 
       - name: Trigger Topology Update
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TARGET_TOKEN }}
         run: |
           echo ">>> Triggering version-index.yml in Toob-Boot/Toob-Registry..."
-          gh workflow run version-index.yml --repo Toob-Boot/Toob-Registry --ref main
+          curl -s -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.RELEASE_TARGET_TOKEN }}" \
+            https://api.github.com/repos/Toob-Boot/Toob-Registry/actions/workflows/version-index.yml/dispatches \
+            -d '{"ref":"main"}'
