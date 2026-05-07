@@ -59,7 +59,7 @@ jobs:
       - name: Upload to Target Release Repository
         uses: softprops/action-gh-release@v2
         with:
-          repository: ${{ env.TARGET_RELEASE_REPO }}
+          repository: Toob-Boot/Toob-CLI-Release
           token: ${{ secrets.RELEASE_TARGET_TOKEN }}
           tag_name: ${{ env.TAG_NAME }}
           draft: true
@@ -69,3 +69,10 @@ jobs:
           append_body: true
           files: |
             cli/toob-cli/toob-*
+
+      - name: Trigger Topology Update
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TARGET_TOKEN }}
+        run: |
+          echo ">>> Triggering version-topology.yml in Toob-Boot/Toob-Registry..."
+          gh workflow run version-topology.yml --repo Toob-Boot/Toob-Registry --ref main

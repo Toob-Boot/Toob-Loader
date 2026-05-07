@@ -6,7 +6,7 @@ on:
       - "core/v*" # Trigger ONLY on Core SDK version tags
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-and-release:
@@ -45,8 +45,7 @@ jobs:
       - name: Upload to Target Release Repository
         uses: softprops/action-gh-release@v2
         with:
-          repository: ${{ env.TARGET_RELEASE_REPO }}
-          token: ${{ secrets.RELEASE_TARGET_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN || github.token }}
           tag_name: ${{ env.TAG_NAME }}
           draft: true
           prerelease: false
