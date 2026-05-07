@@ -1,9 +1,7 @@
 name: Core SDK Publisher Pipeline
 
 on:
-  push:
-    tags:
-      - "core/v*" # Trigger ONLY on Core SDK version tags
+  workflow_dispatch:
 
 permissions:
   contents: write

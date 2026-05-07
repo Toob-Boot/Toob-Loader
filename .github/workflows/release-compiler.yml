@@ -1,9 +1,7 @@
 name: Compiler Publisher Pipeline
 
 on:
-  push:
-    tags:
-      - "compiler/v*" # Trigger ONLY on Compiler version tags
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,7 +10,6 @@ jobs:
   build-and-release:
     name: Build & Verify Compiler Image
     runs-on: ubuntu-latest
-    if: ${{ env.ACT }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6
