@@ -31,7 +31,7 @@ jobs:
         working-directory: cli/toob-cli
         run: |
           TARGETS="windows/amd64/.exe linux/amd64/ darwin/amd64/ darwin/arm64/"
-          
+
           # Remove 'cli/v' prefix to get raw version
           RAW_VERSION=${GITHUB_REF_NAME#cli/v}
 
@@ -63,12 +63,13 @@ jobs:
           echo "Extracted Tag: ${TAG}"
 
       - name: Upload to Target Release Repository
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           repository: Toob-Boot/Toob-CLI-Release
           token: ${{ secrets.RELEASE_TARGET_TOKEN }}
           tag_name: ${{ env.TAG_NAME }}
-          draft: true
+          target_commitish: main
+          draft: false
           prerelease: false
           generate_release_notes: true
           fail_on_unmatched_files: true
