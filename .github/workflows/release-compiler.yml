@@ -12,6 +12,7 @@ jobs:
   build-and-release:
     name: Build & Verify Compiler Image
     runs-on: ubuntu-latest
+    if: ${{ env.ACT }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6
@@ -20,7 +21,10 @@ jobs:
 
       - name: Extract Tag Name
         run: |
-          REF=$(jq -r '.ref' "$GITHUB_EVENT_PATH")
+          REF="${GITHUB_REF}"
+          if [ -z "$REF" ] || [ "$REF" = "master" ] || [ "$REF" = "main" ]; then
+            REF=$(jq -r '.ref // empty' "$GITHUB_EVENT_PATH")
+          fi
           TAG_NAME=${REF#refs/tags/}
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
           

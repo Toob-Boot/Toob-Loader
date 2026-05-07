@@ -12,6 +12,7 @@ jobs:
   build-and-release:
     name: Build & Release CLI
     runs-on: ubuntu-latest
+    if: ${{ env.ACT }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v6
@@ -69,7 +70,7 @@ jobs:
           token: ${{ secrets.RELEASE_TARGET_TOKEN }}
           tag_name: ${{ env.TAG_NAME }}
           target_commitish: main
-          draft: false
+          draft: true
           prerelease: false
           generate_release_notes: true
           fail_on_unmatched_files: true
