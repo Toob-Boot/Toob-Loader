@@ -74,5 +74,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TARGET_TOKEN }}
         run: |
-          echo ">>> Triggering version-topology.yml in Toob-Boot/Toob-Registry..."
-          gh workflow run version-topology.yml --repo Toob-Boot/Toob-Registry --ref main
+          echo ">>> Triggering version-index.yml in Toob-Boot/Toob-Registry..."
+          gh workflow run version-index.yml --repo Toob-Boot/Toob-Registry --ref main

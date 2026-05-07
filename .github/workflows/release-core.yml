@@ -54,3 +54,10 @@ jobs:
           append_body: true
           files: |
             ${{ env.ZIP_NAME }}
+
+      - name: Trigger Topology Update
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TARGET_TOKEN }}
+        run: |
+          echo ">>> Triggering version-index.yml in Toob-Boot/Toob-Registry..."
+          gh workflow run version-index.yml --repo Toob-Boot/Toob-Registry --ref main
