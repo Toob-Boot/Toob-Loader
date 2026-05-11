@@ -1,3 +1,5 @@
+// BOUNDARY TYPES: RegistryToolchain is mirrored in internal/ports/ports.go.
+// If you modify these structs, you MUST update ports.go and assertions.go.
 package toolchain
 
 import (

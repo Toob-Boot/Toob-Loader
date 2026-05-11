@@ -10,6 +10,10 @@
 //	arch = "riscv32"
 //	vendor = "esp"
 //	spawned = false
+//
+// BOUNDARY TYPES: Struct types in this file are mirrored in internal/ports/ports.go.
+// If you add, remove, or modify a struct field here, you MUST update ports.go
+// and the assertions in internal/ports/assertions.go accordingly.
 package lockfile
 
 import (

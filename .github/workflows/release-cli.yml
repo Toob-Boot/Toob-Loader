@@ -28,6 +28,10 @@ jobs:
       - name: Install UPX
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
 
+      - name: Verify Protocol Contracts
+        working-directory: cli/toob-cli
+        run: go test ./internal/ports/ -count=1
+
       - name: Hermetic Cross-Compilation (Parallel)
         working-directory: cli/toob-cli
         run: |

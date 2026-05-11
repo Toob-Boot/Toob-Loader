@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: abi-oracle
+  cancel-in-progress: false
+
 jobs:
   abi-oracle:
     name: Calculate ABI and Bump Version
@@ -21,7 +25,7 @@ jobs:
       - name: Setup Toob Ecosystem
         uses: ./.github/actions/setup-cli
         with:
-          install-native-deps: 'true'
+          install-native-deps: "true"
 
       - name: Install ABI Tools
         run: sudo apt-get update && sudo apt-get install -y abigail-tools gcc jq
@@ -31,57 +35,51 @@ jobs:
         run: |
           echo ">>> Detecting changes in recent commit..."
 
-          # Check which paths were modified in the latest commit
-          # Fetch all history and tags so git describe works
           git fetch --prune --unshallow || git fetch --all || true
-          
-          LAST_TAG=$(git describe --tags --match "core/v*" --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            # No tag found, assume everything changed
+
+          # Compare only the files changed in the latest merge to main
+          MODIFIED_FILES=$(git diff --name-only HEAD~1 HEAD || echo "")
+          if [ -z "$MODIFIED_FILES" ]; then
             MODIFIED_FILES=$(git ls-files)
-          else
-            MODIFIED_FILES=$(git diff --name-only $LAST_TAG HEAD || echo "")
           fi
 
           CHECK_CORE="false"
           CHECK_CHIPS="false"
           CHECK_ARCH="false"
           CHECK_VENDORS="false"
+          CHECK_CLI="false"
 
           for file in $MODIFIED_FILES; do
-            if [[ "$file" == toobloader/core/* ]] || [[ "$file" == sdk/* ]] || [[ "$file" == common/* ]]; then
-              CHECK_CORE="true"
-            elif [[ "$file" == toob-registry/chips/* ]]; then
-              CHECK_CHIPS="true"
-            elif [[ "$file" == toob-registry/arch/* ]]; then
-              CHECK_ARCH="true"
-            elif [[ "$file" == toob-registry/vendors/* ]]; then
-              CHECK_VENDORS="true"
-            fi
+            case "$file" in
+              toobloader/core/* | sdk/* | common/*) CHECK_CORE="true" ;;
+              toob-registry/chips/*)                CHECK_CHIPS="true" ;;
+              toob-registry/arch/*)                 CHECK_ARCH="true" ;;
+              toob-registry/vendors/*)              CHECK_VENDORS="true" ;;
+              cli/toob-cli/*)                       CHECK_CLI="true" ;;
+            esac
           done
 
           echo "CHECK_CORE=$CHECK_CORE" >> $GITHUB_ENV
           echo "CHECK_CHIPS=$CHECK_CHIPS" >> $GITHUB_ENV
           echo "CHECK_ARCH=$CHECK_ARCH" >> $GITHUB_ENV
           echo "CHECK_VENDORS=$CHECK_VENDORS" >> $GITHUB_ENV
+          echo "CHECK_CLI=$CHECK_CLI" >> $GITHUB_ENV
 
           echo "Core changed: $CHECK_CORE"
           echo "Chips changed: $CHECK_CHIPS"
           echo "Arch changed: $CHECK_ARCH"
           echo "Vendors changed: $CHECK_VENDORS"
+          echo "CLI changed: $CHECK_CLI"
 
-
-
-      - name: ⚙️ ABI Orakel (Core SDK)
+      - name: ABI Orakel (Core SDK)
         if: env.CHECK_CORE == 'true'
         run: |
           echo ">>> [Core Oracle] Starting ABI analysis for Core, SDK, and Common..."
 
-          # 2. Find last tag
           LAST_TAG=$(git describe --tags --match "core/v*" --abbrev=0 2>/dev/null || echo "core/v0.0.0")
-          echo "Last tag was $LAST_TAG"
-
           RAW_VERSION=${LAST_TAG#core/v}
+          echo ">>> [Core Oracle] Baseline Tag: $LAST_TAG"
+
           MAJOR=$(echo $RAW_VERSION | cut -d. -f1)
           MINOR=$(echo $RAW_VERSION | cut -d. -f2)
           PATCH=$(echo $RAW_VERSION | cut -d. -f3)
@@ -131,13 +129,8 @@ jobs:
           set +e
           for lib in libtoob_core.a libtoob_libtoob.a libtoob_zcbor.a libtoob_heatshrink.a; do
               if [ -f "abi_workspace/current/$lib" ] && [ -f "abi_workspace/old/$lib" ]; then
-                  echo ">> Analyzing $lib..."
                   abidiff abi_workspace/old/$lib abi_workspace/current/$lib
-                  LIB_EXIT=$?
-                  ABI_EXIT_CODE=$((ABI_EXIT_CODE | LIB_EXIT))
-                  echo ">> $lib exit code: $LIB_EXIT"
-              else
-                  echo ">> Skipping $lib (not found in either old or current)"
+                  ABI_EXIT_CODE=$((ABI_EXIT_CODE | $?))
               fi
           done
           set -e
@@ -152,13 +145,10 @@ jobs:
 
           if [ $((ABI_EXIT_CODE & 8)) -ne 0 ]; then
               echo ">>> [RESULT] Incompatible ABI changes detected (MAJOR)."
-              MAJOR=$((MAJOR + 1))
-              MINOR=0
-              PATCH=0
+              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
           elif [ $((ABI_EXIT_CODE & 4)) -ne 0 ]; then
               echo ">>> [RESULT] Compatible ABI changes detected (MINOR)."
-              MINOR=$((MINOR + 1))
-              PATCH=0
+              MINOR=$((MINOR + 1)); PATCH=0
           else
               echo ">>> [RESULT] No ABI changes detected. Only internal logic modified (PATCH)."
               PATCH=$((PATCH + 1))
@@ -168,11 +158,65 @@ jobs:
           echo ">>> [Orakel] Calculated new Core version: $NEW_TAG"
 
           # 7. Push Tag
-          git config user.name "Toob ABI Oracle"
-          git config user.email "oracle@toob-boot.io"
-          git tag "$NEW_TAG"
-          git push origin "$NEW_TAG"
-          echo ">>> [Orakel] Core Tag $NEW_TAG successfully pushed!"
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo ">>> [Orakel] Tag $NEW_TAG already exists. Skipping."
+          else
+              git config user.name "Toob ABI Oracle"
+              git config user.email "oracle@toob-boot.io"
+              git tag "$NEW_TAG"
+              git push origin "$NEW_TAG"
+              echo ">>> [Orakel] Core Tag $NEW_TAG successfully pushed!"
+          fi
+
+      - name: ABI Orakel (CLI)
+        if: env.CHECK_CLI == 'true'
+        run: |
+          echo ">>> [CLI Oracle] Starting Contract analysis for CLI..."
+
+          LAST_TAG=$(git describe --tags --match "cli/v*" --abbrev=0 2>/dev/null || echo "cli/v0.0.0")
+          RAW_VERSION=${LAST_TAG#cli/v}
+          echo ">>> [CLI Oracle] Baseline Tag: $LAST_TAG"
+
+          MAJOR=$(echo $RAW_VERSION | cut -d. -f1)
+          MINOR=$(echo $RAW_VERSION | cut -d. -f2)
+          PATCH=$(echo $RAW_VERSION | cut -d. -f3)
+
+          mkdir -p cli_abi_workspace
+          cp cli/toob-cli/internal/ports/ports.go cli_abi_workspace/ports_current.go
+
+          if [ "$LAST_TAG" != "cli/v0.0.0" ]; then
+              git show $LAST_TAG:cli/toob-cli/internal/ports/ports.go > cli_abi_workspace/ports_old.go 2>/dev/null || touch cli_abi_workspace/ports_old.go
+          else
+              touch cli_abi_workspace/ports_old.go
+          fi
+
+          echo ">>> Running AST-based Contract Differ..."
+          cd cli/toob-cli
+          go build -o /tmp/semver-tool ./internal/ports/cmd/semver
+          BUMP_TYPE=$(/tmp/semver-tool ../../cli_abi_workspace/ports_old.go ../../cli_abi_workspace/ports_current.go | tail -n 1)
+          cd ../../
+          echo ">>> [RESULT] Contract Differ determined bump type: $BUMP_TYPE"
+
+          if [ "$BUMP_TYPE" = "MAJOR" ]; then
+              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
+          elif [ "$BUMP_TYPE" = "MINOR" ]; then
+              MINOR=$((MINOR + 1)); PATCH=0
+          else
+              PATCH=$((PATCH + 1))
+          fi
+
+          NEW_TAG="cli/v${MAJOR}.${MINOR}.${PATCH}"
+          echo ">>> [Orakel] Calculated new CLI version: $NEW_TAG"
+
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo ">>> [Orakel] Tag $NEW_TAG already exists. Skipping."
+          else
+              git config user.name "Toob ABI Oracle"
+              git config user.email "oracle@toob-boot.io"
+              git tag "$NEW_TAG"
+              git push origin "$NEW_TAG"
+              echo ">>> [Orakel] CLI Tag $NEW_TAG successfully pushed!"
+          fi
 
       - name: ABI Orakel (Chips)
         if: env.CHECK_CHIPS == 'true'

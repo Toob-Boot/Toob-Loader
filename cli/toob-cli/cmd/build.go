@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
@@ -16,6 +17,7 @@ import (
 	"github.com/toob-boot/toob/internal/lockfile"
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/paths"
+	"github.com/toob-boot/toob/internal/ports"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/suit"
 	"github.com/toob-boot/toob/internal/toolchain"
@@ -49,13 +51,6 @@ func init() {
 	buildCmd.Flags().BoolVar(&flagNative, "native", false, "Force native build (use local toolchains instead of Docker)")
 }
 
-// chipManifest mirrors chip_manifest.json.
-type chipManifest struct {
-	Vendor             string `json:"vendor"`
-	Arch               string `json:"arch"`
-	CompilerPrefix     string `json:"compiler_prefix"`
-	Version            string `json:"version"`
-}
 
 func isMonorepo(root string) bool {
 	cmPath := filepath.Join(root, "CMakeLists.txt")
@@ -124,29 +119,48 @@ func runDockerBuild(root string) error {
 		}
 	}
 
-	args := []string{
-		"run", "--rm",
-		"-v", fmt.Sprintf("%s:/workspace", root),
-		"-v", fmt.Sprintf("%s:/root/.toob/registry", regDir),
+	// Build the port contract struct — this is the single source of truth
+	// for what we pass to the compiler container.
+	input := ports.DockerBuildInput{
+		Image:       "toob-boot/toob-compiler:v" + Version,
+		Workspace:   root,
+		RegistryDir: regDir,
+		WorkDir:     "/workspace",
+		Command:     "toob build --native",
+		Manifest:    flagManifest,
+		BuildDir:    flagBuildDir,
+		ProxyVars:   make(map[string]string),
 	}
-
-	// Pass through proxy variables
 	for _, envVar := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
 		if val := os.Getenv(envVar); val != "" {
-			args = append(args, "-e", fmt.Sprintf("%s=%s", envVar, val))
+			input.ProxyVars[envVar] = val
 		}
 	}
 
-	args = append(args, "-w", "/workspace", "toob-boot/toob-compiler:v"+Version, "toob", "build", "--native")
+	// Protocol Handshake: verify the container image speaks our protocol
+	if err := checkProtocolVersion(input.Image); err != nil {
+		return err
+	}
 
-	if flagManifest != "" {
-		relManifest, err := filepath.Rel(root, flagManifest)
+	// Derive Docker arguments from the port struct
+	args := []string{
+		"run", "--rm",
+		"-v", fmt.Sprintf("%s:/workspace", input.Workspace),
+		"-v", fmt.Sprintf("%s:/root/.toob/registry", input.RegistryDir),
+	}
+	for k, v := range input.ProxyVars {
+		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
+	}
+	args = append(args, "-w", input.WorkDir, input.Image, "toob", "build", "--native")
+
+	if input.Manifest != "" {
+		relManifest, err := filepath.Rel(root, input.Manifest)
 		if err == nil {
 			args = append(args, "--manifest", filepath.ToSlash(filepath.Join("/workspace", relManifest)))
 		}
 	}
-	if flagBuildDir != "" {
-		relBuildDir, err := filepath.Rel(root, flagBuildDir)
+	if input.BuildDir != "" {
+		relBuildDir, err := filepath.Rel(root, input.BuildDir)
 		if err == nil {
 			args = append(args, "--build-dir", filepath.ToSlash(filepath.Join("/workspace", relBuildDir)))
 		}
@@ -154,6 +168,49 @@ func runDockerBuild(root string) error {
 
 	fmt.Println("[toob] Starting Docker container (toob-boot/toob-compiler)...")
 	return run(root, "docker", args...)
+}
+
+// checkProtocolVersion inspects the compiler container image for the
+// toob.protocol_version label and compares it against our embedded version.
+func checkProtocolVersion(image string) error {
+	out, err := exec.Command("docker", "inspect",
+		"--format", "{{index .Config.Labels \"toob.protocol_version\"}}",
+		image,
+	).Output()
+	if err != nil {
+		// Image might not exist yet (first pull). Skip handshake gracefully.
+		fmt.Println("[toob] Protocol handshake skipped (image not cached locally).")
+		return nil
+	}
+
+	label := strings.TrimSpace(string(out))
+	if label == "" || label == "<no value>" {
+		// Old image without label — allow but warn
+		fmt.Println("[toob] WARNING: Compiler image has no protocol version label. Consider pulling a newer image.")
+		return nil
+	}
+
+	containerVersion, err := strconv.Atoi(label)
+	if err != nil {
+		return fmt.Errorf("invalid protocol version label on image: %q", label)
+	}
+
+	if containerVersion != ports.ProtocolVersion {
+		if containerVersion > ports.ProtocolVersion {
+			return fmt.Errorf(
+				"Protocol mismatch: Compiler image speaks protocol v%d, but this CLI only supports v%d.\n"+
+					"Your CLI is too old. Run `toob update` to get a compatible version.",
+				containerVersion, ports.ProtocolVersion,
+			)
+		}
+		return fmt.Errorf(
+			"Protocol mismatch: Compiler image speaks protocol v%d, but this CLI requires v%d.\n"+
+				"Your compiler image is outdated. Run `docker pull %s` to update.",
+			containerVersion, ports.ProtocolVersion, image,
+		)
+	}
+
+	return nil
 }
 
 func runNativeBuild(root string) error {
@@ -302,7 +359,7 @@ func runNativeBuild(root string) error {
 
 	chipVersion := "1.0.0"
 	if data, err := os.ReadFile(cmPath); err == nil {
-		var cm chipManifest
+		var cm ports.ChipManifest
 		if err := json.Unmarshal(data, &cm); err == nil {
 			if cm.Arch != "" {
 				arch = cm.Arch

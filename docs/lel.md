@@ -1,0 +1,7 @@
+Also du weißt, wie die registry funktioniert? es kommt bei jeder kleinen eine neue Version raus.
+
+Lies dafür mal @contextScopeItemMention.
+
+Der aktuelle Main-branch beinhaltet dabei nur die aktuellsten Sachen. Die tags müssten eigentlich die richtigen Informanten sein. von denen wird es aber ungelogen hunderte bis tausende über Zeit geben, was bei github nicht gerade gnädig ist. Dafür finden wir in der version_index.json eine Liste ALLER Versionen und deren Commits. Sprich wir können leider nix pre-clonen, weil eigentlich alles davon in älteren tags/versionen steckt wovon wir tausende haben. Die aktuellste Version zu pre-clonen geht vermutlich, weil sie wahrscheinlich das Beste ist, was zu bieten ist und dabei auch die volle/modernste version_index.json hat über die man schneller an die richtigen registry-Versionen kommt, ohne wissen zu müssen, was in welcher geupdatet wurde.
+
+Plane bitte im Build-Prozess die Wichtigkeit der version_index.json ein. Vielleicht sollten wir hier einen wichtigen interpreter schreiben, der egal, was ein compiler oder eine CLI oder sonst wer daraus wissen will, diese Infos hat, ohne dass man precompilen muss. Quasi ein mini-service auf dem Server, der die aktuellste Version der version_index.json immer vorliegen hat und diese sinnvoll nach allen möglichen Dingen durchforsten kann, um herauszufinden, was für welche toob.lock oder device.toml oder irgendwelche Befehle gedownloaded werden muss und dafür direkt die Links ausspuckt. Was denkst du dazu?

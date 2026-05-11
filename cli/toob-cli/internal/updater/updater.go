@@ -1,3 +1,5 @@
+// BOUNDARY TYPES: ReleaseInfo and Asset are mirrored in internal/ports/ports.go.
+// If you modify these structs, you MUST update ports.go and assertions.go.
 package updater
 
 import (
