@@ -13,12 +13,12 @@ Every exported field inside a port struct **must** contain a `port` struct tag.
 
 ---
 
-## 2. Toob-CLI: The SemVer Oracle Workflow
+## 2. Toob-CLI: The SemVer Enforcer Workflow
 
 The `toob-cli` is a distributed binary. Because users might run an older version of the CLI against a newer Compiler Container, we must prevent and detect **Version Skew**.
 
 ### Triggers & CI Integration
-- **When:** The SemVer Oracle runs automatically as a GitHub Action (`oracle-semver.yml`) whenever a Pull Request modifies files in `cli/toob-cli/**`.
+- **When:** The SemVer Enforcer runs automatically as a GitHub Action (`semver-enforcer.yml`) whenever a Pull Request modifies files in `cli/toob-cli/**`.
 - **How it works:** 
   1. The pipeline fetches the `ports.go` from the `HEAD~1` baseline (the state before the PR).
   2. It runs the AST-based diffing tool (`cmd/semver`).
