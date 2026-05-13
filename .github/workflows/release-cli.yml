@@ -101,6 +101,8 @@ jobs:
             -d '{"ref":"main"}'
 
       - name: Propagate to Compiler Container
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TARGET_TOKEN }}
         run: |
           CLI_TAG=${{ env.TAG_NAME }}
           RAW_CLI=${CLI_TAG#cli/v}
@@ -115,5 +117,8 @@ jobs:
           git config user.email "publisher@toob-boot.io"
           git add compiler/compiler_manifest.json
           git commit -m "chore(compiler): update CLI dependency to ${CLI_TAG}"
+          
+          # Authenticate using token for act compatibility
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/Toob-Boot/Toob-Loader.git
           git push origin HEAD:main
 
