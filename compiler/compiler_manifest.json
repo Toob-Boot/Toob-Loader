@@ -61,7 +61,7 @@
 
     "distribution": {
         "registry": "docker.io",
-        "repository": "toob-boot/toob-compiler",
+        "repository": "mannomannx/toob-compiler",
         "platforms": ["linux/amd64"]
     }
 }
