@@ -293,7 +293,7 @@ jobs:
           git config user.name "Toob ABI Oracle"
           git config user.email "oracle@toob-boot.io"
           git add compiler/compiler_manifest.json
-          git commit -m "chore(compiler): bump to v${NEW_VERSION}" || true
+          git commit -m "chore(compiler): bump to v${NEW_VERSION} [skip ci]" || true
           git push origin HEAD:main || true
 
           if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
