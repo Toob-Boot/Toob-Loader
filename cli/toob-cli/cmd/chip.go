@@ -2,12 +2,12 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/installer"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 var chipCmd = &cobra.Command{
@@ -25,14 +25,15 @@ var chipListCmd = &cobra.Command{
 			return err
 		}
 		if len(idx.Chips) == 0 {
-			fmt.Println("Registry is empty.")
+			ui.Muted("Registry is empty.")
 			return nil
 		}
-		fmt.Printf("%-20s %-12s %-16s %-10s\n", "Chip", "Vendor", "Arch", "Version")
-		fmt.Println(strings.Repeat("-", 58))
+		headers := []string{"Chip", "Vendor", "Arch", "Version"}
+		var rows [][]string
 		for _, ci := range idx.Chips {
-			fmt.Printf("%-20s %-12s %-16s %-10s\n", ci.Name, ci.Vendor, ci.Arch, ci.Version)
+			rows = append(rows, []string{ci.Name, ci.Vendor, ci.Arch, ci.Version})
 		}
+		ui.Table(headers, rows)
 		return nil
 	},
 }
@@ -47,9 +48,9 @@ var chipInfoCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Printf("  Name:          %s\n", ci.Name)
-		fmt.Printf("  Version:       %s\n", ci.Version)
-		
+
+		ui.Header(fmt.Sprintf("Chip: %s", ci.Name))
+
 		idx, _ := cache.LoadIndex()
 		vVer := "unknown"
 		aVer := "unknown"
@@ -61,12 +62,13 @@ var chipInfoCmd = &cobra.Command{
 				aVer = aInfo.Version
 			}
 		}
-		
-		fmt.Printf("  Vendor:        %s (v%s)\n", ci.Vendor, vVer)
-		fmt.Printf("  Architecture:  %s (v%s)\n", ci.Arch, aVer)
-		fmt.Printf("  Compiler Prefix: %s\n", ci.CompilerPrefix)
-		fmt.Printf("  Registry Path:   %s\n", ci.Path)
-		fmt.Printf("  Description:   %s\n", ci.Description)
+
+		ui.KeyValue("Version", ci.Version)
+		ui.KeyValue("Vendor", fmt.Sprintf("%s (v%s)", ci.Vendor, vVer))
+		ui.KeyValue("Architecture", fmt.Sprintf("%s (v%s)", ci.Arch, aVer))
+		ui.KeyValue("Compiler", ci.CompilerPrefix)
+		ui.KeyValue("Registry Path", ci.Path)
+		ui.KeyValue("Description", ci.Description)
 		return nil
 	},
 }

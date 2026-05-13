@@ -138,9 +138,9 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 	}
 
 	// 3. Find the actual /bin directory recursively
-	tcPath := findBinDir(tcRoot, prefix)
+	tcPath := FindBinDir(tcRoot, prefix)
 	if tcPath == "" {
-		return "", fmt.Errorf("auto-provisioning completed but /bin directory with %sgcc not found inside %s", prefix, tcRoot)
+		return "", fmt.Errorf("auto-provisioning completed but /bin directory with executables prefixed '%s' not found inside %s", prefix, tcRoot)
 	}
 
 	fmt.Printf("[toob] Successfully installed toolchain to %s\n", tcPath)
@@ -559,13 +559,10 @@ func extractTar(tr *tar.Reader, destDir string) error {
 	return nil
 }
 
-// findBinDir recursively searches for a directory named "bin" containing the prefixed gcc
-func findBinDir(root string, prefix string) string {
+// FindBinDir recursively searches for a directory named "bin" containing any executables starting with the given prefix.
+// This is completely compiler-agnostic (it doesn't care if it's gcc, clang, ld, etc.)
+func FindBinDir(root string, prefix string) string {
 	var binDir string
-	expectedExe := prefix + "gcc"
-	if runtime.GOOS == "windows" {
-		expectedExe += ".exe"
-	}
 
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -575,11 +572,17 @@ func findBinDir(root string, prefix string) string {
 			return filepath.SkipDir // Abort further traversal once found
 		}
 		if info.IsDir() && info.Name() == "bin" {
-			// Check if this bin directory contains the compiler
-			if stat, err := os.Stat(filepath.Join(path, expectedExe)); err == nil && !stat.IsDir() {
-				binDir = path
+			// Check if this bin directory contains any files starting with the prefix
+			entries, err := os.ReadDir(path)
+			if err == nil {
+				for _, e := range entries {
+					if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+						binDir = path
+						return filepath.SkipDir // Found it!
+					}
+				}
 			}
-			return filepath.SkipDir // Skip traversing inside bin
+			return filepath.SkipDir // Skip traversing inside bin if it didn't match
 		}
 		return nil
 	})

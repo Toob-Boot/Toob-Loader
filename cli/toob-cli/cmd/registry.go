@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/registry"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 var registryCmd = &cobra.Command{
@@ -20,9 +21,9 @@ var registrySyncCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cache := registry.NewCache("")
 		if cache.IsInitialized() {
-			fmt.Println("[toob] Updating registry ...")
+			ui.Step("Updating registry ...")
 		} else {
-			fmt.Println("[toob] Cloning registry ...")
+			ui.Step("Cloning registry ...")
 		}
 
 		if err := cache.Sync(); err != nil {
@@ -30,15 +31,15 @@ var registrySyncCmd = &cobra.Command{
 		}
 
 		if flagVerifySignature {
-			fmt.Println("[toob] Verifying GPG signature of HEAD...")
+			ui.Step("Verifying GPG signature of HEAD...")
 			if err := cache.VerifyHead(); err != nil {
 				return fmt.Errorf("signature verification failed: %w", err)
 			}
-			fmt.Println("[toob] Signature OK.")
+			ui.Success("Signature OK.")
 		}
 
 		commit, _ := cache.HeadCommit()
-		fmt.Printf("[toob] Registry synced.  HEAD = %s\n", commit)
+		ui.Success("Registry synced.  HEAD = %s", ui.Gray(commit))
 		return nil
 	},
 }

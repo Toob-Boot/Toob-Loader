@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 var doctorCmd = &cobra.Command{
@@ -15,7 +16,6 @@ var doctorCmd = &cobra.Command{
 	Short: "Check system environment and dependencies for Toob",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Toob Environment Doctor")
-		fmt.Println("-----------------------")
 
 		type doctorCheck struct {
 			name        string
@@ -40,13 +40,14 @@ var doctorCmd = &cobra.Command{
 		allPassed := true
 		var failedFixable []doctorCheck
 
+		fmt.Fprintln(os.Stderr)
 		for _, check := range checks {
 			path, err := exec.LookPath(check.command)
 			if err != nil {
 				if check.optional {
-					fmt.Printf("[ ] %s: Not found (Optional)\n    -> %s\n", check.name, check.solution)
+					ui.CheckItem(false, true, check.name, check.solution)
 				} else {
-					fmt.Printf("[X] %s: Not found\n    -> %s\n", check.name, check.solution)
+					ui.CheckItem(false, false, check.name, check.solution)
 					allPassed = false
 				}
 				if check.autoFixCmd != "" {
@@ -61,7 +62,7 @@ var doctorCmd = &cobra.Command{
 				if len(errMsg) > 60 {
 					errMsg = errMsg[:57] + "..."
 				}
-				fmt.Printf("[X] %s: Found at %s, but failed to execute\n    -> Error: %s\n", check.name, path, errMsg)
+				ui.CheckItem(false, false, check.name, fmt.Sprintf("Found at %s, but failed: %s", path, errMsg))
 				allPassed = false
 				if check.autoFixCmd != "" {
 					failedFixable = append(failedFixable, check)
@@ -70,46 +71,47 @@ var doctorCmd = &cobra.Command{
 			}
 
 			version := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
-			// Some tools print very long first lines, let's truncate if needed
 			if len(version) > 40 {
 				version = version[:37] + "..."
 			}
-			fmt.Printf("[\u2713] %s: OK (%s)\n", check.name, version)
+			ui.CheckItem(true, false, check.name, version)
 		}
 
-		fmt.Println("-----------------------")
+		ui.Divider()
 		if allPassed {
-			fmt.Println("System is completely ready for Toob development!")
+			ui.Success("System is ready for Toob development!")
 			return nil
 		}
-		
-		fmt.Println("Missing dependencies detected! Please resolve them to ensure a smooth build process.")
+
+		ui.Warn("Missing dependencies detected.")
 
 		if len(failedFixable) > 0 {
-			fmt.Println("\nToob can attempt to automatically resolve the following issues:")
+			fmt.Fprintln(os.Stderr)
+			ui.Info("Toob can attempt to automatically resolve:")
 			for _, check := range failedFixable {
-				fmt.Printf("  - %s: %s\n", check.name, check.autoFixDesc)
+				ui.Muted("  %s: %s", check.name, check.autoFixDesc)
 			}
-			fmt.Print("\nDo you want to run the auto-resolver? [Y/n]: ")
-			
+			fmt.Fprint(os.Stderr, "\n  Run auto-resolver? [Y/n]: ")
+
 			reader := bufio.NewReader(os.Stdin)
 			response, _ := reader.ReadString('\n')
 			response = strings.TrimSpace(strings.ToLower(response))
-			
+
 			if response == "" || response == "y" || response == "yes" {
-				fmt.Println("\n[toob] Running auto-resolver...")
+				fmt.Fprintln(os.Stderr)
 				for _, check := range failedFixable {
-					fmt.Printf("[toob] Fixing %s...\n", check.name)
-					cmd := exec.Command(check.autoFixCmd, check.autoFixArgs...)
-					cmd.Stdout = os.Stdout
-					cmd.Stderr = os.Stderr
-					if err := cmd.Run(); err != nil {
-						fmt.Printf("[toob] Failed to auto-fix %s: %v\n", check.name, err)
+					ui.Step("Fixing %s...", check.name)
+					fixCmd := exec.Command(check.autoFixCmd, check.autoFixArgs...)
+					fixCmd.Stdout = os.Stdout
+					fixCmd.Stderr = os.Stderr
+					if err := fixCmd.Run(); err != nil {
+						ui.Error("Failed to fix %s: %v", check.name, err)
 					} else {
-						fmt.Printf("[toob] Successfully fixed %s!\n", check.name)
+						ui.Success("Fixed %s", check.name)
 					}
 				}
-				fmt.Println("\n[toob] Auto-resolve complete. Please run 'toob doctor' again to verify.")
+				ui.Divider()
+				ui.Tip("Run 'toob doctor' again to verify.")
 			}
 		}
 

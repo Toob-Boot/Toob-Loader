@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/scaffold"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 var (
@@ -30,7 +30,7 @@ var initCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectName := args[0]
-		
+
 		validNamePattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 		if !validNamePattern.MatchString(projectName) {
 			return fmt.Errorf("invalid project name '%s'. Only alphanumeric characters, dashes, and underscores are allowed", projectName)
@@ -41,7 +41,7 @@ var initCmd = &cobra.Command{
 		}
 
 		// 1. Create project directory
-		projectDir := filepath.Join(".", projectName)
+		projectDir := fmt.Sprintf("./%s", projectName)
 		if _, err := os.Stat(projectDir); err == nil {
 			return fmt.Errorf("directory %s already exists", projectDir)
 		}
@@ -53,13 +53,13 @@ var initCmd = &cobra.Command{
 		var initErr error
 		defer func() {
 			if initErr != nil {
-				fmt.Printf("[toob] ERROR: Scaffolding failed: %v\n", initErr)
-				fmt.Printf("[toob] Rolling back... removing directory %s\n", projectDir)
+				ui.Error("Scaffolding failed: %v", initErr)
+				ui.Step("Rolling back... removing %s", projectDir)
 				os.RemoveAll(projectDir)
 			}
 		}()
 
-		fmt.Printf("[toob] Initializing Zero-Bloat project '%s' for chip '%s' (Framework: %s)...\n", projectName, initChip, initFramework)
+		ui.Step("Initializing project '%s' for chip '%s' (Framework: %s)", projectName, initChip, initFramework)
 
 		// 2. Fetch Registry Context
 		_, err := paths.RegistryDir()
@@ -126,15 +126,15 @@ var initCmd = &cobra.Command{
 		gitCmd.Stdout = os.Stdout
 		gitCmd.Stderr = os.Stderr
 		if err := gitCmd.Run(); err != nil {
-			fmt.Printf("[toob] WARN: Failed to initialize git repository: %v\n", err)
+			ui.Warn("Failed to initialize git repository: %v", err)
 		}
 
-		fmt.Println("\n[toob] Project initialized successfully!")
-		
+		ui.Success("Project initialized successfully!")
+
 		if strings.ToLower(initFramework) == "zephyr" {
-			fmt.Printf("Run `cd %s` then `west build` to compile the Zephyr application.\n", projectName)
+			ui.Tip("Run 'cd %s' then 'west build' to compile.", projectName)
 		} else {
-			fmt.Printf("Run `cd %s` then `toob build` to compile the Bootloader.\n", projectName)
+			ui.Tip("Run 'cd %s' then 'toob build' to compile.", projectName)
 		}
 		return nil
 	},

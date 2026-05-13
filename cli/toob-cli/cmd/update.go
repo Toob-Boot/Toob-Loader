@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
+	"aead.dev/minisign"
 	"github.com/minio/selfupdate"
 	"github.com/spf13/cobra"
-	"aead.dev/minisign"
+	"github.com/toob-boot/toob/internal/ui"
 	"github.com/toob-boot/toob/internal/updater"
 	"golang.org/x/mod/semver"
 )
@@ -33,7 +35,8 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 	if pr.total > 0 {
 		pct := int(float64(pr.current) / float64(pr.total) * 100)
 		if pct != pr.lastPct && pct%5 == 0 {
-			fmt.Printf("\r[toob] Downloading update: %d%% (%.2f MB / %.2f MB)", pct, float64(pr.current)/1024/1024, float64(pr.total)/1024/1024)
+			fmt.Fprintf(os.Stderr, "\r  %s Downloading: %d%% (%.2f MB / %.2f MB)",
+				ui.Brand("▸"), pct, float64(pr.current)/1024/1024, float64(pr.total)/1024/1024)
 			pr.lastPct = pct
 		}
 	}
@@ -70,10 +73,10 @@ var updateCmd = &cobra.Command{
 		var err error
 
 		if targetVersion != "" {
-			fmt.Printf("[toob] Fetching specific release: %s...\n", targetVersion)
+			ui.Step("Fetching specific release: %s", targetVersion)
 			res, err = updater.FetchReleaseByTag(targetVersion, insecure)
 		} else {
-			fmt.Printf("[toob] Checking for updates (current version: %s)...\n", Version)
+			ui.Step("Checking for updates (current: %s)", ui.Bold(Version))
 			res, err = updater.CheckForUpdate(Version, true, insecure)
 		}
 
@@ -85,12 +88,12 @@ var updateCmd = &cobra.Command{
 		}
 
 		if !res.Available {
-			fmt.Println("[toob] You are already on the target version!")
+			ui.Success("Already on the target version!")
 			return nil
 		}
 
-		fmt.Printf("[toob] Downloading update %s ...\n", res.Version)
-		
+		ui.Step("Downloading %s ...", ui.Bold(res.Version))
+
 		transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
 		if insecure {
 			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -116,24 +119,24 @@ var updateCmd = &cobra.Command{
 		if _, err := io.Copy(&buf, pr); err != nil {
 			return fmt.Errorf("\nfailed during download: %w", err)
 		}
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 
 		if res.MinisigURL != "" {
-			fmt.Println("[toob] Verifying Minisign signature (Supply Chain Security)...")
+			ui.Step("Verifying Minisign signature (Supply Chain Security)")
 			sigStr, err := fetchMinisig(res.MinisigURL, insecure)
 			if err != nil {
 				return fmt.Errorf("failed to fetch minisign signature: %w", err)
 			}
-			
+
 			pubKey, err := updater.GetPublicKey()
 			if err != nil {
 				return fmt.Errorf("FATAL: Hardcoded public key is corrupted: %w", err)
 			}
-			
+
 			if !minisign.Verify(pubKey, buf.Bytes(), []byte(sigStr)) {
 				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Minisign signature invalid or binary was tampered with!")
 			}
-			fmt.Println("[toob] Signature OK. Binary is authentic.")
+			ui.Success("Signature OK. Binary is authentic.")
 		} else {
 			return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: No .minisig signature found in release. Downgrade attack prevented.")
 		}
@@ -156,13 +159,13 @@ var updateCmd = &cobra.Command{
 			}
 		}
 
-		fmt.Println("[toob] Applying update...")
+		ui.Step("Applying update...")
 		err = selfupdate.Apply(bytes.NewReader(buf.Bytes()), selfupdate.Options{})
 		if err != nil {
 			return fmt.Errorf("failed to apply update: %w", err)
 		}
 
-		fmt.Printf("[toob] Successfully updated to %s!\n", res.Version)
+		ui.Success("Updated to %s!", ui.Bold(res.Version))
 		return nil
 	},
 }

@@ -27,6 +27,7 @@ import (
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/suit"
 	"github.com/toob-boot/toob/internal/toolchain"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 func resolvePath(localRoot string, fallbackRoot string, relPath string) string {
@@ -69,12 +70,11 @@ func (t *TimingTracker) Add(name string, duration time.Duration) {
 }
 
 func (t *TimingTracker) Print(total time.Duration) {
-	fmt.Printf("\n\033[36m[toob] Build Timings:\033[0m\n")
+	var entries []ui.TimingEntry
 	for _, p := range t.phases {
-		pad := strings.Repeat(".", 26-len(p.Name))
-		fmt.Printf("       %s %s %v\n", p.Name, pad, p.Duration.Round(time.Millisecond))
+		entries = append(entries, ui.TimingEntry{Name: p.Name, Duration: p.Duration})
 	}
-	fmt.Printf("       Total %s %v\n\n", strings.Repeat(".", 21), total.Round(time.Millisecond))
+	ui.TimingSummary(entries, total)
 }
 
 var buildCmd = &cobra.Command{
@@ -92,12 +92,8 @@ func init() {
 
 
 func isMonorepo(root string) bool {
-	cmPath := filepath.Join(root, "CMakeLists.txt")
-	data, err := os.ReadFile(cmPath)
-	if err != nil {
-		return false
-	}
-	return strings.Contains(string(data), "toob-boot")
+	stat, err := os.Stat(filepath.Join(root, "toobloader", "core"))
+	return err == nil && stat.IsDir()
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
@@ -134,7 +130,7 @@ func runBuild(cmd *cobra.Command, args []string) error {
 
 	useNative := flagNative
 	if !useNative && isMonorepo(root) {
-		fmt.Println("[toob] Detected Toob-Loader Monorepo. Auto-enabling --native build.")
+		ui.Info("Detected Toob-Loader Monorepo. Auto-enabling --native build.")
 		useNative = true
 	}
 
@@ -152,7 +148,7 @@ func runDockerBuild(root string) error {
 	regDir, _ := paths.RegistryDir()
 	cache := registry.NewCache("")
 	if !cache.IsInitialized() {
-		fmt.Println("[toob] Registry not initialized. Attempting auto-clone...")
+		ui.Step("Registry not initialized. Attempting auto-clone...")
 		if err := cache.Sync(); err != nil {
 			return fmt.Errorf("failed to sync registry (offline?): %w\nRun `toob chip add` when connected to the internet.", err)
 		}
@@ -184,11 +180,11 @@ func runDockerBuild(root string) error {
 
 	// 1. Ensure image is fresh/pulled
 	if compilerTag == "latest" {
-		fmt.Printf("[toob] Pulling latest compiler image...\n")
+		ui.Step("Pulling latest compiler image...")
 		exec.Command("docker", "pull", input.Image).Run()
 	} else {
 		if err := exec.Command("docker", "image", "inspect", input.Image).Run(); err != nil {
-			fmt.Printf("[toob] Compiler image %s not found locally. Pulling...\n", compilerTag)
+			ui.Step("Compiler image %s not found locally. Pulling...", compilerTag)
 			exec.Command("docker", "pull", input.Image).Run()
 		}
 	}
@@ -251,10 +247,10 @@ func runDockerBuild(root string) error {
 		}
 	}
 
-	fmt.Printf("[toob] Starting Docker container (mannomannx/toob-compiler:%s)...\n", compilerTag)
+	ui.Step("Starting Docker container (toob-compiler:%s)", compilerTag)
 	err := run(root, "docker", args...)
 	if err == nil {
-		fmt.Println("\n\033[36m[toob] TIP: Run 'toob build --native' for much faster builds (requires local toolchains).\033[0m")
+		ui.Tip("Run 'toob build --native' for much faster builds (requires local toolchains).")
 	}
 	return err
 }
@@ -268,14 +264,14 @@ func checkProtocolVersion(image string) error {
 	).Output()
 	if err != nil {
 		// Image might not exist yet (first pull). Skip handshake gracefully.
-		fmt.Println("[toob] Protocol handshake skipped (image not cached locally).")
+		ui.Muted("Protocol handshake skipped (image not cached locally).")
 		return nil
 	}
 
 	label := strings.TrimSpace(string(out))
 	if label == "" || label == "<no value>" {
 		// Old image without label — allow but warn
-		fmt.Println("[toob] WARNING: Compiler image has no protocol version label. Consider pulling a newer image.")
+		ui.Warn("Compiler image has no protocol version label. Consider pulling a newer image.")
 		return nil
 	}
 
@@ -326,7 +322,7 @@ func runNativeBuild(root string) error {
 	if chip == "" || vendor == "" {
 		return fmt.Errorf("device.toml must define [device] with 'chip' and 'vendor'")
 	}
-	fmt.Printf("[toob] Target: %s/%s\n", vendor, chip)
+	ui.Info("Target: %s/%s", vendor, chip)
 
 	registryURL := ""
 	if dt.Build.Registry != "" {
@@ -335,7 +331,7 @@ func runNativeBuild(root string) error {
 	cache := registry.NewCache(registryURL)
 
 	if flagSkipChecks && !cache.IsInitialized() {
-		fmt.Println("\033[33m[toob] Warning: Cannot skip checks because local registry is missing. Auto-syncing...\033[0m")
+		ui.Warn("Cannot skip checks because local registry is missing. Auto-syncing...")
 		flagSkipChecks = false
 	}
 
@@ -366,13 +362,13 @@ func runNativeBuild(root string) error {
 		compilerVer = "latest" // Docker image tag
 	}
 
-	fmt.Printf("[toob] Environment: Compiler=%s, CoreSDK=%s\n", compilerVer, coreSDKVer)
+	ui.Info("Environment: Compiler=%s, CoreSDK=%s", compilerVer, coreSDKVer)
 
 	// Parallel Fetching: Registry Sync & Core SDK (Gap 2.3)
 	g, _ := errgroup.WithContext(context.Background())
 
 	if !cache.IsInitialized() {
-		fmt.Println("[toob] Registry not initialized. Auto-syncing in background...")
+		ui.Step("Registry not initialized. Auto-syncing in background...")
 		g.Go(func() error {
 			start := time.Now()
 			err := cache.Sync()
@@ -392,7 +388,7 @@ func runNativeBuild(root string) error {
 		}
 		coreDir := filepath.Join(homeDir, ".toob", "core", coreSDKVer)
 		if _, err := os.Stat(coreDir); os.IsNotExist(err) {
-			fmt.Printf("[toob] Core SDK '%s' not found locally. Downloading...\n", coreSDKVer)
+			ui.Step("Core SDK '%s' not found locally. Downloading...", coreSDKVer)
 			coreDirToDownload = coreDir
 		}
 		compilerRoot = coreDir
@@ -431,7 +427,7 @@ func runNativeBuild(root string) error {
 	// Load Registry Index ONCE (Gap 3.2)
 	idx, err := cache.LoadIndex()
 	if err != nil {
-		fmt.Printf("\033[33m[toob] WARNING: Could not load registry index: %v\033[0m\n", err)
+		ui.Warn("Could not load registry index: %v", err)
 	}
 
 	// 2. Resolve hardware.json (HAL Registry Inheritance)
@@ -440,7 +436,7 @@ func runNativeBuild(root string) error {
 		hwJSON = filepath.Join(regDir, "chips", chip, "hardware.json")
 	}
 	if _, err := os.Stat(hwJSON); err != nil {
-		fmt.Printf("[toob] Chip '%s' not found locally. Auto-syncing registry...\n", chip)
+		ui.Step("Chip '%s' not found locally. Auto-syncing registry...", chip)
 		start := time.Now()
 		if err := cache.Sync(); err == nil {
 			timings.Add("Registry Sync", time.Since(start))
@@ -463,7 +459,7 @@ func runNativeBuild(root string) error {
 	}
 
 	// 4. Run manifest compiler (Go Native)
-	fmt.Println("[toob] Running manifest compiler (Go Native)...")
+	ui.Step("Running manifest compiler (Go Native)")
 	startManifest := time.Now()
 	bootloaderDir := resolvePath(root, compilerRoot, "toobloader")
 	if err := manifestpkg.Compile(manifest, hwJSON, generatedDir, bootloaderDir); err != nil {
@@ -480,8 +476,8 @@ func runNativeBuild(root string) error {
 	}
 
 	// 6. Resolve toolchain from chip metadata
-	arch := "riscv32"
-	toolchainPrefix := "riscv32-unknown-elf-"
+	arch := ""
+	toolchainPrefix := ""
 	halVendor := vendor
 
 	cmPath := filepath.Join(root, "toobloader", "hal", "chips", chip, "chip_manifest.json")
@@ -506,6 +502,17 @@ func runNativeBuild(root string) error {
 				chipVersion = cm.Version
 			}
 		}
+	} else {
+		return fmt.Errorf("chip_manifest.json not found for chip '%s'", chip)
+	}
+
+	if arch == "" || toolchainPrefix == "" {
+		ui.ErrorBanner(
+			"Missing Metadata",
+			fmt.Sprintf("chip_manifest.json for '%s' is missing 'arch' or 'compiler_prefix'", chip),
+			"Ensure the registry or local manifest defines these fields.",
+		)
+		return fmt.Errorf("invalid chip manifest")
 	}
 
 	// 7. CLI Blocker Logic: Check Compatibility Matrix (Wait for background fetch)
@@ -518,7 +525,7 @@ func runNativeBuild(root string) error {
 		}
 
 		if matrixErr != nil {
-			fmt.Printf("\033[33m[toob] WARNING: Could not fetch Compatibility Matrix: %v\033[0m\n", matrixErr)
+			ui.Warn("Could not fetch Compatibility Matrix: %v", matrixErr)
 		} else if matrix != nil {
 			if chipEntry, hasChip := (*matrix)[chip]; hasChip {
 				if versionEntry, hasVer := chipEntry.Versions[chipVersion]; hasVer {
@@ -532,13 +539,13 @@ func runNativeBuild(root string) error {
 							return fmt.Errorf("FATAL: Der Chip %s (v%s) ist laut aktueller Ledger Matrix explizit inkompatibel mit deiner CLI Version (%s). Build abgebrochen!", chip, chipVersion, cliVer)
 						}
 					} else {
-						fmt.Printf("\033[33m[toob] WARNING: The combination of Chip %s (v%s) and CLI %s has not been verified by the CI yet.\033[0m\n", chip, chipVersion, cliVer)
+						ui.Warn("The combination of Chip %s (v%s) and CLI %s has not been verified by the CI yet.", chip, chipVersion, cliVer)
 					}
 				}
 			}
 		}
 	} else {
-		fmt.Println("\033[36m[toob] Skipping compatibility matrix checks (--skip-checks)\033[0m")
+		ui.Muted("Skipping compatibility matrix checks (--skip-checks)")
 	}
 
 	// Calculate toolchain.cmake name based on architecture
@@ -632,7 +639,7 @@ func runNativeBuild(root string) error {
 			}
 			tcPath, err = toolchain.EnsureAvailable(toolchainPrefix, expectedVersion, cache.Dir())
 			if err != nil {
-				return fmt.Errorf("failed to auto-provision toolchain: %w\nIf you prefer to install it manually, use --toolchain-path.", err)
+				return fmt.Errorf("failed to auto-provision toolchain: %w\nPlease run 'toob install' to verify your project dependencies or use --toolchain-path.", err)
 			}
 		}
 	} else {
@@ -653,13 +660,14 @@ func runNativeBuild(root string) error {
 
 	if tcPath != "" {
 		os.Setenv("PATH", tcPath+string(os.PathListSeparator)+os.Getenv("PATH"))
-		fmt.Printf("[toob] Toolchain: %s\n", tcPath)
+		ui.Info("Toolchain: %s", tcPath)
 	}
 
 	// 9. CMake configure
-	fmt.Println("[toob] Configuring CMake ...")
+	spinner := ui.NewSpinner("Configuring CMake")
+	spinner.Start()
 	startCMake := time.Now()
-	if err := runWithClassifier(root, "cmake",
+	if err := runWithLiveSpinner(root, "cmake", spinner,
 		"-G", "Ninja",
 		"-B", buildDir,
 		"-S", compilerRoot,
@@ -671,17 +679,20 @@ func runNativeBuild(root string) error {
 	); err != nil {
 		return err
 	}
+	spinner.Stop()
 	timings.Add("CMake Configure", time.Since(startCMake))
 
 	// 10. Build
-	fmt.Println("[toob] Building ...")
+	spinner = ui.NewSpinner("Building")
+	spinner.Start()
 	startNinja := time.Now()
-	if err := runWithClassifier(root, "cmake", "--build", buildDir); err != nil {
+	if err := runWithLiveSpinner(root, "cmake", spinner, "--build", buildDir); err != nil {
 		return err
 	}
+	spinner.Stop()
 	timings.Add("Ninja Build", time.Since(startNinja))
 
-	fmt.Println("[toob] Build complete.")
+	ui.Success("Build complete.")
 
 	// Output Timings (Gap 4.3)
 	timings.Print(time.Since(buildStartTime))
@@ -741,13 +752,54 @@ func (r *ringBuffer) String() string {
 	return string(res)
 }
 
+// spinnerWriter intercepts compiler stdout and pipes the latest line to the LiveSpinner
+type spinnerWriter struct {
+	spinner *ui.LiveSpinner
+}
+
+func (w *spinnerWriter) Write(p []byte) (n int, err error) {
+	str := string(p)
+	lines := strings.Split(str, "\n")
+	if len(lines) > 0 {
+		last := strings.TrimSpace(lines[len(lines)-1])
+		if last == "" && len(lines) > 1 {
+			last = strings.TrimSpace(lines[len(lines)-2])
+		}
+		if last != "" {
+			w.spinner.UpdateDetail(last)
+		}
+	}
+	return len(p), nil
+}
+
+// runWithLiveSpinner executes a command, parsing its output to a lag-free UI spinner instead of stdout.
+func runWithLiveSpinner(dir string, name string, spinner *ui.LiveSpinner, args ...string) error {
+	c := exec.Command(name, args...)
+	c.Dir = dir
+	c.Stdin = os.Stdin
+
+	// Bounded 1MB buffer to prevent OOM on massive outputs
+	ringBuf := newRingBuffer(1 * 1024 * 1024)
+	sw := &spinnerWriter{spinner: spinner}
+	c.Stdout = io.MultiWriter(sw, ringBuf)
+	c.Stderr = io.MultiWriter(sw, ringBuf)
+
+	err := c.Run()
+	if err != nil {
+		// Stop the spinner so we can print the raw error clearly
+		spinner.Stop()
+		fmt.Fprintf(os.Stderr, "\n%s\n", ringBuf.String())
+		classifyBuildError(ringBuf.String(), dir)
+	}
+	return err
+}
+
 // runWithClassifier executes a command and parses its output for error classification if it fails.
 func runWithClassifier(dir string, name string, args ...string) error {
 	c := exec.Command(name, args...)
 	c.Dir = dir
 	c.Stdin = os.Stdin
 
-	// Bounded 1MB buffer to prevent OOM on massive outputs
 	ringBuf := newRingBuffer(1 * 1024 * 1024)
 	c.Stdout = io.MultiWriter(os.Stdout, ringBuf)
 	c.Stderr = io.MultiWriter(os.Stderr, ringBuf)
@@ -760,115 +812,40 @@ func runWithClassifier(dir string, name string, args ...string) error {
 }
 
 func classifyBuildError(output string, projectDir string) {
-	fmt.Print("\n\033[31m================================================================================\n")
-	fmt.Print("                          TOOB BUILD ERROR CLASSIFIER                           \n")
-	fmt.Print("================================================================================\033[0m\n")
-
 	outLower := strings.ToLower(output)
 	projectBase := strings.ToLower(filepath.Base(projectDir))
 
 	if strings.Contains(outLower, "toobloader/hal") {
-		fmt.Print("\033[31m[!] HAL Layer Error:\033[0m The compiler found an error in the Hardware Abstraction Layer.\n")
-		fmt.Print("    If you spawned this chip locally, check your modifications.\n")
-		fmt.Print("    If not, this might be a bug in the Toob Registry.\n")
+		ui.ErrorBanner("HAL Layer Error",
+			"The compiler found an error in the Hardware Abstraction Layer.",
+			"If you spawned this chip locally, check your modifications. Otherwise, report a bug.")
 	} else if strings.Contains(outLower, "toobloader/core") {
-		fmt.Print("\033[31m[!] Core SDK Error:\033[0m The error originated in the Toob Core SDK.\n")
-		fmt.Print("    This is usually a bug in the Toob-Loader repository. Please report it.\n")
+		ui.ErrorBanner("Core SDK Error",
+			"The error originated in the Toob Core SDK.",
+			"This is usually a bug in the Toob-Loader repository. Please report it.")
 	} else if strings.Contains(outLower, "src/") || strings.Contains(outLower, "app/") || strings.Contains(outLower, "main/") || strings.Contains(outLower, "components/") || strings.Contains(outLower, projectBase+"/") {
-		fmt.Print("\033[31m[!] Application Code Error:\033[0m The compiler found an error in your application code.\n")
-		fmt.Print("    Check the files in your project directory.\n")
+		ui.ErrorBanner("Application Code Error",
+			"The compiler found an error in your application code.",
+			"Check the files in your project directory.")
 	} else if strings.Contains(outLower, "exec: \"cmake\": executable file not found") || strings.Contains(outLower, "gcc: fatal error: cannot execute") || strings.Contains(outLower, "unrecognized command line option") {
-		fmt.Print("\033[31m[!] Toolchain / Environment Error:\033[0m The compiler executable failed or is missing components.\n")
-		fmt.Print("    Try running 'toob clean --toolchains' and rebuilding to re-provision the toolchain.\n")
+		ui.ErrorBanner("Toolchain / Environment Error",
+			"The compiler executable failed or is missing components.",
+			"Try running 'toob clean --toolchains' and rebuilding.")
 	} else {
-		fmt.Print("\033[33m[!] Unknown Error Category:\033[0m Could not automatically classify the error.\n")
-		fmt.Print("    Please read the raw compiler output above.\n")
+		ui.ErrorBanner("Unknown Error Category",
+			"Could not automatically classify the error.",
+			"Please read the raw compiler output above.")
 	}
-	fmt.Print("\033[31m================================================================================\033[0m\n\n")
 }
 
-// findToolchainBin auto-detects the cross-compiler bin directory.
+// findToolchainBin strictly returns the toolchain path from the hermetic Toob cache.
+// It explicitly avoids checking the system PATH to guarantee reproducible, hermetic builds.
 func findToolchainBin(prefix string, expectedVersion string) string {
-	compiler := prefix + "gcc"
-	if runtime.GOOS == "windows" {
-		compiler += ".exe"
-	}
-
-	// 0. Fast path: Check default Toob provisioning directory first (~/.toob/toolchains)
+	// 1. Check hermetic Toob cache (~/.toob/toolchains)
 	if home, err := os.UserHomeDir(); err == nil && expectedVersion != "" {
-		toobPath := filepath.Join(home, ".toob", "toolchains", strings.TrimSuffix(prefix, "-"), expectedVersion, "bin")
-		if _, err := os.Stat(filepath.Join(toobPath, compiler)); err == nil {
-			return toobPath // Zero-overhead, no os.ReadDir needed!
-		}
-	}
-
-	compilerBin := prefix + "gcc"
-	if path, err := exec.LookPath(compilerBin); err == nil {
-		if expectedVersion == "" {
-			return ""
-		}
-		out, err := exec.Command(path, "--version").CombinedOutput()
-		if err == nil && strings.Contains(string(out), expectedVersion) {
-			return "" // already in PATH and version matches
-		}
-	}
-
-	// Espressif IDF standard layout
-	if runtime.GOOS == "windows" {
-		triplet := strings.TrimSuffix(prefix, "-")
-		var bases []string
-		if p := os.Getenv("IDF_TOOLS_PATH"); p != "" {
-			bases = append(bases, filepath.Join(p, "tools", triplet))
-		}
-		if p, err := os.UserHomeDir(); err == nil {
-			bases = append(bases, filepath.Join(p, ".espressif", "tools", triplet))
-		}
-		bases = append(bases, filepath.Join("C:\\", "Espressif", "tools", triplet))
-
-		for _, base := range bases {
-			entries, err := os.ReadDir(base)
-			if err != nil {
-				continue
-			}
-			// Sort reverse to pick the newest version
-			sort.Slice(entries, func(i, j int) bool {
-				return entries[i].Name() > entries[j].Name()
-			})
-			for _, e := range entries {
-				if expectedVersion != "" && !strings.Contains(e.Name(), expectedVersion) {
-					continue
-				}
-				candidate := filepath.Join(base, e.Name(), triplet, "bin")
-				exe := filepath.Join(candidate, compiler+".exe")
-				if _, err := os.Stat(exe); err == nil {
-					fmt.Println("[toob] Warning: Using unhashed local toolchain. For guaranteed reproducible CI builds, consider using the auto-provisioned toolchain.")
-					return candidate
-				}
-			}
-		}
-	}
-
-	// Linux/macOS: check common ESP-IDF paths
-	home, _ := os.UserHomeDir()
-	if home != "" {
-		triplet := strings.TrimSuffix(prefix, "-")
-		base := filepath.Join(home, ".espressif", "tools", triplet)
-		entries, err := os.ReadDir(base)
-		if err == nil {
-			sort.Slice(entries, func(i, j int) bool {
-				return entries[i].Name() > entries[j].Name()
-			})
-			for _, e := range entries {
-				if expectedVersion != "" && !strings.Contains(e.Name(), expectedVersion) {
-					continue
-				}
-				candidate := filepath.Join(base, e.Name(), triplet, "bin")
-				exe := filepath.Join(candidate, compiler)
-				if _, err := os.Stat(exe); err == nil {
-					fmt.Println("[toob] Warning: Using unhashed local toolchain. For guaranteed reproducible CI builds, consider using the auto-provisioned toolchain.")
-					return candidate
-				}
-			}
+		toobPath := filepath.Join(home, ".toob", "toolchains", strings.TrimSuffix(prefix, "-"), expectedVersion)
+		if bin := toolchain.FindBinDir(toobPath, prefix); bin != "" {
+			return bin
 		}
 	}
 

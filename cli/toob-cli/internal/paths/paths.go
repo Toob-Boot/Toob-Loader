@@ -62,10 +62,8 @@ func FindProjectRoot(start string) (string, error) {
 	}
 
 	for {
-		// Check for Core Developer Monorepo
-		cmCandidate := filepath.Join(current, "CMakeLists.txt")
-		data, err := os.ReadFile(cmCandidate)
-		if err == nil && strings.Contains(string(data), "toob-boot") {
+		// Check for Core Developer Monorepo (structural check instead of file parsing)
+		if stat, err := os.Stat(filepath.Join(current, "toobloader", "core")); err == nil && stat.IsDir() {
 			return current, nil
 		}
 
