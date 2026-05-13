@@ -40,7 +40,9 @@ type RegistryConfig struct {
 
 
 
-// GetExpectedVersion returns the version specified in registry.json for a toolchain
+// GetExpectedVersion returns the version specified in registry.json for a toolchain.
+// Reads and parses registry.json from disk. Prefer GetExpectedVersionFromIndex when
+// the Index is already loaded.
 func GetExpectedVersion(prefix string, regDir string) string {
 	tcName := strings.TrimSuffix(prefix, "-")
 	data, err := os.ReadFile(filepath.Join(regDir, "registry.json"))
@@ -57,17 +59,19 @@ func GetExpectedVersion(prefix string, regDir string) string {
 	return ""
 }
 
-// GetExpectedSha256 returns the sha256 specified in registry.json for a toolchain
-func GetExpectedSha256(prefix string, regDir string) string {
+// GetExpectedVersionFromConfig returns the expected version from an already-parsed config.
+// Avoids redundant disk reads when the config is already loaded.
+func GetExpectedVersionFromConfig(prefix string, reg *RegistryConfig) string {
 	tcName := strings.TrimSuffix(prefix, "-")
-	data, err := os.ReadFile(filepath.Join(regDir, "registry.json"))
-	if err != nil {
-		return ""
+	if tcInfo, ok := reg.Toolchains[tcName]; ok {
+		return tcInfo.Version
 	}
-	var reg RegistryConfig
-	if err := json.Unmarshal(data, &reg); err != nil {
-		return ""
-	}
+	return ""
+}
+
+// GetExpectedSha256FromConfig returns the expected sha256 from an already-parsed config.
+func GetExpectedSha256FromConfig(prefix string, reg *RegistryConfig) string {
+	tcName := strings.TrimSuffix(prefix, "-")
 	if tcInfo, ok := reg.Toolchains[tcName]; ok {
 		osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
 		return tcInfo.Sha256[osArch]
@@ -446,6 +450,7 @@ func findBinDir(root string, prefix string) string {
 }
 
 // copyTree recursively copies src to dst. Used as fallback for EXDEV errors.
+// Uses hard-links where possible for instant, zero-disk-cost copies.
 func copyTree(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -457,17 +462,23 @@ func copyTree(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		
+
+		// Hard-link first (instant, shares inode), byte-copy fallback
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.Link(path, target); err == nil {
+			return nil
+		}
+
 		sInfo, err := d.Info()
 		if err != nil {
 			return err
 		}
-		
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		
 		return os.WriteFile(target, data, sInfo.Mode())
 	})
 }

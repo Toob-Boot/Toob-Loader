@@ -48,6 +48,12 @@ func parseChipArg(arg string) (string, string) {
 
 // Add installs a chip from the registry (not tracked by git).
 func (inst *Installer) Add(arg string) error {
+	// Async Matrix Fetch (Gap 4.1)
+	matrixChan := make(chan *registry.Matrix, 1)
+	go func() {
+		m, _ := inst.cache.FetchLiveMatrix()
+		matrixChan <- m
+	}()
 	name, version := parseChipArg(arg)
 	if inst.lock.HasChip(name) {
 		e := inst.lock.GetChip(name)
@@ -115,9 +121,13 @@ func (inst *Installer) Add(arg string) error {
 	}
 	fmt.Printf("Added chip '%s' (v%s) to lockfile [arch=%s, vendor=%s].\n", name, ci.Version, ci.Arch, ci.Vendor)
 	
-	if !ci.Verified {
-		fmt.Println("\n\033[33mWarning: This hardware configuration is marked as UNVERIFIED by the CI Compatibility Matrix. Build stability is not guaranteed.\033[0m")
+	// Wait up to 1 second for the matrix to avoid blocking
+	var matrix *registry.Matrix
+	select {
+	case matrix = <-matrixChan:
+	case <-time.After(1 * time.Second):
 	}
+	printMatrixCompatibility(matrix, ci.Name, ci.Version, ci.Verified)
 
 	fmt.Println("Registry link established. Run `toob build` to compile.")
 	return nil
@@ -125,6 +135,12 @@ func (inst *Installer) Add(arg string) error {
 
 // Spawn installs a chip as locally editable (tracked by git).
 func (inst *Installer) Spawn(arg string) error {
+	// Async Matrix Fetch (Gap 4.1)
+	matrixChan := make(chan *registry.Matrix, 1)
+	go func() {
+		m, _ := inst.cache.FetchLiveMatrix()
+		matrixChan <- m
+	}()
 	name, version := parseChipArg(arg)
 	if inst.lock.HasChip(name) {
 		e := inst.lock.GetChip(name)
@@ -229,9 +245,13 @@ func (inst *Installer) Spawn(arg string) error {
 	}
 	fmt.Printf("Spawned chip '%s' (v%s)  [locally editable]\n", name, ci.Version)
 	
-	if !ci.Verified {
-		fmt.Println("\n\033[33mWarning: This hardware configuration is marked as UNVERIFIED by the CI Compatibility Matrix. Build stability is not guaranteed.\033[0m")
+	// Wait up to 1 second for the matrix to avoid blocking
+	var matrix *registry.Matrix
+	select {
+	case matrix = <-matrixChan:
+	case <-time.After(1 * time.Second):
 	}
+	printMatrixCompatibility(matrix, ci.Name, ci.Version, ci.Verified)
 
 	return nil
 }
@@ -244,6 +264,36 @@ func moveToTrash(dir string) {
 	trashDir := filepath.Join(filepath.Dir(filepath.Dir(dir)), ".trash", filepath.Base(filepath.Dir(dir)), filepath.Base(dir)+"-"+time.Now().Format("20060102150405"))
 	os.MkdirAll(filepath.Dir(trashDir), 0o755)
 	os.Rename(dir, trashDir)
+}
+
+func printMatrixCompatibility(matrix *registry.Matrix, chipName, chipVersion string, verified bool) {
+	if !verified {
+		fmt.Println("\n\033[33mWarning: This hardware configuration is marked as UNVERIFIED by the CI Compatibility Matrix. Build stability is not guaranteed.\033[0m")
+		return
+	}
+
+	if matrix == nil {
+		return
+	}
+
+	if chipEntry, has := (*matrix)[chipName]; has {
+		// Normalize version string to handle mismatching prefixes (Gap 4.2)
+		searchVer := strings.TrimPrefix(chipVersion, "v")
+		for vKey, verEntry := range chipEntry.Versions {
+			if strings.TrimPrefix(vKey, "v") == searchVer {
+				var verifiedClis []string
+				for cliVer, info := range verEntry.VerifiedCliVersions {
+					if info.Status == "SUCCESS" {
+						verifiedClis = append(verifiedClis, cliVer)
+					}
+				}
+				if len(verifiedClis) > 0 {
+					fmt.Printf("\n\033[32m[toob] Chip %s v%s — Verified with CLI: %s\033[0m\n", chipName, chipVersion, strings.Join(verifiedClis, ", "))
+				}
+				break
+			}
+		}
+	}
 }
 
 // Remove uninstalls a chip and cleans up unshared dependencies.
@@ -349,6 +399,7 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 }
 
 // copyTree recursively copies src to dst.
+// Uses hard-links where possible for instant, zero-disk-cost copies.
 func copyTree(src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -373,12 +424,25 @@ func copyTree(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, 0o644)
+		return linkOrCopy(path, target)
 	})
+}
+
+// linkOrCopy attempts a hard-link first, falling back to a full byte-copy.
+// Hard-links share the inode and are instant with zero additional disk cost.
+// Fallback handles cross-device mounts, FAT32, and Windows restrictions.
+func linkOrCopy(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
 }
 
 

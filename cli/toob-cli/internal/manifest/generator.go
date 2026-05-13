@@ -298,7 +298,7 @@ func VerifyMacroUsage(headerPath, bootloaderDir string) error {
 		errb.WriteString("  2. The manifest is generating dead code that should be pruned.\n")
 		errb.WriteString("Fix the C code to use these macros, or remove them from the generator.\n")
 		errb.WriteString("======================================================================\n")
-		return fmt.Errorf(errb.String())
+		return fmt.Errorf("%s", errb.String())
 	}
 
 	fmt.Println("[Manifest Verifier] SUCCESS: All generated macros are perfectly synchronized with the C code!")

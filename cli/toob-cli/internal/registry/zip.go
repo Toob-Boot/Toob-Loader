@@ -2,7 +2,6 @@ package registry
 
 import (
 	"archive/zip"
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,8 +10,9 @@ import (
 	"strings"
 )
 
-// downloadAndExtractZip downloads a ZIP archive and extracts it to targetDir.
-// It automatically strips the root folder (e.g. 'Toob-Registry-main/') from the zip entries.
+// downloadAndExtractZip downloads a ZIP archive to a temp file and extracts it to targetDir.
+// Streams directly to disk to avoid holding the full archive in RAM.
+// Automatically strips the root folder (e.g. 'Toob-Registry-main/') from zip entries.
 func downloadAndExtractZip(url string, targetDir string) error {
 	resp, err := http.Get(url)
 	if err != nil {
@@ -24,15 +24,24 @@ func downloadAndExtractZip(url string, targetDir string) error {
 		return fmt.Errorf("bad status %d from %s", resp.StatusCode, url)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Stream to temp file instead of buffering entire archive in RAM
+	tmpFile, err := os.CreateTemp("", "toob-registry-*.zip")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
+	defer os.Remove(tmpFile.Name())
+	defer tmpFile.Close()
 
-	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+		return fmt.Errorf("failed to download archive: %w", err)
+	}
+	tmpFile.Close()
+
+	zipReader, err := zip.OpenReader(tmpFile.Name())
 	if err != nil {
 		return err
 	}
+	defer zipReader.Close()
 
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return err
@@ -42,9 +51,9 @@ func downloadAndExtractZip(url string, targetDir string) error {
 		// Strip the top-level directory
 		parts := strings.SplitN(filepath.ToSlash(f.Name), "/", 2)
 		if len(parts) < 2 || parts[1] == "" {
-			continue // Skip the root directory itself
+			continue
 		}
-		
+
 		relPath := filepath.FromSlash(parts[1])
 		destPath := filepath.Join(targetDir, relPath)
 

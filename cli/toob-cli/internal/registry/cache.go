@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/toob-boot/toob/internal/paths"
@@ -119,11 +120,49 @@ func (c *Cache) lock() (func(), error) {
 	lockDir := filepath.Join(filepath.Dir(c.dir), "registry.lock")
 	for i := 0; i < 100; i++ { // wait up to 10 seconds
 		if err := os.Mkdir(lockDir, 0o755); err == nil {
-			return func() { os.Remove(lockDir) }, nil
+			// Write PID file for stale-lock detection
+			pidFile := filepath.Join(lockDir, "pid")
+			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644)
+			return func() { os.RemoveAll(lockDir) }, nil
+		}
+
+		// Check if the locking process is still alive
+		if i%10 == 9 { // every ~1 second
+			if c.tryCleanStaleLock(lockDir) {
+				continue // Retry immediately after cleaning stale lock
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("timeout waiting for registry lock. Is another toob process running? (If not, delete %s)", lockDir)
+}
+
+// tryCleanStaleLock reads the PID from the lock directory and checks if the process is alive.
+// Returns true if a stale lock was cleaned up.
+func (c *Cache) tryCleanStaleLock(lockDir string) bool {
+	pidBytes, err := os.ReadFile(filepath.Join(lockDir, "pid"))
+	if err != nil {
+		return false
+	}
+	pid := 0
+	if _, err := fmt.Sscanf(string(pidBytes), "%d", &pid); err != nil || pid == 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		// Process doesn't exist — stale lock
+		fmt.Printf("[toob] Cleaning stale registry lock (PID %d no longer running)\n", pid)
+		os.RemoveAll(lockDir)
+		return true
+	}
+	// On Unix, FindProcess always succeeds. Send signal 0 to probe liveness.
+	// On Windows, FindProcess fails for dead processes, so reaching here means alive.
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		fmt.Printf("[toob] Cleaning stale registry lock (PID %d no longer running)\n", pid)
+		os.RemoveAll(lockDir)
+		return true
+	}
+	return false
 }
 
 // getHubURL returns the URL of the Toob Hub API
