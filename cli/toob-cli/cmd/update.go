@@ -11,6 +11,7 @@ import (
 
 	"github.com/minio/selfupdate"
 	"github.com/spf13/cobra"
+	"aead.dev/minisign"
 	"github.com/toob-boot/toob/internal/updater"
 )
 
@@ -39,7 +40,7 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 	return
 }
 
-func fetchChecksum(url string, insecure bool) (string, error) {
+func fetchMinisig(url string, insecure bool) (string, error) {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
 	if insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -58,11 +59,7 @@ func fetchChecksum(url string, insecure bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	parts := strings.Fields(string(body))
-	if len(parts) > 0 {
-		return parts[0], nil
-	}
-	return "", fmt.Errorf("empty checksum file")
+	return string(body), nil
 }
 
 var updateCmd = &cobra.Command{
@@ -121,19 +118,29 @@ var updateCmd = &cobra.Command{
 		}
 		fmt.Println()
 
-		if res.ChecksumURL != "" {
-			fmt.Println("[toob] Verifying SHA256 signature (Supply Chain Security)...")
-			expectedHash, err := fetchChecksum(res.ChecksumURL, insecure)
+		if res.MinisigURL != "" {
+			fmt.Println("[toob] Verifying Minisign signature (Supply Chain Security)...")
+			sigStr, err := fetchMinisig(res.MinisigURL, insecure)
 			if err != nil {
-				return fmt.Errorf("failed to fetch checksum signature: %w", err)
+				return fmt.Errorf("failed to fetch minisign signature: %w", err)
 			}
-			actualHash := fmt.Sprintf("%x", sha256.Sum256(buf.Bytes()))
-			if !strings.EqualFold(actualHash, expectedHash) {
-				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Checksum mismatch!\nExpected: %s\nActual:   %s", expectedHash, actualHash)
+			
+			sig, err := minisign.DecodeSignature(sigStr)
+			if err != nil {
+				return fmt.Errorf("failed to decode minisign signature: %w", err)
 			}
-			fmt.Println("[toob] Signature OK.")
+			
+			pubKey, err := updater.GetPublicKey()
+			if err != nil {
+				return fmt.Errorf("FATAL: Hardcoded public key is corrupted: %w", err)
+			}
+			
+			if !minisign.Verify(pubKey, buf.Bytes(), sig) {
+				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Minisign signature invalid or binary was tampered with!")
+			}
+			fmt.Println("[toob] Signature OK. Binary is authentic.")
 		} else {
-			fmt.Println("[toob] WARN: No .sha256 signature found in release. Bypassing checksum validation.")
+			return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: No .minisig signature found in release. Downgrade attack prevented.")
 		}
 
 		fmt.Println("[toob] Applying update...")

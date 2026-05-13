@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -119,10 +120,16 @@ func runDockerBuild(root string) error {
 		}
 	}
 
+	compilerTag := "latest"
+	lfPath := paths.LockfilePath(root)
+	if lf, err := lockfile.Load(lfPath); err == nil && lf.Environment.Compiler != "" {
+		compilerTag = lf.Environment.Compiler
+	}
+
 	// Build the port contract struct — this is the single source of truth
 	// for what we pass to the compiler container.
 	input := ports.DockerBuildInput{
-		Image:       "mannomannx/toob-compiler:latest",
+		Image:       fmt.Sprintf("mannomannx/toob-compiler:%s", compilerTag),
 		Workspace:   root,
 		RegistryDir: regDir,
 		WorkDir:     "/workspace",
@@ -137,20 +144,59 @@ func runDockerBuild(root string) error {
 		}
 	}
 
+	// 1. Ensure image is fresh/pulled
+	if compilerTag == "latest" {
+		fmt.Printf("[toob] Pulling latest compiler image...\n")
+		exec.Command("docker", "pull", input.Image).Run()
+	} else {
+		if err := exec.Command("docker", "image", "inspect", input.Image).Run(); err != nil {
+			fmt.Printf("[toob] Compiler image %s not found locally. Pulling...\n", compilerTag)
+			exec.Command("docker", "pull", input.Image).Run()
+		}
+	}
+
 	// Protocol Handshake: verify the container image speaks our protocol
 	if err := checkProtocolVersion(input.Image); err != nil {
 		return err
 	}
 
 	// Derive Docker arguments from the port struct
-	args := []string{
-		"run", "--rm",
+	args := []string{"run", "--rm", "-i"}
+
+	if stat, _ := os.Stdout.Stat(); (stat.Mode() & os.ModeCharDevice) != 0 {
+		args = append(args, "-t")
+	}
+
+	if runtime.GOOS != "windows" {
+		if u, err := user.Current(); err == nil {
+			args = append(args, "-u", fmt.Sprintf("%s:%s", u.Uid, u.Gid))
+		}
+	}
+
+	args = append(args,
 		"-v", fmt.Sprintf("%s:/workspace", input.Workspace),
 		"-v", fmt.Sprintf("%s:/root/.toob/registry", input.RegistryDir),
+	)
+
+	// Version-segmented ccache
+	if home, err := os.UserHomeDir(); err == nil {
+		ccacheDir := filepath.Join(home, ".toob", "ccache", compilerTag)
+		os.MkdirAll(ccacheDir, 0755)
+		args = append(args, "-v", fmt.Sprintf("%s:/ccache", ccacheDir), "-e", "CCACHE_DIR=/ccache")
 	}
+
+	hasProxy := false
 	for k, v := range input.ProxyVars {
 		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
+		hasProxy = true
 	}
+
+	if hasProxy && runtime.GOOS == "linux" {
+		if _, err := os.Stat("/etc/ssl/certs"); err == nil {
+			args = append(args, "-v", "/etc/ssl/certs:/etc/ssl/certs:ro")
+		}
+	}
+
 	args = append(args, "-w", input.WorkDir, input.Image, "toob", "build", "--native")
 
 	if input.Manifest != "" {
@@ -166,7 +212,7 @@ func runDockerBuild(root string) error {
 		}
 	}
 
-	fmt.Println("[toob] Starting Docker container (toob-boot/toob-compiler)...")
+	fmt.Printf("[toob] Starting Docker container (mannomannx/toob-compiler:%s)...\n", compilerTag)
 	return run(root, "docker", args...)
 }
 
@@ -541,6 +587,7 @@ func runNativeBuild(root string) error {
 func run(dir string, name string, args ...string) error {
 	c := exec.Command(name, args...)
 	c.Dir = dir
+	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()

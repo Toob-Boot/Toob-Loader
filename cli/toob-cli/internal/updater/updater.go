@@ -48,7 +48,7 @@ type CheckResult struct {
 	Available   bool
 	Version     string
 	DownloadURL string
-	ChecksumURL string
+	MinisigURL  string
 }
 
 func getCachePath() (string, error) {
@@ -173,14 +173,14 @@ func fetchUpdateFromGitHub(currentVersion, url string, insecure bool) (*CheckRes
 		ext = ".exe"
 	}
 
-	var downloadURL, checksumURL string
+	var downloadURL, minisigURL string
 	for _, a := range release.Assets {
 		lowerName := strings.ToLower(a.Name)
 		if strings.Contains(lowerName, osArchPart) && strings.HasSuffix(lowerName, ext) {
 			downloadURL = a.BrowserDownloadURL
 		}
-		if strings.Contains(lowerName, osArchPart) && strings.HasSuffix(lowerName, ext+".sha256") {
-			checksumURL = a.BrowserDownloadURL
+		if strings.Contains(lowerName, osArchPart) && strings.HasSuffix(lowerName, ext+".minisig") {
+			minisigURL = a.BrowserDownloadURL
 		}
 	}
 
@@ -209,7 +209,7 @@ func fetchUpdateFromGitHub(currentVersion, url string, insecure bool) (*CheckRes
 
 	// If currentVersion is empty (FetchReleaseByTag), always return Available: true
 	if currentVersion == "" || semver.Compare(latestVer, currentVersion) > 0 {
-		return &CheckResult{Available: true, Version: latestVer, DownloadURL: downloadURL, ChecksumURL: checksumURL}, nil
+		return &CheckResult{Available: true, Version: latestVer, DownloadURL: downloadURL, MinisigURL: minisigURL}, nil
 	}
 
 	return &CheckResult{Available: false}, nil

@@ -388,6 +388,11 @@ func extractTar(tr *tar.Reader, destDir string) error {
 
 		target := filepath.Join(destDir, header.Name)
 
+		// Prevention of Zip-Slip / Path Traversal for TAR archives
+		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) {
+			return fmt.Errorf("illegal file path (zip slip vulnerability): %s", target)
+		}
+
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0755); err != nil {

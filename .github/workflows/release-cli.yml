@@ -25,8 +25,10 @@ jobs:
           go-version: "1.26.2"
           cache: true
 
-      - name: Install UPX
-        run: sudo apt-get update && sudo apt-get install -y upx-ucl
+      - name: Install UPX & Minisign
+        run: |
+          sudo apt-get update && sudo apt-get install -y upx-ucl
+          go install aead.dev/minisign/cmd/minisign@latest
 
       - name: Verify Protocol Contracts
         working-directory: cli/toob-cli
@@ -34,6 +36,8 @@ jobs:
 
       - name: Hermetic Cross-Compilation (Parallel)
         working-directory: cli/toob-cli
+        env:
+          MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
         run: |
           TARGETS="windows/amd64/.exe linux/amd64/ darwin/amd64/ darwin/arm64/"
 
@@ -55,6 +59,11 @@ jobs:
             fi
             
             sha256sum "toob-$OS-$ARCH$EXT" > "toob-$OS-$ARCH$EXT.sha256"
+            
+            # Cryptographic Signature (Supply Chain Security)
+            echo "$MINISIGN_PRIVATE_KEY" | base64 -d > toob.key
+            ~/go/bin/minisign -Sm "toob-$OS-$ARCH$EXT" -s toob.key -W
+            
             echo ">>> Finished $OS-$ARCH"
           }
 
@@ -63,6 +72,7 @@ jobs:
           done
           
           wait
+          rm -f toob.key || true
           echo ">>> All parallel builds completed successfully."
 
       - name: Extract Tag Name
