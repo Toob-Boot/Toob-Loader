@@ -3,6 +3,7 @@ package installer
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"

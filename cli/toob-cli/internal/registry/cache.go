@@ -170,7 +170,7 @@ func getHubURL() string {
 	if url := os.Getenv("TOOB_HUB_URL"); url != "" {
 		return url
 	}
-	return "http://ci.the-toob.com:9000" // Default Hetzner CI Daemon
+	return "https://ci.the-toob.com" // Default Hetzner CI Daemon (via Caddy)
 }
 
 // Sync updates the registry to the latest version.
