@@ -172,7 +172,8 @@ func (inst *Installer) Spawn(arg string) error {
 		if spawnErr != nil {
 			fmt.Println("[toob] Spawn failed. Rolling back created directories...")
 			for _, dir := range rollback {
-				os.RemoveAll(dir)
+				// Gap 7.2: Use moveToTrash to prevent NTFS zombie folders on rollback failure
+				moveToTrash(dir)
 			}
 		}
 	}()
@@ -438,11 +439,30 @@ func linkOrCopy(src, dst string) error {
 	if err := os.Link(src, dst); err == nil {
 		return nil
 	}
-	data, err := os.ReadFile(src)
+	
+	stat, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0o644)
+	origMode := stat.Mode()
+	
+	// Gap 7.2: Atomic copyTree Fallback with Windows NTFS Lock Retries
+	var writeErr error
+	delays := []time.Duration{10 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond}
+	for _, d := range delays {
+		// Use O(1) memory streaming instead of os.ReadFile to prevent Out-Of-Memory (OOM) on large binaries
+		srcFile, _ := os.Open(src)
+		dstFile, _ := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, origMode)
+		_, writeErr = io.Copy(dstFile, srcFile)
+		srcFile.Close()
+		dstFile.Close()
+		
+		if writeErr == nil {
+			return nil
+		}
+		time.Sleep(d)
+	}
+	return writeErr
 }
 
 

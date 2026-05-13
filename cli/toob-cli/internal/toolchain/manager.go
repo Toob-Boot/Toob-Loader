@@ -84,40 +84,28 @@ func GetExpectedSha256FromConfig(prefix string, reg *RegistryConfig) string {
 func EnsureAvailable(prefix string, expectedVersion string, regDir string) (string, error) {
 	tcName := strings.TrimSuffix(prefix, "-")
 
-	// 1. Cache Invalidation Check
-	// If a folder exists, verify its .toob_version matches expectedVersion.
-	// If not, we wipe it and re-download.
 	homeDir, err := paths.ToobHome()
 	if err != nil {
 		return "", err
 	}
 	localDir := filepath.Join(homeDir, "toolchains")
-	tcRoot := filepath.Join(localDir, tcName)
-	var tcPath string
-	if expectedVersion != "" {
-		versionFile := filepath.Join(tcRoot, ".toob_version")
-		cachedVersionBytes, err := os.ReadFile(versionFile)
-		if err == nil {
-			cachedVersion := strings.TrimSpace(string(cachedVersionBytes))
-			if cachedVersion == expectedVersion {
-				tcPath = findBinDir(tcRoot, prefix)
-				if tcPath != "" {
-					return tcPath, nil
-				}
-			} else {
-				fmt.Printf("[toob] Auto-provisioned toolchain cache is outdated (v%s). Upgrading to v%s...\n", cachedVersion, expectedVersion)
-			}
-		}
-	}
 	
-	// Ensure a clean slate for extraction if it's outdated or corrupted.
-	_ = os.RemoveAll(tcRoot)
+	if expectedVersion == "" {
+		expectedVersion = "latest"
+	}
+	tcRoot := filepath.Join(localDir, tcName, expectedVersion)
 
-	// 2. Not found or outdated, we must auto-provision it.
-	fmt.Printf("[toob] Toolchain '%s' not found locally or outdated.\n", tcName)
+	// 1. Cache Check (Gap 1.1 Versioning)
+	if tcPath := findBinDir(tcRoot, prefix); tcPath != "" {
+		return tcPath, nil
+	}
+
+	// Ensure a clean slate for extraction if it's corrupted.
+	_ = RetryWindowsLocks(func() error { return os.RemoveAll(tcRoot) })
+
+	// 2. Not found or corrupted, we must auto-provision it.
+	fmt.Printf("[toob] Toolchain '%s' (v%s) not found locally.\n", tcName, expectedVersion)
 	fmt.Printf("[toob] Looking up auto-provisioning URL in registry...\n")
-
-
 
 	regJSON := filepath.Join(regDir, "registry.json")
 	data, err := os.ReadFile(regJSON)
@@ -145,133 +133,282 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 
 	expectedSha256 := tcInfo.Sha256[osArch]
 
-	if err := downloadAndExtract(downloadURL, filepath.Join(localDir, tcName), expectedSha256, expectedVersion); err != nil {
+	if err := downloadAndExtract(downloadURL, tcRoot, expectedSha256, expectedVersion); err != nil {
 		return "", fmt.Errorf("failed to download and extract toolchain: %w", err)
 	}
 
 	// 3. Find the actual /bin directory recursively
-	tcPath = findBinDir(filepath.Join(localDir, tcName), prefix)
+	tcPath := findBinDir(tcRoot, prefix)
 	if tcPath == "" {
-		return "", fmt.Errorf("auto-provisioning completed but /bin directory with %sgcc not found inside %s", prefix, filepath.Join(localDir, tcName))
+		return "", fmt.Errorf("auto-provisioning completed but /bin directory with %sgcc not found inside %s", prefix, tcRoot)
 	}
 
 	fmt.Printf("[toob] Successfully installed toolchain to %s\n", tcPath)
 	return tcPath, nil
 }
 
+// RetryWindowsLocks wraps an operation with exponential backoff to bypass temporary NTFS locks (e.g. from Defender)
+func RetryWindowsLocks(op func() error) error {
+	var err error
+	delays := []time.Duration{
+		10 * time.Millisecond,
+		50 * time.Millisecond,
+		100 * time.Millisecond,
+		500 * time.Millisecond,
+		1000 * time.Millisecond,
+		2000 * time.Millisecond,
+	}
+	for i, d := range delays {
+		err = op()
+		if err == nil {
+			return nil
+		}
+		if i == 3 {
+			fmt.Printf("[toob] Waiting for background file lock release (Windows Defender/IDE)...\n")
+		}
+		time.Sleep(d)
+	}
+	return err
+}
+
 func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) error {
+	// Setup download cache directory
+	homeDir, _ := paths.ToobHome()
+	cacheDir := filepath.Join(homeDir, "cache", "downloads")
+	os.MkdirAll(cacheDir, 0755)
+
+	tcName := filepath.Base(filepath.Dir(destDir))
+	archivePath := filepath.Join(cacheDir, fmt.Sprintf("%s-%s.archive", tcName, expectedVersion))
+	lockPath := archivePath + ".lock"
+
+	// Wait for exclusive download lock to prevent concurrent HTTP Range appending corruption
+	for {
+		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err == nil {
+			lockFile.Close()
+			defer os.Remove(lockPath)
+			break
+		}
+		fmt.Printf("[toob] Waiting for another process to finish downloading %s...\n", tcName)
+		time.Sleep(2 * time.Second)
+	}
+
+	var startBytes int64 = 0
+	if stat, err := os.Stat(archivePath); err == nil {
+		startBytes = stat.Size()
+	}
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("[toob] Downloading %s\n", url)
+	if startBytes > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", startBytes))
+		fmt.Printf("[toob] Resuming download %s from byte %d...\n", url, startBytes)
+	} else {
+		fmt.Printf("[toob] Downloading %s\n", url)
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode == 416 {
+		// Requested Range Not Satisfiable - we probably downloaded the whole file already!
+		fmt.Printf("[toob] Download already complete.\n")
+	} else if resp.StatusCode == 206 || resp.StatusCode == 200 {
+		var out *os.File
+		if resp.StatusCode == 206 {
+			// Resuming
+			out, err = os.OpenFile(archivePath, os.O_WRONLY|os.O_APPEND, 0644)
+		} else {
+			// Server didn't support range or we started from 0
+			out, err = os.Create(archivePath)
+			startBytes = 0 // Reset
+		}
+		if err != nil {
+			return err
+		}
+
+		bar := progressbar.NewOptions64(
+			resp.ContentLength+startBytes,
+			progressbar.OptionSetDescription("Downloading"),
+			progressbar.OptionSetWriter(os.Stderr),
+			progressbar.OptionShowBytes(true),
+			progressbar.OptionSetWidth(30),
+			progressbar.OptionThrottle(150*time.Millisecond),
+			progressbar.OptionShowCount(),
+			progressbar.OptionOnCompletion(func() {
+				fmt.Fprint(os.Stderr, "\n")
+			}),
+			progressbar.OptionSpinnerType(14),
+			progressbar.OptionFullWidth(),
+		)
+		bar.Add64(startBytes) // Fast-forward progress bar
+
+		if _, err := io.Copy(io.MultiWriter(out, bar), resp.Body); err != nil {
+			out.Close()
+			return err
+		}
+		out.Close()
+	} else {
 		return fmt.Errorf("server returned %d", resp.StatusCode)
 	}
 
-	bar := progressbar.NewOptions64(
-		resp.ContentLength,
-		progressbar.OptionSetDescription("Downloading"),
-		progressbar.OptionSetWriter(os.Stderr),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionSetWidth(30),
-		progressbar.OptionThrottle(150*time.Millisecond),
-		progressbar.OptionShowCount(),
-		progressbar.OptionOnCompletion(func() {
-			fmt.Fprint(os.Stderr, "\n")
-		}),
-		progressbar.OptionSpinnerType(14),
-		progressbar.OptionFullWidth(),
-	)
-	
-	tmpFile, err := os.CreateTemp("", "toob-toolchain-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpFile.Name())
-	defer tmpFile.Close()
-
-	if _, err := io.Copy(io.MultiWriter(tmpFile, bar), resp.Body); err != nil {
-		return err
-	}
-
-	// Check SHA256 if expected
+	// Verify SHA256 of the FULL file
 	if expectedSha256 != "" {
-		tmpFile.Seek(0, 0)
 		hasher := sha256.New()
-		if _, err := io.Copy(hasher, tmpFile); err != nil {
-			return fmt.Errorf("failed to compute hash: %w", err)
+		f, err := os.Open(archivePath)
+		if err != nil {
+			return err
 		}
+		io.Copy(hasher, f)
+		f.Close()
+		
 		actualSha256 := hex.EncodeToString(hasher.Sum(nil))
 		if actualSha256 != expectedSha256 {
+			// Corrupt! Delete it and fail.
+			os.Remove(archivePath)
 			return fmt.Errorf("SHA256 mismatch!\nExpected: %s\nGot:      %s", expectedSha256, actualSha256)
 		}
 		fmt.Printf("[toob] Checksum verified.\n")
 	}
 
-	// Seek back to start for extraction
-	tmpFile.Seek(0, 0)
-
 	tmpDestDir := fmt.Sprintf("%s.tmp.%d", destDir, os.Getpid())
-	_ = os.RemoveAll(tmpDestDir)
+	_ = RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
 	if err := os.MkdirAll(tmpDestDir, 0755); err != nil {
 		return err
 	}
 
 	var extractErr error
 	if strings.HasSuffix(url, ".zip") {
-		extractErr = extractZipFast(tmpFile.Name(), tmpDestDir)
+		extractErr = extractZipFast(archivePath, tmpDestDir)
 		if extractErr != nil {
 			fmt.Printf("\n[toob] Fast native zip failed. Falling back to Go extraction...\n")
-			tmpFile.Seek(0, 0)
-			extractErr = extractZip(tmpFile.Name(), tmpDestDir)
+			extractErr = extractZip(archivePath, tmpDestDir)
 		}
 	} else if strings.HasSuffix(url, ".tar.gz") || strings.HasSuffix(url, ".tar.xz") {
-		extractErr = extractTarFast(tmpFile.Name(), tmpDestDir)
+		extractErr = extractTarFast(archivePath, tmpDestDir)
 		if extractErr != nil {
 			fmt.Printf("\n[toob] Fast native tar failed. Falling back to Go extraction...\n")
-			tmpFile.Seek(0, 0)
+			f, _ := os.Open(archivePath)
 			if strings.HasSuffix(url, ".tar.gz") {
-				extractErr = extractTarGz(tmpFile, tmpDestDir)
+				extractErr = extractTarGz(f, tmpDestDir)
 			} else {
-				extractErr = extractTarXz(tmpFile, tmpDestDir)
+				extractErr = extractTarXz(f, tmpDestDir)
 			}
+			f.Close()
 		}
 	} else {
 		extractErr = fmt.Errorf("unsupported archive format for url: %s", url)
 	}
 
 	if extractErr != nil {
-		os.RemoveAll(tmpDestDir)
+		os.Remove(archivePath) // Gap 4: Wipe broken archive from cache to avoid endless loops
+		RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
 		return extractErr
 	}
 
+	// Post-process extracted files to push them into CAS
+	if err := postProcessCAS(tmpDestDir); err != nil {
+		RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
+		return fmt.Errorf("CAS processing failed: %w", err)
+	}
+
 	// Atomic commit
-	_ = os.RemoveAll(destDir)
-	if err := os.Rename(tmpDestDir, destDir); err != nil {
+	_ = RetryWindowsLocks(func() error { return os.RemoveAll(destDir) })
+	if err := RetryWindowsLocks(func() error { return os.Rename(tmpDestDir, destDir) }); err != nil {
 		if strings.Contains(err.Error(), "cross-device link") {
 			// Fallback to recursive copy for cross-volume mounts (e.g. Docker/Windows)
 			if copyErr := copyTree(tmpDestDir, destDir); copyErr != nil {
 				return fmt.Errorf("failed to finalize installation (cross-device fallback failed): %w", copyErr)
 			}
-			os.RemoveAll(tmpDestDir)
+			RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
 		} else {
 			return fmt.Errorf("failed to finalize installation: %w", err)
 		}
 	}
 
-	if expectedVersion != "" {
-		_ = os.WriteFile(filepath.Join(destDir, ".toob_version"), []byte(expectedVersion), 0o644)
-	}
-
+	os.Remove(archivePath) // Gap 3: Free up disk space after successful installation
 	return nil
+}
+
+func postProcessCAS(extractedDir string) error {
+	homeDir, _ := paths.ToobHome()
+	casDir := filepath.Join(homeDir, "store", "cas")
+	os.MkdirAll(casDir, 0755)
+
+	return filepath.WalkDir(extractedDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+
+		// Hash file
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		hasher := sha256.New()
+		io.Copy(hasher, f)
+		f.Close()
+
+		hashStr := hex.EncodeToString(hasher.Sum(nil))
+		casPath := filepath.Join(casDir, hashStr)
+
+		origStat, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		origMode := origStat.Mode()
+
+		// Check if it's already in CAS
+		if _, err := os.Stat(casPath); os.IsNotExist(err) {
+			// Move into CAS
+			tmpCas := fmt.Sprintf("%s.tmp.%d", casPath, os.Getpid())
+			if err := RetryWindowsLocks(func() error { return os.Rename(path, tmpCas) }); err != nil {
+				// If rename fails (e.g. cross volume), copy it using O(1) memory streaming to prevent OOM
+				srcFile, _ := os.Open(path)
+				dstFile, _ := os.OpenFile(tmpCas, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, origMode)
+				io.Copy(dstFile, srcFile)
+				srcFile.Close()
+				dstFile.Close()
+				os.Remove(path) // Remove original
+			}
+			
+			// Gap 1: Protect CAS store from accidental user modifications
+			var roMode fs.FileMode = 0444
+			if origMode&0111 != 0 {
+				roMode = 0555 // Preserve executable bit for read-only
+			}
+			os.Chmod(tmpCas, roMode)
+			if err := RetryWindowsLocks(func() error { return os.Rename(tmpCas, casPath) }); err != nil {
+				// We lost the race condition (another process created casPath in the exact same millisecond).
+				// Since the file is mathematically identical (SHA256), we just drop our temp file and use theirs!
+				os.Remove(tmpCas)
+			}
+		} else {
+			// Already in CAS, just remove the extracted file so we can hardlink it
+			os.Remove(path)
+		}
+
+		// Now create a hardlink from CAS to the original path
+		if err := os.Link(casPath, path); err != nil {
+			// If hardlink fails (e.g. cross-device), copy from CAS using O(1) memory streaming to prevent OOM
+			srcFile, _ := os.Open(casPath)
+			dstFile, _ := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, origMode)
+			io.Copy(dstFile, srcFile)
+			srcFile.Close()
+			dstFile.Close()
+		}
+
+		return nil
+	})
 }
 
 func extractTarFast(archivePath, destDir string) error {
