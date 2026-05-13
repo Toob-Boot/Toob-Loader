@@ -1,0 +1,55 @@
+name: Sync CLI Release to Compiler
+
+# Triggered by Toob-CLI-Release when a CLI release is published (moved out of draft).
+# Updates the compiler manifest so the Enforcer can tag a new compiler version.
+on:
+  repository_dispatch:
+    types: [cli_published]
+
+permissions:
+  contents: write
+
+jobs:
+  update-manifest:
+    name: Update Compiler Manifest
+    runs-on: ubuntu-latest
+    if: ${{ github.event.client_payload.version != '' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          # PAT ensures the push triggers the semver-enforcer workflow
+          token: ${{ secrets.RELEASE_TARGET_TOKEN }}
+
+      - name: Validate & Update Manifest
+        run: |
+          CLI_TAG="${{ github.event.client_payload.version }}"
+
+          if [[ ! "$CLI_TAG" =~ ^cli/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo ">>> FATAL: Invalid CLI tag format: '$CLI_TAG'. Expected 'cli/vX.Y.Z'."
+            exit 1
+          fi
+
+          RAW_CLI=${CLI_TAG#cli/v}
+
+          echo ">>> Updating compiler manifest with CLI v${RAW_CLI}..."
+          jq --arg ver "$RAW_CLI" --arg ref "$CLI_TAG" \
+            '.cli.version = $ver | .cli.source.ref = $ref' \
+            compiler/compiler_manifest.json > tmp_manifest.json \
+            && mv tmp_manifest.json compiler/compiler_manifest.json
+
+          git config user.name "Toob Release Sync"
+          git config user.email "sync@toob-boot.io"
+          git add compiler/compiler_manifest.json
+
+          # Skip if manifest already matches (idempotent)
+          if git diff --cached --quiet; then
+            echo ">>> Manifest already up to date. Nothing to commit."
+            exit 0
+          fi
+
+          git commit -m "chore(compiler): update CLI dependency to ${CLI_TAG}"
+          git push origin HEAD:main
+
+          echo ">>> [SUCCESS] Manifest updated. Enforcer will tag automatically."
