@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "compiler_version": "1.0.1",
+  "compiler_version": "1.0.2",
   "protocol_version": 1,
   "base_image": {
     "image": "ubuntu:26.04",
