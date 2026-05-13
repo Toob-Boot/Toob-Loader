@@ -48,6 +48,13 @@ func downloadAndExtractZip(url string, targetDir string) error {
 		relPath := filepath.FromSlash(parts[1])
 		destPath := filepath.Join(targetDir, relPath)
 
+		// Zip-Slip protection
+		cleanDest := filepath.Clean(destPath)
+		cleanTarget := filepath.Clean(targetDir) + string(os.PathSeparator)
+		if !strings.HasPrefix(cleanDest, cleanTarget) {
+			return fmt.Errorf("illegal path (zip-slip): %s", destPath)
+		}
+
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(destPath, 0o755)
 			continue
