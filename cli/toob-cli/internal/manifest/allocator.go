@@ -49,34 +49,35 @@ func (a *Allocator) GetSectorSizeAt(addr uint32) (uint32, error) {
 
 func (a *Allocator) advanceToWritable(addr uint32) (uint32, error) {
 	for {
-		inReserved := false
-		for _, r := range a.regions {
-			if r.Type == "reserved" {
-				base := r.Base
-				size := r.Size
-				if addr >= base && addr < base+size {
-					addr = base + size
-					inReserved = true
-					break
+		for {
+			inReserved := false
+			for _, r := range a.regions {
+				if r.Type == "reserved" {
+					base := r.Base
+					size := r.Size
+					if addr >= base && addr < base+size {
+						addr = base + size
+						inReserved = true
+						break
+					}
 				}
 			}
+			if !inReserved {
+				break
+			}
 		}
-		if !inReserved {
-			break
-		}
-	}
 
-	secSz, err := a.GetSectorSizeAt(addr)
-	if err != nil {
-		return 0, fmt.Errorf("advanceToWritable pushed address out of bounds: %w", err)
-	}
-	if secSz > 0 {
-		if addr%secSz != 0 {
-			addr = ((addr + secSz - 1) / secSz) * secSz
-			return a.advanceToWritable(addr)
+		secSz, err := a.GetSectorSizeAt(addr)
+		if err != nil {
+			return 0, fmt.Errorf("advanceToWritable pushed address out of bounds: %w", err)
 		}
+		if secSz > 0 && addr%secSz != 0 {
+			addr = ((addr + secSz - 1) / secSz) * secSz
+			// Continue the outer loop to check if the newly aligned address hits a reserved region
+			continue
+		}
+		return addr, nil
 	}
-	return addr, nil
 }
 
 func (a *Allocator) Allocate(budgetReq uint32, forceAlign uint32, name string) (uint32, uint32, error) {

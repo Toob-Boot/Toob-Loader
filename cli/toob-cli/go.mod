@@ -3,6 +3,7 @@ module github.com/toob-boot/toob
 go 1.26.2
 
 require (
+	aead.dev/minisign v0.3.0
 	github.com/BurntSushi/toml v1.6.0
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/minio/selfupdate v0.6.0
@@ -13,7 +14,6 @@ require (
 )
 
 require (
-	aead.dev/minisign v0.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect

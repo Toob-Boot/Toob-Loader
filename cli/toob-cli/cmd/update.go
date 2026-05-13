@@ -2,12 +2,10 @@ package cmd
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/minio/selfupdate"
 	"github.com/spf13/cobra"
@@ -125,17 +123,12 @@ var updateCmd = &cobra.Command{
 				return fmt.Errorf("failed to fetch minisign signature: %w", err)
 			}
 			
-			sig, err := minisign.DecodeSignature(sigStr)
-			if err != nil {
-				return fmt.Errorf("failed to decode minisign signature: %w", err)
-			}
-			
 			pubKey, err := updater.GetPublicKey()
 			if err != nil {
 				return fmt.Errorf("FATAL: Hardcoded public key is corrupted: %w", err)
 			}
 			
-			if !minisign.Verify(pubKey, buf.Bytes(), sig) {
+			if !minisign.Verify(pubKey, buf.Bytes(), []byte(sigStr)) {
 				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Minisign signature invalid or binary was tampered with!")
 			}
 			fmt.Println("[toob] Signature OK. Binary is authentic.")

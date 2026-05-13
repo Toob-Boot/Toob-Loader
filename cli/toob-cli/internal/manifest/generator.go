@@ -253,8 +253,6 @@ func VerifyMacroUsage(headerPath, bootloaderDir string) error {
 		}
 	}
 
-	commentRe := regexp.MustCompile(`(?s)/\*.*?\*/|//[^\n]*\n`)
-
 	err = filepath.WalkDir(bootloaderDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -263,10 +261,10 @@ func VerifyMacroUsage(headerPath, bootloaderDir string) error {
 			b, err := os.ReadFile(path)
 			if err == nil {
 				text := string(b)
-				// Strip comments before checking for macro presence to avoid "comment bypass"
-				cleanText := commentRe.ReplaceAllString(text, "")
+				// We intentionally do NOT strip comments anymore, as regex stripping is fragile
+				// and destroys macros embedded in strings.
 				for m, used := range macros {
-					if !used && strings.Contains(cleanText, m) {
+					if !used && strings.Contains(text, m) {
 						macros[m] = true
 					}
 				}
