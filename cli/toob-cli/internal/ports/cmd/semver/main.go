@@ -9,12 +9,14 @@ import (
 	"go/token"
 	"os"
 	"reflect"
+	"strings"
 )
 
 type FieldMeta struct {
-	Name string
-	Type string
-	Tag  string // "required" or "optional"
+	Name    string
+	Type    string
+	Tag     string // "required" or "optional"
+	JsonTag string // Wire-format key from `json:"..."` tag
 }
 
 type InterfaceInfo struct {
@@ -80,6 +82,12 @@ func main() {
 			if oldField.Tag == "optional" && newField.Tag == "required" {
 				bump = "MAJOR"
 				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed from optional to required.", fieldName, name))
+			}
+
+			// Wire-format breaking: renaming a JSON key changes the serialized contract
+			if oldField.JsonTag != "" && newField.JsonTag != "" && oldField.JsonTag != newField.JsonTag {
+				bump = "MAJOR"
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed JSON tag from %q to %q (wire-format break).", fieldName, name, oldField.JsonTag, newField.JsonTag))
 			}
 		}
 
@@ -272,7 +280,8 @@ func parseInterface(filename string) (InterfaceInfo, error) {
 								name, typeSpec.Name.Name)
 						}
 						tagStr := field.Tag.Value[1 : len(field.Tag.Value)-1]
-						tagValue := reflect.StructTag(tagStr).Get("port")
+						parsedTag := reflect.StructTag(tagStr)
+						tagValue := parsedTag.Get("port")
 						if tagValue == "" {
 							return info, fmt.Errorf("field %q in struct %q is missing port tag",
 								name, typeSpec.Name.Name)
@@ -282,7 +291,13 @@ func parseInterface(filename string) (InterfaceInfo, error) {
 								name, typeSpec.Name.Name, tagValue)
 						}
 
-						fields[name] = FieldMeta{Name: name, Type: fieldType, Tag: tagValue}
+						// Extract wire-format JSON key for contract diffing
+						jsonTag := parsedTag.Get("json")
+						if idx := strings.Index(jsonTag, ","); idx != -1 {
+							jsonTag = jsonTag[:idx]
+						}
+
+						fields[name] = FieldMeta{Name: name, Type: fieldType, Tag: tagValue, JsonTag: jsonTag}
 					}
 					info.Structs[typeSpec.Name.Name] = fields
 				} else {

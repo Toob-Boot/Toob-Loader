@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/minio/selfupdate"
 	"github.com/spf13/cobra"
 	"aead.dev/minisign"
 	"github.com/toob-boot/toob/internal/updater"
+	"golang.org/x/mod/semver"
 )
 
 var (
@@ -134,6 +136,24 @@ var updateCmd = &cobra.Command{
 			fmt.Println("[toob] Signature OK. Binary is authentic.")
 		} else {
 			return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: No .minisig signature found in release. Downgrade attack prevented.")
+		}
+
+		// Downgrade guard: reject signed-but-older binaries unless user explicitly
+		// requested a specific version with --version (intentional rollback).
+		if targetVersion == "" {
+			releaseVer := res.Version
+			currentVer := Version
+			if !strings.HasPrefix(releaseVer, "v") {
+				releaseVer = "v" + releaseVer
+			}
+			if !strings.HasPrefix(currentVer, "v") {
+				currentVer = "v" + currentVer
+			}
+			if semver.IsValid(releaseVer) && semver.IsValid(currentVer) {
+				if semver.Compare(releaseVer, currentVer) < 0 {
+					return fmt.Errorf("FATAL [DOWNGRADE_BLOCKED]: Server offered v%s but current is v%s. Possible supply-chain attack", releaseVer, currentVer)
+				}
+			}
 		}
 
 		fmt.Println("[toob] Applying update...")

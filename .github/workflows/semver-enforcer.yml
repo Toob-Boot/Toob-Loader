@@ -36,10 +36,20 @@ jobs:
         run: |
           echo ">>> Detecting changes in recent commit..."
 
-          git fetch --prune --unshallow || git fetch --all || true
+          git fetch --prune --unshallow 2>/dev/null || git fetch --all 2>/dev/null || true
 
-          # Compare only the files changed in the latest merge to main
-          MODIFIED_FILES=$(git diff --name-only HEAD~1 HEAD || echo "")
+          # Find the most recent Oracle tag to diff against (any subsystem)
+          ORACLE_BASE=$(git describe --tags --match "*/v*" --abbrev=0 HEAD~1 2>/dev/null || echo "")
+          
+          if [ -n "$ORACLE_BASE" ]; then
+            MODIFIED_FILES=$(git diff --name-only "$ORACLE_BASE" HEAD 2>/dev/null || echo "")
+          fi
+          
+          # Fallback: compare against parent commit
+          if [ -z "$MODIFIED_FILES" ]; then
+            MODIFIED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          fi
+          
           if [ -z "$MODIFIED_FILES" ]; then
             MODIFIED_FILES=$(git ls-files)
           fi

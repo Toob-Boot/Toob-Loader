@@ -215,7 +215,7 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 	// Seek back to start for extraction
 	tmpFile.Seek(0, 0)
 
-	tmpDestDir := destDir + ".tmp"
+	tmpDestDir := fmt.Sprintf("%s.tmp.%d", destDir, os.Getpid())
 	_ = os.RemoveAll(tmpDestDir)
 	if err := os.MkdirAll(tmpDestDir, 0755); err != nil {
 		return err

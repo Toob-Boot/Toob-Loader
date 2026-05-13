@@ -67,12 +67,23 @@ jobs:
             echo ">>> Finished $OS-$ARCH"
           }
 
+          PIDS=()
           for TARGET in $TARGETS; do
             build_target $TARGET &
+            PIDS+=($!)
           done
           
-          wait
+          FAIL=0
+          for PID in "${PIDS[@]}"; do
+            wait $PID || FAIL=1
+          done
+          
           rm -f toob.key || true
+          
+          if [ $FAIL -ne 0 ]; then
+            echo ">>> FATAL: One or more build targets failed!"
+            exit 1
+          fi
           echo ">>> All parallel builds completed successfully."
 
       - name: Extract Tag Name
