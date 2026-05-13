@@ -99,3 +99,21 @@ jobs:
             -H "Authorization: token ${{ secrets.RELEASE_TARGET_TOKEN }}" \
             https://api.github.com/repos/Toob-Boot/Toob-Registry/actions/workflows/version-index.yml/dispatches \
             -d '{"ref":"main"}'
+
+      - name: Propagate to Compiler Container
+        run: |
+          CLI_TAG=${{ env.TAG_NAME }}
+          RAW_CLI=${CLI_TAG#cli/v}
+
+          echo ">>> Updating compiler manifest with CLI v${RAW_CLI}..."
+          jq --arg ver "$RAW_CLI" --arg ref "$CLI_TAG" \
+            '.cli.version = $ver | .cli.source.ref = $ref' \
+            compiler/compiler_manifest.json > tmp_manifest.json \
+            && mv tmp_manifest.json compiler/compiler_manifest.json
+
+          git config user.name "Toob CLI Publisher"
+          git config user.email "publisher@toob-boot.io"
+          git add compiler/compiler_manifest.json
+          git commit -m "chore(compiler): update CLI dependency to ${CLI_TAG}"
+          git push origin HEAD:main
+

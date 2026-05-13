@@ -48,6 +48,7 @@ jobs:
           CHECK_ARCH="false"
           CHECK_VENDORS="false"
           CHECK_CLI="false"
+          CHECK_COMPILER="false"
 
           for file in $MODIFIED_FILES; do
             case "$file" in
@@ -56,6 +57,9 @@ jobs:
               toob-registry/arch/*)                 CHECK_ARCH="true" ;;
               toob-registry/vendors/*)              CHECK_VENDORS="true" ;;
               cli/toob-cli/*)                       CHECK_CLI="true" ;;
+              cli/.pipeline-repo/Dockerfile.compiler) CHECK_COMPILER="true" ;;
+              cli/.pipeline-repo/toob-ci-build.sh)    CHECK_COMPILER="true" ;;
+              compiler/*)                              CHECK_COMPILER="true" ;;
             esac
           done
 
@@ -64,12 +68,14 @@ jobs:
           echo "CHECK_ARCH=$CHECK_ARCH" >> $GITHUB_ENV
           echo "CHECK_VENDORS=$CHECK_VENDORS" >> $GITHUB_ENV
           echo "CHECK_CLI=$CHECK_CLI" >> $GITHUB_ENV
+          echo "CHECK_COMPILER=$CHECK_COMPILER" >> $GITHUB_ENV
 
           echo "Core changed: $CHECK_CORE"
           echo "Chips changed: $CHECK_CHIPS"
           echo "Arch changed: $CHECK_ARCH"
           echo "Vendors changed: $CHECK_VENDORS"
           echo "CLI changed: $CHECK_CLI"
+          echo "Compiler changed: $CHECK_COMPILER"
 
       - name: ABI Orakel (Core SDK)
         if: env.CHECK_CORE == 'true'
@@ -216,6 +222,75 @@ jobs:
               git tag "$NEW_TAG"
               git push origin "$NEW_TAG"
               echo ">>> [Orakel] CLI Tag $NEW_TAG successfully pushed!"
+          fi
+
+      - name: ABI Orakel (Compiler Container)
+        if: env.CHECK_COMPILER == 'true'
+        run: |
+          echo ">>> [Compiler Oracle] Starting manifest-based version analysis..."
+
+          LAST_TAG=$(git describe --tags --match "compiler/v*" --abbrev=0 2>/dev/null || echo "compiler/v0.0.0")
+          echo ">>> [Compiler Oracle] Baseline Tag: $LAST_TAG"
+
+          # Read current version from manifest
+          CURRENT_VERSION=$(jq -r '.compiler_version' compiler/compiler_manifest.json)
+          MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
+          MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
+          PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
+
+          # Determine bump level by diffing the manifest against the last tag
+          BUMP="PATCH"
+          if [ "$LAST_TAG" != "compiler/v0.0.0" ]; then
+              OLD_MANIFEST=$(git show $LAST_TAG:compiler/compiler_manifest.json 2>/dev/null || echo '{}')
+
+              OLD_PROTOCOL=$(echo "$OLD_MANIFEST" | jq -r '.protocol_version // 0')
+              NEW_PROTOCOL=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
+              if [ "$OLD_PROTOCOL" != "$NEW_PROTOCOL" ]; then
+                  BUMP="MAJOR"
+              fi
+
+              if [ "$BUMP" = "PATCH" ]; then
+                  OLD_BASE=$(echo "$OLD_MANIFEST" | jq -r '.base_image.image // ""')
+                  NEW_BASE=$(jq -r '.base_image.image' compiler/compiler_manifest.json)
+                  OLD_SYSPKG=$(echo "$OLD_MANIFEST" | jq -cS '.system_packages // []')
+                  NEW_SYSPKG=$(jq -cS '.system_packages' compiler/compiler_manifest.json)
+                  if [ "$OLD_BASE" != "$NEW_BASE" ] || [ "$OLD_SYSPKG" != "$NEW_SYSPKG" ]; then
+                      BUMP="MINOR"
+                  fi
+              fi
+          fi
+
+          echo ">>> [Compiler Oracle] Bump type: $BUMP"
+
+          if [ "$BUMP" = "MAJOR" ]; then
+              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
+          elif [ "$BUMP" = "MINOR" ]; then
+              MINOR=$((MINOR + 1)); PATCH=0
+          else
+              PATCH=$((PATCH + 1))
+          fi
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          NEW_TAG="compiler/v${NEW_VERSION}"
+          echo ">>> [Compiler Oracle] New version: $NEW_TAG"
+
+          # Update version in manifest and commit
+          jq --arg v "$NEW_VERSION" '.compiler_version = $v' \
+            compiler/compiler_manifest.json > tmp_manifest.json \
+            && mv tmp_manifest.json compiler/compiler_manifest.json
+
+          git config user.name "Toob ABI Oracle"
+          git config user.email "oracle@toob-boot.io"
+          git add compiler/compiler_manifest.json
+          git commit -m "chore(compiler): bump to v${NEW_VERSION}" || true
+          git push origin HEAD:main || true
+
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo ">>> [Compiler Oracle] Tag $NEW_TAG already exists. Skipping."
+          else
+              git tag "$NEW_TAG"
+              git push origin "$NEW_TAG"
+              echo ">>> [Compiler Oracle] Tag $NEW_TAG successfully pushed!"
           fi
 
       - name: ABI Orakel (Chips)

@@ -122,7 +122,7 @@ func runDockerBuild(root string) error {
 	// Build the port contract struct — this is the single source of truth
 	// for what we pass to the compiler container.
 	input := ports.DockerBuildInput{
-		Image:       "toob-boot/toob-compiler:v" + Version,
+		Image:       "toob-boot/toob-compiler:latest",
 		Workspace:   root,
 		RegistryDir: regDir,
 		WorkDir:     "/workspace",

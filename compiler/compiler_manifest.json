@@ -1,0 +1,67 @@
+{
+    "format_version": 1,
+    "compiler_version": "0.1.0",
+    "protocol_version": 1,
+
+    "base_image": {
+        "image": "ubuntu:26.04",
+        "source": "https://hub.docker.com/_/ubuntu"
+    },
+
+    "cli": {
+        "version": "0.0.15",
+        "source": {
+            "url": "https://github.com/Toob-Boot/Toob-CLI-Release",
+            "ref": "cli/v0.0.15",
+            "artifact": "toob-linux-amd64"
+        }
+    },
+
+    "core_sdk": {
+        "version": "0.0.1",
+        "source": {
+            "url": "https://github.com/Toob-Boot/Toob-Loader",
+            "ref": "core/v0.0.1"
+        }
+    },
+
+    "registry": {
+        "source": {
+            "url": "https://github.com/Toob-Boot/Toob-Registry",
+            "ref": "main"
+        }
+    },
+
+    "system_packages": [
+        "cmake",
+        "ninja-build",
+        "build-essential",
+        "python3-pip",
+        "python3-venv",
+        "git",
+        "wget",
+        "curl",
+        "ca-certificates",
+        "xz-utils"
+    ],
+
+    "python_packages": [
+        "cryptography",
+        "cbor2<6.0.0",
+        "ecdsa",
+        "zcbor"
+    ],
+
+    "scripts": [
+        {
+            "name": "toob-ci-build",
+            "path": "cli/.pipeline-repo/toob-ci-build.sh"
+        }
+    ],
+
+    "distribution": {
+        "registry": "docker.io",
+        "repository": "toob-boot/toob-compiler",
+        "platforms": ["linux/amd64"]
+    }
+}

@@ -3,14 +3,14 @@ name: Compiler Publisher Pipeline
 on:
   push:
     tags:
-      - "compiler/v*" # Trigger ONLY on Compiler version tags
+      - "compiler/v*"
 
 permissions:
   contents: read
 
 jobs:
-  build-and-release:
-    name: Build & Verify Compiler Image
+  build-and-push:
+    name: Build & Push Compiler Image
     runs-on: ubuntu-latest
     if: ${{ github.event.act }}
     steps:
@@ -19,35 +19,70 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Extract Tag Name
+      - name: Extract Versions
         run: |
           REF="${GITHUB_REF}"
           if [ -z "$REF" ] || [ "$REF" = "master" ] || [ "$REF" = "main" ]; then
             REF=$(jq -r '.ref // empty' "$GITHUB_EVENT_PATH")
           fi
           TAG_NAME=${REF#refs/tags/}
-          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
-
-          # Remove 'compiler/v' prefix for the docker image tag
           RAW_VERSION=${TAG_NAME#compiler/v}
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
           echo "RAW_VERSION=$RAW_VERSION" >> $GITHUB_ENV
 
-      - name: Build Docker Image (Verification Only)
+          # Read pinned versions from the compiler manifest
+          CLI_VERSION=$(jq -r '.cli.version' compiler/compiler_manifest.json)
+          CLI_REF=$(jq -r '.cli.source.ref' compiler/compiler_manifest.json)
+          PROTOCOL_VERSION=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
+          REPOSITORY=$(jq -r '.distribution.repository' compiler/compiler_manifest.json)
+
+          echo "CLI_VERSION=$CLI_VERSION" >> $GITHUB_ENV
+          echo "CLI_REF=$CLI_REF" >> $GITHUB_ENV
+          echo "PROTOCOL_VERSION=$PROTOCOL_VERSION" >> $GITHUB_ENV
+          echo "REPOSITORY=$REPOSITORY" >> $GITHUB_ENV
+
+          echo ">>> Compiler v${RAW_VERSION} | CLI v${CLI_VERSION} | Protocol v${PROTOCOL_VERSION}"
+
+      - name: Build Docker Image
+        working-directory: cli/.pipeline-repo
         run: |
-          echo ">>> Building repowatt/toob-compiler:${RAW_VERSION}..."
+          echo ">>> Building ${REPOSITORY}:v${RAW_VERSION}..."
 
-          # This verifies that the Dockerfile compiles correctly.
-          # Note: We assume the Dockerfile is in the 'tools/compiler' or root directory.
-          # Adjust the path below if the Dockerfile is located elsewhere.
-          if [ -f "Dockerfile" ]; then
-            docker build -t "repowatt/toob-compiler:${RAW_VERSION}" .
-          else
-            echo "Warning: Dockerfile not found in root. Simulating build success."
+          docker build \
+            --build-arg CLI_VERSION=${CLI_REF} \
+            --build-arg COMPILER_VERSION=${RAW_VERSION} \
+            --build-arg PROTOCOL_VERSION=${PROTOCOL_VERSION} \
+            --label "org.opencontainers.image.version=${RAW_VERSION}" \
+            --label "org.opencontainers.image.source=https://github.com/Toob-Boot/Toob-Loader" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.vendor=Toob-Boot" \
+            --label "org.opencontainers.image.title=Toob Compiler" \
+            --label "org.opencontainers.image.description=Cross-compilation environment for Toob-Loader firmware" \
+            --label "toob.compiler_version=${RAW_VERSION}" \
+            --label "toob.cli_version=${CLI_VERSION}" \
+            --label "toob.protocol_version=${PROTOCOL_VERSION}" \
+            -t "${REPOSITORY}:v${RAW_VERSION}" \
+            -t "${REPOSITORY}:latest" \
+            -f Dockerfile.compiler .
+
+          echo ">>> [SUCCESS] Image built: ${REPOSITORY}:v${RAW_VERSION}"
+
+      - name: Verify Protocol Label
+        run: |
+          LABEL=$(docker inspect --format '{{index .Config.Labels "toob.protocol_version"}}' "${REPOSITORY}:v${RAW_VERSION}")
+          if [ "$LABEL" != "$PROTOCOL_VERSION" ]; then
+            echo "FATAL: Protocol label mismatch. Expected ${PROTOCOL_VERSION}, got ${LABEL}"
+            exit 1
           fi
+          echo ">>> Protocol label verified: v${LABEL}"
 
-          echo ">>> [SUCCESS] Docker Image built successfully."
+      - name: Login to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
-      # As requested by the user, we do NOT push the image yet.
-      # The pipeline stops here after successful verification.
-      - name: Skip Docker Push
-        run: echo ">>> Skipping Docker Hub push as requested. Image is verified locally."
+      - name: Push to Docker Hub
+        run: |
+          echo ">>> Pushing ${REPOSITORY}:v${RAW_VERSION}..."
+          docker push "${REPOSITORY}:v${RAW_VERSION}"
+          docker push "${REPOSITORY}:latest"
+          echo ">>> [SUCCESS] Image pushed to Docker Hub"

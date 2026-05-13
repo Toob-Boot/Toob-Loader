@@ -352,3 +352,67 @@ type LockfileChipEntry struct {
 type LockfileToolchainEntry struct {
 	Version string `json:"version" port:"required"`
 }
+
+// =============================================================================
+// Boundary: Compiler Container Manifest (compiler/compiler_manifest.json)
+// =============================================================================
+
+// CompilerManifest is the parsed content of compiler/compiler_manifest.json.
+// It declaratively tracks all inputs of the compiler container for
+// reproducibility and supply-chain traceability.
+type CompilerManifest struct {
+	FormatVersion   int                  `json:"format_version"   port:"required"`
+	CompilerVersion string               `json:"compiler_version" port:"required"`
+	ProtocolVersion int                  `json:"protocol_version" port:"required"`
+	BaseImage       CompilerBaseImage    `json:"base_image"       port:"required"`
+	CLI             CompilerCLIDep       `json:"cli"              port:"required"`
+	CoreSDK         CompilerCoreSDKDep   `json:"core_sdk"         port:"required"`
+	Registry        CompilerRegistryDep  `json:"registry"         port:"required"`
+	SystemPackages  []string             `json:"system_packages"  port:"required"`
+	PythonPackages  []string             `json:"python_packages"  port:"required"`
+	Scripts         []CompilerScript     `json:"scripts"          port:"optional"`
+	Distribution    CompilerDistribution `json:"distribution"     port:"required"`
+}
+
+// CompilerBaseImage identifies the container base.
+type CompilerBaseImage struct {
+	Image  string `json:"image"  port:"required"`
+	Source string `json:"source" port:"optional"`
+}
+
+// CompilerSourceRef is a traceable reference to a Git repository.
+type CompilerSourceRef struct {
+	URL      string `json:"url"      port:"required"`
+	Ref      string `json:"ref"      port:"required"`
+	Artifact string `json:"artifact" port:"optional"`
+}
+
+// CompilerCLIDep defines the embedded CLI binary dependency.
+type CompilerCLIDep struct {
+	Version string            `json:"version" port:"required"`
+	Source  CompilerSourceRef `json:"source"  port:"required"`
+}
+
+// CompilerCoreSDKDep defines the embedded Core SDK dependency.
+type CompilerCoreSDKDep struct {
+	Version string            `json:"version" port:"required"`
+	Source  CompilerSourceRef `json:"source"  port:"required"`
+}
+
+// CompilerRegistryDep defines the pre-cloned HAL registry.
+type CompilerRegistryDep struct {
+	Source CompilerSourceRef `json:"source" port:"required"`
+}
+
+// CompilerScript is a build script bundled into the container.
+type CompilerScript struct {
+	Name string `json:"name" port:"required"`
+	Path string `json:"path" port:"required"`
+}
+
+// CompilerDistribution defines the target container registry.
+type CompilerDistribution struct {
+	Registry   string   `json:"registry"   port:"required"`
+	Repository string   `json:"repository" port:"required"`
+	Platforms  []string `json:"platforms"   port:"required"`
+}
