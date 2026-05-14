@@ -31,7 +31,6 @@ jobs:
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
           echo "RAW_VERSION=$RAW_VERSION" >> $GITHUB_ENV
 
-          # Read pinned versions from the compiler manifest
           CLI_VERSION=$(jq -r '.cli.version' compiler/compiler_manifest.json)
           CLI_REF=$(jq -r '.cli.source.ref' compiler/compiler_manifest.json)
           PROTOCOL_VERSION=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
@@ -97,7 +96,6 @@ jobs:
             exit 0
           fi
 
-          echo ">>> Updating compiler_manifest.json: ${CURRENT} -> ${RAW_VERSION}"
           jq --arg v "$RAW_VERSION" '.compiler_version = $v' \
             compiler/compiler_manifest.json > tmp_manifest.json \
             && mv tmp_manifest.json compiler/compiler_manifest.json
@@ -110,10 +108,9 @@ jobs:
 
       - name: Trigger Topology Update
         run: |
-          echo ">>> Triggering version-index.yml in Toob-Boot/Toob-Registry..."
           curl -s -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ secrets.RELEASE_TARGET_TOKEN }}" \
             https://api.github.com/repos/Toob-Boot/Toob-Registry/actions/workflows/version-index.yml/dispatches \
             -d '{"ref":"main"}'
-
+          echo ">>> Topology update triggered"

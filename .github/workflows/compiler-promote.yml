@@ -1,0 +1,40 @@
+name: Compiler Promote Pipeline
+
+# Triggered when a compiler draft release is published (manual approval gate).
+# Dispatches a signed webhook to the CI server to start the actual build.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch-build:
+    name: Dispatch Build to CI Server
+    runs-on: ubuntu-latest
+    if: startsWith(github.event.release.tag_name, 'compiler/v')
+    steps:
+      - name: Notify CI Server
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          echo ">>> Dispatching compiler build for ${TAG} to CI server..."
+
+          PAYLOAD="{\"ref\":\"refs/tags/${TAG}\",\"ref_type\":\"tag\",\"act\":true,\"after\":\"${{ github.sha }}\",\"repository\":{\"full_name\":\"Toob-Boot/Toob-Loader\"}}"
+          SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | awk '{print $NF}')
+
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" \
+            -X POST "https://ci.the-toob.com/hooks/release" \
+            -H "Content-Type: application/json" \
+            -H "X-Hub-Signature-256: sha256=${SIG}" \
+            -d "$PAYLOAD")
+
+          cat /tmp/response.txt
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo ">>> [SUCCESS] CI server accepted the build request"
+          else
+            echo ">>> [ERROR] CI server returned HTTP ${HTTP_CODE}"
+            exit 1
+          fi
