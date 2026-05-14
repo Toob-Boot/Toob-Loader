@@ -27,9 +27,10 @@ import (
 
 // RegistryToolchain defines the toolchain URLs from registry.json
 type RegistryToolchain struct {
-	Version string            `json:"version"`
-	URLs    map[string]string `json:"urls"`
-	Sha256  map[string]string `json:"sha256"`
+	Version         string            `json:"version"`
+	UpstreamVersion string            `json:"upstream_version"`
+	URLs            map[string]string `json:"urls"`
+	Sha256          map[string]string `json:"sha256"`
 }
 
 // RegistryConfig represents the root of registry.json
@@ -82,16 +83,37 @@ func GetExpectedSha256FromConfig(prefix string, reg *RegistryConfig) string {
 func EnsureAvailable(prefix string, expectedVersion string, regDir string) (string, error) {
 	tcName := strings.TrimSuffix(prefix, "-")
 
+	// Read registry immediately to get UpstreamVersion for cache paths
+	regJSON := filepath.Join(regDir, "registry.json")
+	data, err := os.ReadFile(regJSON)
+	if err != nil {
+		return "", fmt.Errorf("could not read registry.json: %w", err)
+	}
+
+	var reg RegistryConfig
+	if err := json.Unmarshal(data, &reg); err != nil {
+		return "", fmt.Errorf("failed to parse registry.json: %w", err)
+	}
+
+	tcInfo, ok := reg.Toolchains[tcName]
+	if !ok {
+		return "", fmt.Errorf("toolchain '%s' is not defined in the registry. Auto-provisioning failed", tcName)
+	}
+
 	homeDir, err := paths.ToobHome()
 	if err != nil {
 		return "", err
 	}
 	localDir := filepath.Join(homeDir, "toolchains")
 
-	if expectedVersion == "" {
-		expectedVersion = "latest"
+	cacheVer := tcInfo.UpstreamVersion
+	if cacheVer == "" {
+		cacheVer = expectedVersion
 	}
-	tcRoot := filepath.Join(localDir, tcName, expectedVersion)
+	if cacheVer == "" {
+		cacheVer = "latest"
+	}
+	tcRoot := filepath.Join(localDir, tcName, cacheVer)
 	lockDir := tcRoot + ".lock.d"
 
 	// 1. Cache Check (Gap 1.1 Versioning)
@@ -106,7 +128,7 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 			defer os.RemoveAll(lockDir)
 			break
 		}
-		
+
 		if stat, err := os.Stat(lockDir); err == nil {
 			if time.Since(stat.ModTime()) > 15*time.Minute {
 				ui.Warn("Toolchain lock for %s is older than 15 minutes. Assuming stale and removing...", tcName)
@@ -128,24 +150,8 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 	_ = RetryWindowsLocks(func() error { return os.RemoveAll(tcRoot) })
 
 	// 2. Not found or corrupted, we must auto-provision it.
-	ui.Muted("Toolchain '%s' (v%s) not found locally.", tcName, expectedVersion)
+	ui.Muted("Toolchain '%s' (v%s) not found locally.", tcName, cacheVer)
 	ui.Step("Looking up auto-provisioning URL in registry...")
-
-	regJSON := filepath.Join(regDir, "registry.json")
-	data, err := os.ReadFile(regJSON)
-	if err != nil {
-		return "", fmt.Errorf("could not read registry.json: %w", err)
-	}
-
-	var reg RegistryConfig
-	if err := json.Unmarshal(data, &reg); err != nil {
-		return "", fmt.Errorf("failed to parse registry.json: %w", err)
-	}
-
-	tcInfo, ok := reg.Toolchains[tcName]
-	if !ok {
-		return "", fmt.Errorf("toolchain '%s' is not defined in the registry. Auto-provisioning failed", tcName)
-	}
 
 	osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
 	downloadURL, ok := tcInfo.URLs[osArch]

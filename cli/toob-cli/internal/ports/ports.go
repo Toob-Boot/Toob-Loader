@@ -176,8 +176,9 @@ type RegistryIntegration struct {
 
 // RegistryToolchain defines toolchain download metadata in registry.json.
 type RegistryToolchain struct {
-	Path    string `json:"path"    port:"optional"`
-	Version string `json:"version" port:"required"`
+	Path            string `json:"path"             port:"optional"`
+	Version         string `json:"version"          port:"required"`
+	UpstreamVersion string `json:"upstream_version" port:"required"`
 }
 
 // ToolchainDownload is the extended toolchain entry used by toolchain/manager.go
