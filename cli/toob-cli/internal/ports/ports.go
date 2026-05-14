@@ -329,6 +329,31 @@ type MatrixChip struct {
 }
 
 // =============================================================================
+// Boundary: Toob Hub API (resolve/matrix, resolve/combination)
+// =============================================================================
+
+// HubResolveMatrixRequest defines GET /api/v1/resolve/matrix query params.
+type HubResolveMatrixRequest struct {
+	Chip string `json:"chip" port:"optional"` // Filter by chip name; omit for full matrix
+}
+
+// HubResolveCombinationRequest defines GET /api/v1/resolve/combination query params.
+type HubResolveCombinationRequest struct {
+	Chip        string `json:"chip"         port:"required"`
+	ChipVersion string `json:"chip_version" port:"optional"`
+	CLI         string `json:"cli"          port:"optional"`
+	Core        string `json:"core"         port:"optional"`
+	Compiler    string `json:"compiler"     port:"optional"`
+}
+
+// HubResolveCombinationResponse defines the binary go/no-go validation result.
+type HubResolveCombinationResponse struct {
+	Compatible bool   `json:"compatible"   port:"required"` // true if VERIFIED
+	Status     string `json:"status"       port:"required"` // "VERIFIED" | "UNKNOWN" | error status
+	LastTested string `json:"last_tested"  port:"optional"`
+}
+
+// =============================================================================
 // Boundary: Chip Manifest (chip_manifest.json)
 // =============================================================================
 

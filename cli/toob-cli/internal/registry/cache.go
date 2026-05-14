@@ -262,7 +262,7 @@ func (c *Cache) LoadIndex() (*Index, error) {
 
 // ResolveChipLive fetches chip existence from the Hub API and returns the Registry Version it was found in.
 func (c *Cache) ResolveChipLive(name string) (string, error) {
-	url := fmt.Sprintf("%s/api/v1/resolve/chip?name=%s", c.remote, name)
+	url := fmt.Sprintf("%s/api/v1/resolve/chip?name=%s", getHubURL(), name)
 
 	client := http.Client{Timeout: 2 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
@@ -289,7 +289,7 @@ func (c *Cache) ResolveChipLive(name string) (string, error) {
 // FetchLiveIntegrations fetches available integrations from the Hub API.
 // It falls back to the local cached registry index if the API is offline.
 func (c *Cache) FetchLiveIntegrations() ([]string, error) {
-	url := fmt.Sprintf("%s/api/v1/resolve/integrations", c.remote)
+	url := fmt.Sprintf("%s/api/v1/resolve/integrations", getHubURL())
 
 	client := http.Client{Timeout: 3 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
@@ -328,32 +328,49 @@ func (c *Cache) FetchLiveIntegrations() ([]string, error) {
 	return result, nil
 }
 
-// FetchLiveMatrix downloads the compatibility matrix directly from GitHub's main branch,
-// bypassing the local locked registry. If offline, it falls back to the local copy.
+// FetchLiveMatrix downloads the compatibility matrix, prioritizing the Hub API
+// (SQLite SSOT) over raw GitHub. Falls back to local copy if all network sources fail.
 func (c *Cache) FetchLiveMatrix() (*Matrix, error) {
 	matrix := make(Matrix)
-
-	url := "https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/compatibility_matrix.json"
-
 	client := http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
-	if err == nil {
+
+	// Tier 1: Hub API (SQLite SSOT, serves CLI-native shape)
+	hubURL := fmt.Sprintf("%s/api/v1/resolve/matrix", getHubURL())
+	if req, err := http.NewRequest("GET", hubURL, nil); err == nil {
 		req.Header.Set("User-Agent", "Toob-CLI")
-		resp, err := client.Do(req)
-		if err == nil && resp.StatusCode == 200 {
-			defer resp.Body.Close()
+		if resp, err := client.Do(req); err == nil {
 			body, _ := io.ReadAll(resp.Body)
-			if json.Unmarshal(body, &matrix) == nil {
-				return &matrix, nil
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				if json.Unmarshal(body, &matrix) == nil {
+					return &matrix, nil
+				}
+			} else {
+				ui.Muted("[registry] Hub API failed (status=%d), falling back to GitHub", resp.StatusCode)
 			}
 		}
 	}
 
-	// Fallback to local locked file if HTTP fails
+	// Tier 2: Raw GitHub (legacy compatibility_matrix.json)
+	ghURL := "https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/compatibility_matrix.json"
+	if req, err := http.NewRequest("GET", ghURL, nil); err == nil {
+		req.Header.Set("User-Agent", "Toob-CLI")
+		if resp, err := client.Do(req); err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				if json.Unmarshal(body, &matrix) == nil {
+					return &matrix, nil
+				}
+			}
+		}
+	}
+
+	// Tier 3: Local locked file
 	localPath := filepath.Join(c.dir, "compatibility_matrix.json")
 	data, err := os.ReadFile(localPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch live matrix and local fallback failed: %w", err)
+		return nil, fmt.Errorf("failed to fetch live matrix (hub, github, local all failed): %w", err)
 	}
 
 	if err := json.Unmarshal(data, &matrix); err != nil {

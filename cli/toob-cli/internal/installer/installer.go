@@ -186,14 +186,14 @@ func (inst *Installer) Spawn(arg string) error {
 		}
 	}()
 
-	created, err := inst.installChip(ci)
+	created, err := inst.installChip(ci, false)
 	if err != nil {
 		spawnErr = err
 		return err
 	}
 	rollback = append(rollback, created...)
 
-	createdDeps, err := inst.installDeps(ci)
+	createdDeps, err := inst.installDeps(ci, false)
 	if err != nil {
 		spawnErr = err
 		return err
@@ -339,16 +339,16 @@ func (inst *Installer) Remove(name string) error {
 	return nil
 }
 
-func (inst *Installer) installChip(ci *registry.ChipInfo) ([]string, error) {
+func (inst *Installer) installChip(ci *registry.ChipInfo, allowLinks bool) ([]string, error) {
 	src, err := inst.cache.ChipSourcePath(ci.Name)
 	if err != nil {
 		return nil, err
 	}
 	dst := filepath.Join(inst.hal, "chips", ci.Name)
-	return []string{dst}, copyTree(src, dst)
+	return []string{dst}, copyTree(src, dst, allowLinks)
 }
 
-func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
+func (inst *Installer) installDeps(ci *registry.ChipInfo, allowLinks bool) ([]string, error) {
 	var created []string
 
 	// Architecture layer
@@ -358,7 +358,7 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 		if err != nil {
 			return created, err
 		}
-		if err := copyTree(archSrc, archDst); err != nil {
+		if err := copyTree(archSrc, archDst, allowLinks); err != nil {
 			return created, err
 		}
 		created = append(created, archDst)
@@ -377,7 +377,7 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 		if err != nil {
 			return created, err
 		}
-		if err := copyTree(vendorSrc, vendorDst); err != nil {
+		if err := copyTree(vendorSrc, vendorDst, allowLinks); err != nil {
 			return created, err
 		}
 		created = append(created, vendorDst)
@@ -409,7 +409,7 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 
 // copyTree recursively copies src to dst.
 // Uses hard-links where possible for instant, zero-disk-cost copies.
-func copyTree(src, dst string) error {
+func copyTree(src, dst string, allowLinks bool) error {
 	info, err := os.Stat(src)
 	if err != nil {
 		return fmt.Errorf("registry source does not exist: %s (run `toob registry sync`)", src)
@@ -433,19 +433,21 @@ func copyTree(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
-		return linkOrCopy(path, target)
+		return linkOrCopy(path, target, allowLinks)
 	})
 }
 
 // linkOrCopy attempts a hard-link first, falling back to a full byte-copy.
 // Hard-links share the inode and are instant with zero additional disk cost.
 // Fallback handles cross-device mounts, FAT32, and Windows restrictions.
-func linkOrCopy(src, dst string) error {
+func linkOrCopy(src, dst string, allowLinks bool) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	if err := os.Link(src, dst); err == nil {
-		return nil
+	if allowLinks {
+		if err := os.Link(src, dst); err == nil {
+			return nil
+		}
 	}
 	
 	stat, err := os.Stat(src)

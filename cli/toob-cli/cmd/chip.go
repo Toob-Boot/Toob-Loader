@@ -67,7 +67,7 @@ var chipListCmd = &cobra.Command{
 						if strings.TrimPrefix(vKey, "v") == searchVer {
 							var clis []string
 							for cliVer, info := range verEntry.VerifiedCliVersions {
-								if info.Status == "SUCCESS" {
+								if info.Status == "VERIFIED" {
 									clis = append(clis, cliVer)
 								}
 							}
