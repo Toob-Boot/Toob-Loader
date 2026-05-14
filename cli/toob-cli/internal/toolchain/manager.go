@@ -187,6 +187,16 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 			defer os.Remove(lockPath)
 			break
 		}
+
+		// Stale lock detection (e.g. if the previous downloading process crashed/timed out)
+		if stat, statErr := os.Stat(lockPath); statErr == nil {
+			if time.Since(stat.ModTime()) > 5*time.Minute {
+				ui.Warn("Lock file for %s is older than 5 minutes. Assuming previous process crashed. Removing stale lock...", tcName)
+				os.Remove(lockPath)
+				continue
+			}
+		}
+
 		ui.Warn("Waiting for another process to finish downloading %s...", tcName)
 		time.Sleep(2 * time.Second)
 	}
