@@ -2,6 +2,8 @@ package manifest
 
 import (
 	"fmt"
+
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 type Allocator struct {
@@ -94,7 +96,7 @@ func (a *Allocator) Allocate(budgetReq uint32, forceAlign uint32, name string) (
 
 	if a.offset > preJumpOffset {
 		wasted := a.offset - preJumpOffset
-		fmt.Printf("WARNING: Allocation for '%s' skipped %d bytes of writable flash to bypass reserved region at 0x%X.\n", name, wasted, preJumpOffset)
+		ui.Warn("Allocation for '%s' skipped %d bytes of writable flash to bypass reserved region at 0x%X.", name, wasted, preJumpOffset)
 	}
 
 	addr := a.offset

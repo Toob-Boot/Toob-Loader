@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 type MapEntry struct {
@@ -16,8 +18,8 @@ type MapEntry struct {
 	Type string
 }
 
-func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocator, outDir string, 
-	s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget, 
+func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocator, outDir string,
+	s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget,
 	recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize uint32,
 	walAddrs []uint32, walSizes []uint32) error {
 
@@ -91,7 +93,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	b.WriteString(" * ======================================================================== */\n\n")
 
 	b.WriteString(fmt.Sprintf("#define CHIP_FLASH_WRITE_ALIGNMENT  %dU\n", hj.Flash.WriteAlignment))
-	
+
 	flashBase := hj.Flash.BaseAddr
 	if flashBase == "" {
 		flashBase = "0x00000000"
@@ -107,7 +109,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	b.WriteString(fmt.Sprintf("#define CHIP_APP_SLOT_SIZE          0x%08XU\n", appBudget))
 	b.WriteString(fmt.Sprintf("#define CHIP_STAGING_SLOT_ABS_ADDR  0x%08XU\n", stagingAddr))
 	b.WriteString(fmt.Sprintf("#define CHIP_STAGING_SLOT_SIZE      0x%08XU\n", appBudget))
-	
+
 	stagingSlotID := dt.Partitions.StagingSlotID
 	if stagingSlotID == 0 {
 		stagingSlotID = 2
@@ -149,7 +151,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	b.WriteString("}\n\n")
 
 	b.WriteString(fmt.Sprintf("#define BOOT_CRYPTO_ARENA_SIZE      %dU\n\n", hj.CryptoCapabilities.ArenaSize))
-	
+
 	wdtTimeout := dt.BootConfig.WdtTimeoutMs
 	if wdtTimeout == 0 {
 		wdtTimeout = 4100
@@ -166,7 +168,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	b.WriteString(fmt.Sprintf("#define CHIP_FLASH_MAX_SECTOR_SIZE  %dU\n", maxSectorSize))
 	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_MAX_RETRIES     %dU\n", dt.BootConfig.MaxRetries))
 	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_MAX_RECOVERY_RETRIES %dU\n", dt.BootConfig.MaxRecoveryRetries))
-	
+
 	edgeMode := "0"
 	if dt.BootConfig.EdgeUnattendedMode {
 		edgeMode = "1"
@@ -236,7 +238,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 }
 
 func VerifyMacroUsage(headerPath, bootloaderDir string) error {
-	fmt.Println("[Manifest Verifier] Validating macro consumption in C code...")
+	ui.Step("Validating macro consumption in C code...")
 
 	data, err := os.ReadFile(headerPath)
 	if err != nil {
@@ -301,6 +303,6 @@ func VerifyMacroUsage(headerPath, bootloaderDir string) error {
 		return fmt.Errorf("%s", errb.String())
 	}
 
-	fmt.Println("[Manifest Verifier] SUCCESS: All generated macros are perfectly synchronized with the C code!")
+	ui.Success("All generated macros are perfectly synchronized with the C code!")
 	return nil
 }

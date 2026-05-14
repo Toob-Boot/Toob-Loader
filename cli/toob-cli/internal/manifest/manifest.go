@@ -3,6 +3,8 @@ package manifest
 import (
 	"fmt"
 	"strings"
+
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 func Compile(tomlPath, hardwarePath, outDir, bootloaderDir string) error {
@@ -35,11 +37,17 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir string) error {
 	}
 
 	s0Addr, s0Budget, err := alloc.Allocate(dt.Partitions.Stage0Size, 0, "Stage 0")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	s1aAddr, s1Budget, err := alloc.Allocate(dt.Partitions.Stage1Size, 0, "Stage 1A")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	s1bAddr, _, err := alloc.Allocate(dt.Partitions.Stage1Size, 0, "Stage 1B")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	appAlign := hj.Flash.AppAlignment
 	if appAlign == 0 {
@@ -47,20 +55,28 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir string) error {
 	}
 
 	appAddr, appBudget, err := alloc.Allocate(dt.Partitions.AppSize, appAlign, "App Slot")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	stagingAddr, _, err := alloc.Allocate(dt.Partitions.AppSize, appAlign, "Staging Slot")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	var recAddr, recBudget uint32
 	if dt.Partitions.RecoverySize > 0 {
 		recAddr, recBudget, err = alloc.Allocate(dt.Partitions.RecoverySize, appAlign, "Recovery OS")
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 	}
 
 	var netAddr, netBudget uint32
 	if dt.Partitions.NetcoreSize > 0 {
 		netAddr, netBudget, err = alloc.Allocate(dt.Partitions.NetcoreSize, appAlign, "NetCore Slot")
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 	}
 
 	scratchBudget := dt.Partitions.ScratchSize
@@ -68,7 +84,9 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir string) error {
 		scratchBudget = appBudget
 	}
 	scratchAddr, scratchSize, err := alloc.Allocate(scratchBudget, 0, "Scratch Buffer")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	walSectors := dt.Partitions.WalSectors
 	if walSectors == 0 {
@@ -82,13 +100,19 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir string) error {
 
 	for i := uint32(0); i < walSectors; i++ {
 		newOffset, err := alloc.advanceToWritable(alloc.offset)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		alloc.offset = newOffset
 
 		targetSecSize, err := alloc.GetSectorSizeAt(alloc.offset)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		addr, size, err := alloc.Allocate(targetSecSize, 0, fmt.Sprintf("WAL Sector %d", i))
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		walAddrs = append(walAddrs, addr)
 		walSizes = append(walSizes, size)
 		walSize += size
@@ -108,15 +132,15 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir string) error {
 		return fmt.Errorf("FATAL: memory.ram_base and memory.ram_size are mandatory in hardware.json")
 	}
 
-	err = GenerateHeadersAndScripts(dt, hj, alloc, outDir, 
-		s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget, 
-		recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize, 
+	err = GenerateHeadersAndScripts(dt, hj, alloc, outDir,
+		s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget,
+		recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize,
 		walAddrs, walSizes)
 	if err != nil {
 		return fmt.Errorf("failed to generate outputs: %w", err)
 	}
 
-	fmt.Printf("Manifest Compiler (Go Native): Successfully generated headers and ld scripts to %s\n", outDir)
+	ui.Success("Manifest Compiler (Go Native): Successfully generated headers and ld scripts to %s", outDir)
 
 	if err := VerifyMacroUsage(outDir+"/generated_boot_config.h", bootloaderDir); err != nil {
 		return err

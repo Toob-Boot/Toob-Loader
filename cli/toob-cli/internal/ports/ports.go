@@ -88,6 +88,14 @@ type ResolveEnvironmentResponse struct {
 	RecommendedCoreSDK  string `json:"recommended_core_sdk" port:"required"`
 }
 
+// HubResolveIntegrationsResponse defines GET /api/v1/resolve/integrations response.
+type HubResolveIntegrationsResponse struct {
+	Integrations []struct {
+		Name    string `json:"name"    port:"required"`
+		Version string `json:"version" port:"required"`
+	} `json:"integrations" port:"required"`
+}
+
 // =============================================================================
 // Boundary: CLI → GitHub API
 // =============================================================================
@@ -126,6 +134,7 @@ type RegistryIndex struct {
 	Vendors          map[string]RegistryVendor  `json:"vendors"           port:"required"`
 	Archs            map[string]RegistryArch    `json:"archs"             port:"required"`
 	Toolchains       map[string]RegistryToolchain `json:"toolchains"      port:"required"`
+	Integrations     map[string]RegistryIntegration `json:"integrations"  port:"required"`
 }
 
 // RegistryChip is a single chip entry in registry.json.
@@ -151,6 +160,14 @@ type RegistryVendor struct {
 
 // RegistryArch is an architecture entry in registry.json.
 type RegistryArch struct {
+	Name        string `json:"name"        port:"required"`
+	Path        string `json:"path"        port:"required"`
+	Version     string `json:"version"     port:"required"`
+	Description string `json:"description" port:"optional"`
+}
+
+// RegistryIntegration is an integration entry in registry.json.
+type RegistryIntegration struct {
 	Name        string `json:"name"        port:"required"`
 	Path        string `json:"path"        port:"required"`
 	Version     string `json:"version"     port:"required"`
@@ -309,6 +326,31 @@ type MatrixVersion struct {
 // MatrixChip is a single chip entry in the compatibility matrix.
 type MatrixChip struct {
 	Versions map[string]MatrixVersion `json:"versions" port:"required"`
+}
+
+// =============================================================================
+// Boundary: Toob Hub API (resolve/matrix, resolve/combination)
+// =============================================================================
+
+// HubResolveMatrixRequest defines GET /api/v1/resolve/matrix query params.
+type HubResolveMatrixRequest struct {
+	Chip string `json:"chip" port:"optional"` // Filter by chip name; omit for full matrix
+}
+
+// HubResolveCombinationRequest defines GET /api/v1/resolve/combination query params.
+type HubResolveCombinationRequest struct {
+	Chip        string `json:"chip"         port:"required"`
+	ChipVersion string `json:"chip_version" port:"optional"`
+	CLI         string `json:"cli"          port:"optional"`
+	Core        string `json:"core"         port:"optional"`
+	Compiler    string `json:"compiler"     port:"optional"`
+}
+
+// HubResolveCombinationResponse defines the binary go/no-go validation result.
+type HubResolveCombinationResponse struct {
+	Compatible bool   `json:"compatible"   port:"required"` // true if VERIFIED
+	Status     string `json:"status"       port:"required"` // "VERIFIED" | "UNKNOWN" | error status
+	LastTested string `json:"last_tested"  port:"optional"`
 }
 
 // =============================================================================

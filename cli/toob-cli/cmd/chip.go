@@ -3,11 +3,13 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/installer"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 var chipCmd = &cobra.Command{
@@ -16,23 +18,77 @@ var chipCmd = &cobra.Command{
 }
 
 var chipListCmd = &cobra.Command{
-	Use:   "list",
+	Use:   "list [query]",
 	Short: "List all chips available in the registry",
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		query := ""
+		if len(args) > 0 {
+			query = strings.ToLower(args[0])
+		}
+
 		cache := registry.NewCache("")
+
+		// Async Matrix Fetch
+		matrixChan := make(chan *registry.Matrix, 1)
+		go func() {
+			m, _ := cache.FetchLiveMatrix()
+			matrixChan <- m
+		}()
+
 		idx, err := cache.LoadIndex()
 		if err != nil {
 			return err
 		}
 		if len(idx.Chips) == 0 {
-			fmt.Println("Registry is empty.")
+			ui.Muted("Registry is empty.")
 			return nil
 		}
-		fmt.Printf("%-20s %-12s %-16s %-10s\n", "Chip", "Vendor", "Arch", "Version")
-		fmt.Println(strings.Repeat("-", 58))
-		for _, ci := range idx.Chips {
-			fmt.Printf("%-20s %-12s %-16s %-10s\n", ci.Name, ci.Vendor, ci.Arch, ci.Version)
+
+		// Wait up to 2 seconds for matrix
+		var matrix *registry.Matrix
+		select {
+		case matrix = <-matrixChan:
+		case <-time.After(2 * time.Second):
 		}
+
+		headers := []string{"Chip", "Version", "Vendor", "Arch", "Verified CLI"}
+		var rows [][]string
+		for _, ci := range idx.Chips {
+			if query != "" && !strings.Contains(strings.ToLower(ci.Name), query) {
+				continue
+			}
+
+			verifiedClisStr := "(unverified)"
+			if matrix != nil {
+				if chipEntry, has := (*matrix)[ci.Name]; has {
+					searchVer := strings.TrimPrefix(ci.Version, "v")
+					for vKey, verEntry := range chipEntry.Versions {
+						if strings.TrimPrefix(vKey, "v") == searchVer {
+							var clis []string
+							for cliVer, info := range verEntry.VerifiedCliVersions {
+								if info.Status == "VERIFIED" {
+									clis = append(clis, cliVer)
+								}
+							}
+							if len(clis) > 0 {
+								verifiedClisStr = strings.Join(clis, ", ")
+							}
+							break
+						}
+					}
+				}
+			}
+
+			rows = append(rows, []string{ci.Name, ci.Version, ci.Vendor, ci.Arch, verifiedClisStr})
+		}
+
+		if len(rows) == 0 {
+			ui.Warn("No chips found matching '%s'", query)
+			return nil
+		}
+
+		ui.Table(headers, rows)
 		return nil
 	},
 }
@@ -47,9 +103,9 @@ var chipInfoCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		fmt.Printf("  Name:          %s\n", ci.Name)
-		fmt.Printf("  Version:       %s\n", ci.Version)
-		
+
+		ui.Header(fmt.Sprintf("Chip: %s", ci.Name))
+
 		idx, _ := cache.LoadIndex()
 		vVer := "unknown"
 		aVer := "unknown"
@@ -61,12 +117,13 @@ var chipInfoCmd = &cobra.Command{
 				aVer = aInfo.Version
 			}
 		}
-		
-		fmt.Printf("  Vendor:        %s (v%s)\n", ci.Vendor, vVer)
-		fmt.Printf("  Architecture:  %s (v%s)\n", ci.Arch, aVer)
-		fmt.Printf("  Compiler Prefix: %s\n", ci.CompilerPrefix)
-		fmt.Printf("  Registry Path:   %s\n", ci.Path)
-		fmt.Printf("  Description:   %s\n", ci.Description)
+
+		ui.KeyValue("Version", ci.Version)
+		ui.KeyValue("Vendor", fmt.Sprintf("%s (v%s)", ci.Vendor, vVer))
+		ui.KeyValue("Architecture", fmt.Sprintf("%s (v%s)", ci.Arch, aVer))
+		ui.KeyValue("Compiler", ci.CompilerPrefix)
+		ui.KeyValue("Registry Path", ci.Path)
+		ui.KeyValue("Description", ci.Description)
 		return nil
 	},
 }

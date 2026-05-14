@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/ui"
 	"github.com/toob-boot/toob/internal/updater"
 )
 
@@ -19,6 +20,7 @@ var rootCmd = &cobra.Command{
 	Long: `Toob manages chip HAL packages, registry synchronization,
 and orchestrates the full build pipeline for Toob-Boot firmware.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		ui.Init()
 		if cmd.Name() == "update" {
 			return
 		}
@@ -36,15 +38,9 @@ and orchestrates the full build pipeline for Toob-Boot firmware.`,
 		select {
 		case res := <-updateResult:
 			if res != nil && res.Available {
-				fmt.Printf("\n\033[36m╭──────────────────────────────────────────────────────────╮\033[0m\n")
-				fmt.Printf("\033[36m│\033[0m                                                          \033[36m│\033[0m\n")
-				fmt.Printf("\033[36m│\033[0m   Update available! %-6s \u2192 %-25s \033[36m│\033[0m\n", Version, res.Version)
-				fmt.Printf("\033[36m│\033[0m   Run 'toob update' to install the newest version.       \033[36m│\033[0m\n")
-				fmt.Printf("\033[36m│\033[0m                                                          \033[36m│\033[0m\n")
-				fmt.Printf("\033[36m╰──────────────────────────────────────────────────────────╯\033[0m\n\n")
+				ui.UpdateBanner(Version, res.Version)
 			}
 		default:
-			// Non-blocking fallback
 		}
 	},
 }
@@ -67,4 +63,5 @@ func init() {
 	rootCmd.AddCommand(cleanCmd)
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(abiCmd)
+	rootCmd.AddCommand(installCmd)
 }

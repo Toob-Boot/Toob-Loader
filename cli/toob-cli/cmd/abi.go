@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/abi"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 var abiCmd = &cobra.Command{
@@ -29,9 +30,10 @@ var abiCheckCmd = &cobra.Command{
 		oldFile := args[0]
 		newFile := args[1]
 
-		fmt.Printf("Analyzing ABI changes...\n")
-		fmt.Printf(" Baseline: %s\n", oldFile)
-		fmt.Printf(" New:      %s\n\n", newFile)
+		ui.Step("Analyzing ABI changes...")
+		ui.KeyValue("Baseline", oldFile)
+		ui.KeyValue("New", newFile)
+		ui.Divider()
 
 		res, err := abi.Compare(oldFile, newFile)
 		if err != nil {
@@ -39,22 +41,22 @@ var abiCheckCmd = &cobra.Command{
 		}
 
 		if res.BumpType == abi.BumpPatch {
-			fmt.Printf("\033[32m✔ ABI is perfectly compatible.\033[0m\n")
-			fmt.Printf("Recommended SemVer bump: \033[1;32mPATCH\033[0m\n")
+			ui.Success("ABI is perfectly compatible.")
+			ui.Info("Recommended SemVer bump: %s", ui.BoldGreen("PATCH"))
 			return nil
 		}
 
-		fmt.Printf("\033[33mABI Changes Detected:\033[0m\n")
-		fmt.Println(res.Report)
+		ui.Warn("ABI Changes Detected:")
+		fmt.Fprintln(os.Stderr, res.Report)
 
 		switch res.BumpType {
 		case abi.BumpMajor:
-			fmt.Printf("Recommended SemVer bump: \033[1;31mMAJOR\033[0m (Incompatible/Breaking Changes)\n")
-			os.Exit(1) // Exit with code 1 so CI pipelines can block this if necessary
+			ui.Error("Recommended SemVer bump: %s (Breaking Changes)", ui.BoldRed("MAJOR"))
+			os.Exit(1)
 		case abi.BumpMinor:
-			fmt.Printf("Recommended SemVer bump: \033[1;33mMINOR\033[0m (Backwards-Compatible Additions)\n")
+			ui.Info("Recommended SemVer bump: %s (Backwards-Compatible)", ui.Bold("MINOR"))
 		default:
-			fmt.Printf("Recommended SemVer bump: \033[1;31mUNKNOWN\033[0m\n")
+			ui.Warn("Recommended SemVer bump: %s", ui.BoldRed("UNKNOWN"))
 		}
 
 		return nil
@@ -73,12 +75,12 @@ var abiBaselineCmd = &cobra.Command{
 			outFile = inFile + ".abi.xml"
 		}
 
-		fmt.Printf("Generating baseline for %s...\n", inFile)
+		ui.Step("Generating baseline for %s", inFile)
 		if err := abi.GenerateBaseline(inFile, outFile); err != nil {
 			return err
 		}
 
-		fmt.Printf("\033[32m✔ Baseline successfully generated:\033[0m %s\n", outFile)
+		ui.Success("Baseline generated: %s", outFile)
 		return nil
 	},
 }

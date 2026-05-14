@@ -4,15 +4,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/installer"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/scaffold"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 var (
@@ -30,7 +29,7 @@ var initCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectName := args[0]
-		
+
 		validNamePattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 		if !validNamePattern.MatchString(projectName) {
 			return fmt.Errorf("invalid project name '%s'. Only alphanumeric characters, dashes, and underscores are allowed", projectName)
@@ -41,7 +40,7 @@ var initCmd = &cobra.Command{
 		}
 
 		// 1. Create project directory
-		projectDir := filepath.Join(".", projectName)
+		projectDir := fmt.Sprintf("./%s", projectName)
 		if _, err := os.Stat(projectDir); err == nil {
 			return fmt.Errorf("directory %s already exists", projectDir)
 		}
@@ -53,13 +52,13 @@ var initCmd = &cobra.Command{
 		var initErr error
 		defer func() {
 			if initErr != nil {
-				fmt.Printf("[toob] ERROR: Scaffolding failed: %v\n", initErr)
-				fmt.Printf("[toob] Rolling back... removing directory %s\n", projectDir)
+				ui.Error("Scaffolding failed: %v", initErr)
+				ui.Step("Rolling back... removing %s", projectDir)
 				os.RemoveAll(projectDir)
 			}
 		}()
 
-		fmt.Printf("[toob] Initializing Zero-Bloat project '%s' for chip '%s' (Framework: %s)...\n", projectName, initChip, initFramework)
+		ui.Step("Initializing project '%s' for chip '%s' (Framework: %s)", projectName, initChip, initFramework)
 
 		// 2. Fetch Registry Context
 		_, err := paths.RegistryDir()
@@ -78,6 +77,62 @@ var initCmd = &cobra.Command{
 			return initErr
 		}
 
+		if initFramework == "" {
+			idx, _ := cache.LoadIndex()
+			liveIntegrations, liveErr := cache.FetchLiveIntegrations()
+			var frameworks []string
+			var frameworkKeys []string
+
+			if liveErr == nil && len(liveIntegrations) > 0 {
+				// We have live data!
+				for _, key := range liveIntegrations {
+					displayName := key
+					// Try to enrich with local description if available
+					if idx != nil {
+						if info, ok := idx.Integrations[key]; ok && info.Description != "" {
+							displayName = fmt.Sprintf("%s (%s)", info.Name, info.Description)
+						}
+					}
+					frameworks = append(frameworks, displayName)
+					frameworkKeys = append(frameworkKeys, key)
+				}
+			} else {
+				// Fallback to local cache
+				if idx == nil || len(idx.Integrations) == 0 {
+					initErr = fmt.Errorf("no integrations found in registry")
+					return initErr
+				}
+				for key, info := range idx.Integrations {
+					displayName := info.Name
+					if info.Description != "" {
+						displayName = fmt.Sprintf("%s (%s)", info.Name, info.Description)
+					}
+					frameworks = append(frameworks, displayName)
+					frameworkKeys = append(frameworkKeys, key)
+				}
+			}
+
+			choiceIdx, err := ui.Select("Select Target Framework", frameworks)
+			if err != nil {
+				return err
+			}
+			initFramework = frameworkKeys[choiceIdx]
+		}
+
+		// Auto-sync if the chosen framework does not exist locally
+		idx, _ := cache.LoadIndex()
+		_, exists := idx.Integrations[initFramework]
+		if idx == nil || !exists {
+			ui.Step("Framework '%s' is new! Auto-syncing registry to download files...", initFramework)
+			if err := cache.Sync(); err != nil {
+				return fmt.Errorf("failed to sync registry to download new framework: %w", err)
+			}
+			// Reload index after sync
+			if _, err := cache.LoadIndex(); err != nil {
+				return fmt.Errorf("failed to load registry index after sync: %w", err)
+			}
+		}
+
 		ctx := scaffold.Context{
 			ProjectName:     projectName,
 			ProjectDir:      projectDir,
@@ -90,19 +145,8 @@ var initCmd = &cobra.Command{
 			SdkRevision:     initSdkRevision,
 		}
 
-		// 3. Delegate to specific Generator
-		var generator scaffold.Generator
-		switch strings.ToLower(initFramework) {
-		case "baremetal":
-			generator = &scaffold.BaremetalGenerator{}
-		case "zephyr":
-			generator = &scaffold.ZephyrGenerator{}
-		case "espidf":
-			generator = &scaffold.EspIdfGenerator{}
-		default:
-			initErr = fmt.Errorf("unsupported framework '%s'. Supported: baremetal, zephyr, espidf", initFramework)
-			return initErr
-		}
+		// 3. Delegate to Integration Generator
+		generator := &scaffold.IntegrationGenerator{Framework: initFramework}
 
 		if err := generator.Generate(ctx); err != nil {
 			initErr = fmt.Errorf("scaffolding failed: %w", err)
@@ -126,16 +170,11 @@ var initCmd = &cobra.Command{
 		gitCmd.Stdout = os.Stdout
 		gitCmd.Stderr = os.Stderr
 		if err := gitCmd.Run(); err != nil {
-			fmt.Printf("[toob] WARN: Failed to initialize git repository: %v\n", err)
+			ui.Warn("Failed to initialize git repository: %v", err)
 		}
 
-		fmt.Println("\n[toob] Project initialized successfully!")
-		
-		if strings.ToLower(initFramework) == "zephyr" {
-			fmt.Printf("Run `cd %s` then `west build` to compile the Zephyr application.\n", projectName)
-		} else {
-			fmt.Printf("Run `cd %s` then `toob build` to compile the Bootloader.\n", projectName)
-		}
+		ui.Success("Toob Integration files generated successfully!")
+		ui.Tip("Run 'cd %s' and check out the 'toob_integration/INTEGRATION_GUIDE.md' to finish the setup.", projectName)
 		return nil
 	},
 }
@@ -143,7 +182,7 @@ var initCmd = &cobra.Command{
 func init() {
 	initCmd.Flags().StringVarP(&initChip, "chip", "c", "", "Target chip for the project (e.g., esp32c6)")
 	initCmd.Flags().BoolVar(&initNoVSCode, "no-vscode", false, "Disable generation of VS Code IntelliSense configurations")
-	initCmd.Flags().StringVar(&initFramework, "framework", "baremetal", "Target RTOS framework (baremetal, zephyr, espidf)")
+	initCmd.Flags().StringVar(&initFramework, "framework", "", "Target RTOS framework (baremetal, zephyr, espidf)")
 	initCmd.Flags().BoolVar(&initDevContainer, "devcontainer", false, "Generate VS Code DevContainer configuration for isolated builds")
 	initCmd.Flags().StringVar(&initSdkUrl, "sdk-url", "https://github.com/Toob-Boot/Toob-Loader.git", "URL to fetch the Toob-Loader SDK from")
 	initCmd.Flags().StringVar(&initSdkRevision, "sdk-version", "main", "Git branch or tag to use for the Toob-Loader SDK")

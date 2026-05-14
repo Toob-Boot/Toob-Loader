@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/schollz/progressbar/v3"
 	"github.com/toob-boot/toob/internal/paths"
+	"github.com/toob-boot/toob/internal/ui"
 	"github.com/ulikunitz/xz"
 )
 
@@ -37,8 +37,6 @@ type RegistryConfig struct {
 	FormatVersion int                          `json:"format_version"`
 	Toolchains    map[string]RegistryToolchain `json:"toolchains"`
 }
-
-
 
 // GetExpectedVersion returns the version specified in registry.json for a toolchain.
 // Reads and parses registry.json from disk. Prefer GetExpectedVersionFromIndex when
@@ -89,14 +87,14 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 		return "", err
 	}
 	localDir := filepath.Join(homeDir, "toolchains")
-	
+
 	if expectedVersion == "" {
 		expectedVersion = "latest"
 	}
 	tcRoot := filepath.Join(localDir, tcName, expectedVersion)
 
 	// 1. Cache Check (Gap 1.1 Versioning)
-	if tcPath := findBinDir(tcRoot, prefix); tcPath != "" {
+	if tcPath := FindBinDir(tcRoot, prefix); tcPath != "" {
 		return tcPath, nil
 	}
 
@@ -104,8 +102,8 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 	_ = RetryWindowsLocks(func() error { return os.RemoveAll(tcRoot) })
 
 	// 2. Not found or corrupted, we must auto-provision it.
-	fmt.Printf("[toob] Toolchain '%s' (v%s) not found locally.\n", tcName, expectedVersion)
-	fmt.Printf("[toob] Looking up auto-provisioning URL in registry...\n")
+	ui.Muted("Toolchain '%s' (v%s) not found locally.", tcName, expectedVersion)
+	ui.Step("Looking up auto-provisioning URL in registry...")
 
 	regJSON := filepath.Join(regDir, "registry.json")
 	data, err := os.ReadFile(regJSON)
@@ -129,7 +127,7 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 		return "", fmt.Errorf("no download URL provided for OS/Arch: %s", osArch)
 	}
 
-	fmt.Printf("[toob] Found toolchain v%s for %s\n", tcInfo.Version, osArch)
+	ui.Info("Found toolchain v%s for %s", tcInfo.Version, osArch)
 
 	expectedSha256 := tcInfo.Sha256[osArch]
 
@@ -138,12 +136,12 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 	}
 
 	// 3. Find the actual /bin directory recursively
-	tcPath := findBinDir(tcRoot, prefix)
+	tcPath := FindBinDir(tcRoot, prefix)
 	if tcPath == "" {
-		return "", fmt.Errorf("auto-provisioning completed but /bin directory with %sgcc not found inside %s", prefix, tcRoot)
+		return "", fmt.Errorf("auto-provisioning completed but /bin directory with executables prefixed '%s' not found inside %s", prefix, tcRoot)
 	}
 
-	fmt.Printf("[toob] Successfully installed toolchain to %s\n", tcPath)
+	ui.Success("Successfully installed toolchain to %s", tcPath)
 	return tcPath, nil
 }
 
@@ -164,7 +162,7 @@ func RetryWindowsLocks(op func() error) error {
 			return nil
 		}
 		if i == 3 {
-			fmt.Printf("[toob] Waiting for background file lock release (Windows Defender/IDE)...\n")
+			ui.Warn("Waiting for background file lock release (Windows Defender/IDE)...")
 		}
 		time.Sleep(d)
 	}
@@ -189,7 +187,7 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 			defer os.Remove(lockPath)
 			break
 		}
-		fmt.Printf("[toob] Waiting for another process to finish downloading %s...\n", tcName)
+		ui.Warn("Waiting for another process to finish downloading %s...", tcName)
 		time.Sleep(2 * time.Second)
 	}
 
@@ -205,9 +203,9 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 
 	if startBytes > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", startBytes))
-		fmt.Printf("[toob] Resuming download %s from byte %d...\n", url, startBytes)
+		ui.Step("Resuming download %s from byte %d...", url, startBytes)
 	} else {
-		fmt.Printf("[toob] Downloading %s\n", url)
+		ui.Step("Downloading %s", url)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -218,7 +216,7 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 
 	if resp.StatusCode == 416 {
 		// Requested Range Not Satisfiable - we probably downloaded the whole file already!
-		fmt.Printf("[toob] Download already complete.\n")
+		ui.Muted("Download already complete.")
 	} else if resp.StatusCode == 206 || resp.StatusCode == 200 {
 		var out *os.File
 		if resp.StatusCode == 206 {
@@ -233,26 +231,16 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 			return err
 		}
 
-		bar := progressbar.NewOptions64(
-			resp.ContentLength+startBytes,
-			progressbar.OptionSetDescription("Downloading"),
-			progressbar.OptionSetWriter(os.Stderr),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetWidth(30),
-			progressbar.OptionThrottle(150*time.Millisecond),
-			progressbar.OptionShowCount(),
-			progressbar.OptionOnCompletion(func() {
-				fmt.Fprint(os.Stderr, "\n")
-			}),
-			progressbar.OptionSpinnerType(14),
-			progressbar.OptionFullWidth(),
-		)
-		bar.Add64(startBytes) // Fast-forward progress bar
+		spinner := ui.NewSpinner("Downloading Toolchain")
+		spinner.SetProgress(int(startBytes), int(resp.ContentLength+startBytes))
+		spinner.Start()
 
-		if _, err := io.Copy(io.MultiWriter(out, bar), resp.Body); err != nil {
+		if _, err := io.Copy(io.MultiWriter(out, spinner), resp.Body); err != nil {
 			out.Close()
+			spinner.Stop()
 			return err
 		}
+		spinner.Stop()
 		out.Close()
 	} else {
 		return fmt.Errorf("server returned %d", resp.StatusCode)
@@ -267,14 +255,14 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 		}
 		io.Copy(hasher, f)
 		f.Close()
-		
+
 		actualSha256 := hex.EncodeToString(hasher.Sum(nil))
 		if actualSha256 != expectedSha256 {
 			// Corrupt! Delete it and fail.
 			os.Remove(archivePath)
 			return fmt.Errorf("SHA256 mismatch!\nExpected: %s\nGot:      %s", expectedSha256, actualSha256)
 		}
-		fmt.Printf("[toob] Checksum verified.\n")
+		ui.Success("Checksum verified.")
 	}
 
 	tmpDestDir := fmt.Sprintf("%s.tmp.%d", destDir, os.Getpid())
@@ -287,13 +275,13 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 	if strings.HasSuffix(url, ".zip") {
 		extractErr = extractZipFast(archivePath, tmpDestDir)
 		if extractErr != nil {
-			fmt.Printf("\n[toob] Fast native zip failed. Falling back to Go extraction...\n")
+			ui.Warn("Fast native zip failed. Falling back to Go extraction...")
 			extractErr = extractZip(archivePath, tmpDestDir)
 		}
 	} else if strings.HasSuffix(url, ".tar.gz") || strings.HasSuffix(url, ".tar.xz") {
 		extractErr = extractTarFast(archivePath, tmpDestDir)
 		if extractErr != nil {
-			fmt.Printf("\n[toob] Fast native tar failed. Falling back to Go extraction...\n")
+			ui.Warn("Fast native tar failed. Falling back to Go extraction...")
 			f, _ := os.Open(archivePath)
 			if strings.HasSuffix(url, ".tar.gz") {
 				extractErr = extractTarGz(f, tmpDestDir)
@@ -380,7 +368,7 @@ func postProcessCAS(extractedDir string) error {
 				dstFile.Close()
 				os.Remove(path) // Remove original
 			}
-			
+
 			// Gap 1: Protect CAS store from accidental user modifications
 			var roMode fs.FileMode = 0444
 			if origMode&0111 != 0 {
@@ -429,21 +417,14 @@ func extractZip(zipPath, destDir string) error {
 	defer r.Close()
 
 	totalFiles := len(r.File)
-	bar := progressbar.NewOptions(totalFiles,
-		progressbar.OptionSetDescription("Unzipping"),
-		progressbar.OptionSetWriter(os.Stderr),
-		progressbar.OptionSetWidth(30),
-		progressbar.OptionThrottle(150*time.Millisecond),
-		progressbar.OptionShowCount(),
-		progressbar.OptionOnCompletion(func() {
-			fmt.Fprint(os.Stderr, "\n")
-		}),
-		progressbar.OptionSpinnerType(14),
-		progressbar.OptionFullWidth(),
-	)
+
+	spinner := ui.NewSpinner("Unzipping Toolchain")
+	spinner.SetProgress(0, totalFiles)
+	spinner.Start()
+	defer spinner.Stop()
 
 	for _, f := range r.File {
-		bar.Add(1)
+		spinner.AddProgress(1)
 
 		fpath := filepath.Join(destDir, f.Name)
 		if !strings.HasPrefix(fpath, filepath.Clean(destDir)+string(os.PathSeparator)) {
@@ -503,18 +484,10 @@ func extractTarXz(r io.Reader, destDir string) error {
 }
 
 func extractTar(tr *tar.Reader, destDir string) error {
-	bar := progressbar.NewOptions(-1,
-		progressbar.OptionSetDescription("Unpacking"),
-		progressbar.OptionSetWriter(os.Stderr),
-		progressbar.OptionSetWidth(30),
-		progressbar.OptionThrottle(150*time.Millisecond),
-		progressbar.OptionShowCount(),
-		progressbar.OptionOnCompletion(func() {
-			fmt.Fprint(os.Stderr, "\n")
-		}),
-		progressbar.OptionSpinnerType(14),
-		progressbar.OptionFullWidth(),
-	)
+	spinner := ui.NewSpinner("Unpacking Toolchain")
+	// Since TAR length is unknown beforehand, we just use it as a spinner without progress bar
+	spinner.Start()
+	defer spinner.Stop()
 
 	for {
 		header, err := tr.Next()
@@ -524,8 +497,6 @@ func extractTar(tr *tar.Reader, destDir string) error {
 		if err != nil {
 			return err
 		}
-
-		bar.Add(1)
 
 		target := filepath.Join(destDir, header.Name)
 
@@ -559,13 +530,10 @@ func extractTar(tr *tar.Reader, destDir string) error {
 	return nil
 }
 
-// findBinDir recursively searches for a directory named "bin" containing the prefixed gcc
-func findBinDir(root string, prefix string) string {
+// FindBinDir recursively searches for a directory named "bin" containing any executables starting with the given prefix.
+// This is completely compiler-agnostic (it doesn't care if it's gcc, clang, ld, etc.)
+func FindBinDir(root string, prefix string) string {
 	var binDir string
-	expectedExe := prefix + "gcc"
-	if runtime.GOOS == "windows" {
-		expectedExe += ".exe"
-	}
 
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -575,11 +543,17 @@ func findBinDir(root string, prefix string) string {
 			return filepath.SkipDir // Abort further traversal once found
 		}
 		if info.IsDir() && info.Name() == "bin" {
-			// Check if this bin directory contains the compiler
-			if stat, err := os.Stat(filepath.Join(path, expectedExe)); err == nil && !stat.IsDir() {
-				binDir = path
+			// Check if this bin directory contains any files starting with the prefix
+			entries, err := os.ReadDir(path)
+			if err == nil {
+				for _, e := range entries {
+					if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+						binDir = path
+						return filepath.SkipDir // Found it!
+					}
+				}
 			}
-			return filepath.SkipDir // Skip traversing inside bin
+			return filepath.SkipDir // Skip traversing inside bin if it didn't match
 		}
 		return nil
 	})

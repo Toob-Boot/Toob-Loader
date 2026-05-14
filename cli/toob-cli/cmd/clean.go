@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/paths"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 var flagToolchains bool
@@ -27,10 +28,10 @@ var cleanCmd = &cobra.Command{
 			}
 			tcDir := filepath.Join(home, ".toob", "toolchains")
 			if _, err := os.Stat(tcDir); os.IsNotExist(err) {
-				fmt.Println("[toob] No toolchains found. Nothing to clean.")
+				ui.Muted("No toolchains found. Nothing to clean.")
 				return nil
 			}
-			fmt.Printf("[toob] Removing globally cached toolchains at %s ...\n", tcDir)
+			ui.Step("Removing cached toolchains at %s", tcDir)
 			// Safe rename-to-trash pattern for Windows locking safety
 			trashDir := filepath.Join(home, ".toob", ".trash", "toolchains-"+time.Now().Format("20060102150405"))
 			os.MkdirAll(filepath.Dir(trashDir), 0o755)
@@ -39,9 +40,9 @@ var cleanCmd = &cobra.Command{
 			}
 
 			if err := os.RemoveAll(trashDir); err != nil {
-				fmt.Printf("\033[33m[toob] Warning: Could not fully delete all files (some are locked), but toolchains are deactivated.\033[0m\n")
+				ui.Warn("Could not fully delete all files (some are locked), but toolchains are deactivated.")
 			}
-			fmt.Println("\033[32m[toob] Successfully freed disk space.\033[0m")
+			ui.Success("Disk space freed.")
 			return nil
 		}
 
@@ -52,16 +53,16 @@ var cleanCmd = &cobra.Command{
 
 		buildsDir := filepath.Join(root, "builds")
 		if _, err := os.Stat(buildsDir); os.IsNotExist(err) {
-			fmt.Println("[toob] Nothing to clean.")
+			ui.Muted("Nothing to clean.")
 			return nil
 		}
 
-		fmt.Printf("[toob] Removing %s ...\n", buildsDir)
+		ui.Step("Removing %s", buildsDir)
 		if err := os.RemoveAll(buildsDir); err != nil {
 			return fmt.Errorf("failed to clean builds directory: %w", err)
 		}
 
-		fmt.Println("[toob] Clean complete.")
+		ui.Success("Clean complete.")
 		return nil
 	},
 }

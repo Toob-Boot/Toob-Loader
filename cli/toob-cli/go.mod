@@ -1,6 +1,6 @@
 module github.com/toob-boot/toob
 
-go 1.26.2
+go 1.26.3
 
 require (
 	aead.dev/minisign v0.3.0

@@ -17,6 +17,7 @@ type FieldMeta struct {
 	Type    string
 	Tag     string // "required" or "optional"
 	JsonTag string // Wire-format key from `json:"..."` tag
+	JsonTagFull string // The complete json tag including options like omitempty
 }
 
 type InterfaceInfo struct {
@@ -84,10 +85,21 @@ func main() {
 				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed from optional to required.", fieldName, name))
 			}
 
-			// Wire-format breaking: renaming a JSON key changes the serialized contract
-			if oldField.JsonTag != "" && newField.JsonTag != "" && oldField.JsonTag != newField.JsonTag {
+			// Wire-format breaking: renaming or removing a JSON key changes the serialized contract
+			oldWireName := oldField.JsonTag
+			if oldWireName == "" {
+				oldWireName = fieldName
+			}
+			newWireName := newField.JsonTag
+			if newWireName == "" {
+				newWireName = fieldName
+			}
+			if oldWireName != newWireName {
 				bump = "MAJOR"
-				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed JSON tag from %q to %q (wire-format break).", fieldName, name, oldField.JsonTag, newField.JsonTag))
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed wire-format name from %q to %q.", fieldName, name, oldWireName, newWireName))
+			} else if oldField.JsonTagFull != newField.JsonTagFull {
+				bump = "MAJOR"
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed json serialization options (e.g. omitempty).", fieldName, name))
 			}
 		}
 
@@ -292,12 +304,13 @@ func parseInterface(filename string) (InterfaceInfo, error) {
 						}
 
 						// Extract wire-format JSON key for contract diffing
-						jsonTag := parsedTag.Get("json")
+						jsonTagFull := parsedTag.Get("json")
+						jsonTag := jsonTagFull
 						if idx := strings.Index(jsonTag, ","); idx != -1 {
 							jsonTag = jsonTag[:idx]
 						}
 
-						fields[name] = FieldMeta{Name: name, Type: fieldType, Tag: tagValue, JsonTag: jsonTag}
+						fields[name] = FieldMeta{Name: name, Type: fieldType, Tag: tagValue, JsonTag: jsonTag, JsonTagFull: jsonTagFull}
 					}
 					info.Structs[typeSpec.Name.Name] = fields
 				} else {
