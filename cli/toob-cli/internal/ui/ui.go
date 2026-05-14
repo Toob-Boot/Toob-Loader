@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+// parseMarkdown applies lightweight formatting, e.g. turning `text` into Cyan text.
+func parseMarkdown(s string) string {
+	parts := strings.Split(s, "`")
+	// Every odd index is inside backticks (if properly paired)
+	for i := 1; i < len(parts); i += 2 {
+		parts[i] = Cyan(parts[i])
+	}
+	return strings.Join(parts, "")
+}
+
 // --- Semantic Output Primitives ---
 // Inspired by Turborepo's task-scoped logging and Docker's clean progress output.
 
@@ -35,12 +45,13 @@ func Warn(msg string, args ...any) {
 //
 //	✗ Manifest not found
 func Error(msg string, args ...any) {
-	fmt.Fprintf(os.Stderr, "  %s %s\n", Red("✗"), fmt.Sprintf(msg, args...))
+	formatted := parseMarkdown(fmt.Sprintf(msg, args...))
+	fmt.Fprintf(os.Stderr, "  %s %s\n", Red("✗"), formatted)
 }
 
 // Info prints a secondary detail line.
 //
-//	• Target: espressif/esp32c6
+//   - Target: espressif/esp32c6
 func Info(msg string, args ...any) {
 	fmt.Fprintf(os.Stderr, "  %s %s\n", Brand("•"), fmt.Sprintf(msg, args...))
 }
@@ -56,15 +67,16 @@ func Muted(msg string, args ...any) {
 //
 //	💡 Run 'toob build --native' for faster builds.
 func Tip(msg string, args ...any) {
-	fmt.Fprintf(os.Stderr, "  %s %s\n", Brand("›"), Gray(fmt.Sprintf(msg, args...)))
+	formatted := parseMarkdown(fmt.Sprintf(msg, args...))
+	fmt.Fprintf(os.Stderr, "  %s %s\n", Brand("›"), Gray(formatted))
 }
 
 // --- Structured Components ---
 
 // Header prints a prominent section title with a brand-colored underline.
 //
-//	 TOOB BUILD
-//	 ──────────
+//	TOOB BUILD
+//	──────────
 func Header(title string) {
 	upper := strings.ToUpper(title)
 	fmt.Fprintf(os.Stderr, "\n  %s\n", BoldBrand(upper))
@@ -130,17 +142,41 @@ func UpdateBanner(current, latest string) {
 	fmt.Fprintf(os.Stderr, "  %s\n\n", bottomBorder)
 }
 
-// Table prints a formatted table with headers and rows.
-// Automatically calculates column widths.
+// TableOptions defines configurable settings for Table rendering.
+type TableOptions struct {
+	ColumnPadding   int   // Number of spaces between columns (default 2)
+	MinColumnWidths []int // Minimum width for specific columns, matched by index
+}
+
+// Table prints a formatted table with default settings (2 spaces padding).
 func Table(headers []string, rows [][]string) {
+	TableWithOptions(headers, rows, TableOptions{ColumnPadding: 2})
+}
+
+// TableWithOptions prints a formatted table with configurable settings.
+// Automatically calculates column widths, ignoring ANSI colors for alignment.
+func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
+	if opts.ColumnPadding <= 0 {
+		opts.ColumnPadding = 2
+	}
+	padStr := strings.Repeat(" ", opts.ColumnPadding)
+
 	colWidths := make([]int, len(headers))
 	for i, h := range headers {
-		colWidths[i] = len(h)
+		w := len(Strip(h))
+		if i < len(opts.MinColumnWidths) && opts.MinColumnWidths[i] > w {
+			w = opts.MinColumnWidths[i]
+		}
+		colWidths[i] = w
 	}
+	
 	for _, row := range rows {
 		for i, cell := range row {
-			if i < len(colWidths) && len(cell) > colWidths[i] {
-				colWidths[i] = len(cell)
+			if i < len(colWidths) {
+				w := len(Strip(cell))
+				if w > colWidths[i] {
+					colWidths[i] = w
+				}
 			}
 		}
 	}
@@ -149,9 +185,15 @@ func Table(headers []string, rows [][]string) {
 	var hdr strings.Builder
 	for i, h := range headers {
 		if i > 0 {
-			hdr.WriteString("  ")
+			hdr.WriteString(padStr)
 		}
-		hdr.WriteString(fmt.Sprintf("%-*s", colWidths[i], h))
+		
+		visualLen := len(Strip(h))
+		padding := colWidths[i] - visualLen
+		if padding < 0 {
+			padding = 0
+		}
+		hdr.WriteString(h + strings.Repeat(" ", padding))
 	}
 	fmt.Fprintf(os.Stderr, "  %s\n", Bold(hdr.String()))
 
@@ -159,7 +201,7 @@ func Table(headers []string, rows [][]string) {
 	var sep strings.Builder
 	for i, w := range colWidths {
 		if i > 0 {
-			sep.WriteString("  ")
+			sep.WriteString(padStr)
 		}
 		sep.WriteString(strings.Repeat("─", w))
 	}
@@ -170,13 +212,20 @@ func Table(headers []string, rows [][]string) {
 		var line strings.Builder
 		for i, cell := range row {
 			if i > 0 {
-				line.WriteString("  ")
+				line.WriteString(padStr)
 			}
 			w := 0
 			if i < len(colWidths) {
 				w = colWidths[i]
 			}
-			line.WriteString(fmt.Sprintf("%-*s", w, cell))
+			
+			visualLen := len(Strip(cell))
+			padding := w - visualLen
+			if padding < 0 {
+				padding = 0
+			}
+			
+			line.WriteString(cell + strings.Repeat(" ", padding))
 		}
 		fmt.Fprintf(os.Stderr, "  %s\n", line.String())
 	}
@@ -190,13 +239,13 @@ type TimingEntry struct {
 
 // TimingSummary prints a Turborepo-style timing breakdown.
 //
-//	 TIMINGS
-//	 ───────
-//	 Manifest Compiler ······· 12ms
-//	 CMake Configure ········· 340ms
-//	 Ninja Build ············· 1.2s
-//	 ─────────────────────────────
-//	 Total ··················· 1.56s
+//	TIMINGS
+//	───────
+//	Manifest Compiler ······· 12ms
+//	CMake Configure ········· 340ms
+//	Ninja Build ············· 1.2s
+//	─────────────────────────────
+//	Total ··················· 1.56s
 func TimingSummary(phases []TimingEntry, total time.Duration) {
 	Header("Timings")
 	padWidth := 28

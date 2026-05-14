@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/installer"
@@ -16,10 +18,24 @@ var chipCmd = &cobra.Command{
 }
 
 var chipListCmd = &cobra.Command{
-	Use:   "list",
+	Use:   "list [query]",
 	Short: "List all chips available in the registry",
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		query := ""
+		if len(args) > 0 {
+			query = strings.ToLower(args[0])
+		}
+
 		cache := registry.NewCache("")
+
+		// Async Matrix Fetch
+		matrixChan := make(chan *registry.Matrix, 1)
+		go func() {
+			m, _ := cache.FetchLiveMatrix()
+			matrixChan <- m
+		}()
+
 		idx, err := cache.LoadIndex()
 		if err != nil {
 			return err
@@ -28,11 +44,50 @@ var chipListCmd = &cobra.Command{
 			ui.Muted("Registry is empty.")
 			return nil
 		}
-		headers := []string{"Chip", "Vendor", "Arch", "Version"}
+
+		// Wait up to 2 seconds for matrix
+		var matrix *registry.Matrix
+		select {
+		case matrix = <-matrixChan:
+		case <-time.After(2 * time.Second):
+		}
+
+		headers := []string{"Chip", "Version", "Vendor", "Arch", "Verified CLI"}
 		var rows [][]string
 		for _, ci := range idx.Chips {
-			rows = append(rows, []string{ci.Name, ci.Vendor, ci.Arch, ci.Version})
+			if query != "" && !strings.Contains(strings.ToLower(ci.Name), query) {
+				continue
+			}
+
+			verifiedClisStr := "(unverified)"
+			if matrix != nil {
+				if chipEntry, has := (*matrix)[ci.Name]; has {
+					searchVer := strings.TrimPrefix(ci.Version, "v")
+					for vKey, verEntry := range chipEntry.Versions {
+						if strings.TrimPrefix(vKey, "v") == searchVer {
+							var clis []string
+							for cliVer, info := range verEntry.VerifiedCliVersions {
+								if info.Status == "SUCCESS" {
+									clis = append(clis, cliVer)
+								}
+							}
+							if len(clis) > 0 {
+								verifiedClisStr = strings.Join(clis, ", ")
+							}
+							break
+						}
+					}
+				}
+			}
+
+			rows = append(rows, []string{ci.Name, ci.Version, ci.Vendor, ci.Arch, verifiedClisStr})
 		}
+
+		if len(rows) == 0 {
+			ui.Warn("No chips found matching '%s'", query)
+			return nil
+		}
+
 		ui.Table(headers, rows)
 		return nil
 	},

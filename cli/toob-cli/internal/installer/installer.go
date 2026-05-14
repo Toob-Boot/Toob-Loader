@@ -13,6 +13,7 @@ import (
 	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 
@@ -76,6 +77,9 @@ func (inst *Installer) Add(arg string) error {
 
 	ci, err := inst.cache.GetChip(name)
 	if err != nil {
+		if liveVer, liveErr := inst.cache.ResolveChipLive(name); liveErr == nil {
+			return fmt.Errorf("Chip '%s' is locally unknown.\n  › Good news: It exists in Toob-Registry Version %s!\n  › Run `toob registry sync` to download it.", name, liveVer)
+		}
 		return err
 	}
 	idx, _ := inst.cache.LoadIndex()
@@ -120,7 +124,7 @@ func (inst *Installer) Add(arg string) error {
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
 	}
-	fmt.Printf("Added chip '%s' (v%s) to lockfile [arch=%s, vendor=%s].\n", name, ci.Version, ci.Arch, ci.Vendor)
+	ui.Success("Added chip '%s' (v%s) to lockfile [arch=%s, vendor=%s].", name, ci.Version, ci.Arch, ci.Vendor)
 	
 	// Wait up to 1 second for the matrix to avoid blocking
 	var matrix *registry.Matrix
@@ -130,7 +134,7 @@ func (inst *Installer) Add(arg string) error {
 	}
 	printMatrixCompatibility(matrix, ci.Name, ci.Version, ci.Verified)
 
-	fmt.Println("Registry link established. Run `toob build` to compile.")
+	ui.Tip("Registry link established. Run `toob build` to compile.")
 	return nil
 }
 
@@ -164,6 +168,9 @@ func (inst *Installer) Spawn(arg string) error {
 
 	ci, err := inst.cache.GetChip(name)
 	if err != nil {
+		if liveVer, liveErr := inst.cache.ResolveChipLive(name); liveErr == nil {
+			return fmt.Errorf("Chip '%s' is locally unknown.\n  › Good news: It exists in Toob-Registry Version %s!\n  › Run `toob registry sync` to download it.", name, liveVer)
+		}
 		return err
 	}
 
@@ -171,7 +178,7 @@ func (inst *Installer) Spawn(arg string) error {
 	var spawnErr error
 	defer func() {
 		if spawnErr != nil {
-			fmt.Println("[toob] Spawn failed. Rolling back created directories...")
+			ui.Warn("Spawn failed. Rolling back created directories...")
 			for _, dir := range rollback {
 				// Gap 7.2: Use moveToTrash to prevent NTFS zombie folders on rollback failure
 				moveToTrash(dir)
@@ -245,7 +252,7 @@ func (inst *Installer) Spawn(arg string) error {
 		spawnErr = err
 		return err
 	}
-	fmt.Printf("Spawned chip '%s' (v%s)  [locally editable]\n", name, ci.Version)
+	ui.Success("Spawned chip '%s' (v%s) [locally editable]", name, ci.Version)
 	
 	// Wait up to 1 second for the matrix to avoid blocking
 	var matrix *registry.Matrix
@@ -270,7 +277,7 @@ func moveToTrash(dir string) {
 
 func printMatrixCompatibility(matrix *registry.Matrix, chipName, chipVersion string, verified bool) {
 	if !verified {
-		fmt.Println("\n\033[33mWarning: This hardware configuration is marked as UNVERIFIED by the CI Compatibility Matrix. Build stability is not guaranteed.\033[0m")
+		ui.Warn("This hardware configuration is marked as UNVERIFIED by the CI Compatibility Matrix. Build stability is not guaranteed.")
 		return
 	}
 
@@ -290,7 +297,7 @@ func printMatrixCompatibility(matrix *registry.Matrix, chipName, chipVersion str
 					}
 				}
 				if len(verifiedClis) > 0 {
-					fmt.Printf("\n\033[32m[toob] Chip %s v%s — Verified with CLI: %s\033[0m\n", chipName, chipVersion, strings.Join(verifiedClis, ", "))
+					ui.Success("Chip %s v%s — Verified with CLI: %s", chipName, chipVersion, strings.Join(verifiedClis, ", "))
 				}
 				break
 			}
@@ -328,7 +335,7 @@ func (inst *Installer) Remove(name string) error {
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
 	}
-	fmt.Printf("Removed chip '%s'.\n", name)
+	ui.Success("Removed chip '%s'.", name)
 	return nil
 }
 
@@ -360,7 +367,7 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 		// Actually, we forced checkout to Lockfile version or specific version above.
 		// If they forced a new version, the existing dependency might be outdated!
 		// For now, we print a warning, as we are not overwriting it.
-		fmt.Printf("[toob] Warning: shared dependency '%s' already exists. Not overwriting to preserve local edits.\n", archDst)
+		ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", archDst)
 	}
 
 	// Vendor layer
@@ -375,7 +382,7 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo) ([]string, error) {
 		}
 		created = append(created, vendorDst)
 	} else if inst.lock.Registry.Version != "" {
-		fmt.Printf("[toob] Warning: shared dependency '%s' already exists. Not overwriting to preserve local edits.\n", vendorDst)
+		ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", vendorDst)
 	}
 
 	// Toolchain file

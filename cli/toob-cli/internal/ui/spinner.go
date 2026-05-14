@@ -20,6 +20,10 @@ type LiveSpinner struct {
 	wg           sync.WaitGroup
 	startTime    time.Time
 	easterEggIdx int
+
+	// Progress Tracking
+	total   int
+	current int
 }
 
 // NewSpinner creates a new LiveSpinner instance.
@@ -81,7 +85,7 @@ func (s *LiveSpinner) Start() {
 				// Determine if we should show an Easter Egg (every ~10 seconds)
 				elapsed := t.Sub(s.startTime).Seconds()
 				showEasterEgg := false
-				
+
 				// 10s interval, active for 1.2 seconds (3 frames)
 				intervalMod := int(elapsed) % 10
 				if intervalMod == 0 && elapsed > 5 {
@@ -107,18 +111,45 @@ func (s *LiveSpinner) Start() {
 				}
 
 				// Render Frame
-				// Primary Line:   [■ ] Building...
+				// Primary Line:   [■ ] Building... [████░░░] 50%
 				// Detail Line:      ❯ [45/120] Compiling main.c
-				
+
 				// Apply Brand color to the spinner frame
 				coloredFrame := BoldBrand(activeFrame)
 
+				// Calculate optional progress bar
+				var progressStr string
+				s.mu.Lock()
+				cur := s.current
+				tot := s.total
+				s.mu.Unlock()
+
+				if tot > 0 {
+					if cur > tot {
+						cur = tot
+					}
+					percent := int((float64(cur) / float64(tot)) * 100)
+					width := 25
+					filled := int((float64(cur) / float64(tot)) * float64(width))
+					empty := width - filled
+					if empty < 0 {
+						empty = 0
+					}
+					bar := Brand(strings.Repeat("█", filled)) + Gray(strings.Repeat("░", empty))
+
+					timeStr := ""
+					if elapsed > 1 {
+						timeStr = Gray(fmt.Sprintf(" (%ds)", int(elapsed)))
+					}
+					progressStr = fmt.Sprintf(" [%s] %3d%%%s", bar, percent, timeStr)
+				}
+
 				// Determine how many lines we are drawing
 				if det != "" {
-					fmt.Fprintf(os.Stderr, "  %s %s\n    %s %s", coloredFrame, msg, Brand("❯"), Gray(det))
+					fmt.Fprintf(os.Stderr, "  %s %s%s\n    %s %s", coloredFrame, msg, progressStr, Brand("❯"), Gray(det))
 					linesDrawn = 2
 				} else {
-					fmt.Fprintf(os.Stderr, "  %s %s", coloredFrame, msg)
+					fmt.Fprintf(os.Stderr, "  %s %s%s", coloredFrame, msg, progressStr)
 					linesDrawn = 1
 				}
 
@@ -144,9 +175,33 @@ func (s *LiveSpinner) clearLines(count int, clearOne, clearTwo string) {
 func (s *LiveSpinner) UpdateDetail(detail string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	// Pre-strip whitespace/newlines from raw compiler output
 	s.detail = strings.TrimSpace(detail)
+}
+
+// SetProgress enables the progress bar mode on the spinner.
+func (s *LiveSpinner) SetProgress(current, total int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.current = current
+	s.total = total
+}
+
+// AddProgress increments the current progress count.
+func (s *LiveSpinner) AddProgress(amount int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.current += amount
+}
+
+// Write implements io.Writer so the LiveSpinner can be used directly in io.Copy
+// to track download or streaming progress automatically.
+func (s *LiveSpinner) Write(p []byte) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.current += len(p)
+	return len(p), nil
 }
 
 // Stop cleanly terminates the spinner goroutine and wipes its visual footprint.

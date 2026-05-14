@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/toob-boot/toob/internal/registry"
@@ -27,22 +28,27 @@ type Generator interface {
 	Generate(ctx Context) error
 }
 
-// RegistryGenerator copies template files dynamically from the registry.
-type RegistryGenerator struct {
+// IntegrationGenerator generates minimal libtoob bridging code instead of full scaffolding.
+type IntegrationGenerator struct {
 	Framework string
 }
 
-func (g *RegistryGenerator) Generate(ctx Context) error {
+func (g *IntegrationGenerator) Generate(ctx Context) error {
 	if err := GenerateDeviceToml(ctx); err != nil {
 		return err
 	}
 
-	tmplDir := filepath.Join(ctx.RegistryDir, "chips", ctx.ChipName, "templates", strings.ToLower(g.Framework))
-	if _, err := os.Stat(tmplDir); os.IsNotExist(err) {
-		return fmt.Errorf("framework '%s' not found for chip '%s' in registry (missing %s)", g.Framework, ctx.ChipName, tmplDir)
+	integrationDir := filepath.Join(ctx.ProjectDir, "toob_integration")
+	if err := os.MkdirAll(integrationDir, 0o755); err != nil {
+		return err
 	}
 
-	err := filepath.Walk(tmplDir, func(path string, info os.FileInfo, err error) error {
+	tmplDir := filepath.Join(ctx.RegistryDir, "integrations", strings.ToLower(g.Framework), "files")
+	if _, err := os.Stat(tmplDir); os.IsNotExist(err) {
+		return fmt.Errorf("FATAL: Integration files not found for framework '%s' in registry", g.Framework)
+	}
+
+	return filepath.Walk(tmplDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -55,12 +61,11 @@ func (g *RegistryGenerator) Generate(ctx Context) error {
 			return nil
 		}
 
-		destPath := filepath.Join(ctx.ProjectDir, relPath)
+		destPath := filepath.Join(integrationDir, relPath)
 		if info.IsDir() {
-			return os.MkdirAll(destPath, 0755)
+			return os.MkdirAll(destPath, 0o755)
 		}
 
-		// Read and execute template
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -82,42 +87,22 @@ func (g *RegistryGenerator) Generate(ctx Context) error {
 		}
 		return nil
 	})
-
-	return err
 }
+
 
 func GenerateDeviceToml(ctx Context) error {
 	tmplPath := filepath.Join(ctx.RegistryDir, "chips", ctx.ChipName, "template_device.toml")
 
-	// Fallback Template (Minimal with instructions)
-	fallbackTmpl := `name = "{{.ProjectName}}"
-version = "0.1.0"
-
-[device]
-vendor = "{{.ChipInfo.Vendor}}"
-chip = "{{.ChipName}}"
-
-[partitions]
-# FATAL: No template found in registry for this chip.
-# You MUST configure these following partition sizes (in bytes) for your specific hardware flash size!
-stage0_size = 0
-stage1_size = 0
-app_size = 0
-`
-
 	var tmpl *template.Template
 	var err error
 
-	if _, err := os.Stat(tmplPath); err == nil {
-		tmpl, err = template.ParseFiles(tmplPath)
-		if err != nil {
-			return fmt.Errorf("failed to parse registry template: %w", err)
-		}
-	} else {
-		tmpl, err = template.New("device.toml").Parse(fallbackTmpl)
-		if err != nil {
-			return fmt.Errorf("failed to parse fallback template: %w", err)
-		}
+	if _, err := os.Stat(tmplPath); os.IsNotExist(err) {
+		return fmt.Errorf("FATAL: No template_device.toml found in registry for chip '%s'", ctx.ChipName)
+	}
+
+	tmpl, err = template.ParseFiles(tmplPath)
+	if err != nil {
+		return fmt.Errorf("failed to parse registry template: %w", err)
 	}
 
 	f, err := os.Create(filepath.Join(ctx.ProjectDir, "device.toml"))

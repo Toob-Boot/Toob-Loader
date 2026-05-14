@@ -15,7 +15,7 @@ var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Check system environment and dependencies for Toob",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("Toob Environment Doctor")
+		ui.Header("Toob Environment Doctor")
 
 		type doctorCheck struct {
 			name        string

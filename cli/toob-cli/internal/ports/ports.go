@@ -88,6 +88,14 @@ type ResolveEnvironmentResponse struct {
 	RecommendedCoreSDK  string `json:"recommended_core_sdk" port:"required"`
 }
 
+// HubResolveIntegrationsResponse defines GET /api/v1/resolve/integrations response.
+type HubResolveIntegrationsResponse struct {
+	Integrations []struct {
+		Name    string `json:"name"    port:"required"`
+		Version string `json:"version" port:"required"`
+	} `json:"integrations" port:"required"`
+}
+
 // =============================================================================
 // Boundary: CLI → GitHub API
 // =============================================================================
@@ -126,6 +134,7 @@ type RegistryIndex struct {
 	Vendors          map[string]RegistryVendor  `json:"vendors"           port:"required"`
 	Archs            map[string]RegistryArch    `json:"archs"             port:"required"`
 	Toolchains       map[string]RegistryToolchain `json:"toolchains"      port:"required"`
+	Integrations     map[string]RegistryIntegration `json:"integrations"  port:"required"`
 }
 
 // RegistryChip is a single chip entry in registry.json.
@@ -151,6 +160,14 @@ type RegistryVendor struct {
 
 // RegistryArch is an architecture entry in registry.json.
 type RegistryArch struct {
+	Name        string `json:"name"        port:"required"`
+	Path        string `json:"path"        port:"required"`
+	Version     string `json:"version"     port:"required"`
+	Description string `json:"description" port:"optional"`
+}
+
+// RegistryIntegration is an integration entry in registry.json.
+type RegistryIntegration struct {
 	Name        string `json:"name"        port:"required"`
 	Path        string `json:"path"        port:"required"`
 	Version     string `json:"version"     port:"required"`

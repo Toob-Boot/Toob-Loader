@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/toob-boot/toob/internal/paths"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 // ChipInfo holds immutable metadata for a single chip.
@@ -51,15 +52,23 @@ type ToolchainInfo struct {
 	Version string `json:"version"`
 }
 
+type IntegrationInfo struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+}
+
 // Index is the parsed content of registry.json.
 type Index struct {
-	FormatVersion    int                      `json:"format_version"`
-	RegistryVersion  string                   `json:"registry_version"`
-	CliCompatibility string                   `json:"cli_compatibility"`
-	Chips            map[string]ChipInfo      `json:"chips"`
-	Vendors          map[string]VendorInfo    `json:"vendors"`
-	Archs            map[string]ArchInfo      `json:"archs"`
-	Toolchains       map[string]ToolchainInfo `json:"toolchains"`
+	FormatVersion    int                        `json:"format_version"`
+	RegistryVersion  string                     `json:"registry_version"`
+	CliCompatibility string                     `json:"cli_compatibility"`
+	Chips            map[string]ChipInfo        `json:"chips"`
+	Vendors          map[string]VendorInfo      `json:"vendors"`
+	Archs            map[string]ArchInfo        `json:"archs"`
+	Toolchains       map[string]ToolchainInfo   `json:"toolchains"`
+	Integrations     map[string]IntegrationInfo `json:"integrations"`
 }
 
 type MatrixDependencies struct {
@@ -151,14 +160,14 @@ func (c *Cache) tryCleanStaleLock(lockDir string) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		// Process doesn't exist — stale lock
-		fmt.Printf("[toob] Cleaning stale registry lock (PID %d no longer running)\n", pid)
+		ui.Muted("Cleaning stale registry lock (PID %d no longer running)", pid)
 		os.RemoveAll(lockDir)
 		return true
 	}
 	// On Unix, FindProcess always succeeds. Send signal 0 to probe liveness.
 	// On Windows, FindProcess fails for dead processes, so reaching here means alive.
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		fmt.Printf("[toob] Cleaning stale registry lock (PID %d no longer running)\n", pid)
+		ui.Muted("Cleaning stale registry lock (PID %d no longer running)", pid)
 		os.RemoveAll(lockDir)
 		return true
 	}
@@ -181,10 +190,10 @@ func (c *Cache) Sync() error {
 // Checkout switches the registry to a specific version via the Toob Hub API.
 func (c *Cache) Checkout(version string) error {
 	hubURL := fmt.Sprintf("%s/api/v1/resolve/registry?version=%s", getHubURL(), version)
-	
+
 	resp, err := http.Get(hubURL)
 	if err != nil {
-		fmt.Printf("\n[toob] \033[33mWARN: Failed to reach Toob Hub API (Offline?).\033[0m\n")
+		ui.Warn("Failed to reach Toob Hub API (Offline?).")
 		return fmt.Errorf("network error: %w", err)
 	}
 	defer resp.Body.Close()
@@ -203,11 +212,11 @@ func (c *Cache) Checkout(version string) error {
 
 	// We extract to a versioned subdirectory
 	targetDir := filepath.Join(c.dir, "versions", result.Version)
-	
+
 	// If it already exists, just update our active directory
 	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
 		c.dir = targetDir
-		fmt.Printf("[toob] Registry Source: Local Cache (%s)\n", result.Version)
+		ui.Info("Registry Source: Local Cache (%s)", result.Version)
 		return nil
 	}
 
@@ -223,7 +232,7 @@ func (c *Cache) Checkout(version string) error {
 		return nil
 	}
 
-	fmt.Printf("[toob] Downloading Registry %s from GitHub...\n", result.Version)
+	ui.Step("Downloading Registry %s from GitHub...", result.Version)
 	if err := downloadAndExtractZip(result.DownloadURL, targetDir); err != nil {
 		return fmt.Errorf("failed to extract registry: %w", err)
 	}
@@ -249,6 +258,74 @@ func (c *Cache) LoadIndex() (*Index, error) {
 	}
 	c.index = &idx
 	return &idx, nil
+}
+
+// ResolveChipLive fetches chip existence from the Hub API and returns the Registry Version it was found in.
+func (c *Cache) ResolveChipLive(name string) (string, error) {
+	url := fmt.Sprintf("%s/api/v1/resolve/chip?name=%s", c.remote, name)
+
+	client := http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err == nil {
+		req.Header.Set("User-Agent", "Toob-CLI")
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+
+			var apiResp struct {
+				FoundInRegistryVersion string `json:"found_in_registry_version"`
+			}
+			if json.Unmarshal(body, &apiResp) == nil {
+				return apiResp.FoundInRegistryVersion, nil
+			}
+		} else if resp != nil && resp.StatusCode == 404 {
+			return "", fmt.Errorf("chip not found on hub")
+		}
+	}
+	return "", fmt.Errorf("failed to contact hub API")
+}
+
+// FetchLiveIntegrations fetches available integrations from the Hub API.
+// It falls back to the local cached registry index if the API is offline.
+func (c *Cache) FetchLiveIntegrations() ([]string, error) {
+	url := fmt.Sprintf("%s/api/v1/resolve/integrations", c.remote)
+
+	client := http.Client{Timeout: 3 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err == nil {
+		req.Header.Set("User-Agent", "Toob-CLI")
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+
+			var apiResp struct {
+				Integrations []struct {
+					Name    string `json:"name"`
+				} `json:"integrations"`
+			}
+			if json.Unmarshal(body, &apiResp) == nil {
+				var result []string
+				for _, i := range apiResp.Integrations {
+					result = append(result, i.Name)
+				}
+				return result, nil
+			}
+		}
+	}
+
+	// Fallback to local
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch live integrations and local fallback failed: %w", err)
+	}
+
+	var result []string
+	for k := range idx.Integrations {
+		result = append(result, k)
+	}
+	return result, nil
 }
 
 // FetchLiveMatrix downloads the compatibility matrix directly from GitHub's main branch,

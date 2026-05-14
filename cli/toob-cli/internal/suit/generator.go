@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 // Generate runs the zcbor parser generation for SUIT and telemetry CDDLs.
@@ -13,17 +15,17 @@ func Generate(outputDir, compilerRoot, projectRoot, cliVersion string) error {
 	suitCddl := filepath.Join(compilerRoot, "cli", "suit", "toob_suit.cddl")
 	telemCddl := filepath.Join(compilerRoot, "cli", "suit", "toob_telemetry.cddl")
 
-	fmt.Println("[SUIT CodeGen] Generating C artifacts in:", outputDir)
+	ui.Step("Generating SUIT CodeGen C artifacts in: %s", outputDir)
 
 	zcborPath, err := exec.LookPath("zcbor")
 	useDocker := false
 	if err != nil {
-		fmt.Println("[SUIT CodeGen] Local zcbor not found.")
+		ui.Muted("Local zcbor not found.")
 		zcborPath, err = exec.LookPath("docker")
 		if err != nil {
 			return fmt.Errorf("FATAL ERROR: Valid Python zcbor CLI not found, and Docker is not installed for fallback!\nPlease install Python and 'pip install zcbor', or install Docker.")
 		}
-		fmt.Print("[SUIT CodeGen] Do you want to use the Docker Hybrid Fallback for this step? [Y/n]: ")
+		fmt.Print("  ? Do you want to use the Docker Hybrid Fallback for this step? [Y/n]: ")
 		var response string
 		fmt.Scanln(&response)
 		if response != "" && strings.ToLower(strings.TrimSpace(response)) != "y" {
@@ -31,7 +33,7 @@ func Generate(outputDir, compilerRoot, projectRoot, cliVersion string) error {
 		}
 		useDocker = true
 	} else {
-		fmt.Println("[SUIT CodeGen] zcbor CLI found locally. Generating strict parsers...")
+		ui.Step("zcbor CLI found locally. Generating strict parsers...")
 	}
 
 	commands := [][]string{
@@ -64,6 +66,6 @@ func Generate(outputDir, compilerRoot, projectRoot, cliVersion string) error {
 		}
 	}
 
-	fmt.Println("[SUIT CodeGen] Complete.")
+	ui.Success("SUIT CodeGen complete.")
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -97,6 +96,14 @@ func isMonorepo(root string) bool {
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
+	// Premium UX: Show initialization progress bar
+	pb := ui.NewProgressBar("Initializing Build Engine", 100)
+	for i := 0; i <= 100; i += 10 {
+		pb.Update(i)
+		time.Sleep(15 * time.Millisecond)
+	}
+	pb.Finish()
+
 	root, err := paths.FindProjectRoot("")
 	if err != nil {
 		return err

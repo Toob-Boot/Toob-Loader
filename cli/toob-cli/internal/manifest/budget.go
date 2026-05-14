@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/BurntSushi/toml"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
 func CheckBudget(tomlPath, binPath, stage string) error {
@@ -39,6 +40,6 @@ func CheckBudget(tomlPath, binPath, stage string) error {
 		return fmt.Errorf("FATAL [BUDGET_EXCEEDED]: %s is %d bytes, which exceeds the budget of %d bytes!", stage, actualSize, budget)
 	}
 
-	fmt.Printf("BUDGET SUCCESS: %s (%d bytes) fits into budget (%d bytes).\n", stage, actualSize, budget)
+	ui.Success("BUDGET SUCCESS: %s (%d bytes) fits into budget (%d bytes).", stage, actualSize, budget)
 	return nil
 }
