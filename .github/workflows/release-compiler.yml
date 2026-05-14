@@ -9,8 +9,8 @@ permissions:
   contents: write
 
 jobs:
-  build-and-stage:
-    name: Build & Stage Compiler Image
+  build-and-push:
+    name: Build & Push Compiler Image
     runs-on: ubuntu-latest
     if: ${{ github.event.act }}
     steps:
@@ -46,7 +46,7 @@ jobs:
       - name: Build Docker Image
         working-directory: cli/.pipeline-repo
         run: |
-          echo ">>> Building ${REPOSITORY}:v${RAW_VERSION}-rc..."
+          echo ">>> Building ${REPOSITORY}:v${RAW_VERSION}..."
 
           docker build \
             --no-cache \
@@ -62,14 +62,15 @@ jobs:
             --label "toob.compiler_version=${RAW_VERSION}" \
             --label "toob.cli_version=${CLI_VERSION}" \
             --label "toob.protocol_version=${PROTOCOL_VERSION}" \
-            -t "${REPOSITORY}:v${RAW_VERSION}-rc" \
+            -t "${REPOSITORY}:v${RAW_VERSION}" \
+            -t "${REPOSITORY}:latest" \
             -f Dockerfile.compiler .
 
-          echo ">>> [SUCCESS] Image built: ${REPOSITORY}:v${RAW_VERSION}-rc"
+          echo ">>> [SUCCESS] Image built: ${REPOSITORY}:v${RAW_VERSION}"
 
       - name: Verify Protocol Label
         run: |
-          LABEL=$(docker inspect --format '{{index .Config.Labels "toob.protocol_version"}}' "${REPOSITORY}:v${RAW_VERSION}-rc")
+          LABEL=$(docker inspect --format '{{index .Config.Labels "toob.protocol_version"}}' "${REPOSITORY}:v${RAW_VERSION}")
           if [ "$LABEL" != "$PROTOCOL_VERSION" ]; then
             echo "FATAL: Protocol label mismatch. Expected ${PROTOCOL_VERSION}, got ${LABEL}"
             exit 1
@@ -80,31 +81,36 @@ jobs:
         run: |
           echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
 
-      - name: Push Release Candidate
+      - name: Push to Docker Hub
         run: |
-          echo ">>> Pushing ${REPOSITORY}:v${RAW_VERSION}-rc..."
-          docker push "${REPOSITORY}:v${RAW_VERSION}-rc"
-          echo ">>> [SUCCESS] RC image pushed to Docker Hub"
+          echo ">>> Pushing ${REPOSITORY}:v${RAW_VERSION}..."
+          docker push "${REPOSITORY}:v${RAW_VERSION}"
+          docker push "${REPOSITORY}:latest"
+          echo ">>> [SUCCESS] Image pushed to Docker Hub"
 
-      - name: Create Draft Release
+      - name: Update Manifest Version
         run: |
-          BODY="## Compiler v${RAW_VERSION}\n\n"
-          BODY+="| Property | Value |\n|---|---|\n"
-          BODY+="| CLI | v${CLI_VERSION} |\n"
-          BODY+="| Protocol | v${PROTOCOL_VERSION} |\n"
-          BODY+="| Docker Hub | \`${REPOSITORY}:v${RAW_VERSION}-rc\` |\n\n"
-          BODY+="**Publish this release to promote the image to \`v${RAW_VERSION}\` + \`latest\`.**"
+          CURRENT=$(jq -r '.compiler_version' compiler/compiler_manifest.json)
+          if [ "$CURRENT" = "$RAW_VERSION" ]; then
+            echo ">>> Manifest already at v${RAW_VERSION}. Skipping."
+            exit 0
+          fi
 
-          curl -sf -X POST \
+          jq --arg v "$RAW_VERSION" '.compiler_version = $v' \
+            compiler/compiler_manifest.json > tmp_manifest.json \
+            && mv tmp_manifest.json compiler/compiler_manifest.json
+
+          git config user.name "Toob Release Bot"
+          git config user.email "release@toob-boot.io"
+          git add compiler/compiler_manifest.json
+          git commit -m "chore(compiler): record v${RAW_VERSION} release [skip ci]"
+          git push origin HEAD:main || echo ">>> Push failed (non-critical). Manual sync needed."
+
+      - name: Trigger Topology Update
+        run: |
+          curl -s -X POST \
             -H "Accept: application/vnd.github.v3+json" \
             -H "Authorization: token ${{ secrets.RELEASE_TARGET_TOKEN }}" \
-            https://api.github.com/repos/Toob-Boot/Toob-Loader/releases \
-            -d "{
-              \"tag_name\": \"${TAG_NAME}\",
-              \"name\": \"Compiler v${RAW_VERSION}\",
-              \"body\": \"$(echo -e "$BODY")\",
-              \"draft\": true,
-              \"prerelease\": false
-            }"
-
-          echo ">>> [SUCCESS] Draft release created for ${TAG_NAME}"
+            https://api.github.com/repos/Toob-Boot/Toob-Registry/actions/workflows/version-index.yml/dispatches \
+            -d '{"ref":"main"}'
+          echo ">>> Topology update triggered"

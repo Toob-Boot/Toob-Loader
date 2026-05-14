@@ -302,6 +302,28 @@ jobs:
               git tag "$NEW_TAG"
               git push origin "$NEW_TAG"
               echo ">>> [Compiler Oracle] Tag $NEW_TAG successfully pushed!"
+
+              # Create draft release as manual approval gate
+              CLI_VER=$(jq -r '.cli.version' compiler/compiler_manifest.json)
+              PROTO_VER=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
+              BODY="## Compiler v${NEW_VERSION}\n\n"
+              BODY+="| Property | Value |\n|---|---|\n"
+              BODY+="| CLI | v${CLI_VER} |\n"
+              BODY+="| Protocol | v${PROTO_VER} |\n\n"
+              BODY+="**Publish this release to trigger the Docker image build on the CI server.**"
+
+              curl -sf -X POST \
+                -H "Accept: application/vnd.github.v3+json" \
+                -H "Authorization: token ${{ secrets.RELEASE_TARGET_TOKEN }}" \
+                https://api.github.com/repos/Toob-Boot/Toob-Loader/releases \
+                -d "{
+                  \"tag_name\": \"${NEW_TAG}\",
+                  \"name\": \"Compiler v${NEW_VERSION}\",
+                  \"body\": \"$(echo -e "$BODY")\",
+                  \"draft\": true,
+                  \"prerelease\": false
+                }" && echo ">>> [Compiler Oracle] Draft release created for ${NEW_TAG}" \
+                   || echo ">>> [Compiler Oracle] Draft creation failed (non-critical)"
           fi
 
       - name: ABI Orakel (Chips)
