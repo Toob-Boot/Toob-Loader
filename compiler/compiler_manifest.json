@@ -1,16 +1,16 @@
 {
   "format_version": 1,
-  "compiler_version": "1.0.0",
+  "compiler_version": "1.0.9",
   "protocol_version": 1,
   "base_image": {
     "image": "ubuntu:26.04",
     "source": "https://hub.docker.com/_/ubuntu"
   },
   "cli": {
-    "version": "0.0.15",
+    "version": "0.2.2",
     "source": {
       "url": "https://github.com/Toob-Boot/Toob-CLI-Release",
-      "ref": "cli/v0.0.15",
+      "ref": "cli/v0.2.2",
       "artifact": "toob-linux-amd64"
     }
   },
