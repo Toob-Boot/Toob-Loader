@@ -92,8 +92,34 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 		expectedVersion = "latest"
 	}
 	tcRoot := filepath.Join(localDir, tcName, expectedVersion)
+	lockDir := tcRoot + ".lock.d"
 
 	// 1. Cache Check (Gap 1.1 Versioning)
+	if tcPath := FindBinDir(tcRoot, prefix); tcPath != "" {
+		return tcPath, nil
+	}
+
+	// Acquire global provisioning lock
+	for {
+		err := os.Mkdir(lockDir, 0755)
+		if err == nil {
+			defer os.RemoveAll(lockDir)
+			break
+		}
+		
+		if stat, err := os.Stat(lockDir); err == nil {
+			if time.Since(stat.ModTime()) > 15*time.Minute {
+				ui.Warn("Toolchain lock for %s is older than 15 minutes. Assuming stale and removing...", tcName)
+				os.RemoveAll(lockDir)
+				continue
+			}
+		}
+
+		ui.Warn("Waiting for another process to finish provisioning %s...", tcName)
+		time.Sleep(3 * time.Second)
+	}
+
+	// Double-check after acquiring the lock
 	if tcPath := FindBinDir(tcRoot, prefix); tcPath != "" {
 		return tcPath, nil
 	}
@@ -177,29 +203,6 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 
 	tcName := filepath.Base(filepath.Dir(destDir))
 	archivePath := filepath.Join(cacheDir, fmt.Sprintf("%s-%s.archive", tcName, expectedVersion))
-	lockPath := archivePath + ".lock"
-
-	// Wait for exclusive download lock to prevent concurrent HTTP Range appending corruption
-	for {
-		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-		if err == nil {
-			lockFile.Close()
-			defer os.Remove(lockPath)
-			break
-		}
-
-		// Stale lock detection (e.g. if the previous downloading process crashed/timed out)
-		if stat, statErr := os.Stat(lockPath); statErr == nil {
-			if time.Since(stat.ModTime()) > 5*time.Minute {
-				ui.Warn("Lock file for %s is older than 5 minutes. Assuming previous process crashed. Removing stale lock...", tcName)
-				os.Remove(lockPath)
-				continue
-			}
-		}
-
-		ui.Warn("Waiting for another process to finish downloading %s...", tcName)
-		time.Sleep(2 * time.Second)
-	}
 
 	var startBytes int64 = 0
 	if stat, err := os.Stat(archivePath); err == nil {
@@ -310,10 +313,14 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 		return extractErr
 	}
 
-	// Post-process extracted files to push them into CAS
-	if err := postProcessCAS(tmpDestDir); err != nil {
-		RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
-		return fmt.Errorf("CAS processing failed: %w", err)
+	// Post-process extracted files to push them into CAS (Bypass in Docker)
+	if _, err := os.Stat("/.dockerenv"); os.IsNotExist(err) && os.Getenv("TOOB_DISABLE_CAS") == "" {
+		if err := postProcessCAS(tmpDestDir); err != nil {
+			RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
+			return fmt.Errorf("CAS processing failed: %w", err)
+		}
+	} else {
+		ui.Muted("Bypassing CAS deduplication (Docker Environment / Disabled).")
 	}
 
 	// Atomic commit
