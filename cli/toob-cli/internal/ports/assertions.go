@@ -104,6 +104,7 @@ func assertToolchainToPort() {
 	var r registry.ToolchainInfo
 	_ = RegistryToolchain{
 		Path: r.Path, Version: r.Version,
+		UpstreamVersion: r.UpstreamVersion,
 	}
 }
 
@@ -111,6 +112,7 @@ func assertToolchainFromPort() {
 	var p RegistryToolchain
 	_ = registry.ToolchainInfo{
 		Path: p.Path, Version: p.Version,
+		UpstreamVersion: p.UpstreamVersion,
 	}
 }
 

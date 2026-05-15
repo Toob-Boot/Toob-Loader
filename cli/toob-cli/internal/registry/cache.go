@@ -48,8 +48,9 @@ type ArchInfo struct {
 }
 
 type ToolchainInfo struct {
-	Path    string `json:"path"`
-	Version string `json:"version"`
+	Path            string `json:"path"`
+	Version         string `json:"version"`
+	UpstreamVersion string `json:"upstream_version"`
 }
 
 type IntegrationInfo struct {
