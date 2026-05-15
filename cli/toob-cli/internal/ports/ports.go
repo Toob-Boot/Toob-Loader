@@ -174,19 +174,19 @@ type RegistryIntegration struct {
 	Description string `json:"description" port:"optional"`
 }
 
-// RegistryToolchain defines toolchain download metadata in registry.json.
+// RegistryToolchain defines toolchain metadata in registry.json.
 type RegistryToolchain struct {
-	Path            string `json:"path"             port:"optional"`
-	Version         string `json:"version"          port:"required"`
-	UpstreamVersion string `json:"upstream_version" port:"required"`
+	Path    string `json:"path"    port:"optional"`
+	Version string `json:"version" port:"required"`
 }
 
 // ToolchainDownload is the extended toolchain entry used by toolchain/manager.go
 // for auto-provisioning. Includes download URLs and checksums per OS/arch.
 type ToolchainDownload struct {
-	Version string            `json:"version" port:"required"`
-	URLs    map[string]string `json:"urls"    port:"required"` // Key: {os}_{arch}
-	SHA256  map[string]string `json:"sha256"  port:"required"` // Key: {os}_{arch}
+	Version         string            `json:"version"          port:"required"`
+	UpstreamVersion string            `json:"upstream_version" port:"optional"`
+	URLs            map[string]string `json:"urls"             port:"required"`
+	Sha256          map[string]string `json:"sha256"           port:"required"`
 }
 
 // HardwareJSON is the parsed content of chips/{chip}/hardware.json.

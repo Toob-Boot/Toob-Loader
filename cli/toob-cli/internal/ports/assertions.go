@@ -119,14 +119,16 @@ func assertToolchainFromPort() {
 func assertToolchainDownloadToPort() {
 	var r toolchain.RegistryToolchain
 	_ = ToolchainDownload{
-		Version: r.Version, URLs: r.URLs, SHA256: r.Sha256,
+		Version: r.Version, UpstreamVersion: r.UpstreamVersion,
+		URLs: r.URLs, Sha256: r.Sha256,
 	}
 }
 
 func assertToolchainDownloadFromPort() {
 	var p ToolchainDownload
 	_ = toolchain.RegistryToolchain{
-		Version: p.Version, URLs: p.URLs, Sha256: p.SHA256,
+		Version: p.Version, UpstreamVersion: p.UpstreamVersion,
+		URLs: p.URLs, Sha256: p.Sha256,
 	}
 }
 
