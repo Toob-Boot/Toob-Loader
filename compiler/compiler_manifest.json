@@ -7,10 +7,10 @@
     "source": "https://hub.docker.com/_/ubuntu"
   },
   "cli": {
-    "version": "0.3.7",
+    "version": "0.4.2",
     "source": {
       "url": "https://github.com/Toob-Boot/Toob-CLI-Release",
-      "ref": "cli/v0.3.7",
+      "ref": "cli/v0.4.2",
       "artifact": "toob-linux-amd64"
     }
   },
