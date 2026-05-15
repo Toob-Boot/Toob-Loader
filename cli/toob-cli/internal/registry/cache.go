@@ -99,19 +99,35 @@ type Matrix map[string]MatrixChip
 
 // Cache manages the local registry clone.
 type Cache struct {
-	dir    string
-	remote string
-	index  *Index
+	rootDir string // Always ~/.toob/registry/ (never changes)
+	dir     string // Active version directory (e.g. ~/.toob/registry/versions/main/)
+	remote  string
+	index   *Index
 }
 
 // NewCache creates a cache at the default or given directory.
+// Automatically resolves the active version if one has been synced.
 func NewCache(remoteOverride string) *Cache {
-	dir, _ := paths.RegistryDir()
+	rootDir, _ := paths.RegistryDir()
 	remote := paths.DefaultRegistryURL
 	if remoteOverride != "" {
 		remote = remoteOverride
 	}
-	return &Cache{dir: dir, remote: remote}
+
+	dir := rootDir
+
+	// Resolve active version from persistent marker
+	if activeVer, err := os.ReadFile(filepath.Join(rootDir, "active_version")); err == nil {
+		ver := strings.TrimSpace(string(activeVer))
+		if ver != "" {
+			versionedDir := filepath.Join(rootDir, "versions", ver)
+			if _, err := os.Stat(filepath.Join(versionedDir, "registry.json")); err == nil {
+				dir = versionedDir
+			}
+		}
+	}
+
+	return &Cache{rootDir: rootDir, dir: dir, remote: remote}
 }
 
 // Dir returns the cache directory path.
@@ -124,10 +140,10 @@ func (c *Cache) IsInitialized() bool {
 }
 
 func (c *Cache) lock() (func(), error) {
-	if err := os.MkdirAll(filepath.Dir(c.dir), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.rootDir), 0o755); err != nil {
 		return nil, err
 	}
-	lockDir := filepath.Join(filepath.Dir(c.dir), "registry.lock")
+	lockDir := filepath.Join(filepath.Dir(c.rootDir), "registry.lock")
 	for i := 0; i < 100; i++ { // wait up to 10 seconds
 		if err := os.Mkdir(lockDir, 0o755); err == nil {
 			// Write PID file for stale-lock detection
@@ -211,12 +227,16 @@ func (c *Cache) Checkout(version string) error {
 		return err
 	}
 
-	// We extract to a versioned subdirectory
-	targetDir := filepath.Join(c.dir, "versions", result.Version)
+	targetDir := filepath.Join(c.rootDir, "versions", result.Version)
+
+	persistActive := func() {
+		_ = os.WriteFile(filepath.Join(c.rootDir, "active_version"), []byte(result.Version), 0o644)
+	}
 
 	// If it already exists, just update our active directory
 	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
 		c.dir = targetDir
+		persistActive()
 		ui.Info("Registry Source: Local Cache (%s)", result.Version)
 		return nil
 	}
@@ -239,7 +259,9 @@ func (c *Cache) Checkout(version string) error {
 	}
 
 	c.dir = targetDir
-	c.index = nil // invalidate cache
+	c.index = nil
+	persistActive()
+
 	return nil
 }
 
