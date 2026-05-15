@@ -42,7 +42,6 @@
   "python_packages": [
     "cryptography",
     "cbor2<6.0.0",
-    "ecdsa",
     "zcbor"
   ],
   "scripts": [
