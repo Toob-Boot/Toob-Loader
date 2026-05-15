@@ -194,6 +194,10 @@ func fetchUpdateFromGitHub(currentVersion, url string, insecure bool) (*CheckRes
 	}
 
 	latestVer := release.TagName
+	// GitHub tags for the CLI are prefixed with "cli/" (e.g. "cli/v0.4.2")
+	if strings.HasPrefix(latestVer, "cli/") {
+		latestVer = strings.TrimPrefix(latestVer, "cli/")
+	}
 	if !strings.HasPrefix(latestVer, "v") {
 		latestVer = "v" + latestVer
 	}
