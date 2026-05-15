@@ -229,15 +229,43 @@ func (c *Cache) Checkout(version string) error {
 
 	targetDir := filepath.Join(c.rootDir, "versions", result.Version)
 
-	persistActive := func() {
-		_ = os.WriteFile(filepath.Join(c.rootDir, "active_version"), []byte(result.Version), 0o644)
+	// resolveCanonicalVersion reads registry_version from registry.json
+	// and renames the directory to the canonical semver if the Hub returned
+	// a branch name (e.g. "main") instead of a proper version.
+	resolveCanonicalVersion := func(dir string) string {
+		data, err := os.ReadFile(filepath.Join(dir, "registry.json"))
+		if err != nil {
+			return result.Version
+		}
+		var idx struct {
+			RegistryVersion string `json:"registry_version"`
+		}
+		if json.Unmarshal(data, &idx) != nil || idx.RegistryVersion == "" {
+			return result.Version
+		}
+		return idx.RegistryVersion
 	}
 
-	// If it already exists, just update our active directory
+	persistActive := func(ver string) {
+		_ = os.WriteFile(filepath.Join(c.rootDir, "active_version"), []byte(ver), 0o644)
+	}
+
+	// If it already exists, resolve canonical version and activate
 	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
+		canonicalVer := resolveCanonicalVersion(targetDir)
+
+		// Rename to canonical version directory if needed (e.g. "main" → "v1.0.10")
+		if canonicalVer != result.Version {
+			canonicalDir := filepath.Join(c.rootDir, "versions", canonicalVer)
+			if _, err := os.Stat(canonicalDir); os.IsNotExist(err) {
+				os.Rename(targetDir, canonicalDir)
+				targetDir = canonicalDir
+			}
+		}
+
 		c.dir = targetDir
-		persistActive()
-		ui.Info("Registry Source: Local Cache (%s)", result.Version)
+		persistActive(canonicalVer)
+		ui.Info("Registry Source: Local Cache (%s)", canonicalVer)
 		return nil
 	}
 
@@ -258,9 +286,19 @@ func (c *Cache) Checkout(version string) error {
 		return fmt.Errorf("failed to extract registry: %w", err)
 	}
 
+	// Resolve canonical version and rename directory
+	canonicalVer := resolveCanonicalVersion(targetDir)
+	if canonicalVer != result.Version {
+		canonicalDir := filepath.Join(c.rootDir, "versions", canonicalVer)
+		if _, err := os.Stat(canonicalDir); os.IsNotExist(err) {
+			os.Rename(targetDir, canonicalDir)
+			targetDir = canonicalDir
+		}
+	}
+
 	c.dir = targetDir
 	c.index = nil
-	persistActive()
+	persistActive(canonicalVer)
 
 	return nil
 }
