@@ -27,6 +27,8 @@ var installCmd = &cobra.Command{
 			return nil
 		}
 
+		ui.Header("Install")
+
 		cache := registry.NewCache("")
 		if !cache.IsInitialized() {
 			ui.Step("Registry not initialized. Auto-syncing...")

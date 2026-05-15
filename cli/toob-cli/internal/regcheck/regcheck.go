@@ -1,0 +1,211 @@
+// Package regcheck provides a non-blocking registry freshness check.
+//
+// Called once in PersistentPreRun (async) and consumed in PersistentPostRun
+// to show a banner when the locked registry version is outdated.
+package regcheck
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/toob-boot/toob/internal/lockfile"
+	"github.com/toob-boot/toob/internal/paths"
+)
+
+const (
+	cacheFileName = "registry_check.json"
+	checkInterval = 6 * time.Hour
+)
+
+// Result holds the outcome of a registry freshness check.
+type Result struct {
+	CurrentVersion string
+	LatestVersion  string
+	Outdated       bool
+	ChipWarnings   []string // Chips in lockfile that are missing in the latest registry
+}
+
+type cacheData struct {
+	LastCheck     time.Time `json:"last_check"`
+	LatestVersion string    `json:"latest_version"`
+}
+
+func getCachePath() string {
+	home, err := paths.ToobHome()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, cacheFileName)
+}
+
+func readCache() *cacheData {
+	path := getCachePath()
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var c cacheData
+	if json.Unmarshal(data, &c) != nil {
+		return nil
+	}
+	return &c
+}
+
+func writeCache(c cacheData) {
+	path := getCachePath()
+	if path == "" {
+		return
+	}
+	data, _ := json.Marshal(c)
+	tmpPath := path + ".tmp"
+	if os.WriteFile(tmpPath, data, 0o644) == nil {
+		os.Rename(tmpPath, path)
+	}
+}
+
+func getHubURL() string {
+	if url := os.Getenv("TOOB_HUB_URL"); url != "" {
+		return url
+	}
+	return "https://ci.the-toob.com"
+}
+
+// CheckAsync performs a non-blocking registry freshness check.
+// Returns a channel that will receive the result when ready.
+// If there's no lockfile or the cache is still fresh, returns nil.
+func CheckAsync() <-chan *Result {
+	ch := make(chan *Result, 1)
+
+	// Find lockfile from CWD upward
+	root, err := paths.FindProjectRoot("")
+	if err != nil {
+		close(ch)
+		return ch
+	}
+	lf, err := lockfile.Load(paths.LockfilePath(root))
+	if err != nil || lf.Registry.Version == "" {
+		close(ch)
+		return ch
+	}
+
+	lockedVersion := lf.Registry.Version
+	chipNames := make([]string, len(lf.Chips))
+	for i, c := range lf.Chips {
+		chipNames[i] = c.Name
+	}
+
+	// Check cache first
+	if cached := readCache(); cached != nil {
+		if time.Since(cached.LastCheck) < checkInterval {
+			if cached.LatestVersion != "" && normalizeVersion(cached.LatestVersion) != normalizeVersion(lockedVersion) {
+				ch <- &Result{
+					CurrentVersion: lockedVersion,
+					LatestVersion:  cached.LatestVersion,
+					Outdated:       true,
+				}
+			} else {
+				close(ch)
+			}
+			return ch
+		}
+	}
+
+	go func() {
+		defer close(ch)
+		result := fetchRegistryStatus(lockedVersion, chipNames)
+		if result != nil {
+			ch <- result
+		}
+	}()
+
+	return ch
+}
+
+func fetchRegistryStatus(lockedVersion string, chipNames []string) *Result {
+	client := http.Client{Timeout: 3 * time.Second}
+
+	url := fmt.Sprintf("%s/api/v1/resolve/registry?version=latest", getHubURL())
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", "Toob-CLI")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	var apiResp struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(body, &apiResp) != nil || apiResp.Version == "" {
+		return nil
+	}
+
+	writeCache(cacheData{
+		LastCheck:     time.Now(),
+		LatestVersion: apiResp.Version,
+	})
+
+	if normalizeVersion(apiResp.Version) == normalizeVersion(lockedVersion) {
+		return nil
+	}
+
+	result := &Result{
+		CurrentVersion: lockedVersion,
+		LatestVersion:  apiResp.Version,
+		Outdated:       true,
+	}
+
+	// Compatibility check: verify locked chips exist in latest registry
+	result.ChipWarnings = checkChipCompatibility(client, chipNames)
+
+	return result
+}
+
+// checkChipCompatibility queries the Hub for each locked chip
+// and returns warnings for any that don't exist in the latest registry.
+func checkChipCompatibility(client http.Client, chipNames []string) []string {
+	var warnings []string
+	for _, name := range chipNames {
+		url := fmt.Sprintf("%s/api/v1/resolve/chip?name=%s", getHubURL(), name)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", "Toob-CLI")
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == 404 {
+			warnings = append(warnings, name)
+		}
+	}
+	return warnings
+}
+
+func normalizeVersion(v string) string {
+	return strings.TrimPrefix(v, "v")
+}

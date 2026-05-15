@@ -142,6 +142,61 @@ func UpdateBanner(current, latest string) {
 	fmt.Fprintf(os.Stderr, "  %s\n\n", bottomBorder)
 }
 
+// RegistryBanner prints a notification when the locked registry is outdated.
+func RegistryBanner(current, latest string, chipWarnings []string) {
+	width := 50
+
+	logoText := " TツOB "
+	logoVisualLen := 7
+	leftDash := (width - 2 - logoVisualLen) / 2
+	rightDash := width - 2 - logoVisualLen - leftDash
+
+	topBorder := Cyan("╭"+strings.Repeat("─", leftDash)) + BoldCyan(logoText) + Cyan(strings.Repeat("─", rightDash)+"╮")
+	bottomBorder := Cyan("╰" + strings.Repeat("─", width-2) + "╯")
+	emptyLine := Cyan("│") + strings.Repeat(" ", width-2) + Cyan("│")
+
+	// Line 1: "Registry v1.0.10 → v1.2.0"
+	line1 := fmt.Sprintf("Registry %s %s %s", Gray(current), Gray("→"), BoldCyan(latest))
+	visualLen1 := 9 + len(current) + 3 + len(latest) // "Registry " (9) + current + " → " (3) + latest
+	pad1 := width - 2 - visualLen1
+	if pad1 < 0 {
+		pad1 = 0
+	}
+	left1 := pad1 / 2
+	right1 := pad1 - left1
+
+	// Line 2: "Run toob registry sync to update"
+	line2 := fmt.Sprintf("Run %s to update", Cyan("toob registry sync"))
+	visualLen2 := 32 // "Run " (4) + "toob registry sync" (18) + " to update" (10)
+	pad2 := width - 2 - visualLen2
+	if pad2 < 0 {
+		pad2 = 0
+	}
+	left2 := pad2 / 2
+	right2 := pad2 - left2
+
+	fmt.Fprintf(os.Stderr, "\n  %s\n", topBorder)
+	fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
+	fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", left1), line1, strings.Repeat(" ", right1), Cyan("│"))
+	fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", left2), line2, strings.Repeat(" ", right2), Cyan("│"))
+
+	if len(chipWarnings) > 0 {
+		fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
+		warnLine := fmt.Sprintf("%s Chips not found: %s", Yellow("⚠"), Yellow(strings.Join(chipWarnings, ", ")))
+		warnVisual := 18 + len(strings.Join(chipWarnings, ", ")) // "⚠ Chips not found: " = 20 visually but ⚠ is 1 char
+		warnPad := width - 2 - warnVisual
+		if warnPad < 0 {
+			warnPad = 0
+		}
+		wLeft := warnPad / 2
+		wRight := warnPad - wLeft
+		fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", wLeft), warnLine, strings.Repeat(" ", wRight), Cyan("│"))
+	}
+
+	fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
+	fmt.Fprintf(os.Stderr, "  %s\n\n", bottomBorder)
+}
+
 // TableOptions defines configurable settings for Table rendering.
 type TableOptions struct {
 	ColumnPadding   int   // Number of spaces between columns (default 2)

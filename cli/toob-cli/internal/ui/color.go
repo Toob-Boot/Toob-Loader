@@ -57,6 +57,7 @@ func Bold(s string) string   { return Color("\033[1m", s) }
 func BoldBrand(s string) string { return Color("\033[1;38;5;120m", s) }
 func BoldGreen(s string) string { return Color("\033[1;32m", s) }
 func BoldRed(s string) string   { return Color("\033[1;31m", s) }
+func BoldCyan(s string) string  { return Color("\033[1;36m", s) }
 
 // Strip removes all ANSI escape sequences from a string.
 func Strip(s string) string {

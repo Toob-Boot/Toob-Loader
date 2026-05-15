@@ -270,9 +270,52 @@ func moveToTrash(dir string) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return
 	}
-	trashDir := filepath.Join(filepath.Dir(filepath.Dir(dir)), ".trash", filepath.Base(filepath.Dir(dir)), filepath.Base(dir)+"-"+time.Now().Format("20060102150405"))
+	trashRoot := filepath.Join(filepath.Dir(filepath.Dir(dir)), ".trash")
+	trashDir := filepath.Join(trashRoot, filepath.Base(filepath.Dir(dir)), filepath.Base(dir)+"-"+time.Now().Format("20060102150405"))
 	os.MkdirAll(filepath.Dir(trashDir), 0o755)
 	os.Rename(dir, trashDir)
+
+	purgeOldTrash(trashRoot, 7*24*time.Hour)
+}
+
+// removeIfEmpty removes a directory only if it contains no entries.
+func removeIfEmpty(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	if len(entries) == 0 {
+		os.Remove(dir)
+	}
+}
+
+// purgeOldTrash removes entries from .trash/ older than maxAge.
+func purgeOldTrash(trashRoot string, maxAge time.Duration) {
+	entries, err := os.ReadDir(trashRoot)
+	if err != nil {
+		return
+	}
+	for _, category := range entries {
+		if !category.IsDir() {
+			continue
+		}
+		catPath := filepath.Join(trashRoot, category.Name())
+		subEntries, err := os.ReadDir(catPath)
+		if err != nil {
+			continue
+		}
+		for _, entry := range subEntries {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if time.Since(info.ModTime()) > maxAge {
+				os.RemoveAll(filepath.Join(catPath, entry.Name()))
+			}
+		}
+		removeIfEmpty(catPath)
+	}
+	removeIfEmpty(trashRoot)
 }
 
 func printMatrixCompatibility(matrix *registry.Matrix, chipName, chipVersion string, verified bool) {
@@ -324,6 +367,13 @@ func (inst *Installer) Remove(name string) error {
 		if !inst.lock.IsVendorShared(entry.Vendor, name) {
 			moveToTrash(filepath.Join(inst.hal, "vendor", entry.Vendor))
 		}
+
+		// Clean up empty parent directories left behind
+		removeIfEmpty(filepath.Join(inst.hal, "chips"))
+		removeIfEmpty(filepath.Join(inst.hal, "arch"))
+		removeIfEmpty(filepath.Join(inst.hal, "vendor"))
+		removeIfEmpty(filepath.Join(inst.hal, "include"))
+		removeIfEmpty(inst.hal)
 	}
 
 	for i, c := range inst.lock.Chips {

@@ -58,7 +58,8 @@ var initCmd = &cobra.Command{
 			}
 		}()
 
-		ui.Step("Initializing project '%s' for chip '%s' (Framework: %s)", projectName, initChip, initFramework)
+		ui.Header("Project Init")
+		ui.Step("Creating '%s' for chip '%s' (Framework: %s)", projectName, ui.Bold(initChip), ui.Cyan(initFramework))
 
 		// 2. Fetch Registry Context
 		_, err := paths.RegistryDir()
@@ -173,8 +174,13 @@ var initCmd = &cobra.Command{
 			ui.Warn("Failed to initialize git repository: %v", err)
 		}
 
-		ui.Success("Toob Integration files generated successfully!")
-		ui.Tip("Run 'cd %s' and check out the 'toob_integration/INTEGRATION_GUIDE.md' to finish the setup.", projectName)
+		ui.Divider()
+		ui.KeyValue("Project", ui.Bold(projectName))
+		ui.KeyValue("Chip", ui.BoldBrand(initChip))
+		ui.KeyValue("Framework", ui.Cyan(initFramework))
+		ui.Divider()
+		ui.Success("Project initialized successfully!")
+		ui.Tip("Run `cd %s` and check out the `toob_integration/INTEGRATION_GUIDE.md` to finish the setup.", projectName)
 		return nil
 	},
 }

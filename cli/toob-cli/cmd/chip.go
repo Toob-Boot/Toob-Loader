@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -52,6 +53,8 @@ var chipListCmd = &cobra.Command{
 		case <-time.After(2 * time.Second):
 		}
 
+		ui.Header("Chip Registry")
+
 		headers := []string{"Chip", "Version", "Vendor", "Arch", "Verified CLI"}
 		var rows [][]string
 		for _, ci := range idx.Chips {
@@ -59,7 +62,7 @@ var chipListCmd = &cobra.Command{
 				continue
 			}
 
-			verifiedClisStr := "(unverified)"
+			verifiedClisStr := ui.Yellow("unverified")
 			if matrix != nil {
 				if chipEntry, has := (*matrix)[ci.Name]; has {
 					searchVer := strings.TrimPrefix(ci.Version, "v")
@@ -72,7 +75,7 @@ var chipListCmd = &cobra.Command{
 								}
 							}
 							if len(clis) > 0 {
-								verifiedClisStr = strings.Join(clis, ", ")
+								verifiedClisStr = ui.Green(strings.Join(clis, ", "))
 							}
 							break
 						}
@@ -80,7 +83,7 @@ var chipListCmd = &cobra.Command{
 				}
 			}
 
-			rows = append(rows, []string{ci.Name, ci.Version, ci.Vendor, ci.Arch, verifiedClisStr})
+			rows = append(rows, []string{ui.Bold(ci.Name), ui.Brand(ci.Version), ci.Vendor, ci.Arch, verifiedClisStr})
 		}
 
 		if len(rows) == 0 {
@@ -89,6 +92,7 @@ var chipListCmd = &cobra.Command{
 		}
 
 		ui.Table(headers, rows)
+		ui.Muted("%d chip(s) available.", len(rows))
 		return nil
 	},
 }
@@ -106,6 +110,12 @@ var chipInfoCmd = &cobra.Command{
 
 		ui.Header(fmt.Sprintf("Chip: %s", ci.Name))
 
+		if ci.Verified {
+			ui.Success("CI Matrix: Verified")
+		} else {
+			ui.Warn("CI Matrix: Unverified")
+		}
+
 		idx, _ := cache.LoadIndex()
 		vVer := "unknown"
 		aVer := "unknown"
@@ -118,12 +128,16 @@ var chipInfoCmd = &cobra.Command{
 			}
 		}
 
-		ui.KeyValue("Version", ci.Version)
-		ui.KeyValue("Vendor", fmt.Sprintf("%s (v%s)", ci.Vendor, vVer))
-		ui.KeyValue("Architecture", fmt.Sprintf("%s (v%s)", ci.Arch, aVer))
-		ui.KeyValue("Compiler", ci.CompilerPrefix)
-		ui.KeyValue("Registry Path", ci.Path)
-		ui.KeyValue("Description", ci.Description)
+		fmt.Fprintln(os.Stderr)
+		ui.KeyValue("Version", ui.BoldBrand(ci.Version))
+		ui.KeyValue("Vendor", fmt.Sprintf("%s %s", ci.Vendor, ui.Gray("(v"+vVer+")")))
+		ui.KeyValue("Architecture", fmt.Sprintf("%s %s", ci.Arch, ui.Gray("(v"+aVer+")")))
+		ui.KeyValue("Compiler", ui.Cyan(ci.CompilerPrefix))
+		ui.KeyValue("Registry Path", ui.Gray(ci.Path))
+		if ci.Description != "" {
+			ui.KeyValue("Description", ci.Description)
+		}
+		ui.Divider()
 		return nil
 	},
 }

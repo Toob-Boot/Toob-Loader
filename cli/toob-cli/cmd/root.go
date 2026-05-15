@@ -5,13 +5,15 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/regcheck"
 	"github.com/toob-boot/toob/internal/ui"
 	"github.com/toob-boot/toob/internal/updater"
 )
 
 var (
-	Version      = "1.0.0"
-	updateResult chan *updater.CheckResult
+	Version        = "dev"
+	updateResult   chan *updater.CheckResult
+	registryResult <-chan *regcheck.Result
 )
 
 var rootCmd = &cobra.Command{
@@ -21,26 +23,38 @@ var rootCmd = &cobra.Command{
 and orchestrates the full build pipeline for Toob-Boot firmware.`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		ui.Init()
-		if cmd.Name() == "update" {
+		if cmd.Name() == "update" || cmd.Name() == "sync" {
 			return
 		}
-		// Zero-blocking async check
+		// CLI update check (async, zero-blocking)
 		res, _ := updater.CheckForUpdate(Version, false, false)
 		if res != nil {
 			updateResult = make(chan *updater.CheckResult, 1)
 			updateResult <- res
 		}
+		// Registry freshness check (async, zero-blocking)
+		registryResult = regcheck.CheckAsync()
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		if updateResult == nil {
-			return
-		}
-		select {
-		case res := <-updateResult:
-			if res != nil && res.Available {
-				ui.UpdateBanner(Version, res.Version)
+		// CLI update banner
+		if updateResult != nil {
+			select {
+			case res := <-updateResult:
+				if res != nil && res.Available {
+					ui.UpdateBanner(Version, res.Version)
+				}
+			default:
 			}
-		default:
+		}
+		// Registry freshness banner
+		if registryResult != nil {
+			select {
+			case res := <-registryResult:
+				if res != nil && res.Outdated {
+					ui.RegistryBanner(res.CurrentVersion, res.LatestVersion, res.ChipWarnings)
+				}
+			default:
+			}
 		}
 	},
 }

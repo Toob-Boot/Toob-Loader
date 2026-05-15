@@ -1,0 +1,46 @@
+{
+  "name": "toob",
+  "version": "0.3.4",
+  "description": "Hardware Package Manager for the Toob-Boot embedded IoT ecosystem",
+  "keywords": [
+    "embedded",
+    "iot",
+    "firmware",
+    "riscv",
+    "arm",
+    "esp32",
+    "package-manager",
+    "hardware",
+    "toob"
+  ],
+  "homepage": "https://github.com/Toob-Boot/Toob-Loader",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Toob-Boot/Toob-Loader.git",
+    "directory": "cli/npm"
+  },
+  "license": "MIT",
+  "bin": {
+    "toob": "bin/run.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md"
+  ]
+}
