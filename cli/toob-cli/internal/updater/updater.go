@@ -19,11 +19,11 @@ import (
 )
 
 const (
-	repoURL        = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/latest"
-	repoTagURL     = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/tags/%s"
-	cacheFileName  = "update_check.json"
-	checkInterval  = 24 * time.Hour
-	cooldownLimit  = 2 * time.Hour // Cooldown if HTTP 403 (Rate Limit) occurs
+	repoURL       = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/latest"
+	repoTagURL    = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/tags/%s"
+	cacheFileName = "update_check.json"
+	checkInterval = 24 * time.Hour
+	cooldownLimit = 2 * time.Hour // Cooldown if HTTP 403 (Rate Limit) occurs
 )
 
 var ErrUnsupportedArch = errors.New("unsupported architecture for this release")
@@ -64,7 +64,7 @@ func writeCache(cache CacheData) {
 	if err != nil {
 		return
 	}
-	
+
 	_ = os.MkdirAll(filepath.Dir(cachePath), 0o755)
 
 	data, err := json.Marshal(cache)
@@ -189,14 +189,14 @@ func fetchUpdateFromGitHub(currentVersion, url string, insecure bool) (*CheckRes
 			// Gap 5: Fallback warning if release exists but arch is missing
 			return nil, ErrUnsupportedArch
 		}
-		writeCache(CacheData{LastCheck: time.Now(), LatestVer: currentVersion}) 
+		writeCache(CacheData{LastCheck: time.Now(), LatestVer: currentVersion})
 		return &CheckResult{Available: false}, nil
 	}
 
 	latestVer := release.TagName
 	// GitHub tags for the CLI are prefixed with "cli/" (e.g. "cli/v0.4.2")
-	if strings.HasPrefix(latestVer, "cli/") {
-		latestVer = strings.TrimPrefix(latestVer, "cli/")
+	if after, ok := strings.CutPrefix(latestVer, "cli/"); ok {
+		latestVer = after
 	}
 	if !strings.HasPrefix(latestVer, "v") {
 		latestVer = "v" + latestVer
