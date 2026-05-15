@@ -122,6 +122,10 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 	}
 
 	// Acquire global provisioning lock
+	if err := os.MkdirAll(filepath.Dir(lockDir), 0755); err != nil {
+		return "", fmt.Errorf("failed to create toolchain directory: %w", err)
+	}
+
 	for {
 		err := os.Mkdir(lockDir, 0755)
 		if err == nil {

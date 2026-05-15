@@ -361,15 +361,20 @@ func runNativeBuild(root string) error {
 
 	// Read Build settings from DeviceToml
 	coreSDKVer := dt.Build.CoreSDK
+	coreSDKLabel := coreSDKVer
 	if coreSDKVer == "" {
 		coreSDKVer = "main"
+		coreSDKLabel = "main (default)"
 	}
+	
 	compilerVer := dt.Build.Compiler
+	compilerLabel := compilerVer
 	if compilerVer == "" {
 		compilerVer = "latest" // Docker image tag
+		compilerLabel = "latest (auto)"
 	}
 
-	ui.Info("Environment: Compiler=%s, CoreSDK=%s", compilerVer, coreSDKVer)
+	ui.Info("Environment: Compiler=%s, CoreSDK=%s", compilerLabel, coreSDKLabel)
 
 	// Parallel Fetching: Registry Sync & Core SDK (Gap 2.3)
 	g, _ := errgroup.WithContext(context.Background())
