@@ -215,9 +215,7 @@ jobs:
             $NM_BIN --defined-only -g "$OLD_LIB" 2>/dev/null | awk '{print $2, $3}' | sort -u > /tmp/sym_old.txt
             $NM_BIN --defined-only -g "$NEW_LIB" 2>/dev/null | awk '{print $2, $3}' | sort -u > /tmp/sym_new.txt
 
-            # Symbols removed = breaking change (MAJOR)
             REMOVED=$(comm -23 /tmp/sym_old.txt /tmp/sym_new.txt | wc -l)
-            # Symbols added = new capability (MINOR)
             ADDED=$(comm -13 /tmp/sym_old.txt /tmp/sym_new.txt | wc -l)
 
             if [ "$REMOVED" -gt 0 ]; then
@@ -230,6 +228,45 @@ jobs:
               [ "$BUMP" = "PATCH" ] && BUMP="MINOR"
             else
               echo ">>> [RESULT] $lib: No symbol changes"
+            fi
+          done
+
+          # Layer 2: Public header diff to catch struct/typedef/enum changes
+          # that are invisible to nm (same symbol name, different layout).
+          echo ">>> Running public header analysis..."
+          HEADER_DIRS="toobloader/core/include sdk/libtoob/include sdk/os_client/include common/include"
+
+          for hdir in $HEADER_DIRS; do
+            [ ! -d "$hdir" ] && continue
+
+            DELETED_H=$(git diff --diff-filter=D --name-only "$LAST_TAG" HEAD -- "$hdir" 2>/dev/null | wc -l)
+            ADDED_H=$(git diff --diff-filter=A --name-only "$LAST_TAG" HEAD -- "$hdir" 2>/dev/null | wc -l)
+            MODIFIED_H=$(git diff --diff-filter=M --name-only "$LAST_TAG" HEAD -- "$hdir" 2>/dev/null || echo "")
+
+            # Deleted public headers = breaking
+            if [ "$DELETED_H" -gt 0 ]; then
+              echo ">>> [HEADER] $hdir: $DELETED_H headers DELETED (MAJOR)"
+              BUMP="MAJOR"
+            fi
+
+            # New public headers = new capability
+            if [ "$ADDED_H" -gt 0 ] && [ "$BUMP" != "MAJOR" ]; then
+              echo ">>> [HEADER] $hdir: $ADDED_H new headers (MINOR)"
+              [ "$BUMP" = "PATCH" ] && BUMP="MINOR"
+            fi
+
+            # Modified headers: check if struct/typedef/enum definitions changed
+            if [ -n "$MODIFIED_H" ] && [ "$BUMP" != "MAJOR" ]; then
+              for hfile in $MODIFIED_H; do
+                # Extract struct, typedef, and enum lines from old and new
+                OLD_DEFS=$(git show "${LAST_TAG}:${hfile}" 2>/dev/null | grep -E '^\s*(typedef\s|struct\s|enum\s|}\s*\w+)' | sort)
+                NEW_DEFS=$(cat "$hfile" 2>/dev/null | grep -E '^\s*(typedef\s|struct\s|enum\s|}\s*\w+)' | sort)
+
+                if [ "$OLD_DEFS" != "$NEW_DEFS" ]; then
+                  echo ">>> [HEADER] $hfile: type definitions changed (MINOR)"
+                  [ "$BUMP" = "PATCH" ] && BUMP="MINOR"
+                fi
+              done
             fi
           done
 
