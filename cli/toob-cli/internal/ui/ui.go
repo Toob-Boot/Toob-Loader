@@ -250,9 +250,10 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 		}
 		hdr.WriteString(h + strings.Repeat(" ", padding))
 	}
+	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "  %s\n", Bold(hdr.String()))
 
-	// Separator
+	// Separator (directly below column headers, no gap)
 	var sep strings.Builder
 	for i, w := range colWidths {
 		if i > 0 {

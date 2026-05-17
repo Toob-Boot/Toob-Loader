@@ -97,9 +97,23 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	}
 	pb.Finish()
 
-	root, err := paths.FindProjectRoot("")
-	if err != nil {
-		return err
+	// Resolve project root: if --manifest is given, use its parent directory.
+	var root string
+	if flagManifest != "" {
+		absManifest, err := filepath.Abs(flagManifest)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(absManifest); err != nil {
+			return fmt.Errorf("manifest not found: %s", absManifest)
+		}
+		root = filepath.Dir(absManifest)
+	} else {
+		var err error
+		root, err = paths.FindProjectRoot("")
+		if err != nil {
+			return err
+		}
 	}
 
 	// 1. Enforce lockfile registry version and compatibility

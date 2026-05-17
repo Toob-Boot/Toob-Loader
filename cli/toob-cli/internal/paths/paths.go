@@ -45,8 +45,24 @@ func RegistryDir() (string, error) {
 	return dir, nil
 }
 
-// FindProjectRoot walks upward from start (or cwd if empty) to locate
-// a CMakeLists.txt containing "toob-boot".
+// isProjectRoot returns true if dir contains a device.toml or toob.lock.
+func isProjectRoot(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "device.toml")); err == nil {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(dir, "toob.lock")); err == nil {
+		return true
+	}
+	return false
+}
+
+// FindProjectRoot locates the nearest Toob project directory.
+//
+// Search order:
+//  1. Walk upward from start (or cwd) looking for device.toml / toob.lock.
+//  2. If nothing found upward, scan one level of child directories.
+//  3. If exactly one child matches, return it.
+//  4. If multiple children match, return an error listing all candidates.
 func FindProjectRoot(start string) (string, error) {
 	if start == "" {
 		var err error
@@ -60,28 +76,49 @@ func FindProjectRoot(start string) (string, error) {
 		return "", err
 	}
 
+	// Phase 1: Walk upward
+	dir := current
 	for {
-		// Check for Core Developer Monorepo (structural check instead of file parsing)
-		if stat, err := os.Stat(filepath.Join(current, "toobloader", "core")); err == nil && stat.IsDir() {
-			return current, nil
+		if isProjectRoot(dir) {
+			return dir, nil
 		}
-
-		// Check for End User Project
-		if _, err := os.Stat(filepath.Join(current, "device.toml")); err == nil {
-			return current, nil
-		}
-		if _, err := os.Stat(filepath.Join(current, "toob.lock")); err == nil {
-			return current, nil
-		}
-
-		parent := filepath.Dir(current)
-		if parent == current {
+		parent := filepath.Dir(dir)
+		if parent == dir {
 			break
 		}
-		current = parent
+		dir = parent
 	}
 
-	return "", fmt.Errorf("no Toob-Loader project root found (no device.toml, toob.lock or CMakeLists.txt containing 'toob-boot' in any parent of %s)", start)
+	// Phase 2: Scan immediate children of the starting directory
+	entries, err := os.ReadDir(current)
+	if err != nil {
+		return "", fmt.Errorf("no Toob project found (no device.toml or toob.lock in any parent of %s)", current)
+	}
+
+	var candidates []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		childDir := filepath.Join(current, entry.Name())
+		if isProjectRoot(childDir) {
+			candidates = append(candidates, childDir)
+		}
+	}
+
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("no Toob project found (no device.toml or toob.lock in any parent or child of %s)", current)
+	case 1:
+		return candidates[0], nil
+	default:
+		msg := fmt.Sprintf("multiple Toob projects found in %s:\n", current)
+		for _, c := range candidates {
+			msg += fmt.Sprintf("  - %s\n", filepath.Base(c))
+		}
+		msg += "Use --manifest to specify which device.toml to build."
+		return "", fmt.Errorf("%s", msg)
+	}
 }
 
 // HALDir returns <project>/toobloader/hal/.
