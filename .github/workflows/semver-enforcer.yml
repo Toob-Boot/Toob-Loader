@@ -38,6 +38,7 @@ jobs:
 
           git fetch --prune --unshallow 2>/dev/null || git fetch --all 2>/dev/null || true
 
+          # Check if a monorepo subsystem changed (direct files, not submodules)
           check_subsystem() {
             local tag_prefix=$1
             shift
@@ -66,10 +67,31 @@ jobs:
             echo "false"
           }
 
+          # Check if the toob-registry submodule pointer changed
+          check_registry_subsystem() {
+            local subdir=$1
+            local diff_base=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+            
+            if echo "$diff_base" | grep -q "^toob-registry$"; then
+              # Submodule pointer changed — diff within the submodule
+              local OLD_SUB=$(git rev-parse "HEAD~1:toob-registry" 2>/dev/null || echo "")
+              local NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
+              
+              if [ -n "$OLD_SUB" ] && [ -n "$NEW_SUB" ] && [ "$OLD_SUB" != "$NEW_SUB" ]; then
+                local changes=$(cd toob-registry && git diff --name-only "$OLD_SUB" "$NEW_SUB" -- "${subdir}/" 2>/dev/null || echo "")
+                if [ -n "$changes" ]; then
+                  echo "true"
+                  return
+                fi
+              fi
+            fi
+            echo "false"
+          }
+
           CHECK_CORE=$(check_subsystem "core/" "toobloader/core/" "sdk/" "common/")
-          CHECK_CHIPS=$(check_subsystem "chip-*/" "toob-registry/chips/")
-          CHECK_ARCH=$(check_subsystem "arch-*/" "toob-registry/arch/")
-          CHECK_VENDORS=$(check_subsystem "vendor-*/" "toob-registry/vendors/")
+          CHECK_CHIPS=$(check_registry_subsystem "chips")
+          CHECK_ARCH=$(check_registry_subsystem "arch")
+          CHECK_VENDORS=$(check_registry_subsystem "vendor")
           CHECK_CLI=$(check_subsystem "cli/" "cli/toob-cli/")
           CHECK_COMPILER=$(check_subsystem "compiler/" "cli/.pipeline-repo/Dockerfile.compiler" "cli/.pipeline-repo/toob-ci-build.sh" "compiler/")
 
@@ -328,27 +350,153 @@ jobs:
       - name: ABI Orakel (Chips)
         if: env.CHECK_CHIPS == 'true'
         run: |
-          echo ">>> [Chips Oracle] Changes in chips/ detected."
-          # TODO: Implement multi-chip detection
-          # 1. Identify which specific chip folders changed (e.g., toob-registry/chips/esp32c6)
-          # 2. Extract LAST_TAG for that specific chip (e.g., chip-esp32c6/v1.0.0)
-          # 3. gcc -c -g on the chip's HAL mapping files
-          # 4. abidiff bitmask logic
-          # 5. Push new tag (e.g., chip-esp32c6/v1.1.0)
-          echo "Chips SemVer logic placeholder reached."
+          echo ">>> [Chips Oracle] Analyzing chip changes..."
+
+          OLD_SUB=$(git rev-parse "HEAD~1:toob-registry" 2>/dev/null || echo "")
+          NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
+
+          for chip_dir in toob-registry/chips/*/; do
+            chip=$(basename "$chip_dir")
+            [ ! -f "${chip_dir}/chip_manifest.json" ] && continue
+
+            # Check if this specific chip has changes
+            CHIP_CHANGES=""
+            if [ -n "$OLD_SUB" ] && [ -n "$NEW_SUB" ] && [ "$OLD_SUB" != "$NEW_SUB" ]; then
+              CHIP_CHANGES=$(cd toob-registry && git diff --name-only "$OLD_SUB" "$NEW_SUB" -- "chips/${chip}/" 2>/dev/null || echo "")
+            fi
+            [ -z "$CHIP_CHANGES" ] && continue
+
+            echo ">>> [Chips Oracle] ${chip}: Changes detected"
+            echo "$CHIP_CHANGES"
+
+            LAST_TAG=$(git describe --tags --match "chip-${chip}/v*" --abbrev=0 2>/dev/null || echo "")
+
+            if [ -z "$LAST_TAG" ]; then
+              # Initial release — use version from manifest
+              NEW_VERSION=$(jq -r '.version' "${chip_dir}/chip_manifest.json")
+            else
+              RAW=${LAST_TAG#chip-${chip}/v}
+              MAJOR=$(echo "$RAW" | cut -d. -f1)
+              MINOR=$(echo "$RAW" | cut -d. -f2)
+              PATCH=$(echo "$RAW" | cut -d. -f3)
+
+              BUMP="PATCH"
+
+              # Breaking: arch, vendor, or compiler_prefix changed
+              cd toob-registry
+              OLD_M=$(git show "${OLD_SUB}:chips/${chip}/chip_manifest.json" 2>/dev/null || echo '{}')
+              cd ..
+              for field in arch vendor compiler_prefix; do
+                OLD_VAL=$(echo "$OLD_M" | jq -r ".${field} // \"\"")
+                NEW_VAL=$(jq -r ".${field}" "${chip_dir}/chip_manifest.json")
+                if [ "$OLD_VAL" != "$NEW_VAL" ]; then
+                  BUMP="MAJOR"
+                  break
+                fi
+              done
+
+              # Structural: deleted headers = MAJOR, new files = MINOR
+              if [ "$BUMP" != "MAJOR" ]; then
+                cd toob-registry
+                DEL=$(git diff --diff-filter=D --name-only "$OLD_SUB" "$NEW_SUB" -- "chips/${chip}/" 2>/dev/null | grep -c '\.h$' || true)
+                ADD=$(git diff --diff-filter=A --name-only "$OLD_SUB" "$NEW_SUB" -- "chips/${chip}/" 2>/dev/null | wc -l)
+                cd ..
+                if [ "$DEL" -gt 0 ]; then BUMP="MAJOR"
+                elif [ "$ADD" -gt 0 ]; then BUMP="MINOR"; fi
+              fi
+
+              echo ">>> [Chips Oracle] ${chip}: Bump=$BUMP"
+              case "$BUMP" in
+                MAJOR) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+                MINOR) MINOR=$((MINOR+1)); PATCH=0 ;;
+                PATCH) PATCH=$((PATCH+1)) ;;
+              esac
+              NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            fi
+
+            NEW_TAG="chip-${chip}/v${NEW_VERSION}"
+            if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo ">>> [Chips Oracle] Tag ${NEW_TAG} exists. Skipping."
+              continue
+            fi
+
+            git config user.name "Toob ABI Oracle"
+            git config user.email "oracle@toob-boot.io"
+            git tag "$NEW_TAG"
+            git push origin "$NEW_TAG"
+            echo ">>> [Chips Oracle] Pushed ${NEW_TAG}"
+          done
 
       - name: ABI Orakel (Architectures)
         if: env.CHECK_ARCH == 'true'
         run: |
-          echo ">>> [Arch Oracle] Changes in arch/ detected."
-          # TODO: Implement multi-arch detection
-          # Logic identical to Chips Oracle. Tags: arch-riscv32/v1.0.0
-          echo "Arch SemVer logic placeholder reached."
+          echo ">>> [Arch Oracle] Analyzing architecture changes..."
+
+          OLD_SUB=$(git rev-parse "HEAD~1:toob-registry" 2>/dev/null || echo "")
+          NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
+
+          for arch_dir in toob-registry/arch/*/; do
+            arch=$(basename "$arch_dir")
+            [ ! -f "${arch_dir}/arch_manifest.json" ] && continue
+
+            ARCH_CHANGES=""
+            if [ -n "$OLD_SUB" ] && [ -n "$NEW_SUB" ] && [ "$OLD_SUB" != "$NEW_SUB" ]; then
+              ARCH_CHANGES=$(cd toob-registry && git diff --name-only "$OLD_SUB" "$NEW_SUB" -- "arch/${arch}/" 2>/dev/null || echo "")
+            fi
+            [ -z "$ARCH_CHANGES" ] && continue
+
+            echo ">>> [Arch Oracle] ${arch}: Changes detected"
+            echo "$ARCH_CHANGES"
+
+            LAST_TAG=$(git describe --tags --match "arch-${arch}/v*" --abbrev=0 2>/dev/null || echo "")
+
+            if [ -z "$LAST_TAG" ]; then
+              NEW_VERSION=$(jq -r '.version' "${arch_dir}/arch_manifest.json")
+            else
+              RAW=${LAST_TAG#arch-${arch}/v}
+              MAJOR=$(echo "$RAW" | cut -d. -f1)
+              MINOR=$(echo "$RAW" | cut -d. -f2)
+              PATCH=$(echo "$RAW" | cut -d. -f3)
+
+              BUMP="PATCH"
+
+              # Breaking: deleted headers or include files
+              cd toob-registry
+              DEL_H=$(git diff --diff-filter=D --name-only "$OLD_SUB" "$NEW_SUB" -- "arch/${arch}/" 2>/dev/null | grep -c '\.h$' || true)
+              ADD=$(git diff --diff-filter=A --name-only "$OLD_SUB" "$NEW_SUB" -- "arch/${arch}/" 2>/dev/null | wc -l)
+              cd ..
+
+              if [ "$DEL_H" -gt 0 ]; then BUMP="MAJOR"
+              elif [ "$ADD" -gt 0 ]; then BUMP="MINOR"; fi
+
+              echo ">>> [Arch Oracle] ${arch}: Bump=$BUMP"
+              case "$BUMP" in
+                MAJOR) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+                MINOR) MINOR=$((MINOR+1)); PATCH=0 ;;
+                PATCH) PATCH=$((PATCH+1)) ;;
+              esac
+              NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            fi
+
+            NEW_TAG="arch-${arch}/v${NEW_VERSION}"
+            if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo ">>> [Arch Oracle] Tag ${NEW_TAG} exists. Skipping."
+              continue
+            fi
+
+            git config user.name "Toob ABI Oracle"
+            git config user.email "oracle@toob-boot.io"
+            git tag "$NEW_TAG"
+            git push origin "$NEW_TAG"
+            echo ">>> [Arch Oracle] Pushed ${NEW_TAG}"
+          done
 
       - name: ABI Orakel (Vendors)
         if: env.CHECK_VENDORS == 'true'
         run: |
-          echo ">>> [Vendors Oracle] Changes in vendors/ detected."
-          # TODO: Implement multi-vendor detection
-          # Logic identical to Chips Oracle. Tags: vendor-espressif/v1.0.0
-          echo "Vendors SemVer logic placeholder reached."
+          echo ">>> [Vendors Oracle] Changes in vendor/ detected."
+          # Vendor versioning follows the same pattern as chips/arch.
+          # Currently only one vendor (esp) exists. Stub retained until
+          # multi-vendor support is needed.
+          echo ">>> [Vendors Oracle] Vendor SemVer deferred to chip-level tagging."
+
