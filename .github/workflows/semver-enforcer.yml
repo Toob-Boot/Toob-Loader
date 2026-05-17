@@ -38,41 +38,40 @@ jobs:
 
           git fetch --prune --unshallow 2>/dev/null || git fetch --all 2>/dev/null || true
 
-          # Find the most recent Oracle tag to diff against (any subsystem)
-          ORACLE_BASE=$(git describe --tags --match "*/v*" --abbrev=0 HEAD~1 2>/dev/null || echo "")
-          
-          if [ -n "$ORACLE_BASE" ]; then
-            MODIFIED_FILES=$(git diff --name-only "$ORACLE_BASE" HEAD 2>/dev/null || echo "")
-          fi
-          
-          # Fallback: compare against parent commit
-          if [ -z "$MODIFIED_FILES" ]; then
-            MODIFIED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
-          fi
-          
-          if [ -z "$MODIFIED_FILES" ]; then
-            MODIFIED_FILES=$(git ls-files)
-          fi
+          check_subsystem() {
+            local tag_prefix=$1
+            shift
+            local paths=("$@")
+            
+            local last_tag=$(git describe --tags --match "${tag_prefix}v*" --abbrev=0 2>/dev/null || echo "")
+            local diff_files=""
+            
+            if [ -n "$last_tag" ]; then
+              diff_files=$(git diff --name-only "$last_tag" HEAD 2>/dev/null || echo "")
+            else
+              diff_files=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+              if [ -z "$diff_files" ]; then
+                diff_files=$(git ls-files)
+              fi
+            fi
+            
+            for file in $diff_files; do
+              for p in "${paths[@]}"; do
+                if [[ "$file" == $p* ]]; then
+                  echo "true"
+                  return
+                fi
+              done
+            done
+            echo "false"
+          }
 
-          CHECK_CORE="false"
-          CHECK_CHIPS="false"
-          CHECK_ARCH="false"
-          CHECK_VENDORS="false"
-          CHECK_CLI="false"
-          CHECK_COMPILER="false"
-
-          for file in $MODIFIED_FILES; do
-            case "$file" in
-              toobloader/core/* | sdk/* | common/*) CHECK_CORE="true" ;;
-              toob-registry/chips/*)                CHECK_CHIPS="true" ;;
-              toob-registry/arch/*)                 CHECK_ARCH="true" ;;
-              toob-registry/vendors/*)              CHECK_VENDORS="true" ;;
-              cli/toob-cli/*)                       CHECK_CLI="true" ;;
-              cli/.pipeline-repo/Dockerfile.compiler) CHECK_COMPILER="true" ;;
-              cli/.pipeline-repo/toob-ci-build.sh)    CHECK_COMPILER="true" ;;
-              compiler/*)                              CHECK_COMPILER="true" ;;
-            esac
-          done
+          CHECK_CORE=$(check_subsystem "core/" "toobloader/core/" "sdk/" "common/")
+          CHECK_CHIPS=$(check_subsystem "chip-*/" "toob-registry/chips/")
+          CHECK_ARCH=$(check_subsystem "arch-*/" "toob-registry/arch/")
+          CHECK_VENDORS=$(check_subsystem "vendor-*/" "toob-registry/vendors/")
+          CHECK_CLI=$(check_subsystem "cli/" "cli/toob-cli/")
+          CHECK_COMPILER=$(check_subsystem "compiler/" "cli/.pipeline-repo/Dockerfile.compiler" "cli/.pipeline-repo/toob-ci-build.sh" "compiler/")
 
           echo "CHECK_CORE=$CHECK_CORE" >> $GITHUB_ENV
           echo "CHECK_CHIPS=$CHECK_CHIPS" >> $GITHUB_ENV
