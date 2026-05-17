@@ -97,6 +97,10 @@ jobs:
               local base_ref="${OLD_SUB:-$(cd toob-registry && git rev-list --max-parents=0 HEAD)}"
               local changes=$(cd toob-registry && git diff --name-only "$base_ref" "$NEW_SUB" -- "${subdir}/" 2>/dev/null || echo "")
               if [ -n "$changes" ]; then
+                # Export these so Oracle steps don't rely on shifting HEAD
+                local prefix=$(echo "$subdir" | tr '[:lower:]' '[:upper:]')
+                echo "${prefix}_OLD_SUB=$base_ref" >> $GITHUB_ENV
+                echo "${prefix}_NEW_SUB=$NEW_SUB" >> $GITHUB_ENV
                 echo "true"
                 return
               fi
@@ -432,15 +436,9 @@ jobs:
           echo ">>> [Chips Oracle] Analyzing chip changes..."
           REPO_ROOT=$(pwd)
 
-          OLD_SUB=$(git rev-parse "HEAD~1:toob-registry" 2>/dev/null || echo "")
-          NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
-
-          # Also check from the last chip tag for accumulated changes
-          LAST_ANY_CHIP_TAG=$(git describe --tags --match "chip-*/v*" --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$LAST_ANY_CHIP_TAG" ]; then
-            TAG_SUB=$(git rev-parse "${LAST_ANY_CHIP_TAG}:toob-registry" 2>/dev/null || echo "")
-            [ -n "$TAG_SUB" ] && OLD_SUB="$TAG_SUB"
-          fi
+          # Use references safely exported during the detection phase
+          OLD_SUB=${{ env.CHIPS_OLD_SUB }}
+          NEW_SUB=${{ env.CHIPS_NEW_SUB }}
 
           for chip_dir in toob-registry/chips/*/; do
             chip=$(basename "$chip_dir")
@@ -516,14 +514,9 @@ jobs:
           echo ">>> [Arch Oracle] Analyzing architecture changes..."
           REPO_ROOT=$(pwd)
 
-          OLD_SUB=$(git rev-parse "HEAD~1:toob-registry" 2>/dev/null || echo "")
-          NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
-
-          LAST_ANY_ARCH_TAG=$(git describe --tags --match "arch-*/v*" --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$LAST_ANY_ARCH_TAG" ]; then
-            TAG_SUB=$(git rev-parse "${LAST_ANY_ARCH_TAG}:toob-registry" 2>/dev/null || echo "")
-            [ -n "$TAG_SUB" ] && OLD_SUB="$TAG_SUB"
-          fi
+          # Use references safely exported during the detection phase
+          OLD_SUB=${{ env.ARCH_OLD_SUB }}
+          NEW_SUB=${{ env.ARCH_NEW_SUB }}
 
           for arch_dir in toob-registry/arch/*/; do
             arch=$(basename "$arch_dir")
