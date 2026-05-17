@@ -912,6 +912,10 @@ func getLatestCoreSDKTag() (string, error) {
 			continue
 		}
 		
+		if !strings.HasPrefix(tag, "core/v") {
+			continue
+		}
+		
 		v, err := parseCoreSDKVersion(tag)
 		if err == nil {
 			if highest == nil || v.GreaterThan(highest) {
