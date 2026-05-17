@@ -494,7 +494,7 @@ func runNativeBuild(root string) error {
 		}
 		gitTarget := coreSDKVer
 		if coreSDKVer != "main" && coreSDKVer != "latest" && !strings.HasPrefix(coreSDKVer, "core/v") {
-			gitTarget = "core/v" + coreSDKVer
+			gitTarget = "core/v" + strings.TrimPrefix(coreSDKVer, "v")
 		}
 		cloneCmd := exec.Command("git", "clone", "--depth", "1", "-b", gitTarget, "https://github.com/Toob-Boot/Toob-Loader.git", coreDirToDownload)
 		cloneCmd.Stdout = os.Stdout
