@@ -167,9 +167,9 @@ jobs:
           toob build --native --manifest toob-registry/chips/esp32c6/template_device.toml
 
           for lib in libtoob_core.a libtoob_libtoob.a libtoob_zcbor.a libtoob_heatshrink.a; do
-            find builds/ -name "$lib" -exec cp {} abi_workspace/current/ \;
+            find . -path '*/builds/*' -name "$lib" -exec cp {} abi_workspace/current/ \;
           done
-          rm -rf builds/
+          find . -path '*/builds/build_*' -type d -exec rm -rf {} + 2>/dev/null || true
 
           # Build OLD code using git worktree (faster than clone, shares object store)
           echo ">>> Building OLD Code from $LAST_TAG..."
@@ -188,7 +188,7 @@ jobs:
           }
 
           for lib in libtoob_core.a libtoob_libtoob.a libtoob_zcbor.a libtoob_heatshrink.a; do
-            find builds/ -name "$lib" -exec cp {} ../old/ \;
+            find . -path '*/builds/*' -name "$lib" -exec cp {} ../old/ \;
           done
           cd ../../
           git worktree remove abi_workspace/old_repo --force 2>/dev/null || true
