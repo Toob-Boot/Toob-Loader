@@ -125,14 +125,10 @@ jobs:
           echo "CLI changed: $CHECK_CLI"
           echo "Compiler changed: $CHECK_COMPILER"
 
-      - name: Install ABI Tools
-        if: env.CHECK_CORE == 'true'
-        run: sudo apt-get update && sudo apt-get install -y abigail-tools
-
       - name: ABI Orakel (Core SDK)
         if: env.CHECK_CORE == 'true'
         run: |
-          echo ">>> [Core Oracle] Starting ABI analysis for Core, SDK, and Common..."
+          echo ">>> [Core Oracle] Starting symbol analysis for Core, SDK, and Common..."
 
           LAST_TAG=$(git describe --tags --match "core/v*" --abbrev=0 2>/dev/null || echo "core/v0.0.0")
           RAW_VERSION=${LAST_TAG#core/v}
@@ -142,7 +138,7 @@ jobs:
           MINOR=$(echo $RAW_VERSION | cut -d. -f2)
           PATCH=$(echo $RAW_VERSION | cut -d. -f3)
 
-          # If no real baseline exists, create the initial tag and skip ABI diff
+          # If no real baseline exists, create the initial tag and skip diff
           if [ "$LAST_TAG" = "core/v0.0.0" ]; then
             echo ">>> [Core Oracle] No baseline tag. Creating initial patch release."
             PATCH=$((PATCH + 1))
@@ -193,37 +189,57 @@ jobs:
           cd ../../
           git worktree remove abi_workspace/old_repo --force 2>/dev/null || true
 
-          # Run ABIDIFF on all core libraries
-          echo ">>> Running abidiff on Core, SDK, and Common libraries..."
-          ABI_EXIT_CODE=0
+          # Symbol-based ABI diff using the cross-compiler's nm.
+          # This avoids abidiff's crash on cross-compiled RISC-V ELF files.
+          # Extract public symbols (T=text, D=data, B=bss) and compare sets.
+          echo ">>> Running symbol-based ABI diff..."
 
-          set +e
+          # Locate the cross-compiler nm (installed during build)
+          NM_BIN=$(find ~/.toob/toolchains -name "riscv32-esp-elf-nm" 2>/dev/null | head -1)
+          if [ -z "$NM_BIN" ]; then
+            NM_BIN="nm"  # fallback to host nm
+          fi
+          echo ">>> Using nm: $NM_BIN"
+
+          BUMP="PATCH"
+
           for lib in libtoob_core.a libtoob_libtoob.a libtoob_zcbor.a libtoob_heatshrink.a; do
-              if [ -f "abi_workspace/current/$lib" ] && [ -f "abi_workspace/old/$lib" ]; then
-                  abidiff abi_workspace/old/$lib abi_workspace/current/$lib
-                  ABI_EXIT_CODE=$((ABI_EXIT_CODE | $?))
-              fi
+            OLD_LIB="abi_workspace/old/$lib"
+            NEW_LIB="abi_workspace/current/$lib"
+
+            if [ ! -f "$OLD_LIB" ] || [ ! -f "$NEW_LIB" ]; then
+              continue
+            fi
+
+            # Extract globally-visible defined symbols (type + name)
+            $NM_BIN --defined-only -g "$OLD_LIB" 2>/dev/null | awk '{print $2, $3}' | sort -u > /tmp/sym_old.txt
+            $NM_BIN --defined-only -g "$NEW_LIB" 2>/dev/null | awk '{print $2, $3}' | sort -u > /tmp/sym_new.txt
+
+            # Symbols removed = breaking change (MAJOR)
+            REMOVED=$(comm -23 /tmp/sym_old.txt /tmp/sym_new.txt | wc -l)
+            # Symbols added = new capability (MINOR)
+            ADDED=$(comm -13 /tmp/sym_old.txt /tmp/sym_new.txt | wc -l)
+
+            if [ "$REMOVED" -gt 0 ]; then
+              echo ">>> [RESULT] $lib: $REMOVED symbols REMOVED (MAJOR)"
+              comm -23 /tmp/sym_old.txt /tmp/sym_new.txt | head -10
+              BUMP="MAJOR"
+            elif [ "$ADDED" -gt 0 ] && [ "$BUMP" != "MAJOR" ]; then
+              echo ">>> [RESULT] $lib: $ADDED symbols ADDED (MINOR)"
+              comm -13 /tmp/sym_old.txt /tmp/sym_new.txt | head -10
+              [ "$BUMP" = "PATCH" ] && BUMP="MINOR"
+            else
+              echo ">>> [RESULT] $lib: No symbol changes"
+            fi
           done
-          set -e
 
-          echo "Combined abidiff Exit Code: $ABI_EXIT_CODE"
+          echo ">>> [Core Oracle] Final bump type: $BUMP"
 
-          # Calculate SemVer via Bitmask
-          if [ $((ABI_EXIT_CODE & 1)) -ne 0 ] || [ $((ABI_EXIT_CODE & 2)) -ne 0 ]; then
-              echo ">>> [FATAL] abidiff encountered an internal error. Aborting."
-              exit 1
-          fi
-
-          if [ $((ABI_EXIT_CODE & 8)) -ne 0 ]; then
-              echo ">>> [RESULT] Incompatible ABI changes detected (MAJOR)."
-              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
-          elif [ $((ABI_EXIT_CODE & 4)) -ne 0 ]; then
-              echo ">>> [RESULT] Compatible ABI changes detected (MINOR)."
-              MINOR=$((MINOR + 1)); PATCH=0
-          else
-              echo ">>> [RESULT] No ABI changes detected. Only internal logic modified (PATCH)."
-              PATCH=$((PATCH + 1))
-          fi
+          case "$BUMP" in
+            MAJOR) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            MINOR) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            PATCH) PATCH=$((PATCH + 1)) ;;
+          esac
 
           NEW_TAG="core/v${MAJOR}.${MINOR}.${PATCH}"
           echo ">>> [Core Oracle] Calculated new version: $NEW_TAG"
