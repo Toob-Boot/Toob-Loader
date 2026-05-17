@@ -237,7 +237,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	return nil
 }
 
-func VerifyMacroUsage(headerPath, bootloaderDir string) error {
+func VerifyMacroUsage(headerPath, bootloaderDir, halChipDir string) error {
 	ui.Step("Validating macro consumption in C code...")
 
 	data, err := os.ReadFile(headerPath)
@@ -255,28 +255,34 @@ func VerifyMacroUsage(headerPath, bootloaderDir string) error {
 		}
 	}
 
-	err = filepath.WalkDir(bootloaderDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !d.IsDir() && (strings.HasSuffix(d.Name(), ".c") || strings.HasSuffix(d.Name(), ".h")) {
-			b, err := os.ReadFile(path)
-			if err == nil {
-				text := string(b)
-				// We intentionally do NOT strip comments anymore, as regex stripping is fragile
-				// and destroys macros embedded in strings.
-				for m, used := range macros {
-					if !used && strings.Contains(text, m) {
-						macros[m] = true
+	dirsToWalk := []string{bootloaderDir}
+	if halChipDir != "" {
+		dirsToWalk = append(dirsToWalk, halChipDir)
+	}
+
+	for _, dir := range dirsToWalk {
+		err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if !d.IsDir() && (strings.HasSuffix(d.Name(), ".c") || strings.HasSuffix(d.Name(), ".h")) {
+				b, err := os.ReadFile(path)
+				if err == nil {
+					text := string(b)
+					// We intentionally do NOT strip comments anymore, as regex stripping is fragile
+					// and destroys macros embedded in strings.
+					for m, used := range macros {
+						if !used && strings.Contains(text, m) {
+							macros[m] = true
+						}
 					}
 				}
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
-
-	if err != nil {
-		return err
 	}
 
 	var unreferenced []string

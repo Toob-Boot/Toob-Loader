@@ -85,28 +85,11 @@ endif()
 # ------------------------------------------------------------------------------
 # Architektur-spezifische GAPs / Hardware-Limits patchen
 # ------------------------------------------------------------------------------
-if(TOOB_ARCH STREQUAL "xtensa")
-    # GAP-ABI: Call0 ist für Bare-Metal Bootloader auf Xtensa elementar, 
-    # andernfalls crasht das System bei tiefen Stacks durch Window-Overflows.
-    target_compile_options(toob_arch PUBLIC -mcall0)
-    
-    # GAP-FPU: Dynamisches Hard-Float für S3 Chips, andernfalls Hardware-Crashes
-    # auf S2 Chips (die keine FPU haben). Toolchains machen das meist NICHT auto.
-    if(TOOB_CHIP STREQUAL "esp32s3")
-        target_compile_options(toob_arch PUBLIC -mhard-float)
-        target_compile_definitions(toob_arch PUBLIC TOOB_XTENSA_HARD_FLOAT_ENABLED=1)
-    else()
-        target_compile_options(toob_arch PUBLIC -msoft-float)
-    endif()
-endif()
+# HINWEIS: Spezifische CPU-Architektur-Flags (wie -march=rv32imac oder -mcall0)
+# wurden aus dem Core SDK entfernt und in die Registry migriert! 
+# Siehe: ~/.toob/registry/toolchains/<name>/toolchain.cmake
 
-if(TOOB_ARCH STREQUAL "riscv32")
-    # ESP32-C6: rv32imac — integer multiply, atomics, compressed instructions.
-    # Explicitly set to avoid toolchain defaults that may include FPU extensions.
-    if(TARGET toob_arch)
-        target_compile_options(toob_arch PUBLIC -march=rv32imac_zicsr -mabi=ilp32)
-    endif()
-endif()
+
 
 # ------------------------------------------------------------------------------
 # P10 Härtung (Stack-Protector für HAL erlaubt)

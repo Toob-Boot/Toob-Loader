@@ -365,6 +365,8 @@ type ChipManifest struct {
 	Arch           string `json:"arch"            port:"required"`
 	CompilerPrefix string `json:"compiler_prefix" port:"required"`
 	Version        string `json:"version"         port:"required"`
+	MinCoreSDK     string `json:"min_core_sdk"    port:"optional"`
+	MinCompiler    string `json:"min_compiler"    port:"optional"`
 }
 
 // =============================================================================

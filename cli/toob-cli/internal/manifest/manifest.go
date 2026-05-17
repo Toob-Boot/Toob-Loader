@@ -7,7 +7,7 @@ import (
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-func Compile(tomlPath, hardwarePath, outDir, bootloaderDir string) error {
+func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string) error {
 	dt, hj, err := LoadConfig(tomlPath, hardwarePath)
 	if err != nil {
 		return err
@@ -142,7 +142,7 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir string) error {
 
 	ui.Success("Manifest Compiler (Go Native): Successfully generated headers and ld scripts to %s", outDir)
 
-	if err := VerifyMacroUsage(outDir+"/generated_boot_config.h", bootloaderDir); err != nil {
+	if err := VerifyMacroUsage(outDir+"/generated_boot_config.h", bootloaderDir, halChipDir); err != nil {
 		return err
 	}
 

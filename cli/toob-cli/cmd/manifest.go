@@ -30,7 +30,7 @@ var manifestCmd = &cobra.Command{
 		}
 		bootloaderDir := filepath.Join(compilerRoot, "toobloader")
 
-		err = manifest.Compile(manifestToml, manifestHardware, manifestOutDir, bootloaderDir)
+		err = manifest.Compile(manifestToml, manifestHardware, manifestOutDir, bootloaderDir, "")
 		if err != nil {
 			return fmt.Errorf("manifest compiler failed: %w", err)
 		}
