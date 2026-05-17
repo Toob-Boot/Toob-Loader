@@ -20,7 +20,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0 # Full history needed for abidiff against previous tags
+          fetch-depth: 0
           token: ${{ secrets.RELEASE_TARGET_TOKEN }}
 
       - name: Setup Toob Ecosystem
@@ -28,25 +28,33 @@ jobs:
         with:
           install-native-deps: "true"
 
-      - name: Install ABI Tools
-        run: sudo apt-get update && sudo apt-get install -y abigail-tools gcc jq
+      - name: Configure Git Identity
+        run: |
+          git config user.name "Toob ABI Oracle"
+          git config user.email "oracle@toob-boot.io"
 
-      - name: Detect Monorepo Changes
+      - name: Detect Subsystem Changes
         id: changes
         run: |
           echo ">>> Detecting changes in recent commit..."
 
           git fetch --prune --unshallow 2>/dev/null || git fetch --all 2>/dev/null || true
 
-          # Check if a monorepo subsystem changed (direct files, not submodules)
+          # Ensure the registry submodule is initialized
+          if [ ! -d "toob-registry/.git" ] && [ ! -f "toob-registry/.git" ]; then
+            git submodule update --init toob-registry
+          fi
+
+          # Check if a monorepo subsystem changed (direct files, not submodules).
+          # Diffs from the last matching tag to capture accumulated changes.
           check_subsystem() {
             local tag_prefix=$1
             shift
             local paths=("$@")
-            
+
             local last_tag=$(git describe --tags --match "${tag_prefix}v*" --abbrev=0 2>/dev/null || echo "")
             local diff_files=""
-            
+
             if [ -n "$last_tag" ]; then
               diff_files=$(git diff --name-only "$last_tag" HEAD 2>/dev/null || echo "")
             else
@@ -55,7 +63,7 @@ jobs:
                 diff_files=$(git ls-files)
               fi
             fi
-            
+
             for file in $diff_files; do
               for p in "${paths[@]}"; do
                 if [[ "$file" == $p* ]]; then
@@ -67,31 +75,39 @@ jobs:
             echo "false"
           }
 
-          # Check if the toob-registry submodule pointer changed
+          # Check if the toob-registry submodule has changes in a specific subdirectory.
+          # Diffs from the submodule commit at the last matching tag (not HEAD~1)
+          # to capture accumulated changes across multiple commits.
           check_registry_subsystem() {
             local subdir=$1
-            local diff_base=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
-            
-            if echo "$diff_base" | grep -q "^toob-registry$"; then
-              # Submodule pointer changed — diff within the submodule
-              local OLD_SUB=$(git rev-parse "HEAD~1:toob-registry" 2>/dev/null || echo "")
-              local NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
-              
-              if [ -n "$OLD_SUB" ] && [ -n "$NEW_SUB" ] && [ "$OLD_SUB" != "$NEW_SUB" ]; then
-                local changes=$(cd toob-registry && git diff --name-only "$OLD_SUB" "$NEW_SUB" -- "${subdir}/" 2>/dev/null || echo "")
-                if [ -n "$changes" ]; then
-                  echo "true"
-                  return
-                fi
+            local tag_prefix=$2
+
+            local NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
+            [ -z "$NEW_SUB" ] && echo "false" && return
+
+            local last_tag=$(git describe --tags --match "${tag_prefix}v*" --abbrev=0 2>/dev/null || echo "")
+            local OLD_SUB=""
+
+            if [ -n "$last_tag" ]; then
+              OLD_SUB=$(git rev-parse "${last_tag}:toob-registry" 2>/dev/null || echo "")
+            fi
+
+            # If no previous tag or submodule commit differs, check for changes
+            if [ -z "$OLD_SUB" ] || [ "$OLD_SUB" != "$NEW_SUB" ]; then
+              local base_ref="${OLD_SUB:-$(cd toob-registry && git rev-list --max-parents=0 HEAD)}"
+              local changes=$(cd toob-registry && git diff --name-only "$base_ref" "$NEW_SUB" -- "${subdir}/" 2>/dev/null || echo "")
+              if [ -n "$changes" ]; then
+                echo "true"
+                return
               fi
             fi
             echo "false"
           }
 
           CHECK_CORE=$(check_subsystem "core/" "toobloader/core/" "sdk/" "common/")
-          CHECK_CHIPS=$(check_registry_subsystem "chips")
-          CHECK_ARCH=$(check_registry_subsystem "arch")
-          CHECK_VENDORS=$(check_registry_subsystem "vendor")
+          CHECK_CHIPS=$(check_registry_subsystem "chips" "chip-*/" )
+          CHECK_ARCH=$(check_registry_subsystem "arch" "arch-*/")
+          CHECK_VENDORS=$(check_registry_subsystem "vendor" "vendor-*/")
           CHECK_CLI=$(check_subsystem "cli/" "cli/toob-cli/")
           CHECK_COMPILER=$(check_subsystem "compiler/" "cli/.pipeline-repo/Dockerfile.compiler" "cli/.pipeline-repo/toob-ci-build.sh" "compiler/")
 
@@ -109,6 +125,10 @@ jobs:
           echo "CLI changed: $CHECK_CLI"
           echo "Compiler changed: $CHECK_COMPILER"
 
+      - name: Install ABI Tools
+        if: env.CHECK_CORE == 'true'
+        run: sudo apt-get update && sudo apt-get install -y abigail-tools
+
       - name: ABI Orakel (Core SDK)
         if: env.CHECK_CORE == 'true'
         run: |
@@ -122,45 +142,58 @@ jobs:
           MINOR=$(echo $RAW_VERSION | cut -d. -f2)
           PATCH=$(echo $RAW_VERSION | cut -d. -f3)
 
-          mkdir -p abi_workspace/current
-          mkdir -p abi_workspace/old
+          # If no real baseline exists, create the initial tag and skip ABI diff
+          if [ "$LAST_TAG" = "core/v0.0.0" ]; then
+            echo ">>> [Core Oracle] No baseline tag. Creating initial patch release."
+            PATCH=$((PATCH + 1))
+            NEW_TAG="core/v${MAJOR}.${MINOR}.${PATCH}"
 
-          # 3. Build CURRENT Code
-          echo ">>> Building CURRENT Code with toob CLI..."
-          # Host-GCC build is sufficient for ABI analysis (struct layouts, symbols).
-          toob build --native --manifest toob-registry/chips/esp32c6/template_device.toml
-
-          # Extract only the Core/SDK/Common static libraries (Isolating them from the HAL)
-          find builds/ -name "libtoob_core.a" -exec cp {} abi_workspace/current/ \;
-          find builds/ -name "libtoob_libtoob.a" -exec cp {} abi_workspace/current/ \;
-          find builds/ -name "libtoob_zcbor.a" -exec cp {} abi_workspace/current/ \;
-          find builds/ -name "libtoob_heatshrink.a" -exec cp {} abi_workspace/current/ \;
-
-          # Clean build directory so we don't mix up files
-          rm -rf builds/
-
-          # 4. Build OLD Code
-          echo ">>> Cloning and building OLD Code from $LAST_TAG..."
-          git clone . abi_workspace/old_repo
-          cd abi_workspace/old_repo
-
-          if [ "$LAST_TAG" != "core/v0.0.0" ]; then
-              git checkout $LAST_TAG
-              # Only init the registry to avoid private submodule clone errors
-              git submodule update --init toob-registry
+            if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo ">>> [Core Oracle] Tag $NEW_TAG already exists. Skipping."
+            else
+              git tag "$NEW_TAG"
+              git push origin "$NEW_TAG" || echo ">>> Tag push failed (concurrent run?)"
+              echo ">>> [Core Oracle] Initial tag $NEW_TAG pushed!"
+            fi
+            exit 0
           fi
 
-          # Build the old code using the current global toob CLI executable
-          toob build --native --manifest toob-registry/chips/esp32c6/template_device.toml || true
+          mkdir -p abi_workspace/current abi_workspace/old
 
-          find builds/ -name "libtoob_core.a" -exec cp {} ../old/ \; || touch ../old/libtoob_core.a
-          find builds/ -name "libtoob_libtoob.a" -exec cp {} ../old/ \; || touch ../old/libtoob_libtoob.a
-          find builds/ -name "libtoob_zcbor.a" -exec cp {} ../old/ \; || touch ../old/libtoob_zcbor.a
-          find builds/ -name "libtoob_heatshrink.a" -exec cp {} ../old/ \; || touch ../old/libtoob_heatshrink.a
+          # Build CURRENT code.
+          # The esp32c6 template is used as a reference target. Core libraries
+          # are chip-independent — the ABI output is identical for any chip.
+          echo ">>> Building CURRENT Code..."
+          toob build --native --manifest toob-registry/chips/esp32c6/template_device.toml
 
+          for lib in libtoob_core.a libtoob_libtoob.a libtoob_zcbor.a libtoob_heatshrink.a; do
+            find builds/ -name "$lib" -exec cp {} abi_workspace/current/ \;
+          done
+          rm -rf builds/
+
+          # Build OLD code using git worktree (faster than clone, shares object store)
+          echo ">>> Building OLD Code from $LAST_TAG..."
+          git worktree add abi_workspace/old_repo "$LAST_TAG" 2>/dev/null || {
+            echo ">>> [FATAL] Cannot create worktree for $LAST_TAG"
+            exit 1
+          }
+          cd abi_workspace/old_repo
+          git submodule update --init toob-registry
+
+          toob build --native --manifest toob-registry/chips/esp32c6/template_device.toml || {
+            echo ">>> [FATAL] Old build failed. Cannot produce ABI baseline."
+            cd ../../
+            git worktree remove abi_workspace/old_repo --force 2>/dev/null || true
+            exit 1
+          }
+
+          for lib in libtoob_core.a libtoob_libtoob.a libtoob_zcbor.a libtoob_heatshrink.a; do
+            find builds/ -name "$lib" -exec cp {} ../old/ \;
+          done
           cd ../../
+          git worktree remove abi_workspace/old_repo --force 2>/dev/null || true
 
-          # 5. Run ABIDIFF on all core libraries
+          # Run ABIDIFF on all core libraries
           echo ">>> Running abidiff on Core, SDK, and Common libraries..."
           ABI_EXIT_CODE=0
 
@@ -175,7 +208,7 @@ jobs:
 
           echo "Combined abidiff Exit Code: $ABI_EXIT_CODE"
 
-          # 6. Calculate SemVer via Bitmask
+          # Calculate SemVer via Bitmask
           if [ $((ABI_EXIT_CODE & 1)) -ne 0 ] || [ $((ABI_EXIT_CODE & 2)) -ne 0 ]; then
               echo ">>> [FATAL] abidiff encountered an internal error. Aborting."
               exit 1
@@ -193,17 +226,14 @@ jobs:
           fi
 
           NEW_TAG="core/v${MAJOR}.${MINOR}.${PATCH}"
-          echo ">>> [Orakel] Calculated new Core version: $NEW_TAG"
+          echo ">>> [Core Oracle] Calculated new version: $NEW_TAG"
 
-          # 7. Push Tag
           if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
-              echo ">>> [Orakel] Tag $NEW_TAG already exists. Skipping."
+              echo ">>> [Core Oracle] Tag $NEW_TAG already exists. Skipping."
           else
-              git config user.name "Toob ABI Oracle"
-              git config user.email "oracle@toob-boot.io"
               git tag "$NEW_TAG"
-              git push origin "$NEW_TAG"
-              echo ">>> [Orakel] Core Tag $NEW_TAG successfully pushed!"
+              git push origin "$NEW_TAG" || echo ">>> Tag push failed (concurrent run?)"
+              echo ">>> [Core Oracle] Tag $NEW_TAG pushed!"
           fi
 
       - name: ABI Orakel (CLI)
@@ -244,16 +274,14 @@ jobs:
           fi
 
           NEW_TAG="cli/v${MAJOR}.${MINOR}.${PATCH}"
-          echo ">>> [Orakel] Calculated new CLI version: $NEW_TAG"
+          echo ">>> [CLI Oracle] Calculated new version: $NEW_TAG"
 
           if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
-              echo ">>> [Orakel] Tag $NEW_TAG already exists. Skipping."
+              echo ">>> [CLI Oracle] Tag $NEW_TAG already exists. Skipping."
           else
-              git config user.name "Toob ABI Oracle"
-              git config user.email "oracle@toob-boot.io"
               git tag "$NEW_TAG"
-              git push origin "$NEW_TAG"
-              echo ">>> [Orakel] CLI Tag $NEW_TAG successfully pushed!"
+              git push origin "$NEW_TAG" || echo ">>> Tag push failed (concurrent run?)"
+              echo ">>> [CLI Oracle] Tag $NEW_TAG pushed!"
           fi
 
       - name: ABI Orakel (Compiler Container)
@@ -264,13 +292,11 @@ jobs:
           LAST_TAG=$(git describe --tags --match "compiler/v*" --abbrev=0 2>/dev/null || echo "compiler/v0.0.0")
           echo ">>> [Compiler Oracle] Baseline Tag: $LAST_TAG"
 
-          # Read current version from manifest
           CURRENT_VERSION=$(jq -r '.compiler_version' compiler/compiler_manifest.json)
           MAJOR=$(echo $CURRENT_VERSION | cut -d. -f1)
           MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
           PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
 
-          # Determine bump level by diffing the manifest against the last tag
           BUMP="PATCH"
           if [ "$LAST_TAG" != "compiler/v0.0.0" ]; then
               OLD_MANIFEST=$(git show $LAST_TAG:compiler/compiler_manifest.json 2>/dev/null || echo '{}')
@@ -306,54 +332,62 @@ jobs:
           NEW_TAG="compiler/v${NEW_VERSION}"
           echo ">>> [Compiler Oracle] New version: $NEW_TAG"
 
+          # Check tag existence BEFORE writing to manifest to prevent double-bumps
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo ">>> [Compiler Oracle] Tag $NEW_TAG already exists. Skipping."
+              exit 0
+          fi
+
           # Update version in manifest and commit
           jq --arg v "$NEW_VERSION" '.compiler_version = $v' \
             compiler/compiler_manifest.json > tmp_manifest.json \
             && mv tmp_manifest.json compiler/compiler_manifest.json
 
-          git config user.name "Toob ABI Oracle"
-          git config user.email "oracle@toob-boot.io"
           git add compiler/compiler_manifest.json
           git commit -m "chore(compiler): bump to v${NEW_VERSION} [skip ci]" || true
-          git push origin HEAD:main || true
 
-          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
-              echo ">>> [Compiler Oracle] Tag $NEW_TAG already exists. Skipping."
-          else
-              git tag "$NEW_TAG"
-              git push origin "$NEW_TAG"
-              echo ">>> [Compiler Oracle] Tag $NEW_TAG successfully pushed!"
+          # Atomic push: commit + tag together to prevent race conditions
+          git tag "$NEW_TAG"
+          git push origin HEAD:main "$NEW_TAG" || echo ">>> Push failed (concurrent run?)"
+          echo ">>> [Compiler Oracle] Tag $NEW_TAG pushed!"
 
-              # Create draft release as manual approval gate
-              CLI_VER=$(jq -r '.cli.version' compiler/compiler_manifest.json)
-              PROTO_VER=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
-              BODY="## Compiler v${NEW_VERSION}\n\n"
-              BODY+="| Property | Value |\n|---|---|\n"
-              BODY+="| CLI | v${CLI_VER} |\n"
-              BODY+="| Protocol | v${PROTO_VER} |\n\n"
-              BODY+="**Publish this release to trigger the Docker image build on the CI server.**"
+          # Create draft release as manual approval gate
+          CLI_VER=$(jq -r '.cli.version' compiler/compiler_manifest.json)
+          PROTO_VER=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
+          BODY="## Compiler v${NEW_VERSION}\n\n"
+          BODY+="| Property | Value |\n|---|---|\n"
+          BODY+="| CLI | v${CLI_VER} |\n"
+          BODY+="| Protocol | v${PROTO_VER} |\n\n"
+          BODY+="**Publish this release to trigger the Docker image build on the CI server.**"
 
-              curl -sf -X POST \
-                -H "Accept: application/vnd.github.v3+json" \
-                -H "Authorization: token ${{ secrets.RELEASE_TARGET_TOKEN }}" \
-                https://api.github.com/repos/Toob-Boot/Toob-Loader/releases \
-                -d "{
-                  \"tag_name\": \"${NEW_TAG}\",
-                  \"name\": \"Compiler v${NEW_VERSION}\",
-                  \"body\": \"$(echo -e "$BODY")\",
-                  \"draft\": true,
-                  \"prerelease\": false
-                }" && echo ">>> [Compiler Oracle] Draft release created for ${NEW_TAG}" \
-                   || echo ">>> [Compiler Oracle] Draft creation failed (non-critical)"
-          fi
+          curl -sf -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.RELEASE_TARGET_TOKEN }}" \
+            https://api.github.com/repos/Toob-Boot/Toob-Loader/releases \
+            -d "{
+              \"tag_name\": \"${NEW_TAG}\",
+              \"name\": \"Compiler v${NEW_VERSION}\",
+              \"body\": \"$(echo -e "$BODY")\",
+              \"draft\": true,
+              \"prerelease\": false
+            }" && echo ">>> [Compiler Oracle] Draft release created for ${NEW_TAG}" \
+               || echo ">>> [Compiler Oracle] Draft creation failed (non-critical)"
 
       - name: ABI Orakel (Chips)
         if: env.CHECK_CHIPS == 'true'
         run: |
           echo ">>> [Chips Oracle] Analyzing chip changes..."
+          REPO_ROOT=$(pwd)
 
           OLD_SUB=$(git rev-parse "HEAD~1:toob-registry" 2>/dev/null || echo "")
           NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
+
+          # Also check from the last chip tag for accumulated changes
+          LAST_ANY_CHIP_TAG=$(git describe --tags --match "chip-*/v*" --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_ANY_CHIP_TAG" ]; then
+            TAG_SUB=$(git rev-parse "${LAST_ANY_CHIP_TAG}:toob-registry" 2>/dev/null || echo "")
+            [ -n "$TAG_SUB" ] && OLD_SUB="$TAG_SUB"
+          fi
 
           for chip_dir in toob-registry/chips/*/; do
             chip=$(basename "$chip_dir")
@@ -363,6 +397,7 @@ jobs:
             CHIP_CHANGES=""
             if [ -n "$OLD_SUB" ] && [ -n "$NEW_SUB" ] && [ "$OLD_SUB" != "$NEW_SUB" ]; then
               CHIP_CHANGES=$(cd toob-registry && git diff --name-only "$OLD_SUB" "$NEW_SUB" -- "chips/${chip}/" 2>/dev/null || echo "")
+              cd "$REPO_ROOT"
             fi
             [ -z "$CHIP_CHANGES" ] && continue
 
@@ -372,7 +407,6 @@ jobs:
             LAST_TAG=$(git describe --tags --match "chip-${chip}/v*" --abbrev=0 2>/dev/null || echo "")
 
             if [ -z "$LAST_TAG" ]; then
-              # Initial release — use version from manifest
               NEW_VERSION=$(jq -r '.version' "${chip_dir}/chip_manifest.json")
             else
               RAW=${LAST_TAG#chip-${chip}/v}
@@ -383,9 +417,8 @@ jobs:
               BUMP="PATCH"
 
               # Breaking: arch, vendor, or compiler_prefix changed
-              cd toob-registry
-              OLD_M=$(git show "${OLD_SUB}:chips/${chip}/chip_manifest.json" 2>/dev/null || echo '{}')
-              cd ..
+              OLD_M=$(cd toob-registry && git show "${OLD_SUB}:chips/${chip}/chip_manifest.json" 2>/dev/null || echo '{}')
+              cd "$REPO_ROOT"
               for field in arch vendor compiler_prefix; do
                 OLD_VAL=$(echo "$OLD_M" | jq -r ".${field} // \"\"")
                 NEW_VAL=$(jq -r ".${field}" "${chip_dir}/chip_manifest.json")
@@ -397,10 +430,9 @@ jobs:
 
               # Structural: deleted headers = MAJOR, new files = MINOR
               if [ "$BUMP" != "MAJOR" ]; then
-                cd toob-registry
-                DEL=$(git diff --diff-filter=D --name-only "$OLD_SUB" "$NEW_SUB" -- "chips/${chip}/" 2>/dev/null | grep -c '\.h$' || true)
-                ADD=$(git diff --diff-filter=A --name-only "$OLD_SUB" "$NEW_SUB" -- "chips/${chip}/" 2>/dev/null | wc -l)
-                cd ..
+                DEL=$(cd toob-registry && git diff --diff-filter=D --name-only "$OLD_SUB" "$NEW_SUB" -- "chips/${chip}/" 2>/dev/null | grep -c '\.h$' || true)
+                ADD=$(cd toob-registry && git diff --diff-filter=A --name-only "$OLD_SUB" "$NEW_SUB" -- "chips/${chip}/" 2>/dev/null | wc -l)
+                cd "$REPO_ROOT"
                 if [ "$DEL" -gt 0 ]; then BUMP="MAJOR"
                 elif [ "$ADD" -gt 0 ]; then BUMP="MINOR"; fi
               fi
@@ -420,10 +452,8 @@ jobs:
               continue
             fi
 
-            git config user.name "Toob ABI Oracle"
-            git config user.email "oracle@toob-boot.io"
             git tag "$NEW_TAG"
-            git push origin "$NEW_TAG"
+            git push origin "$NEW_TAG" || echo ">>> Tag push failed (concurrent run?)"
             echo ">>> [Chips Oracle] Pushed ${NEW_TAG}"
           done
 
@@ -431,9 +461,16 @@ jobs:
         if: env.CHECK_ARCH == 'true'
         run: |
           echo ">>> [Arch Oracle] Analyzing architecture changes..."
+          REPO_ROOT=$(pwd)
 
           OLD_SUB=$(git rev-parse "HEAD~1:toob-registry" 2>/dev/null || echo "")
           NEW_SUB=$(git rev-parse "HEAD:toob-registry" 2>/dev/null || echo "")
+
+          LAST_ANY_ARCH_TAG=$(git describe --tags --match "arch-*/v*" --abbrev=0 2>/dev/null || echo "")
+          if [ -n "$LAST_ANY_ARCH_TAG" ]; then
+            TAG_SUB=$(git rev-parse "${LAST_ANY_ARCH_TAG}:toob-registry" 2>/dev/null || echo "")
+            [ -n "$TAG_SUB" ] && OLD_SUB="$TAG_SUB"
+          fi
 
           for arch_dir in toob-registry/arch/*/; do
             arch=$(basename "$arch_dir")
@@ -442,6 +479,7 @@ jobs:
             ARCH_CHANGES=""
             if [ -n "$OLD_SUB" ] && [ -n "$NEW_SUB" ] && [ "$OLD_SUB" != "$NEW_SUB" ]; then
               ARCH_CHANGES=$(cd toob-registry && git diff --name-only "$OLD_SUB" "$NEW_SUB" -- "arch/${arch}/" 2>/dev/null || echo "")
+              cd "$REPO_ROOT"
             fi
             [ -z "$ARCH_CHANGES" ] && continue
 
@@ -460,11 +498,9 @@ jobs:
 
               BUMP="PATCH"
 
-              # Breaking: deleted headers or include files
-              cd toob-registry
-              DEL_H=$(git diff --diff-filter=D --name-only "$OLD_SUB" "$NEW_SUB" -- "arch/${arch}/" 2>/dev/null | grep -c '\.h$' || true)
-              ADD=$(git diff --diff-filter=A --name-only "$OLD_SUB" "$NEW_SUB" -- "arch/${arch}/" 2>/dev/null | wc -l)
-              cd ..
+              DEL_H=$(cd toob-registry && git diff --diff-filter=D --name-only "$OLD_SUB" "$NEW_SUB" -- "arch/${arch}/" 2>/dev/null | grep -c '\.h$' || true)
+              ADD=$(cd toob-registry && git diff --diff-filter=A --name-only "$OLD_SUB" "$NEW_SUB" -- "arch/${arch}/" 2>/dev/null | wc -l)
+              cd "$REPO_ROOT"
 
               if [ "$DEL_H" -gt 0 ]; then BUMP="MAJOR"
               elif [ "$ADD" -gt 0 ]; then BUMP="MINOR"; fi
@@ -484,10 +520,8 @@ jobs:
               continue
             fi
 
-            git config user.name "Toob ABI Oracle"
-            git config user.email "oracle@toob-boot.io"
             git tag "$NEW_TAG"
-            git push origin "$NEW_TAG"
+            git push origin "$NEW_TAG" || echo ">>> Tag push failed (concurrent run?)"
             echo ">>> [Arch Oracle] Pushed ${NEW_TAG}"
           done
 
@@ -499,4 +533,3 @@ jobs:
           # Currently only one vendor (esp) exists. Stub retained until
           # multi-vendor support is needed.
           echo ">>> [Vendors Oracle] Vendor SemVer deferred to chip-level tagging."
-
