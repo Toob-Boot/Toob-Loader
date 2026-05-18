@@ -13,10 +13,10 @@ import (
 )
 
 type FieldMeta struct {
-	Name    string
-	Type    string
-	Tag     string // "required" or "optional"
-	JsonTag string // Wire-format key from `json:"..."` tag
+	Name        string
+	Type        string
+	Tag         string // "required" or "optional"
+	JsonTag     string // Wire-format key from `json:"..."` tag
 	JsonTagFull string // The complete json tag including options like omitempty
 }
 
@@ -282,7 +282,7 @@ func parseInterface(filename string) (InterfaceInfo, error) {
 							continue
 						}
 						name := field.Names[0].Name
-						
+
 						var typeBuf bytes.Buffer
 						printer.Fprint(&typeBuf, fset, field.Type)
 						fieldType := typeBuf.String()

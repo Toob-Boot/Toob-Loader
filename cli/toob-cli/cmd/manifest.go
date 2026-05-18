@@ -22,7 +22,7 @@ var manifestCmd = &cobra.Command{
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, _ := os.Getwd()
-		
+
 		// Find compiler root to accurately locate the toobloader C code
 		compilerRoot, err := paths.FindProjectRoot(cwd)
 		if err != nil {

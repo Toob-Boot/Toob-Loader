@@ -40,13 +40,13 @@ func CheckDependencies() error {
 // Compare uses abidiff to compare two ELF or XML baseline files.
 func Compare(oldFile, newFile string) (*DiffResult, error) {
 	cmd := exec.Command("abidiff", oldFile, newFile)
-	
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	
+
 	res := &DiffResult{
 		Report:      stdout.String(),
 		IsSupported: true,
@@ -56,7 +56,7 @@ func Compare(oldFile, newFile string) (*DiffResult, error) {
 		if exitError, ok := err.(*exec.ExitError); ok {
 			exitCode := exitError.ExitCode()
 			res.BumpType = determineBump(exitCode)
-			
+
 			// If stderr contains content, it might be an invocation error rather than ABI diff
 			if exitCode >= 128 || stderr.Len() > 0 {
 				if stderr.Len() > 0 {
@@ -76,7 +76,7 @@ func Compare(oldFile, newFile string) (*DiffResult, error) {
 // GenerateBaseline uses abidw to generate an XML baseline representation of an ELF file.
 func GenerateBaseline(binaryFile, outputFile string) error {
 	cmd := exec.Command("abidw", binaryFile, "--out-file", outputFile)
-	
+
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -102,16 +102,16 @@ func determineBump(exitCode int) BumpType {
 		// Bit 2 is set, but not Bit 3: Compatible ABI change (e.g. new func added)
 		return BumpMinor
 	}
-	if (exitCode & 1) != 0 || (exitCode & 2) != 0 {
+	if (exitCode&1) != 0 || (exitCode&2) != 0 {
 		// Error invoking tool
 		return Error
 	}
-	
+
 	if exitCode == 0 {
 		return BumpPatch
 	}
-	
-	// Should theoretically not be reached if exit code > 0 and no bits matched, 
+
+	// Should theoretically not be reached if exit code > 0 and no bits matched,
 	// but default to Major to be safe.
 	return BumpMajor
 }

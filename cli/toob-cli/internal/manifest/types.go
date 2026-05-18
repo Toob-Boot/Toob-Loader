@@ -14,8 +14,8 @@ import (
 type DeviceToml struct {
 	Name    string `toml:"name"`
 	Version string `toml:"version"`
-	Device struct {
-		Chip   string `toml:"chip"`
+	Device  struct {
+		Chip string `toml:"chip"`
 	} `toml:"device"`
 	Build struct {
 		Compiler string `toml:"compiler"`
@@ -23,7 +23,7 @@ type DeviceToml struct {
 		Registry string `toml:"registry"`
 	} `toml:"build"`
 	DriverConfig map[string]interface{} `toml:"driver_config"`
-	Partitions struct {
+	Partitions   struct {
 		Stage0Size    uint32 `toml:"stage0_size"`
 		Stage1Size    uint32 `toml:"stage1_size"`
 		AppSize       uint32 `toml:"app_size"`

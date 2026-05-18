@@ -16,8 +16,6 @@ import (
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-
-
 // Installer orchestrates chip installation, spawning, and removal.
 type Installer struct {
 	root     string
@@ -64,7 +62,7 @@ func (inst *Installer) Add(arg string) error {
 		}
 		return fmt.Errorf("chip '%s' is already installed", name)
 	}
-	
+
 	if version != "" {
 		if err := inst.cache.Checkout(version); err != nil {
 			return fmt.Errorf("failed to checkout registry version '%s': %w", version, err)
@@ -83,10 +81,10 @@ func (inst *Installer) Add(arg string) error {
 		return err
 	}
 	idx, _ := inst.cache.LoadIndex()
-	
+
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
-	
+
 	aVer := ""
 	tcVer := ""
 	if idx != nil {
@@ -100,11 +98,11 @@ func (inst *Installer) Add(arg string) error {
 			tcVer = tcInfo.Version
 		}
 	}
-	
+
 	entry := lockfile.ChipEntry{
 		Name: name, Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Toolchain: strings.TrimSuffix(ci.CompilerPrefix, "-"), ToolchainVersion: tcVer, Spawned: false,
 	}
-	
+
 	// Replace or append
 	found := false
 	for i := range inst.lock.Chips {
@@ -121,7 +119,7 @@ func (inst *Installer) Add(arg string) error {
 		return err
 	}
 	ui.Success("Added chip '%s' (v%s) to lockfile [arch=%s].", name, ci.Version, ci.Arch)
-	
+
 	// Wait up to 1 second for the matrix to avoid blocking
 	var matrix *registry.Matrix
 	select {
@@ -211,7 +209,7 @@ func (inst *Installer) Spawn(arg string) error {
 	idx, _ := inst.cache.LoadIndex()
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
-	
+
 	aVer := ""
 	tcVer := ""
 	if idx != nil {
@@ -224,11 +222,11 @@ func (inst *Installer) Spawn(arg string) error {
 			tcVer = tcInfo.Version
 		}
 	}
-	
+
 	entry := lockfile.ChipEntry{
 		Name: name, Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Toolchain: strings.TrimSuffix(ci.CompilerPrefix, "-"), ToolchainVersion: tcVer, Spawned: true,
 	}
-	
+
 	found := false
 	for i := range inst.lock.Chips {
 		if inst.lock.Chips[i].Name == name {
@@ -245,7 +243,7 @@ func (inst *Installer) Spawn(arg string) error {
 		return err
 	}
 	ui.Success("Spawned chip '%s' (v%s) [locally editable]", name, ci.Version)
-	
+
 	// Wait up to 1 second for the matrix to avoid blocking
 	var matrix *registry.Matrix
 	select {
@@ -505,13 +503,13 @@ func linkOrCopy(src, dst string, allowLinks bool) error {
 			return nil
 		}
 	}
-	
+
 	stat, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
 	origMode := stat.Mode()
-	
+
 	// Gap 7.2: Atomic copyTree Fallback with Windows NTFS Lock Retries
 	var writeErr error
 	delays := []time.Duration{10 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 500 * time.Millisecond}
@@ -522,7 +520,7 @@ func linkOrCopy(src, dst string, allowLinks bool) error {
 		_, writeErr = io.Copy(dstFile, srcFile)
 		srcFile.Close()
 		dstFile.Close()
-		
+
 		if writeErr == nil {
 			return nil
 		}
@@ -530,5 +528,3 @@ func linkOrCopy(src, dst string, allowLinks bool) error {
 	}
 	return writeErr
 }
-
-

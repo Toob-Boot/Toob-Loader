@@ -52,7 +52,7 @@ func (g *IntegrationGenerator) Generate(ctx Context) error {
 		if err != nil {
 			return err
 		}
-		
+
 		relPath, err := filepath.Rel(tmplDir, path)
 		if err != nil {
 			return err
@@ -88,7 +88,6 @@ func (g *IntegrationGenerator) Generate(ctx Context) error {
 		return nil
 	})
 }
-
 
 func GenerateDeviceToml(ctx Context) error {
 	tmplPath := filepath.Join(ctx.RegistryDir, "chips", ctx.ChipName, "template_device.toml")

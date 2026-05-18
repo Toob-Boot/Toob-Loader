@@ -224,7 +224,7 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 		}
 		colWidths[i] = w
 	}
-	
+
 	for _, row := range rows {
 		for i, cell := range row {
 			if i < len(colWidths) {
@@ -242,7 +242,7 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 		if i > 0 {
 			hdr.WriteString(padStr)
 		}
-		
+
 		visualLen := len(Strip(h))
 		padding := colWidths[i] - visualLen
 		if padding < 0 {
@@ -274,13 +274,13 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 			if i < len(colWidths) {
 				w = colWidths[i]
 			}
-			
+
 			visualLen := len(Strip(cell))
 			padding := w - visualLen
 			if padding < 0 {
 				padding = 0
 			}
-			
+
 			line.WriteString(cell + strings.Repeat(" ", padding))
 		}
 		fmt.Fprintf(os.Stderr, "  %s\n", line.String())

@@ -228,8 +228,8 @@ func assertLockChipToPort() {
 	var r lockfile.ChipEntry
 	_ = LockfileChipEntry{
 		Name: r.Name, Version: r.Version, Arch: r.Arch,
-		ArchVersion: r.ArchVersion,
-		Toolchain: r.Toolchain,
+		ArchVersion:      r.ArchVersion,
+		Toolchain:        r.Toolchain,
 		ToolchainVersion: r.ToolchainVersion, Spawned: r.Spawned,
 	}
 }
@@ -238,8 +238,8 @@ func assertLockChipFromPort() {
 	var p LockfileChipEntry
 	_ = lockfile.ChipEntry{
 		Name: p.Name, Version: p.Version, Arch: p.Arch,
-		ArchVersion: p.ArchVersion,
-		Toolchain: p.Toolchain,
+		ArchVersion:      p.ArchVersion,
+		Toolchain:        p.Toolchain,
 		ToolchainVersion: p.ToolchainVersion, Spawned: p.Spawned,
 	}
 }

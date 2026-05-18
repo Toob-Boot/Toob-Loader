@@ -87,7 +87,7 @@ var abiBaselineCmd = &cobra.Command{
 
 func init() {
 	abiBaselineCmd.Flags().StringP("out", "o", "", "Output XML file path")
-	
+
 	abiCmd.AddCommand(abiCheckCmd)
 	abiCmd.AddCommand(abiBaselineCmd)
 }

@@ -411,7 +411,7 @@ func (c *Cache) FetchLiveIntegrations() ([]string, error) {
 
 			var apiResp struct {
 				Integrations []struct {
-					Name    string `json:"name"`
+					Name string `json:"name"`
 				} `json:"integrations"`
 			}
 			if json.Unmarshal(body, &apiResp) == nil {

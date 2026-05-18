@@ -103,8 +103,8 @@ type HubResolveIntegrationsResponse struct {
 // UpdateCheckResponse represents the GitHub Releases API response
 // consumed by the CLI updater.
 type UpdateCheckResponse struct {
-	TagName string              `json:"tag_name" port:"required"`
-	Assets  []UpdateCheckAsset  `json:"assets"   port:"required"`
+	TagName string             `json:"tag_name" port:"required"`
+	Assets  []UpdateCheckAsset `json:"assets"   port:"required"`
 }
 
 // UpdateCheckAsset is a single release asset from GitHub.
@@ -127,12 +127,12 @@ type CoreSDKCloneInput struct {
 
 // RegistryIndex is the parsed content of registry.json.
 type RegistryIndex struct {
-	FormatVersion    int                        `json:"format_version"    port:"required"`
-	RegistryVersion  string                     `json:"registry_version"  port:"required"`
-	CLICompatibility string                     `json:"cli_compatibility" port:"required"`
-	Chips            map[string]RegistryChip    `json:"chips"             port:"required"`
-	Archs            map[string]RegistryArch    `json:"archs"             port:"required"`
-	Toolchains       map[string]RegistryToolchain `json:"toolchains"      port:"required"`
+	FormatVersion    int                            `json:"format_version"    port:"required"`
+	RegistryVersion  string                         `json:"registry_version"  port:"required"`
+	CLICompatibility string                         `json:"cli_compatibility" port:"required"`
+	Chips            map[string]RegistryChip        `json:"chips"             port:"required"`
+	Archs            map[string]RegistryArch        `json:"archs"             port:"required"`
+	Toolchains       map[string]RegistryToolchain   `json:"toolchains"      port:"required"`
 	Integrations     map[string]RegistryIntegration `json:"integrations"  port:"required"`
 }
 
@@ -184,19 +184,19 @@ type ToolchainDownload struct {
 
 // HardwareJSON is the parsed content of chips/{chip}/hardware.json.
 type HardwareJSON struct {
-	ChipFamily         string             `json:"chip_family"          port:"required"`
-	Flash              HardwareFlash      `json:"flash"                port:"required"`
-	CryptoCapabilities HardwareCrypto     `json:"crypto_capabilities"  port:"required"`
-	Memory             HardwareMemory     `json:"memory"               port:"required"`
+	ChipFamily         string         `json:"chip_family"          port:"required"`
+	Flash              HardwareFlash  `json:"flash"                port:"required"`
+	CryptoCapabilities HardwareCrypto `json:"crypto_capabilities"  port:"required"`
+	Memory             HardwareMemory `json:"memory"               port:"required"`
 }
 
 // HardwareFlash describes the flash geometry of a chip.
 type HardwareFlash struct {
-	Size           uint32              `json:"size"            port:"required"`
-	WriteAlignment uint32             `json:"write_alignment" port:"optional"`
-	AppAlignment   uint32             `json:"app_alignment"   port:"optional"`
-	BaseAddr       string             `json:"base_addr"       port:"optional"`
-	XipBase        string             `json:"xip_base"        port:"optional"`
+	Size           uint32                `json:"size"            port:"required"`
+	WriteAlignment uint32                `json:"write_alignment" port:"optional"`
+	AppAlignment   uint32                `json:"app_alignment"   port:"optional"`
+	BaseAddr       string                `json:"base_addr"       port:"optional"`
+	XipBase        string                `json:"xip_base"        port:"optional"`
 	Regions        []HardwareFlashRegion `json:"regions"       port:"required"`
 }
 
@@ -223,17 +223,17 @@ type HardwareMemory struct {
 
 // DeviceToml is the parsed content of device.toml (user project manifest).
 type DeviceToml struct {
-	Name    string          `json:"name"       port:"required"`
-	Version string          `json:"version"    port:"optional"`
-	Device  DeviceSection   `json:"device"     port:"required"`
-	Build   BuildSection    `json:"build"      port:"optional"`
-	Partitions PartitionSection `json:"partitions" port:"required"`
+	Name       string            `json:"name"       port:"required"`
+	Version    string            `json:"version"    port:"optional"`
+	Device     DeviceSection     `json:"device"     port:"required"`
+	Build      BuildSection      `json:"build"      port:"optional"`
+	Partitions PartitionSection  `json:"partitions" port:"required"`
 	BootConfig BootConfigSection `json:"boot_config" port:"optional"`
 }
 
 // DeviceSection identifies the target chip.
 type DeviceSection struct {
-	Chip   string `json:"chip"   port:"required"`
+	Chip string `json:"chip"   port:"required"`
 }
 
 // BuildSection configures the build environment.
@@ -271,23 +271,23 @@ type BootConfigSection struct {
 
 // CompilerInputFiles defines files the compiler pipeline reads.
 type CompilerInputFiles struct {
-	SuitCDDL      string `json:"suit_cddl"      port:"required"` // cli/suit/toob_suit.cddl
-	TelemetryCDDL string `json:"telemetry_cddl"  port:"required"` // cli/suit/toob_telemetry.cddl
-	CMakeLists    string `json:"cmakelists"      port:"required"` // CMakeLists.txt
+	SuitCDDL       string `json:"suit_cddl"      port:"required"`  // cli/suit/toob_suit.cddl
+	TelemetryCDDL  string `json:"telemetry_cddl"  port:"required"` // cli/suit/toob_telemetry.cddl
+	CMakeLists     string `json:"cmakelists"      port:"required"` // CMakeLists.txt
 	ToolchainCMake string `json:"toolchain_cmake" port:"required"` // cmake/toolchain-{arch}.cmake
 }
 
 // CompilerOutputFiles defines files the compiler pipeline produces.
 type CompilerOutputFiles struct {
-	BootSuitC        string `json:"boot_suit_c"        port:"required"` // generated/boot_suit.c
-	BootSuitH        string `json:"boot_suit_h"        port:"required"` // generated/boot_suit.h
+	BootSuitC        string `json:"boot_suit_c"        port:"required"`  // generated/boot_suit.c
+	BootSuitH        string `json:"boot_suit_h"        port:"required"`  // generated/boot_suit.h
 	TelemetryDecodeC string `json:"telemetry_decode_c"  port:"required"` // generated/toob_telemetry_decode.c
 	TelemetryDecodeH string `json:"telemetry_decode_h"  port:"required"` // generated/toob_telemetry_decode.h
 	TelemetryEncodeC string `json:"telemetry_encode_c"  port:"required"` // generated/toob_telemetry_encode.c
 	TelemetryEncodeH string `json:"telemetry_encode_h"  port:"required"` // generated/toob_telemetry_encode.h
-	ManifestHeader   string `json:"manifest_header"    port:"required"` // generated/generated_boot_config.h
-	LinkerScripts    string `json:"linker_scripts"     port:"required"` // generated/toob_linker_*.ld
-	ConfigCMake      string `json:"config_cmake"       port:"required"` // generated/toob_config.cmake
+	ManifestHeader   string `json:"manifest_header"    port:"required"`  // generated/generated_boot_config.h
+	LinkerScripts    string `json:"linker_scripts"     port:"required"`  // generated/toob_linker_*.ld
+	ConfigCMake      string `json:"config_cmake"       port:"required"`  // generated/toob_config.cmake
 }
 
 // =============================================================================
@@ -310,9 +310,9 @@ type MatrixVerifiedCli struct {
 
 // MatrixVersion is a single chip version entry in the matrix.
 type MatrixVersion struct {
-	EnvironmentHash     string                        `json:"environment_hash"      port:"required"`
-	Dependencies        MatrixDependencies            `json:"dependencies"          port:"required"`
-	VerifiedCliVersions map[string]MatrixVerifiedCli  `json:"verified_cli_versions" port:"required"`
+	EnvironmentHash     string                       `json:"environment_hash"      port:"required"`
+	Dependencies        MatrixDependencies           `json:"dependencies"          port:"required"`
+	VerifiedCliVersions map[string]MatrixVerifiedCli `json:"verified_cli_versions" port:"required"`
 }
 
 // MatrixChip is a single chip entry in the compatibility matrix.

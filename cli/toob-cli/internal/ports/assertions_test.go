@@ -27,8 +27,6 @@ func TestPortFieldCounts(t *testing.T) {
 			reflect.TypeOf(RegistryIndex{}), reflect.TypeOf(registry.Index{})},
 		{"RegistryChip ↔ registry.ChipInfo",
 			reflect.TypeOf(RegistryChip{}), reflect.TypeOf(registry.ChipInfo{})},
-		{"RegistryVendor ↔ registry.VendorInfo",
-			reflect.TypeOf(RegistryVendor{}), reflect.TypeOf(registry.VendorInfo{})},
 		{"RegistryArch ↔ registry.ArchInfo",
 			reflect.TypeOf(RegistryArch{}), reflect.TypeOf(registry.ArchInfo{})},
 		{"RegistryToolchain ↔ registry.ToolchainInfo",
@@ -91,8 +89,6 @@ func TestPortFieldTypes(t *testing.T) {
 		// are cross-package mirrors. Each inner type has its own entry below.
 		{"RegistryChip ↔ registry.ChipInfo",
 			reflect.TypeOf(RegistryChip{}), reflect.TypeOf(registry.ChipInfo{})},
-		{"RegistryVendor ↔ registry.VendorInfo",
-			reflect.TypeOf(RegistryVendor{}), reflect.TypeOf(registry.VendorInfo{})},
 		{"RegistryArch ↔ registry.ArchInfo",
 			reflect.TypeOf(RegistryArch{}), reflect.TypeOf(registry.ArchInfo{})},
 		{"RegistryToolchain ↔ registry.ToolchainInfo",

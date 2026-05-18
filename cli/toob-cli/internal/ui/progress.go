@@ -59,7 +59,7 @@ func (p *ProgressBar) Update(current int) {
 	}
 
 	bar := Brand(strings.Repeat("█", filled)) + Gray(strings.Repeat("░", empty))
-	
+
 	elapsed := time.Since(p.startTime).Round(time.Second)
 	timeStr := ""
 	if elapsed > 0 {
