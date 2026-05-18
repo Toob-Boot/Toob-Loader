@@ -64,11 +64,11 @@ func (inst *Installer) Add(arg string) error {
 	}
 
 	if version != "" {
-		if err := inst.cache.Checkout(version); err != nil {
+		if err := inst.cache.SwitchVersion(version); err != nil {
 			return fmt.Errorf("failed to checkout registry version '%s': %w", version, err)
 		}
 	} else if inst.lock.Registry.Commit != "" {
-		if err := inst.cache.Checkout(inst.lock.Registry.Commit); err != nil {
+		if err := inst.cache.SwitchVersion(inst.lock.Registry.Commit); err != nil {
 			return fmt.Errorf("failed to checkout locked registry commit '%s': %w", inst.lock.Registry.Commit, err)
 		}
 	}
@@ -150,12 +150,12 @@ func (inst *Installer) Spawn(arg string) error {
 	}
 
 	if version != "" {
-		if err := inst.cache.Checkout(version); err != nil {
+		if err := inst.cache.SwitchVersion(version); err != nil {
 			return fmt.Errorf("failed to checkout registry version '%s': %w", version, err)
 		}
 	} else if inst.lock.Registry.Commit != "" {
 		// Enforce current lockfile commit to prevent shared dependency drift
-		if err := inst.cache.Checkout(inst.lock.Registry.Commit); err != nil {
+		if err := inst.cache.SwitchVersion(inst.lock.Registry.Commit); err != nil {
 			return fmt.Errorf("failed to checkout locked registry commit '%s': %w", inst.lock.Registry.Commit, err)
 		}
 	}

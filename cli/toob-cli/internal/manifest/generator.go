@@ -196,6 +196,28 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	}
 	b.WriteString("\n")
 
+	if len(hj.Constants) > 0 {
+		b.WriteString("/* ========================================================================\n")
+		b.WriteString(" * CHIP CONSTANTS (Dynamic from hardware.json)\n")
+		b.WriteString(" * ======================================================================== */\n")
+		var constKeys []string
+		for k := range hj.Constants {
+			constKeys = append(constKeys, k)
+		}
+		sort.Strings(constKeys)
+		for _, k := range constKeys {
+			macroName := "CHIP_" + strings.ToUpper(k)
+			v := hj.Constants[k]
+			switch val := v.(type) {
+			case string:
+				b.WriteString(fmt.Sprintf("#define %-30s %sU\n", macroName, val))
+			case float64:
+				b.WriteString(fmt.Sprintf("#define %-30s %dU\n", macroName, uint32(val)))
+			}
+		}
+		b.WriteString("\n")
+	}
+
 	if dt.DriverConfig != nil {
 		b.WriteString("/* ========================================================================\n")
 		b.WriteString(" * USER DRIVER CONFIGURATION (Dynamic from device.toml)\n")

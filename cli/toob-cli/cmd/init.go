@@ -68,7 +68,7 @@ var initCmd = &cobra.Command{
 			return err
 		}
 		cache := registry.NewCache("")
-		if err := cache.Sync(false); err != nil {
+		if err := cache.Sync(false, false); err != nil {
 			initErr = err
 			return err
 		}
@@ -125,7 +125,7 @@ var initCmd = &cobra.Command{
 		_, exists := idx.Integrations[initFramework]
 		if idx == nil || !exists {
 			ui.Step("Framework '%s' is new! Auto-syncing registry to download files...", initFramework)
-			if err := cache.Sync(false); err != nil {
+			if err := cache.Sync(false, false); err != nil {
 				return fmt.Errorf("failed to sync registry to download new framework: %w", err)
 			}
 			// Reload index after sync

@@ -32,14 +32,14 @@ var installCmd = &cobra.Command{
 		cache := registry.NewCache("")
 		if !cache.IsInitialized() {
 			ui.Step("Registry not initialized. Auto-syncing...")
-			if err := cache.Sync(false); err != nil {
+			if err := cache.Sync(false, false); err != nil {
 				return fmt.Errorf("registry sync failed: %w", err)
 			}
 		}
 
 		// Ensure we are using the registry version defined in lockfile
 		if lf.Registry.Commit != "" {
-			if err := cache.Checkout(lf.Registry.Commit); err != nil {
+			if err := cache.SwitchVersion(lf.Registry.Commit); err != nil {
 				return fmt.Errorf("failed to checkout locked registry commit %s: %w", lf.Registry.Commit, err)
 			}
 		}

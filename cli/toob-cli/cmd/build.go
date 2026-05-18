@@ -121,11 +121,11 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		lfPath := paths.LockfilePath(root)
 		if lf, err := lockfile.Load(lfPath); err == nil {
 			if lf.Registry.Commit != "" {
-				if err := cache.Checkout(lf.Registry.Commit); err != nil {
+				if err := cache.SwitchVersion(lf.Registry.Commit); err != nil {
 					return fmt.Errorf("failed to checkout locked registry commit %s: %w", lf.Registry.Commit, err)
 				}
 			} else if lf.Registry.Version != "" {
-				if err := cache.Checkout(lf.Registry.Version); err != nil {
+				if err := cache.SwitchVersion(lf.Registry.Version); err != nil {
 					return fmt.Errorf("failed to checkout locked registry version %s: %w", lf.Registry.Version, err)
 				}
 			}
@@ -158,7 +158,7 @@ func runDockerBuild(root string) error {
 	cache := registry.NewCache("")
 	if !cache.IsInitialized() {
 		ui.Step("Registry not initialized. Attempting auto-clone...")
-		if err := cache.Sync(false); err != nil {
+		if err := cache.Sync(false, false); err != nil {
 			return fmt.Errorf("failed to sync registry (offline?): %w\nRun `toob chip add` when connected to the internet.", err)
 		}
 	}
@@ -310,6 +310,10 @@ func checkProtocolVersion(image string) error {
 func runNativeBuild(root string) error {
 	buildStartTime := time.Now()
 	timings := &TimingTracker{}
+	
+	// Accumulate all setup overhead mathematically perfectly
+	var setupDuration time.Duration
+	lastSetupResume := buildStartTime
 
 	// 1. Resolve device manifest
 	manifest := flagManifest
@@ -362,12 +366,16 @@ func runNativeBuild(root string) error {
 
 	// 2. Registry Sync (Blocking)
 	if !cache.IsInitialized() {
+		setupDuration += time.Since(lastSetupResume)
+
 		ui.Step("Registry not initialized. Auto-syncing in background...")
 		start := time.Now()
-		if err := cache.Sync(false); err != nil {
+		if err := cache.Sync(false, false); err != nil {
 			return fmt.Errorf("failed to sync registry: %w", err)
 		}
 		timings.Add("Registry Sync", time.Since(start))
+		
+		lastSetupResume = time.Now()
 	}
 	regDir := cache.Dir()
 
@@ -408,7 +416,7 @@ func runNativeBuild(root string) error {
 		}
 	} else {
 		ui.Step("Chip '%s' not found locally. Auto-syncing registry...", chip)
-		if err := cache.Sync(false); err != nil {
+		if err := cache.Sync(false, false); err != nil {
 			return fmt.Errorf("chip_manifest.json not found and registry sync failed: %w", err)
 		}
 		if data, err := os.ReadFile(cmPath); err == nil {
@@ -521,6 +529,9 @@ func runNativeBuild(root string) error {
 		return err
 	}
 
+	setupDuration += time.Since(lastSetupResume)
+	timings.Add("Project Setup", setupDuration)
+
 	// 7. Run manifest compiler (Go Native)
 	ui.Step("Running manifest compiler (Go Native)")
 	startManifest := time.Now()
@@ -543,6 +554,11 @@ func runNativeBuild(root string) error {
 			}
 		}
 	}
+	
+	socDir := filepath.Join(regDir, "soc")
+	if _, err := os.Stat(socDir); err == nil {
+		driverDirs = append(driverDirs, socDir)
+	}
 
 	if err := manifestpkg.Compile(manifest, hwJSON, generatedDir, bootloaderDir, halChipDir, driverDirs); err != nil {
 		return err
@@ -550,12 +566,16 @@ func runNativeBuild(root string) error {
 	timings.Add("Manifest Compiler", time.Since(startManifest))
 
 	// 8. Run SUIT code generator
+	startSuit := time.Now()
 	if pyScripts := findPythonScriptsBin(); pyScripts != "" {
 		os.Setenv("PATH", pyScripts+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
 	if err := suit.Generate(generatedDir, compilerRoot, root, Version); err != nil {
 		return err
 	}
+	timings.Add("SUIT CodeGen", time.Since(startSuit))
+
+	startEnvValidation := time.Now()
 
 	// 7. CLI Blocker Logic: Check Compatibility Matrix (Wait for background fetch)
 	if !flagSkipChecks {
@@ -695,6 +715,8 @@ func runNativeBuild(root string) error {
 		os.Setenv("PATH", tcPath+string(os.PathListSeparator)+os.Getenv("PATH"))
 		ui.Info("Toolchain: %s", tcPath)
 	}
+
+	timings.Add("Environment Validation", time.Since(startEnvValidation))
 
 	// 9. CMake configure
 	spinner := ui.NewSpinner("Configuring CMake")

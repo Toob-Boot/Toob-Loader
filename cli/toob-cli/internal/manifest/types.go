@@ -70,6 +70,7 @@ type HardwareJson struct {
 		RamSize string `json:"ram_size"`
 	} `json:"memory"`
 	Registers map[string]interface{} `json:"registers"`
+	Constants map[string]interface{} `json:"constants"`
 }
 
 func ParseToml(path string) (*DeviceToml, error) {

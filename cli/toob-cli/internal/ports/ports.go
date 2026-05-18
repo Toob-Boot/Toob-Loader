@@ -138,12 +138,12 @@ type RegistryIndex struct {
 
 // RegistryChip is a single chip entry in registry.json.
 type RegistryChip struct {
-	Name             string `json:"name"              port:"required"`
-	Arch             string `json:"arch"              port:"required"`
-	CompilerPrefix   string `json:"compiler_prefix"   port:"required"`
-	Path             string `json:"path"              port:"required"`
-	Version          string `json:"version"           port:"required"`
-	CliCompatibility string `json:"cli_compatibility" port:"optional"`
+	Name             string       `json:"name"              port:"required"`
+	Arch             string       `json:"arch"              port:"required"`
+	CompilerPrefix   string       `json:"compiler_prefix"   port:"required"`
+	Path             string       `json:"path"              port:"required"`
+	Version          string       `json:"version"           port:"required"`
+	CliCompatibility string       `json:"cli_compatibility" port:"optional"`
 	Verified         bool         `json:"verified"          port:"optional"`
 	Description      string       `json:"description"       port:"optional"`
 	Sources          *ChipSources `json:"sources"           port:"optional"`

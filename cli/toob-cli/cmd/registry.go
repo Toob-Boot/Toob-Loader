@@ -15,6 +15,7 @@ var registryCmd = &cobra.Command{
 
 var flagVerifySignature bool
 var flagRegistryDev bool
+var flagRegistryForce bool
 
 var registrySyncCmd = &cobra.Command{
 	Use:   "sync",
@@ -27,7 +28,7 @@ var registrySyncCmd = &cobra.Command{
 			ui.Step("Cloning registry ...")
 		}
 
-		if err := cache.Sync(flagRegistryDev); err != nil {
+		if err := cache.Sync(flagRegistryDev, flagRegistryForce); err != nil {
 			return fmt.Errorf("registry sync failed: %w", err)
 		}
 
@@ -48,5 +49,6 @@ var registrySyncCmd = &cobra.Command{
 func init() {
 	registrySyncCmd.Flags().BoolVar(&flagVerifySignature, "verify-signature", false, "Verify GPG signature of the registry HEAD commit")
 	registrySyncCmd.Flags().BoolVar(&flagRegistryDev, "dev", false, "Sync the bleeding-edge main branch instead of the latest stable tag")
+	registrySyncCmd.Flags().BoolVar(&flagRegistryForce, "force", false, "Force re-download even if version exists locally")
 	registryCmd.AddCommand(registrySyncCmd)
 }

@@ -205,25 +205,37 @@ func getHubURL() string {
 
 // Sync updates the registry. If useDev is true, it syncs the bleeding-edge 'main' branch.
 // Otherwise, it discovers the latest stable tag from version_index.json and syncs that.
-func (c *Cache) Sync(useDev bool) error {
+// If force is true, the local cache is bypassed and the version is re-downloaded.
+func (c *Cache) Sync(useDev bool, force bool) error {
+	previousVer, _ := c.HeadCommit()
+
 	if useDev {
-		return c.Checkout("main")
+		return c.checkout("main", true, previousVer)
 	}
 
 	latestVer, err := c.getLatestStableVersion()
 	if err != nil {
-		ui.Warn("Could not discover latest stable tag (%v). Falling back to 'main'.", err)
-		return c.Checkout("main")
+		if c.IsInitialized() {
+			ui.Warn("Could not check for updates (%v). Using cached registry.", err)
+			return nil
+		}
+		return fmt.Errorf("cannot discover registry version (offline?): %w", err)
 	}
 
 	ui.Step("Discovered latest stable registry: %s", ui.Cyan(latestVer))
-	return c.Checkout(latestVer)
+	return c.checkout(latestVer, force, previousVer)
 }
 
 // getLatestStableVersion fetches version_index.json from the Toob-Registry repository
 // and returns the highest version listed under Official.Registry.
 func (c *Cache) getLatestStableVersion() (string, error) {
-	resp, err := http.Get("https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/version_index.json")
+	client := http.Client{Timeout: 5 * time.Second}
+	url := fmt.Sprintf(
+		"https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/version_index.json?t=%d",
+		time.Now().Unix(),
+	)
+
+	resp, err := client.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -252,68 +264,59 @@ func (c *Cache) getLatestStableVersion() (string, error) {
 	return index.Official.Registry[0].Version, nil
 }
 
-// Checkout switches the registry to a specific version via the Toob Hub API.
-func (c *Cache) Checkout(version string) error {
-	hubURL := fmt.Sprintf("%s/api/v1/resolve/registry?version=%s", getHubURL(), version)
+// buildDownloadURL constructs the GitHub archive URL for a registry version.
+func buildDownloadURL(version string) string {
+	if version == "main" {
+		return "https://github.com/Toob-Boot/Toob-Registry/archive/refs/heads/main.zip"
+	}
+	return fmt.Sprintf("https://github.com/Toob-Boot/Toob-Registry/archive/refs/tags/%s.zip", version)
+}
 
-	resp, err := http.Get(hubURL)
+// resolveCanonicalVersion reads registry_version from the downloaded registry.json.
+func resolveCanonicalVersion(dir, fallback string) string {
+	data, err := os.ReadFile(filepath.Join(dir, "registry.json"))
 	if err != nil {
-		ui.Warn("Failed to reach Toob Hub API (Offline?).")
-		return fmt.Errorf("network error: %w", err)
+		return fallback
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("Toob Hub API returned status %d for version %s", resp.StatusCode, version)
+	var idx struct {
+		RegistryVersion string `json:"registry_version"`
 	}
-
-	var result struct {
-		Version     string `json:"version"`
-		DownloadURL string `json:"download_url"`
+	if json.Unmarshal(data, &idx) != nil || idx.RegistryVersion == "" {
+		return fallback
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return err
-	}
+	return idx.RegistryVersion
+}
 
-	targetDir := filepath.Join(c.rootDir, "versions", result.Version)
+func (c *Cache) persistActive(ver string) {
+	_ = os.WriteFile(filepath.Join(c.rootDir, "active_version"), []byte(ver), 0o644)
+}
 
-	// resolveCanonicalVersion reads registry_version from registry.json
-	// and renames the directory to the canonical semver if the Hub returned
-	// a branch name (e.g. "main") instead of a proper version.
-	resolveCanonicalVersion := func(dir string) string {
-		data, err := os.ReadFile(filepath.Join(dir, "registry.json"))
-		if err != nil {
-			return result.Version
-		}
-		var idx struct {
-			RegistryVersion string `json:"registry_version"`
-		}
-		if json.Unmarshal(data, &idx) != nil || idx.RegistryVersion == "" {
-			return result.Version
-		}
-		return idx.RegistryVersion
+// SwitchVersion activates a specific registry version (used by chip add/spawn).
+func (c *Cache) SwitchVersion(version string) error {
+	return c.checkout(version, false, "")
+}
+
+// checkout downloads and activates a specific registry version.
+// Dev versions ("main") are always re-downloaded. Semver tags are cached unless force is true.
+func (c *Cache) checkout(version string, force bool, previousVer string) error {
+	isDev := version == "main"
+	targetDir := filepath.Join(c.rootDir, "versions", version)
+
+	// Dev mode or force: always re-download
+	if isDev || force {
+		os.RemoveAll(targetDir)
 	}
 
-	persistActive := func(ver string) {
-		_ = os.WriteFile(filepath.Join(c.rootDir, "active_version"), []byte(ver), 0o644)
-	}
-
-	// If it already exists, resolve canonical version and activate
+	// Cache hit for immutable semver tags
 	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
-		canonicalVer := resolveCanonicalVersion(targetDir)
-
-		// Rename to canonical version directory if needed (e.g. "main" → "v1.0.10")
-		if canonicalVer != result.Version {
-			canonicalDir := filepath.Join(c.rootDir, "versions", canonicalVer)
-			if _, err := os.Stat(canonicalDir); os.IsNotExist(err) {
-				os.Rename(targetDir, canonicalDir)
-				targetDir = canonicalDir
-			}
-		}
-
 		c.dir = targetDir
-		persistActive(canonicalVer)
-		ui.Info("Registry Source: Local Cache (%s)", canonicalVer)
+		canonicalVer := resolveCanonicalVersion(targetDir, version)
+		c.persistActive(canonicalVer)
+		if previousVer == canonicalVer {
+			ui.Success("Registry is up to date (%s)", canonicalVer)
+		} else {
+			ui.Info("Registry Source: Local Cache (%s)", canonicalVer)
+		}
 		return nil
 	}
 
@@ -326,17 +329,19 @@ func (c *Cache) Checkout(version string) error {
 	// Double check after lock
 	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
 		c.dir = targetDir
+		c.persistActive(resolveCanonicalVersion(targetDir, version))
 		return nil
 	}
 
-	ui.Step("Downloading Registry %s from GitHub...", result.Version)
-	if err := downloadAndExtractZip(result.DownloadURL, targetDir); err != nil {
+	downloadURL := buildDownloadURL(version)
+	ui.Step("Downloading Registry %s from GitHub...", version)
+
+	if err := downloadAndExtractZip(downloadURL, targetDir); err != nil {
 		return fmt.Errorf("failed to extract registry: %w", err)
 	}
 
-	// Resolve canonical version and rename directory
-	canonicalVer := resolveCanonicalVersion(targetDir)
-	if canonicalVer != result.Version {
+	canonicalVer := resolveCanonicalVersion(targetDir, version)
+	if canonicalVer != version {
 		canonicalDir := filepath.Join(c.rootDir, "versions", canonicalVer)
 		if _, err := os.Stat(canonicalDir); os.IsNotExist(err) {
 			os.Rename(targetDir, canonicalDir)
@@ -346,7 +351,7 @@ func (c *Cache) Checkout(version string) error {
 
 	c.dir = targetDir
 	c.index = nil
-	persistActive(canonicalVer)
+	c.persistActive(canonicalVer)
 
 	return nil
 }
@@ -535,6 +540,10 @@ func (c *Cache) ArchSourcePath(arch string) (string, error) {
 func (c *Cache) HeadCommit() (string, error) {
 	if !c.IsInitialized() {
 		return "uninitialized", nil
+	}
+	ver := resolveCanonicalVersion(c.dir, "")
+	if ver != "" {
+		return ver, nil
 	}
 	return filepath.Base(c.dir), nil
 }

@@ -82,7 +82,7 @@ if(EXISTS ${CHIP_MANIFEST})
         math(EXPR LAST_INC "${NUM_INCLUDES} - 1")
         foreach(IDX RANGE 0 ${LAST_INC})
             string(JSON INC_PATH GET ${MANIFEST_JSON} includes ${IDX})
-            if(INC_PATH MATCHES "^(drivers|arch)/")
+            if(INC_PATH MATCHES "^(drivers|arch|soc)/")
                 list(APPEND FLAT_BOM_INCLUDES "${TOOB_HAL_ROOT}/${INC_PATH}")
             else()
                 list(APPEND FLAT_BOM_INCLUDES "${TOOB_HAL_CHIP_DIR}/${INC_PATH}")
@@ -102,6 +102,7 @@ if(FLAT_BOM_SOURCES)
         ${TOOB_CORE_DIR}/include
         ${CMAKE_BINARY_DIR}/generated
         ${TOOB_SDK_DIR}/libtoob/include
+        ${TOOB_CRYPTO_DIR}/monocypher
     )
     if(TOOB_CHIP STREQUAL "sandbox")
         target_include_directories(toob_chip PUBLIC test/mocks)
