@@ -87,7 +87,6 @@ func init() {
 	buildCmd.Flags().BoolVar(&flagNative, "native", false, "Force native build (use local toolchains instead of Docker)")
 }
 
-
 func runBuild(cmd *cobra.Command, args []string) error {
 	// Premium UX: Show initialization progress bar
 	pb := ui.NewProgressBar("Initializing Build Engine", 100)
@@ -159,7 +158,7 @@ func runDockerBuild(root string) error {
 	cache := registry.NewCache("")
 	if !cache.IsInitialized() {
 		ui.Step("Registry not initialized. Attempting auto-clone...")
-		if err := cache.Sync(); err != nil {
+		if err := cache.Sync(false); err != nil {
 			return fmt.Errorf("failed to sync registry (offline?): %w\nRun `toob chip add` when connected to the internet.", err)
 		}
 	}
@@ -365,7 +364,7 @@ func runNativeBuild(root string) error {
 	if !cache.IsInitialized() {
 		ui.Step("Registry not initialized. Auto-syncing in background...")
 		start := time.Now()
-		if err := cache.Sync(); err != nil {
+		if err := cache.Sync(false); err != nil {
 			return fmt.Errorf("failed to sync registry: %w", err)
 		}
 		timings.Add("Registry Sync", time.Since(start))
@@ -383,7 +382,7 @@ func runNativeBuild(root string) error {
 	if _, err := os.Stat(hwJSON); err != nil {
 		hwJSON = filepath.Join(regDir, "chips", chip, "hardware.json")
 	}
-	
+
 	cmPath := filepath.Join(root, "toobloader", "hal", "chips", chip, "chip_manifest.json")
 	if _, err := os.Stat(cmPath); err != nil {
 		cmPath = filepath.Join(regDir, "chips", chip, "chip_manifest.json")
@@ -397,20 +396,32 @@ func runNativeBuild(root string) error {
 
 	if data, err := os.ReadFile(cmPath); err == nil {
 		if err := json.Unmarshal(data, &cm); err == nil {
-			if cm.Arch != "" { arch = cm.Arch }
-			if cm.CompilerPrefix != "" { toolchainPrefix = cm.CompilerPrefix }
-			if cm.Version != "" { chipVersion = cm.Version }
+			if cm.Arch != "" {
+				arch = cm.Arch
+			}
+			if cm.CompilerPrefix != "" {
+				toolchainPrefix = cm.CompilerPrefix
+			}
+			if cm.Version != "" {
+				chipVersion = cm.Version
+			}
 		}
 	} else {
 		ui.Step("Chip '%s' not found locally. Auto-syncing registry...", chip)
-		if err := cache.Sync(); err != nil {
+		if err := cache.Sync(false); err != nil {
 			return fmt.Errorf("chip_manifest.json not found and registry sync failed: %w", err)
 		}
 		if data, err := os.ReadFile(cmPath); err == nil {
 			json.Unmarshal(data, &cm)
-			if cm.Arch != "" { arch = cm.Arch }
-			if cm.CompilerPrefix != "" { toolchainPrefix = cm.CompilerPrefix }
-			if cm.Version != "" { chipVersion = cm.Version }
+			if cm.Arch != "" {
+				arch = cm.Arch
+			}
+			if cm.CompilerPrefix != "" {
+				toolchainPrefix = cm.CompilerPrefix
+			}
+			if cm.Version != "" {
+				chipVersion = cm.Version
+			}
 		} else {
 			return fmt.Errorf("chip_manifest.json not found for chip '%s'", chip)
 		}
@@ -428,7 +439,7 @@ func runNativeBuild(root string) error {
 	// 4. Core SDK Version Resolution
 	coreSDKVer := dt.Build.CoreSDK
 	coreSDKLabel := coreSDKVer
-	
+
 	if coreSDKVer == "" || coreSDKVer == "latest" {
 		ui.Step("Resolving latest Core SDK version...")
 		latestTag, err := getLatestCoreSDKTag()
@@ -514,7 +525,7 @@ func runNativeBuild(root string) error {
 	ui.Step("Running manifest compiler (Go Native)")
 	startManifest := time.Now()
 	bootloaderDir := resolvePath(root, compilerRoot, "toobloader")
-	
+
 	// Phase 3 Fix: Inject HAL paths to Manifest Compiler so it finds Registry sources
 	halChipDir := filepath.Join(root, "toobloader", "hal", "chips", chip)
 	if _, err := os.Stat(halChipDir); err != nil {
@@ -564,7 +575,7 @@ func runNativeBuild(root string) error {
 					if !strings.HasPrefix(cliVer, "v") && cliVer != "main" && cliVer != "dev" {
 						cliVer = "v" + cliVer
 					}
-					
+
 					if cliEntry, hasCli := versionEntry.VerifiedCliVersions[cliVer]; hasCli {
 						if cliEntry.Status == "FAILED" {
 							return fmt.Errorf("FATAL: Der Chip %s (v%s) ist laut aktueller Ledger Matrix explizit inkompatibel mit deiner CLI Version (%s). Build abgebrochen!", chip, chipVersion, cliVer)
@@ -635,7 +646,7 @@ func runNativeBuild(root string) error {
 	} else {
 		expectedVersion = toolchain.GetExpectedVersion(toolchainPrefix, cache.Dir())
 	}
-	
+
 	lfPath := filepath.Join(root, "toob.lock")
 	if lf, err := lockfile.Load(lfPath); err == nil {
 		tcName := strings.TrimSuffix(toolchainPrefix, "-")
@@ -689,7 +700,7 @@ func runNativeBuild(root string) error {
 	spinner := ui.NewSpinner("Configuring CMake")
 	spinner.Start()
 	startCMake := time.Now()
-	
+
 	cmakeArgs := []string{
 		"-G", "Ninja",
 		"-B", buildDir,
@@ -702,9 +713,9 @@ func runNativeBuild(root string) error {
 		"-DTOOB_CHIP=" + chip,
 		"-DTOOB_ARCH=" + arch,
 	}
-	
+
 	if tcPath != "" {
-		cmakeArgs = append(cmakeArgs, "-DTOOLCHAIN_BIN_DIR=" + filepath.ToSlash(tcPath))
+		cmakeArgs = append(cmakeArgs, "-DTOOLCHAIN_BIN_DIR="+filepath.ToSlash(tcPath))
 	}
 
 	if err := runWithLiveSpinner(root, "cmake", spinner, cmakeArgs...); err != nil {
@@ -825,7 +836,6 @@ func runWithLiveSpinner(dir string, name string, spinner *ui.LiveSpinner, args .
 	return err
 }
 
-
 func classifyBuildError(output string, projectDir string) {
 	outLower := strings.ToLower(output)
 	projectBase := strings.ToLower(filepath.Base(projectDir))
@@ -897,11 +907,11 @@ func getLatestCoreSDKTag() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	lines := strings.Split(string(out), "\n")
 	var highest *semver.Version
 	var highestStr string
-	
+
 	for _, line := range lines {
 		if !strings.Contains(line, "refs/tags/") {
 			continue
@@ -914,11 +924,11 @@ func getLatestCoreSDKTag() (string, error) {
 		if strings.HasSuffix(tag, "^{}") {
 			continue
 		}
-		
+
 		if !strings.HasPrefix(tag, "core/v") {
 			continue
 		}
-		
+
 		v, err := parseCoreSDKVersion(tag)
 		if err == nil {
 			if highest == nil || v.GreaterThan(highest) {
@@ -927,7 +937,7 @@ func getLatestCoreSDKTag() (string, error) {
 			}
 		}
 	}
-	
+
 	if highestStr == "" {
 		return "", fmt.Errorf("no valid semantic versions found")
 	}

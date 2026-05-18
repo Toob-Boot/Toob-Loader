@@ -32,7 +32,7 @@ var installCmd = &cobra.Command{
 		cache := registry.NewCache("")
 		if !cache.IsInitialized() {
 			ui.Step("Registry not initialized. Auto-syncing...")
-			if err := cache.Sync(); err != nil {
+			if err := cache.Sync(false); err != nil {
 				return fmt.Errorf("registry sync failed: %w", err)
 			}
 		}
@@ -49,7 +49,7 @@ var installCmd = &cobra.Command{
 			if chip.Toolchain == "" {
 				continue
 			}
-			
+
 			// Resolve expected version. Fallback to registry if lockfile is missing it.
 			expectedVersion := chip.ToolchainVersion
 			if expectedVersion == "" {
@@ -57,7 +57,7 @@ var installCmd = &cobra.Command{
 			}
 
 			ui.Step("Ensuring toolchain %s (v%s) for chip %s", chip.Toolchain, expectedVersion, chip.Name)
-			
+
 			_, err := toolchain.EnsureAvailable(chip.Toolchain, expectedVersion, cache.Dir())
 			if err != nil {
 				return fmt.Errorf("failed to install toolchain %s: %w", chip.Toolchain, err)
