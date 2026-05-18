@@ -203,9 +203,53 @@ func getHubURL() string {
 	return "https://ci.the-toob.com" // Default Hetzner CI Daemon (via Caddy)
 }
 
-// Sync updates the registry to the latest version.
-func (c *Cache) Sync() error {
-	return c.Checkout("latest")
+// Sync updates the registry. If useDev is true, it syncs the bleeding-edge 'main' branch.
+// Otherwise, it discovers the latest stable tag from version_index.json and syncs that.
+func (c *Cache) Sync(useDev bool) error {
+	if useDev {
+		return c.Checkout("main")
+	}
+
+	latestVer, err := c.getLatestStableVersion()
+	if err != nil {
+		ui.Warn("Could not discover latest stable tag (%v). Falling back to 'main'.", err)
+		return c.Checkout("main")
+	}
+
+	ui.Step("Discovered latest stable registry: %s", ui.Cyan(latestVer))
+	return c.Checkout(latestVer)
+}
+
+// getLatestStableVersion fetches version_index.json from the Toob-Registry repository
+// and returns the highest version listed under Official.Registry.
+func (c *Cache) getLatestStableVersion() (string, error) {
+	resp, err := http.Get("https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/version_index.json")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var index struct {
+		Official struct {
+			Registry []struct {
+				Version string `json:"version"`
+			} `json:"registry"`
+		} `json:"official"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&index); err != nil {
+		return "", err
+	}
+
+	if len(index.Official.Registry) == 0 {
+		return "", fmt.Errorf("no official registry versions found in index")
+	}
+
+	return index.Official.Registry[0].Version, nil
 }
 
 // Checkout switches the registry to a specific version via the Toob Hub API.
