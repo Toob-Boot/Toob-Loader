@@ -26,11 +26,11 @@ var manifestCmd = &cobra.Command{
 		// Find compiler root to accurately locate the toobloader C code
 		compilerRoot, err := paths.FindProjectRoot(cwd)
 		if err != nil {
-			compilerRoot = cwd // Fallback
+			return fmt.Errorf("could not find project root: %w", err)
 		}
 		bootloaderDir := filepath.Join(compilerRoot, "toobloader")
 
-		err = manifest.Compile(manifestToml, manifestHardware, manifestOutDir, bootloaderDir, "")
+		err = manifest.Compile(manifestToml, manifestHardware, manifestOutDir, bootloaderDir, "", nil)
 		if err != nil {
 			return fmt.Errorf("manifest compiler failed: %w", err)
 		}

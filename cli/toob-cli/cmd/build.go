@@ -521,7 +521,19 @@ func runNativeBuild(root string) error {
 		halChipDir = filepath.Join(regDir, "chips", chip)
 	}
 
-	if err := manifestpkg.Compile(manifest, hwJSON, generatedDir, bootloaderDir, halChipDir); err != nil {
+	var driverDirs []string
+	var driversCMake strings.Builder
+	if idx != nil {
+		if cInfo, ok := idx.Chips[chip]; ok && cInfo.Sources != nil {
+			for _, drvPath := range cInfo.Sources.Drivers {
+				drvDir := filepath.Join(regDir, filepath.Dir(drvPath))
+				driverDirs = append(driverDirs, drvDir)
+				driversCMake.WriteString(fmt.Sprintf("list(APPEND TOOB_DRIVERS \"%s\")\n", filepath.ToSlash(drvDir)))
+			}
+		}
+	}
+
+	if err := manifestpkg.Compile(manifest, hwJSON, generatedDir, bootloaderDir, halChipDir, driverDirs); err != nil {
 		return err
 	}
 	timings.Add("Manifest Compiler", time.Since(startManifest))
@@ -604,9 +616,9 @@ func runNativeBuild(root string) error {
 			"set(TOOB_HAL_CHIP_DIR \"%s\")\n"+
 			"set(TOOB_HAL_ARCH_DIR \"%s\")\n"+
 			"set(TOOB_SDK_DIR \"%s\")\n"+
-			"set(TOOB_CLI_PATH \"%s\")\n",
+			"set(TOOB_CLI_PATH \"%s\")\n%s",
 		arch, chip, toolchainPrefix,
-		coreDir, cryptoDir, stage0Dir, halChipDir, halArchDir, sdkDir, toobCLIPath,
+		coreDir, cryptoDir, stage0Dir, halChipDir, halArchDir, sdkDir, toobCLIPath, driversCMake.String(),
 	)
 	if err := os.WriteFile(filepath.Join(generatedDir, "toob_config.cmake"), []byte(configContent), 0o644); err != nil {
 		return err
@@ -687,6 +699,8 @@ func runNativeBuild(root string) error {
 		"-DCMAKE_SYSTEM_NAME=Generic",
 		"-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
 		"-DTOOB_DEVICE_MANIFEST=" + manifest,
+		"-DTOOB_CHIP=" + chip,
+		"-DTOOB_ARCH=" + arch,
 	}
 	
 	if tcPath != "" {

@@ -287,7 +287,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	return nil
 }
 
-func VerifyMacroUsage(headerPath, bootloaderDir, halChipDir string) error {
+func VerifyMacroUsage(headerPath, bootloaderDir, halChipDir string, extraDirs []string) error {
 	ui.Step("Validating macro consumption in C code...")
 
 	data, err := os.ReadFile(headerPath)
@@ -309,6 +309,7 @@ func VerifyMacroUsage(headerPath, bootloaderDir, halChipDir string) error {
 	if halChipDir != "" {
 		dirsToWalk = append(dirsToWalk, halChipDir)
 	}
+	dirsToWalk = append(dirsToWalk, extraDirs...)
 
 	for _, dir := range dirsToWalk {
 		err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
