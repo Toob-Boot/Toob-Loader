@@ -60,14 +60,14 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
   /* ====================================================================
    * 2. ALGEBRAIC BOUNDS PROOF (Overflow Prevention)
    * ====================================================================
-   * Begrenzt die Wartezeit auf ca. 6.2 Tage.
-   * Mathematischer Beweis: (UINT32_MAX / 8) * 4 + 1000 = (UINT32_MAX / 2) +
-   * 1000. Dies schließt einen 32-Bit C-Integer Wraparound für den logischen
-   * Deadlock-Tracker ('max_sw_limit') absolut sicher aus!
+   * max_sw_limit = target_ms * MULTIPLIER + 1001.
+   * To guarantee no 32-bit wrap: target_ms <= (UINT32_MAX - 1001) / MULTIPLIER.
+   * With MULTIPLIER=8: cap = 536870786, max_sw_limit = 4294966289 < UINT32_MAX.
    */
   uint32_t target_ms = ms;
-  if (target_ms > (UINT32_MAX / 8)) {
-    target_ms = (UINT32_MAX / 8);
+  const uint32_t safe_cap = (UINT32_MAX - 1001U) / BOOT_DELAY_TOLERANCE_MULTIPLIER;
+  if (target_ms > safe_cap) {
+    target_ms = safe_cap;
   }
 
   /* ====================================================================

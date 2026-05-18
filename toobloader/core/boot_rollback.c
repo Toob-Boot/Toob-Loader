@@ -52,32 +52,7 @@ extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
 #define CFI_RB_VERIFIED 0x40404040
 #define CFI_RB_DONE 0x80808080
 
-/* ============================================================================
- * INTERNAL HELPER: CONSTANT TIME MEMCMP (Glitch Protected)
- * ============================================================================
- */
-static inline boot_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
-                                                             const uint8_t *b,
-                                                             size_t len) {
-  uint32_t acc_fwd = 0;
-  uint32_t acc_rev = 0;
-
-  for (size_t i = 0; i < len; i++) {
-    acc_fwd |= (uint32_t)(a[i] ^ b[i]);
-    acc_rev |= (uint32_t)(a[len - 1 - i] ^ b[len - 1 - i]);
-  }
-
-  volatile uint32_t shield_1 = 0, shield_2 = 0;
-  if (acc_fwd == 0)
-    shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (shield_1 == BOOT_OK && acc_rev == 0)
-    shield_2 = BOOT_OK;
-
-  if (shield_1 == BOOT_OK && shield_2 == BOOT_OK && shield_1 == shield_2)
-    return BOOT_OK;
-  return BOOT_ERR_VERIFY;
-}
+#include "boot_ct_utils.h"
 
 /**
  * @brief O(1) Streaming CRC-32 Berechnung direkt aus dem Flash für Rollbacks.

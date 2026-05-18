@@ -47,29 +47,7 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
  * ==============================================================================
  */
 
-/**
- * @brief O(1) Constant-Time Memcmp (Glitch Shielded)
- */
-static inline boot_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
-                                                             const uint8_t *b,
-                                                             size_t len) {
-  uint32_t acc_fwd = 0, acc_rev = 0;
-  for (size_t i = 0; i < len; i++) {
-    acc_fwd |= (uint32_t)(a[i] ^ b[i]);
-    acc_rev |= (uint32_t)(a[len - 1 - i] ^ b[len - 1 - i]);
-  }
-
-  volatile uint32_t s1 = 0, s2 = 0;
-  if (acc_fwd == 0)
-    s1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (s1 == BOOT_OK && acc_rev == 0)
-    s2 = BOOT_OK;
-
-  if (s1 == BOOT_OK && s2 == BOOT_OK && s1 == s2)
-    return BOOT_OK;
-  return BOOT_ERR_VERIFY;
-}
+#include "boot_ct_utils.h"
 
 /**
  * @brief P10 Software Memory Protection Unit (Subtractive Bound Proof)

@@ -47,7 +47,11 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 /* Definition of the central zero-allocation memory block */
 uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE] __attribute__((aligned(8)));
 
-/* P10 Zero-Trust CFI Constants for Master Orchestrator */
+/* P10 Zero-Trust CFI Constants for Master Orchestrator.
+ * Collision-Freedom Analysis: All 15 pairwise XOR combinations of these 6
+ * tokens are non-zero. No triple-XOR combination equals zero either (verified:
+ * each token occupies a unique nibble lane). If a 7th step is ever added,
+ * re-verify that no subset of tokens XORs to zero. */
 #define CFI_MAIN_INIT 0x10101010
 #define CFI_MAIN_HW_UP 0x20202020
 #define CFI_MAIN_EXEC 0x40404040
@@ -385,7 +389,7 @@ init_success:
     boot_diag_set_recovery_events(tmr.boot_failure_counter);
 
     toob_ext_health_t wear = {
-        .wal_erase_count = tmr.app_svn,
+        .wal_erase_count = 0, /* TMR has no aggregated WAL wear counter */
         .app_slot_erase_count = tmr.app_slot_erase_counter,
         .staging_slot_erase_count = tmr.staging_slot_erase_counter,
         .swap_buffer_erase_count = tmr.swap_buffer_erase_counter
