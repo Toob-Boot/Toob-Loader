@@ -4,10 +4,12 @@
 version = "v1.0.10"
 commit = "55133b4"
 
-[chips.esp32c6]
+[[chip]]
+name = "esp32c6"
 version = "1.1.0"
 arch = "riscv32"
-vendor = "esp"
-registry_commit = "55133b4"
-spawned = false
+arch_version = "1.0.0"
+toolchain = "riscv32-esp-elf"
+toolchain_version = "1.0.0"
+spawned = true
 

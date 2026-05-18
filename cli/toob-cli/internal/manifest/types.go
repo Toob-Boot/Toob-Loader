@@ -15,7 +15,6 @@ type DeviceToml struct {
 	Name    string `toml:"name"`
 	Version string `toml:"version"`
 	Device struct {
-		Vendor string `toml:"vendor"`
 		Chip   string `toml:"chip"`
 	} `toml:"device"`
 	Build struct {
@@ -23,6 +22,7 @@ type DeviceToml struct {
 		CoreSDK  string `toml:"core_sdk"`
 		Registry string `toml:"registry"`
 	} `toml:"build"`
+	DriverConfig map[string]interface{} `toml:"driver_config"`
 	Partitions struct {
 		Stage0Size    uint32 `toml:"stage0_size"`
 		Stage1Size    uint32 `toml:"stage1_size"`
@@ -69,6 +69,7 @@ type HardwareJson struct {
 		RamBase string `json:"ram_base"`
 		RamSize string `json:"ram_size"`
 	} `json:"memory"`
+	Registers map[string]interface{} `json:"registers"`
 }
 
 func ParseToml(path string) (*DeviceToml, error) {

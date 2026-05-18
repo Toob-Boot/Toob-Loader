@@ -87,14 +87,10 @@ func (inst *Installer) Add(arg string) error {
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
 	
-	vVer := ""
 	aVer := ""
 	tcVer := ""
 	if idx != nil {
 		inst.lock.Registry.Version = idx.RegistryVersion
-		if vInfo, ok := idx.Vendors[ci.Vendor]; ok {
-			vVer = vInfo.Version
-		}
 		if aInfo, ok := idx.Archs[ci.Arch]; ok {
 			aVer = aInfo.Version
 		}
@@ -106,7 +102,7 @@ func (inst *Installer) Add(arg string) error {
 	}
 	
 	entry := lockfile.ChipEntry{
-		Name: name, Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Vendor: ci.Vendor, VendorVersion: vVer, Toolchain: strings.TrimSuffix(ci.CompilerPrefix, "-"), ToolchainVersion: tcVer, Spawned: false,
+		Name: name, Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Toolchain: strings.TrimSuffix(ci.CompilerPrefix, "-"), ToolchainVersion: tcVer, Spawned: false,
 	}
 	
 	// Replace or append
@@ -124,7 +120,7 @@ func (inst *Installer) Add(arg string) error {
 	if err := inst.lock.Save(inst.lockPath); err != nil {
 		return err
 	}
-	ui.Success("Added chip '%s' (v%s) to lockfile [arch=%s, vendor=%s].", name, ci.Version, ci.Arch, ci.Vendor)
+	ui.Success("Added chip '%s' (v%s) to lockfile [arch=%s].", name, ci.Version, ci.Arch)
 	
 	// Wait up to 1 second for the matrix to avoid blocking
 	var matrix *registry.Matrix
@@ -216,14 +212,10 @@ func (inst *Installer) Spawn(arg string) error {
 	commit, _ := inst.cache.HeadCommit()
 	inst.lock.Registry.Commit = commit
 	
-	vVer := ""
 	aVer := ""
 	tcVer := ""
 	if idx != nil {
 		inst.lock.Registry.Version = idx.RegistryVersion
-		if vInfo, ok := idx.Vendors[ci.Vendor]; ok {
-			vVer = vInfo.Version
-		}
 		if aInfo, ok := idx.Archs[ci.Arch]; ok {
 			aVer = aInfo.Version
 		}
@@ -234,7 +226,7 @@ func (inst *Installer) Spawn(arg string) error {
 	}
 	
 	entry := lockfile.ChipEntry{
-		Name: name, Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Vendor: ci.Vendor, VendorVersion: vVer, Toolchain: strings.TrimSuffix(ci.CompilerPrefix, "-"), ToolchainVersion: tcVer, Spawned: true,
+		Name: name, Version: ci.Version, Arch: ci.Arch, ArchVersion: aVer, Toolchain: strings.TrimSuffix(ci.CompilerPrefix, "-"), ToolchainVersion: tcVer, Spawned: true,
 	}
 	
 	found := false
@@ -364,14 +356,10 @@ func (inst *Installer) Remove(name string) error {
 		if !inst.lock.IsArchShared(entry.Arch, name) {
 			moveToTrash(filepath.Join(inst.hal, "arch", entry.Arch))
 		}
-		if !inst.lock.IsVendorShared(entry.Vendor, name) {
-			moveToTrash(filepath.Join(inst.hal, "vendor", entry.Vendor))
-		}
-
 		// Clean up empty parent directories left behind
 		removeIfEmpty(filepath.Join(inst.hal, "chips"))
 		removeIfEmpty(filepath.Join(inst.hal, "arch"))
-		removeIfEmpty(filepath.Join(inst.hal, "vendor"))
+		removeIfEmpty(filepath.Join(inst.hal, "drivers"))
 		removeIfEmpty(filepath.Join(inst.hal, "include"))
 		removeIfEmpty(inst.hal)
 	}
@@ -420,19 +408,37 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo, allowLinks bool) ([]st
 		ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", archDst)
 	}
 
-	// Vendor layer
-	vendorDst := filepath.Join(inst.hal, "vendor", ci.Vendor)
-	if _, err := os.Stat(vendorDst); os.IsNotExist(err) {
-		vendorSrc, err := inst.cache.VendorSourcePath(ci.Vendor)
-		if err != nil {
-			return created, err
+	// Drivers layer
+	if ci.Sources != nil {
+		for _, driverFile := range ci.Sources.Drivers {
+			if strings.HasPrefix(driverFile, "drivers/") {
+				driverDir := filepath.Dir(driverFile) // e.g., drivers/uart/esp_uart_v1
+				driverDst := filepath.Join(inst.hal, filepath.FromSlash(driverDir))
+				if _, err := os.Stat(driverDst); os.IsNotExist(err) {
+					driverSrc := filepath.Join(inst.cache.Dir(), filepath.FromSlash(driverDir))
+					if err := copyTree(driverSrc, driverDst, allowLinks); err != nil {
+						return created, err
+					}
+					created = append(created, driverDst)
+				} else if inst.lock.Registry.Version != "" {
+					ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", driverDst)
+				}
+			}
 		}
-		if err := copyTree(vendorSrc, vendorDst, allowLinks); err != nil {
-			return created, err
+	}
+	for _, inc := range ci.Includes {
+		if strings.HasPrefix(inc, "drivers/") || strings.HasPrefix(inc, "soc/") || strings.HasPrefix(inc, "shared/") {
+			driverDst := filepath.Join(inst.hal, filepath.FromSlash(inc))
+			if _, err := os.Stat(driverDst); os.IsNotExist(err) {
+				driverSrc := filepath.Join(inst.cache.Dir(), filepath.FromSlash(inc))
+				if err := copyTree(driverSrc, driverDst, allowLinks); err != nil {
+					return created, err
+				}
+				created = append(created, driverDst)
+			} else if inst.lock.Registry.Version != "" {
+				ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", driverDst)
+			}
 		}
-		created = append(created, vendorDst)
-	} else if inst.lock.Registry.Version != "" {
-		ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", vendorDst)
 	}
 
 	// Toolchain file

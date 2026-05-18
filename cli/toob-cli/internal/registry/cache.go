@@ -20,25 +20,31 @@ import (
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-// ChipInfo holds immutable metadata for a single chip.
-type ChipInfo struct {
-	Name             string `json:"name"`
-	Vendor           string `json:"vendor"`
-	Arch             string `json:"arch"`
-	CompilerPrefix   string `json:"compiler_prefix"`
-	Path             string `json:"path"`
-	Version          string `json:"version"`
-	CliCompatibility string `json:"cli_compatibility"`
-	Description      string `json:"description,omitempty"`
-	Verified         bool   `json:"verified"`
+type ChipSources struct {
+	Startup  string   `json:"startup"`
+	Platform string   `json:"platform"`
+	Config   string   `json:"config"`
+	Linker   string   `json:"linker"`
+	Hardware string   `json:"hardware"`
+	Drivers  []string `json:"drivers,omitempty"`
+	Extra    []string `json:"extra,omitempty"`
 }
 
-type VendorInfo struct {
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	Version     string `json:"version"`
-	Description string `json:"description"`
+// ChipInfo holds immutable metadata for a single chip.
+type ChipInfo struct {
+	Name             string       `json:"name"`
+	Arch             string       `json:"arch"`
+	CompilerPrefix   string       `json:"compiler_prefix"`
+	Path             string       `json:"path"`
+	Version          string       `json:"version"`
+	CliCompatibility string       `json:"cli_compatibility"`
+	Description      string       `json:"description,omitempty"`
+	Verified         bool         `json:"verified"`
+	Sources          *ChipSources `json:"sources,omitempty"`
+	Includes         []string     `json:"includes,omitempty"`
 }
+
+// Removed VendorInfo
 
 type ArchInfo struct {
 	Name        string `json:"name"`
@@ -66,7 +72,6 @@ type Index struct {
 	RegistryVersion  string                     `json:"registry_version"`
 	CliCompatibility string                     `json:"cli_compatibility"`
 	Chips            map[string]ChipInfo        `json:"chips"`
-	Vendors          map[string]VendorInfo      `json:"vendors"`
 	Archs            map[string]ArchInfo        `json:"archs"`
 	Toolchains       map[string]ToolchainInfo   `json:"toolchains"`
 	Integrations     map[string]IntegrationInfo `json:"integrations"`
@@ -74,7 +79,6 @@ type Index struct {
 
 type MatrixDependencies struct {
 	Toolchain string `json:"toolchain"`
-	Vendor    string `json:"vendor"`
 	Arch      string `json:"arch"`
 	Compiler  string `json:"compiler_container,omitempty"`
 	CoreSDK   string `json:"core_sdk,omitempty"`
@@ -481,18 +485,7 @@ func (c *Cache) ArchSourcePath(arch string) (string, error) {
 	return filepath.Join(c.dir, info.Path), nil
 }
 
-// VendorSourcePath returns the absolute path to a vendor's source in the cache.
-func (c *Cache) VendorSourcePath(vendor string) (string, error) {
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return "", err
-	}
-	info, ok := idx.Vendors[vendor]
-	if !ok || info.Path == "" {
-		return filepath.Join(c.dir, "vendor", vendor), nil // fallback for backwards compatibility
-	}
-	return filepath.Join(c.dir, info.Path), nil
-}
+// Removed VendorSourcePath
 
 // HeadCommit returns the version of the currently checked out registry.
 func (c *Cache) HeadCommit() (string, error) {

@@ -176,6 +176,56 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_EDGE_UNATTENDED_MODE %s\n", edgeMode))
 	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_BACKOFF_BASE_S  %dU\n\n", dt.BootConfig.BackoffBaseS))
 
+	b.WriteString("/* ========================================================================\n")
+	b.WriteString(" * HARDWARE REGISTERS (Dynamic from hardware.json)\n")
+	b.WriteString(" * ======================================================================== */\n")
+	var regKeys []string
+	for k := range hj.Registers {
+		regKeys = append(regKeys, k)
+	}
+	sort.Strings(regKeys)
+	for _, k := range regKeys {
+		macroName := "CHIP_REG_" + strings.ToUpper(k)
+		v := hj.Registers[k]
+		switch val := v.(type) {
+		case string:
+			b.WriteString(fmt.Sprintf("#define %-30s %sU\n", macroName, val))
+		case float64:
+			b.WriteString(fmt.Sprintf("#define %-30s %dU\n", macroName, uint32(val)))
+		}
+	}
+	b.WriteString("\n")
+
+	if dt.DriverConfig != nil {
+		b.WriteString("/* ========================================================================\n")
+		b.WriteString(" * USER DRIVER CONFIGURATION (Dynamic from device.toml)\n")
+		b.WriteString(" * ======================================================================== */\n")
+		var drvKeys []string
+		for k := range dt.DriverConfig {
+			drvKeys = append(drvKeys, k)
+		}
+		sort.Strings(drvKeys)
+		for _, k := range drvKeys {
+			macroName := "TOOB_DRIVER_" + strings.ToUpper(k)
+			v := dt.DriverConfig[k]
+			switch val := v.(type) {
+			case string:
+				b.WriteString(fmt.Sprintf("#define %-30s %s\n", macroName, val))
+			case int64:
+				b.WriteString(fmt.Sprintf("#define %-30s %dU\n", macroName, uint32(val)))
+			case float64:
+				b.WriteString(fmt.Sprintf("#define %-30s %dU\n", macroName, uint32(val)))
+			case bool:
+				if val {
+					b.WriteString(fmt.Sprintf("#define %-30s 1\n", macroName))
+				} else {
+					b.WriteString(fmt.Sprintf("#define %-30s 0\n", macroName))
+				}
+			}
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString("#endif /* GENERATED_BOOT_CONFIG_H */\n")
 
 	if err := os.WriteFile(headerPath, []byte(b.String()), 0o644); err != nil {

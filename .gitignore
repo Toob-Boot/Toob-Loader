@@ -48,3 +48,5 @@ cli/toob-cli/toob
 cli_export.txt
 full_review_export.txt
 mock_efuse.o
+# Toob-Loader Spawned HALs
+toobloader/hal/

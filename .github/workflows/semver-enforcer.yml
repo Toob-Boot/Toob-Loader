@@ -75,7 +75,7 @@ jobs:
             echo "false"
           }
 
-          # Registry subsystem versioning (chips, arch, vendor, toolchains)
+          # Registry subsystem versioning (chips, arch, drivers, toolchains)
           # is handled by the Toob-Registry's own CI pipeline:
           #   main-release.yml → semver_calc.go → build_registry.go
           # The enforcer only manages Core SDK, CLI, and Compiler tags.

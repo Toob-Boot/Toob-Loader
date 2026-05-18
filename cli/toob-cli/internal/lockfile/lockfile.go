@@ -30,8 +30,6 @@ type ChipEntry struct {
 	Version          string `toml:"version"`
 	Arch             string `toml:"arch"`
 	ArchVersion      string `toml:"arch_version"`
-	Vendor           string `toml:"vendor"`
-	VendorVersion    string `toml:"vendor_version"`
 	Toolchain        string `toml:"toolchain"`
 	ToolchainVersion string `toml:"toolchain_version"`
 	Spawned          bool   `toml:"spawned"`
@@ -111,10 +109,6 @@ func (lf *Lockfile) Save(path string) error {
 		if e.ArchVersion != "" {
 			b.WriteString(fmt.Sprintf("arch_version = %q\n", e.ArchVersion))
 		}
-		b.WriteString(fmt.Sprintf("vendor = %q\n", e.Vendor))
-		if e.VendorVersion != "" {
-			b.WriteString(fmt.Sprintf("vendor_version = %q\n", e.VendorVersion))
-		}
 		if e.Toolchain != "" {
 			b.WriteString(fmt.Sprintf("toolchain = %q\n", e.Toolchain))
 		}
@@ -174,12 +168,4 @@ func (lf *Lockfile) IsArchShared(arch, exclude string) bool {
 	return false
 }
 
-// IsVendorShared returns true if any chip other than exclude uses the given vendor.
-func (lf *Lockfile) IsVendorShared(vendor, exclude string) bool {
-	for _, e := range lf.Chips {
-		if e.Name != exclude && e.Vendor == vendor {
-			return true
-		}
-	}
-	return false
-}
+// removed IsVendorShared

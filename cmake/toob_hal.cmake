@@ -30,37 +30,74 @@ if(ARCH_SOURCES)
 endif()
 
 # ------------------------------------------------------------------------------
-# Ebene 2: Vendor-Abstraktion (Hersteller Familie)
+# Ebene 2 & 3: Chip- und Driver-Abstraktion (Flat BOM)
 # ------------------------------------------------------------------------------
-file(GLOB_RECURSE VENDOR_SOURCES CONFIGURE_DEPENDS "${TOOB_HAL_VENDOR_DIR}/*.c")
+get_filename_component(TOOB_HAL_ROOT "${TOOB_HAL_CHIP_DIR}/../.." ABSOLUTE)
+set(CHIP_MANIFEST "${TOOB_HAL_CHIP_DIR}/chip_manifest.json")
 
-if(VENDOR_SOURCES)
-    add_library(toob_vendor STATIC ${VENDOR_SOURCES})
-    target_include_directories(toob_vendor PUBLIC 
-        ${TOOB_HAL_VENDOR_DIR}/include
-        ${TOOB_HAL_CHIP_DIR}
-        ${CMAKE_SOURCE_DIR}/common/include
-        ${TOOB_CORE_DIR}/include
-        ${CMAKE_BINARY_DIR}/generated
-        ${TOOB_SDK_DIR}/libtoob/include
-    )
-    if(TARGET toob_arch)
-        target_link_libraries(toob_vendor PUBLIC toob_arch)
+set(FLAT_BOM_SOURCES "")
+set(FLAT_BOM_INCLUDES "")
+
+if(EXISTS ${CHIP_MANIFEST})
+    file(READ ${CHIP_MANIFEST} MANIFEST_JSON)
+    
+    # 1. Startup, Platform
+    string(JSON CHIP_STARTUP ERROR_VARIABLE JSON_ERR GET ${MANIFEST_JSON} sources startup)
+    if(NOT JSON_ERR AND CHIP_STARTUP)
+        list(APPEND FLAT_BOM_SOURCES "${TOOB_HAL_CHIP_DIR}/${CHIP_STARTUP}")
+    endif()
+    
+    string(JSON CHIP_PLATFORM ERROR_VARIABLE JSON_ERR GET ${MANIFEST_JSON} sources platform)
+    if(NOT JSON_ERR AND CHIP_PLATFORM)
+        list(APPEND FLAT_BOM_SOURCES "${TOOB_HAL_CHIP_DIR}/${CHIP_PLATFORM}")
+    endif()
+    
+    # 2. Extra Chip Sources
+    string(JSON NUM_EXTRA ERROR_VARIABLE JSON_ERR LENGTH ${MANIFEST_JSON} sources extra)
+    if(NOT JSON_ERR AND NUM_EXTRA GREATER 0)
+        math(EXPR LAST_EXTRA "${NUM_EXTRA} - 1")
+        foreach(IDX RANGE 0 ${LAST_EXTRA})
+            string(JSON EXTRA_PATH GET ${MANIFEST_JSON} sources extra ${IDX})
+            list(APPEND FLAT_BOM_SOURCES "${TOOB_HAL_CHIP_DIR}/${EXTRA_PATH}")
+        endforeach()
+    endif()
+
+    # 3. Drivers
+    string(JSON NUM_DRIVERS ERROR_VARIABLE JSON_ERR LENGTH ${MANIFEST_JSON} sources drivers)
+    if(NOT JSON_ERR AND NUM_DRIVERS GREATER 0)
+        math(EXPR LAST_DRIVER "${NUM_DRIVERS} - 1")
+        foreach(IDX RANGE 0 ${LAST_DRIVER})
+            string(JSON DRIVER_PATH GET ${MANIFEST_JSON} sources drivers ${IDX})
+            if(DRIVER_PATH MATCHES "^drivers/")
+                list(APPEND FLAT_BOM_SOURCES "${TOOB_HAL_ROOT}/${DRIVER_PATH}")
+            else()
+                list(APPEND FLAT_BOM_SOURCES "${TOOB_HAL_CHIP_DIR}/${DRIVER_PATH}")
+            endif()
+        endforeach()
+    endif()
+
+    # 4. Includes
+    string(JSON NUM_INCLUDES ERROR_VARIABLE JSON_ERR LENGTH ${MANIFEST_JSON} includes)
+    if(NOT JSON_ERR AND NUM_INCLUDES GREATER 0)
+        math(EXPR LAST_INC "${NUM_INCLUDES} - 1")
+        foreach(IDX RANGE 0 ${LAST_INC})
+            string(JSON INC_PATH GET ${MANIFEST_JSON} includes ${IDX})
+            if(INC_PATH MATCHES "^(drivers|arch)/")
+                list(APPEND FLAT_BOM_INCLUDES "${TOOB_HAL_ROOT}/${INC_PATH}")
+            else()
+                list(APPEND FLAT_BOM_INCLUDES "${TOOB_HAL_CHIP_DIR}/${INC_PATH}")
+            endif()
+        endforeach()
     endif()
 endif()
 
-# ------------------------------------------------------------------------------
-# Ebene 3: Chip-Abstraktion (Spezifisches Ziel-Silicon)
-# ------------------------------------------------------------------------------
-file(GLOB_RECURSE CHIP_SOURCES CONFIGURE_DEPENDS "${TOOB_HAL_CHIP_DIR}/*.c")
-# GAP-Integration: Analog zu arch_sources bewahrt uns dieser Block davor,
-# den Build auf der Host-Sandbox zu crashen, da TOOB_CHIP dort leer ist.
-if(CHIP_SOURCES)
-    add_library(toob_chip STATIC ${CHIP_SOURCES})
+if(FLAT_BOM_SOURCES)
+    add_library(toob_chip STATIC ${FLAT_BOM_SOURCES})
 
     # Sichtbarkeit der Bootloader Core-Interfaces für die Chip-Ebene
     target_include_directories(toob_chip PUBLIC 
         ${TOOB_HAL_CHIP_DIR}
+        ${FLAT_BOM_INCLUDES}
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
         ${CMAKE_BINARY_DIR}/generated
@@ -70,8 +107,8 @@ if(CHIP_SOURCES)
         target_include_directories(toob_chip PUBLIC test/mocks)
     endif()
 
-    if(TARGET toob_vendor)
-        target_link_libraries(toob_chip PUBLIC toob_vendor)
+    if(TARGET toob_arch)
+        target_link_libraries(toob_chip PUBLIC toob_arch)
     endif()
 endif()
 
@@ -82,25 +119,11 @@ if(TARGET generate_manifest AND TARGET toob_chip)
     add_dependencies(toob_chip generate_manifest)
 endif()
 
-# ------------------------------------------------------------------------------
-# Architektur-spezifische GAPs / Hardware-Limits patchen
-# ------------------------------------------------------------------------------
-# HINWEIS: Spezifische CPU-Architektur-Flags (wie -march=rv32imac oder -mcall0)
-# wurden aus dem Core SDK entfernt und in die Registry migriert! 
-# Siehe: ~/.toob/registry/toolchains/<name>/toolchain.cmake
 
-
-
-# ------------------------------------------------------------------------------
-# P10 Härtung (Stack-Protector für HAL erlaubt)
-# ------------------------------------------------------------------------------
 if(TARGET toob_arch)
     toob_apply_strict_flags(toob_arch TRUE)
 endif()
 
-if(TARGET toob_vendor)
-    toob_apply_strict_flags(toob_vendor TRUE)
-endif()
 
 if(TARGET toob_chip)
     toob_apply_strict_flags(toob_chip TRUE)

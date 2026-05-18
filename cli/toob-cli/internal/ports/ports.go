@@ -131,7 +131,6 @@ type RegistryIndex struct {
 	RegistryVersion  string                     `json:"registry_version"  port:"required"`
 	CLICompatibility string                     `json:"cli_compatibility" port:"required"`
 	Chips            map[string]RegistryChip    `json:"chips"             port:"required"`
-	Vendors          map[string]RegistryVendor  `json:"vendors"           port:"required"`
 	Archs            map[string]RegistryArch    `json:"archs"             port:"required"`
 	Toolchains       map[string]RegistryToolchain `json:"toolchains"      port:"required"`
 	Integrations     map[string]RegistryIntegration `json:"integrations"  port:"required"`
@@ -140,7 +139,6 @@ type RegistryIndex struct {
 // RegistryChip is a single chip entry in registry.json.
 type RegistryChip struct {
 	Name             string `json:"name"              port:"required"`
-	Vendor           string `json:"vendor"            port:"required"`
 	Arch             string `json:"arch"              port:"required"`
 	CompilerPrefix   string `json:"compiler_prefix"   port:"required"`
 	Path             string `json:"path"              port:"required"`
@@ -150,13 +148,7 @@ type RegistryChip struct {
 	Description      string `json:"description"       port:"optional"`
 }
 
-// RegistryVendor is a vendor entry in registry.json.
-type RegistryVendor struct {
-	Name        string `json:"name"        port:"required"`
-	Path        string `json:"path"        port:"required"`
-	Version     string `json:"version"     port:"required"`
-	Description string `json:"description" port:"optional"`
-}
+// Removed RegistryVendor
 
 // RegistryArch is an architecture entry in registry.json.
 type RegistryArch struct {
@@ -241,7 +233,6 @@ type DeviceToml struct {
 
 // DeviceSection identifies the target chip.
 type DeviceSection struct {
-	Vendor string `json:"vendor" port:"required"`
 	Chip   string `json:"chip"   port:"required"`
 }
 
@@ -306,7 +297,6 @@ type CompilerOutputFiles struct {
 // MatrixDependencies defines what a specific chip version depends on.
 type MatrixDependencies struct {
 	Toolchain string `json:"toolchain"                port:"required"`
-	Vendor    string `json:"vendor"                   port:"required"`
 	Arch      string `json:"arch"                     port:"required"`
 	Compiler  string `json:"compiler_container"       port:"optional"`
 	CoreSDK   string `json:"core_sdk"                 port:"optional"`
@@ -359,14 +349,25 @@ type HubResolveCombinationResponse struct {
 // Boundary: Chip Manifest (chip_manifest.json)
 // =============================================================================
 
+type ChipSources struct {
+	Startup  string   `json:"startup"  port:"required"`
+	Platform string   `json:"platform" port:"required"`
+	Config   string   `json:"config"   port:"required"`
+	Linker   string   `json:"linker"   port:"required"`
+	Hardware string   `json:"hardware" port:"required"`
+	Drivers  []string `json:"drivers"  port:"optional"`
+	Extra    []string `json:"extra"    port:"optional"`
+}
+
 // ChipManifest is the parsed content of chips/{chip}/chip_manifest.json.
 type ChipManifest struct {
-	Vendor         string `json:"vendor"          port:"required"`
-	Arch           string `json:"arch"            port:"required"`
-	CompilerPrefix string `json:"compiler_prefix" port:"required"`
-	Version        string `json:"version"         port:"required"`
-	MinCoreSDK     string `json:"min_core_sdk"    port:"optional"`
-	MinCompiler    string `json:"min_compiler"    port:"optional"`
+	Arch           string       `json:"arch"            port:"required"`
+	CompilerPrefix string       `json:"compiler_prefix" port:"required"`
+	Version        string       `json:"version"         port:"required"`
+	MinCoreSDK     string       `json:"min_core_sdk"    port:"optional"`
+	MinCompiler    string       `json:"min_compiler"    port:"optional"`
+	Sources        *ChipSources `json:"sources"         port:"optional"`
+	Includes       []string     `json:"includes"        port:"optional"`
 }
 
 // =============================================================================
@@ -387,8 +388,6 @@ type LockfileChipEntry struct {
 	Version          string `json:"version"           port:"required"`
 	Arch             string `json:"arch"              port:"required"`
 	ArchVersion      string `json:"arch_version"      port:"optional"`
-	Vendor           string `json:"vendor"            port:"required"`
-	VendorVersion    string `json:"vendor_version"    port:"optional"`
 	Toolchain        string `json:"toolchain"         port:"optional"`
 	ToolchainVersion string `json:"toolchain_version" port:"optional"`
 	Spawned          bool   `json:"spawned"           port:"required"`

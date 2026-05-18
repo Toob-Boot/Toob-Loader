@@ -55,7 +55,7 @@ var chipListCmd = &cobra.Command{
 
 		ui.Header("Chip Registry")
 
-		headers := []string{"Chip", "Version", "Vendor", "Arch", "Verified CLI"}
+		headers := []string{"Chip", "Version", "Arch", "Verified CLI"}
 		var rows [][]string
 		for _, ci := range idx.Chips {
 			if query != "" && !strings.Contains(strings.ToLower(ci.Name), query) {
@@ -83,7 +83,7 @@ var chipListCmd = &cobra.Command{
 				}
 			}
 
-			rows = append(rows, []string{ui.Bold(ci.Name), ui.Brand(ci.Version), ci.Vendor, ci.Arch, verifiedClisStr})
+			rows = append(rows, []string{ui.Bold(ci.Name), ui.Brand(ci.Version), ci.Arch, verifiedClisStr})
 		}
 
 		if len(rows) == 0 {
@@ -117,12 +117,8 @@ var chipInfoCmd = &cobra.Command{
 		}
 
 		idx, _ := cache.LoadIndex()
-		vVer := "unknown"
 		aVer := "unknown"
 		if idx != nil {
-			if vInfo, ok := idx.Vendors[ci.Vendor]; ok {
-				vVer = vInfo.Version
-			}
 			if aInfo, ok := idx.Archs[ci.Arch]; ok {
 				aVer = aInfo.Version
 			}
@@ -130,7 +126,6 @@ var chipInfoCmd = &cobra.Command{
 
 		fmt.Fprintln(os.Stderr)
 		ui.KeyValue("Version", ui.BoldBrand(ci.Version))
-		ui.KeyValue("Vendor", fmt.Sprintf("%s %s", ci.Vendor, ui.Gray("(v"+vVer+")")))
 		ui.KeyValue("Architecture", fmt.Sprintf("%s %s", ci.Arch, ui.Gray("(v"+aVer+")")))
 		ui.KeyValue("Compiler", ui.Cyan(ci.CompilerPrefix))
 		ui.KeyValue("Registry Path", ui.Gray(ci.Path))

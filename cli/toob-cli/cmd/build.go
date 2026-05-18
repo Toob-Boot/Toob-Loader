@@ -328,11 +328,10 @@ func runNativeBuild(root string) error {
 	}
 
 	chip := dt.Device.Chip
-	vendor := dt.Device.Vendor
-	if chip == "" || vendor == "" {
-		return fmt.Errorf("device.toml must define [device] with 'chip' and 'vendor'")
+	if chip == "" {
+		return fmt.Errorf("device.toml must define [device] with 'chip'")
 	}
-	ui.Info("Target: %s/%s", vendor, chip)
+	ui.Info("Target: %s", chip)
 
 	registryURL := ""
 	if dt.Build.Registry != "" {
@@ -395,13 +394,11 @@ func runNativeBuild(root string) error {
 	chipVersion := "1.0.0"
 	arch := ""
 	toolchainPrefix := ""
-	halVendor := vendor
 
 	if data, err := os.ReadFile(cmPath); err == nil {
 		if err := json.Unmarshal(data, &cm); err == nil {
 			if cm.Arch != "" { arch = cm.Arch }
 			if cm.CompilerPrefix != "" { toolchainPrefix = cm.CompilerPrefix }
-			if cm.Vendor != "" { halVendor = cm.Vendor }
 			if cm.Version != "" { chipVersion = cm.Version }
 		}
 	} else {
@@ -413,7 +410,6 @@ func runNativeBuild(root string) error {
 			json.Unmarshal(data, &cm)
 			if cm.Arch != "" { arch = cm.Arch }
 			if cm.CompilerPrefix != "" { toolchainPrefix = cm.CompilerPrefix }
-			if cm.Vendor != "" { halVendor = cm.Vendor }
 			if cm.Version != "" { chipVersion = cm.Version }
 		} else {
 			return fmt.Errorf("chip_manifest.json not found for chip '%s'", chip)
@@ -588,14 +584,8 @@ func runNativeBuild(root string) error {
 		halArchDir = filepath.Join(regDir, "arch", arch)
 	}
 
-	halVendorDir := filepath.Join(root, "toobloader", "hal", "vendor", halVendor)
-	if _, err := os.Stat(halVendorDir); err != nil {
-		halVendorDir = filepath.Join(regDir, "vendor", halVendor)
-	}
-
 	halChipDir = filepath.ToSlash(halChipDir)
 	halArchDir = filepath.ToSlash(halArchDir)
-	halVendorDir = filepath.ToSlash(halVendorDir)
 
 	sdkDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("sdk")))
 
@@ -606,18 +596,17 @@ func runNativeBuild(root string) error {
 	toobCLIPath = filepath.ToSlash(toobCLIPath)
 
 	configContent := fmt.Sprintf(
-		"set(TOOB_ARCH \"%s\")\nset(TOOB_VENDOR \"%s\")\nset(TOOB_CHIP \"%s\")\n"+
+		"set(TOOB_ARCH \"%s\")\nset(TOOB_CHIP \"%s\")\n"+
 			"set(TOOLCHAIN_PREFIX \"%s\")\n"+
 			"set(TOOB_CORE_DIR \"%s\")\n"+
 			"set(TOOB_CRYPTO_DIR \"%s\")\n"+
 			"set(TOOB_STAGE0_DIR \"%s\")\n"+
 			"set(TOOB_HAL_CHIP_DIR \"%s\")\n"+
 			"set(TOOB_HAL_ARCH_DIR \"%s\")\n"+
-			"set(TOOB_HAL_VENDOR_DIR \"%s\")\n"+
 			"set(TOOB_SDK_DIR \"%s\")\n"+
 			"set(TOOB_CLI_PATH \"%s\")\n",
-		arch, halVendor, chip, toolchainPrefix,
-		coreDir, cryptoDir, stage0Dir, halChipDir, halArchDir, halVendorDir, sdkDir, toobCLIPath,
+		arch, chip, toolchainPrefix,
+		coreDir, cryptoDir, stage0Dir, halChipDir, halArchDir, sdkDir, toobCLIPath,
 	)
 	if err := os.WriteFile(filepath.Join(generatedDir, "toob_config.cmake"), []byte(configContent), 0o644); err != nil {
 		return err

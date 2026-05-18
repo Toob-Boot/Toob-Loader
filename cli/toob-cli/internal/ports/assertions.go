@@ -45,7 +45,7 @@ func assertRegistryIndexFromPort() {
 func assertChipToPort() {
 	var r registry.ChipInfo
 	_ = RegistryChip{
-		Name: r.Name, Vendor: r.Vendor, Arch: r.Arch,
+		Name: r.Name, Arch: r.Arch,
 		CompilerPrefix: r.CompilerPrefix, Path: r.Path,
 		Version: r.Version, CliCompatibility: r.CliCompatibility,
 		Verified: r.Verified, Description: r.Description,
@@ -55,30 +55,14 @@ func assertChipToPort() {
 func assertChipFromPort() {
 	var p RegistryChip
 	_ = registry.ChipInfo{
-		Name: p.Name, Vendor: p.Vendor, Arch: p.Arch,
+		Name: p.Name, Arch: p.Arch,
 		CompilerPrefix: p.CompilerPrefix, Path: p.Path,
 		Version: p.Version, CliCompatibility: p.CliCompatibility,
 		Verified: p.Verified, Description: p.Description,
 	}
 }
 
-// --- VendorInfo ↔ RegistryVendor ---
-
-func assertVendorToPort() {
-	var r registry.VendorInfo
-	_ = RegistryVendor{
-		Name: r.Name, Path: r.Path,
-		Version: r.Version, Description: r.Description,
-	}
-}
-
-func assertVendorFromPort() {
-	var p RegistryVendor
-	_ = registry.VendorInfo{
-		Name: p.Name, Path: p.Path,
-		Version: p.Version, Description: p.Description,
-	}
-}
+// Removed VendorInfo
 
 // --- ArchInfo ↔ RegistryArch ---
 
@@ -189,7 +173,7 @@ func assertAssetFromPort() {
 func assertMatrixDepsToPort() {
 	var r registry.MatrixDependencies
 	_ = MatrixDependencies{
-		Toolchain: r.Toolchain, Vendor: r.Vendor, Arch: r.Arch,
+		Toolchain: r.Toolchain, Arch: r.Arch,
 		Compiler: r.Compiler, CoreSDK: r.CoreSDK,
 	}
 }
@@ -197,7 +181,7 @@ func assertMatrixDepsToPort() {
 func assertMatrixDepsFromPort() {
 	var p MatrixDependencies
 	_ = registry.MatrixDependencies{
-		Toolchain: p.Toolchain, Vendor: p.Vendor, Arch: p.Arch,
+		Toolchain: p.Toolchain, Arch: p.Arch,
 		Compiler: p.Compiler, CoreSDK: p.CoreSDK,
 	}
 }
@@ -244,8 +228,8 @@ func assertLockChipToPort() {
 	var r lockfile.ChipEntry
 	_ = LockfileChipEntry{
 		Name: r.Name, Version: r.Version, Arch: r.Arch,
-		ArchVersion: r.ArchVersion, Vendor: r.Vendor,
-		VendorVersion: r.VendorVersion, Toolchain: r.Toolchain,
+		ArchVersion: r.ArchVersion,
+		Toolchain: r.Toolchain,
 		ToolchainVersion: r.ToolchainVersion, Spawned: r.Spawned,
 	}
 }
@@ -254,8 +238,8 @@ func assertLockChipFromPort() {
 	var p LockfileChipEntry
 	_ = lockfile.ChipEntry{
 		Name: p.Name, Version: p.Version, Arch: p.Arch,
-		ArchVersion: p.ArchVersion, Vendor: p.Vendor,
-		VendorVersion: p.VendorVersion, Toolchain: p.Toolchain,
+		ArchVersion: p.ArchVersion,
+		Toolchain: p.Toolchain,
 		ToolchainVersion: p.ToolchainVersion, Spawned: p.Spawned,
 	}
 }
@@ -297,7 +281,6 @@ func assertDeviceToml() {
 
 	_ = [2]string{r.Name, p.Name}
 	_ = [2]string{r.Version, p.Version}
-	_ = [2]string{r.Device.Vendor, p.Device.Vendor}
 	_ = [2]string{r.Device.Chip, p.Device.Chip}
 	_ = [2]string{r.Build.Compiler, p.Build.Compiler}
 	_ = [2]string{r.Build.CoreSDK, p.Build.CoreSDK}
