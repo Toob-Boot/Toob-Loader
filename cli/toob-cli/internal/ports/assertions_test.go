@@ -27,6 +27,8 @@ func TestPortFieldCounts(t *testing.T) {
 			reflect.TypeOf(RegistryIndex{}), reflect.TypeOf(registry.Index{})},
 		{"RegistryChip ↔ registry.ChipInfo",
 			reflect.TypeOf(RegistryChip{}), reflect.TypeOf(registry.ChipInfo{})},
+		{"ChipSources ↔ registry.ChipSources",
+			reflect.TypeOf(ChipSources{}), reflect.TypeOf(registry.ChipSources{})},
 		{"RegistryArch ↔ registry.ArchInfo",
 			reflect.TypeOf(RegistryArch{}), reflect.TypeOf(registry.ArchInfo{})},
 		{"RegistryToolchain ↔ registry.ToolchainInfo",
@@ -89,6 +91,8 @@ func TestPortFieldTypes(t *testing.T) {
 		// are cross-package mirrors. Each inner type has its own entry below.
 		{"RegistryChip ↔ registry.ChipInfo",
 			reflect.TypeOf(RegistryChip{}), reflect.TypeOf(registry.ChipInfo{})},
+		{"ChipSources ↔ registry.ChipSources",
+			reflect.TypeOf(ChipSources{}), reflect.TypeOf(registry.ChipSources{})},
 		{"RegistryArch ↔ registry.ArchInfo",
 			reflect.TypeOf(RegistryArch{}), reflect.TypeOf(registry.ArchInfo{})},
 		{"RegistryToolchain ↔ registry.ToolchainInfo",
@@ -118,6 +122,10 @@ func TestPortFieldTypes(t *testing.T) {
 					continue // Field count test catches missing fields
 				}
 				if pf.Type != rf.Type {
+					// Handle cross-package pointer mapping for embedded structs
+					if pf.Type.String() == "*ports.ChipSources" && rf.Type.String() == "*registry.ChipSources" {
+						continue
+					}
 					t.Errorf("\n[BREAKING CHANGE] %s: Field %q type changed.\n"+
 						"  Port expects %s, but implementation has %s.\n"+
 						"  Fix: Update the field type in internal/ports/ports.go to match. This triggers a MAJOR bump.",

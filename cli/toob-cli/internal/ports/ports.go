@@ -144,8 +144,10 @@ type RegistryChip struct {
 	Path             string `json:"path"              port:"required"`
 	Version          string `json:"version"           port:"required"`
 	CliCompatibility string `json:"cli_compatibility" port:"optional"`
-	Verified         bool   `json:"verified"          port:"optional"`
-	Description      string `json:"description"       port:"optional"`
+	Verified         bool         `json:"verified"          port:"optional"`
+	Description      string       `json:"description"       port:"optional"`
+	Sources          *ChipSources `json:"sources"           port:"optional"`
+	Includes         []string     `json:"includes"          port:"optional"`
 }
 
 // Removed RegistryVendor
