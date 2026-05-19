@@ -683,11 +683,15 @@ func runNativeBuild(root string) error {
 		}
 
 		if idx == nil || idx.Crypto == nil {
-			return fmt.Errorf("cannot resolve crypto package '%s': registry index not loaded", pkgName)
+			ui.Warn("Crypto package '%s' (slot: %s) declared but registry has no crypto index. Disabling slot.", pkgName, slotName)
+			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
+			continue
 		}
 		cryptoPkg, ok := idx.Crypto[pkgName]
 		if !ok {
-			return fmt.Errorf("crypto package '%s' (slot: %s) not found in registry", pkgName, slotName)
+			ui.Warn("Crypto package '%s' (slot: %s) not found in registry. Disabling slot.", pkgName, slotName)
+			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
+			continue
 		}
 
 		// Validate min_core_sdk
@@ -715,8 +719,15 @@ func runNativeBuild(root string) error {
 			}
 		}
 
-		// Resolve absolute paths
+		// Resolve absolute paths and verify existence in registry cache
 		pkgDir := filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path))
+
+		if _, err := os.Stat(filepath.Join(regDir, cryptoPkg.Path)); os.IsNotExist(err) {
+			ui.Warn("Crypto package '%s' (slot: %s) not found in registry cache at '%s'. "+
+				"The registry version may predate crypto support. Disabling slot.", pkgName, slotName, pkgDir)
+			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
+			continue
+		}
 
 		// Deduplicate: if this package was already emitted for a previous slot, skip sources
 		isDuplicate := resolvedCryptoNames[pkgName]
