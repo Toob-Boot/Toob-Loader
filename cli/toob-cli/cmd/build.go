@@ -463,6 +463,16 @@ func runNativeBuild(root string) error {
 				coreSDKLabel = "main (fallback)"
 			}
 		}
+	} else if coreSDKVer == "toob-boot" {
+		// "toob-boot" is the SDK name, not a version. Resolve to latest tag or main.
+		latestTag, err := getLatestCoreSDKTag()
+		if err == nil {
+			coreSDKVer = latestTag
+			coreSDKLabel = latestTag + " (auto-latest)"
+		} else {
+			coreSDKVer = "main"
+			coreSDKLabel = "main (toob-boot default)"
+		}
 	}
 
 	// Validate against MinCoreSDK if present
