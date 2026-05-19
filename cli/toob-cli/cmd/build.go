@@ -310,7 +310,7 @@ func checkProtocolVersion(image string) error {
 func runNativeBuild(root string) error {
 	buildStartTime := time.Now()
 	timings := &TimingTracker{}
-	
+
 	// Accumulate all setup overhead mathematically perfectly
 	var setupDuration time.Duration
 	lastSetupResume := buildStartTime
@@ -374,7 +374,7 @@ func runNativeBuild(root string) error {
 			return fmt.Errorf("failed to sync registry: %w", err)
 		}
 		timings.Add("Registry Sync", time.Since(start))
-		
+
 		lastSetupResume = time.Now()
 	}
 	regDir := cache.Dir()
@@ -448,7 +448,8 @@ func runNativeBuild(root string) error {
 	coreSDKVer := dt.Build.CoreSDK
 	coreSDKLabel := coreSDKVer
 
-	if coreSDKVer == "" || coreSDKVer == "latest" {
+	switch coreSDKVer {
+	case "", "latest":
 		ui.Step("Resolving latest Core SDK version...")
 		latestTag, err := getLatestCoreSDKTag()
 		if err == nil {
@@ -463,7 +464,7 @@ func runNativeBuild(root string) error {
 				coreSDKLabel = "main (fallback)"
 			}
 		}
-	} else if coreSDKVer == "toob-boot" {
+	case "toob-boot":
 		// "toob-boot" is the SDK name, not a version. Resolve to latest tag or main.
 		latestTag, err := getLatestCoreSDKTag()
 		if err == nil {
@@ -564,7 +565,7 @@ func runNativeBuild(root string) error {
 			}
 		}
 	}
-	
+
 	socDir := filepath.Join(regDir, "soc")
 	if _, err := os.Stat(socDir); err == nil {
 		driverDirs = append(driverDirs, socDir)
