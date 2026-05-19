@@ -781,10 +781,12 @@ func runNativeBuild(root string) error {
 			"set(TOOB_HAL_ARCH_DIR \"%s\")\n"+
 			"set(TOOB_SDK_DIR \"%s\")\n"+
 			"set(TOOB_CLI_PATH \"%s\")\n"+
+			"set(TOOB_CRYPTO_DIR \"%s\")\n"+
 			"set(TOOB_FEATURE_PQC_HYBRID %s)\n"+
 			"%s\n# --- Dynamic Crypto Configuration ---\n%s",
 		arch, chip, toolchainPrefix,
 		coreDir, stage0Dir, halChipDir, halArchDir, sdkDir, toobCLIPath,
+		filepath.ToSlash(filepath.Join(bootloaderDir, "crypto")),
 		map[bool]string{true: "ON", false: "OFF"}[pqcEnabled],
 		driversCMake.String(), cryptoCMake.String(),
 	)
