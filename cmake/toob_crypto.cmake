@@ -14,23 +14,14 @@
 #   TOOB_CRYPTO_{BACKEND,HASH,PQC}_CFLAGS    Semicolon-separated compiler flags
 #   TOOB_CRYPTO_{BACKEND,HASH,PQC}_INCLUDES  Semicolon-separated include dirs
 #   TOOB_CRYPTO_{BACKEND,HASH,PQC}_DIR       Package root directory
-#
-# Relevant Specs:
-# - docs/concept_fusion.md (Schicht 2: Pluggable Crypto, crypto_arena)
-# - docs/structure_plan.md (Verzeichnisbaum `toobloader/crypto/`)
-# - docs/hals.md (crypto_hal_t)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1. Target: toob_crypto_upstream (Third-Party / Upstream Code)
+# 1. Collect sources from all enabled slots (before creating targets)
 # ------------------------------------------------------------------------------
-# Compiled with relaxed flags to avoid -Werror breaking bit-intensive third-party
-# code. Each crypto slot contributes its upstream_sources and cflags independently.
-add_library(toob_crypto_upstream STATIC)
-
-# Collect all upstream sources across slots, then deduplicate
 set(_CRYPTO_ALL_SOURCES "")
 set(_CRYPTO_ALL_INCLUDES "")
+set(_CRYPTO_ALL_WRAPPERS "")
 
 # --- Backend Slot ---
 if(TOOB_CRYPTO_BACKEND_ENABLED)
@@ -42,6 +33,9 @@ if(TOOB_CRYPTO_BACKEND_ENABLED)
     endif()
     if(DEFINED TOOB_CRYPTO_BACKEND_INCLUDES)
         list(APPEND _CRYPTO_ALL_INCLUDES ${TOOB_CRYPTO_BACKEND_INCLUDES})
+    endif()
+    if(DEFINED TOOB_CRYPTO_BACKEND_WRAPPER)
+        list(APPEND _CRYPTO_ALL_WRAPPERS ${TOOB_CRYPTO_BACKEND_WRAPPER})
     endif()
 endif()
 
@@ -56,6 +50,9 @@ if(TOOB_CRYPTO_HASH_ENABLED)
     if(DEFINED TOOB_CRYPTO_HASH_INCLUDES)
         list(APPEND _CRYPTO_ALL_INCLUDES ${TOOB_CRYPTO_HASH_INCLUDES})
     endif()
+    if(DEFINED TOOB_CRYPTO_HASH_WRAPPER)
+        list(APPEND _CRYPTO_ALL_WRAPPERS ${TOOB_CRYPTO_HASH_WRAPPER})
+    endif()
 endif()
 
 # --- PQC Slot ---
@@ -69,6 +66,9 @@ if(TOOB_CRYPTO_PQC_ENABLED)
     if(DEFINED TOOB_CRYPTO_PQC_INCLUDES)
         list(APPEND _CRYPTO_ALL_INCLUDES ${TOOB_CRYPTO_PQC_INCLUDES})
     endif()
+    if(DEFINED TOOB_CRYPTO_PQC_WRAPPER)
+        list(APPEND _CRYPTO_ALL_WRAPPERS ${TOOB_CRYPTO_PQC_WRAPPER})
+    endif()
 endif()
 
 # Deduplicate (handles backend+hash pointing to same package)
@@ -78,78 +78,73 @@ endif()
 if(_CRYPTO_ALL_INCLUDES)
     list(REMOVE_DUPLICATES _CRYPTO_ALL_INCLUDES)
 endif()
-
-# Apply sources and includes
-if(_CRYPTO_ALL_SOURCES)
-    target_sources(toob_crypto_upstream PRIVATE ${_CRYPTO_ALL_SOURCES})
-endif()
-
-target_include_directories(toob_crypto_upstream PUBLIC
-    ${_CRYPTO_ALL_INCLUDES}
-    ${CMAKE_SOURCE_DIR}/common/include
-    ${TOOB_CORE_DIR}/include
-)
-
-# Apply per-slot compiler flags. Each slot's cflags are applied to the
-# upstream target. When slots share the same source files, the last
-# cflags win — this is acceptable because shared packages have identical flags.
-set(_CRYPTO_UPSTREAM_CFLAGS -fno-lto -ffunction-sections -fdata-sections)
-if(TOOB_CRYPTO_BACKEND_ENABLED AND DEFINED TOOB_CRYPTO_BACKEND_CFLAGS)
-    list(APPEND _CRYPTO_UPSTREAM_CFLAGS ${TOOB_CRYPTO_BACKEND_CFLAGS})
-else()
-    list(APPEND _CRYPTO_UPSTREAM_CFLAGS -Os)
-endif()
-target_compile_options(toob_crypto_upstream PRIVATE ${_CRYPTO_UPSTREAM_CFLAGS})
-
-# PQC compile definitions
-if(TOOB_FEATURE_PQC_HYBRID)
-    target_compile_definitions(toob_crypto_upstream PUBLIC TOOB_FEATURE_PQC_HYBRID=1)
-endif()
-
-# Upstream code is intentionally exempt from strict P10 flags.
-
-# ------------------------------------------------------------------------------
-# 2. Target: toob_crypto (Toob-Boot Wrapper / HAL Adapter)
-# ------------------------------------------------------------------------------
-# P10-compliant wrapper implementing the crypto_hal_t interface.
-add_library(toob_crypto STATIC)
-
-# Collect wrapper files
-set(_CRYPTO_ALL_WRAPPERS "")
-
-if(TOOB_CRYPTO_BACKEND_ENABLED AND DEFINED TOOB_CRYPTO_BACKEND_WRAPPER)
-    list(APPEND _CRYPTO_ALL_WRAPPERS ${TOOB_CRYPTO_BACKEND_WRAPPER})
-endif()
-
-if(TOOB_CRYPTO_HASH_ENABLED AND DEFINED TOOB_CRYPTO_HASH_WRAPPER)
-    list(APPEND _CRYPTO_ALL_WRAPPERS ${TOOB_CRYPTO_HASH_WRAPPER})
-endif()
-
-if(TOOB_CRYPTO_PQC_ENABLED AND DEFINED TOOB_CRYPTO_PQC_WRAPPER)
-    list(APPEND _CRYPTO_ALL_WRAPPERS ${TOOB_CRYPTO_PQC_WRAPPER})
-endif()
-
 if(_CRYPTO_ALL_WRAPPERS)
     list(REMOVE_DUPLICATES _CRYPTO_ALL_WRAPPERS)
-    target_sources(toob_crypto PRIVATE ${_CRYPTO_ALL_WRAPPERS})
 endif()
 
-if(TOOB_FEATURE_PQC_HYBRID)
-    target_compile_definitions(toob_crypto PUBLIC TOOB_FEATURE_PQC_HYBRID=1)
+# ------------------------------------------------------------------------------
+# 2. Guard: Only create targets if there are sources to compile
+# ------------------------------------------------------------------------------
+# CMake requires STATIC libraries to have at least one source file.
+# If no crypto is configured, skip target creation entirely.
+if(NOT _CRYPTO_ALL_SOURCES AND NOT _CRYPTO_ALL_WRAPPERS)
+    message(STATUS "[toob_crypto] No crypto packages configured. Skipping crypto targets.")
+    return()
 endif()
 
-# Core references for boot_hal.h, generated headers, SDK
-target_include_directories(toob_crypto PUBLIC
-    ${CMAKE_SOURCE_DIR}/common/include
-    ${TOOB_CORE_DIR}/include
-    ${CMAKE_BINARY_DIR}/generated
-    ${TOOB_SDK_DIR}/libtoob/include
-)
+# ------------------------------------------------------------------------------
+# 3. Target: toob_crypto_upstream (Third-Party / Upstream Code)
+# ------------------------------------------------------------------------------
+# Compiled with relaxed flags to avoid -Werror breaking bit-intensive third-party code.
+if(_CRYPTO_ALL_SOURCES)
+    add_library(toob_crypto_upstream STATIC ${_CRYPTO_ALL_SOURCES})
 
-# Link the relaxed upstream into the strict wrapper
-target_link_libraries(toob_crypto PUBLIC toob_crypto_upstream)
+    target_include_directories(toob_crypto_upstream PUBLIC
+        ${_CRYPTO_ALL_INCLUDES}
+        ${CMAKE_SOURCE_DIR}/common/include
+        ${TOOB_CORE_DIR}/include
+    )
 
-# Apply strict P10 / NASA rules to the wrapper code
-if(COMMAND toob_apply_strict_flags)
-    toob_apply_strict_flags(toob_crypto TRUE)
+    # Apply per-slot compiler flags
+    set(_CRYPTO_UPSTREAM_CFLAGS -fno-lto -ffunction-sections -fdata-sections)
+    if(TOOB_CRYPTO_BACKEND_ENABLED AND DEFINED TOOB_CRYPTO_BACKEND_CFLAGS)
+        list(APPEND _CRYPTO_UPSTREAM_CFLAGS ${TOOB_CRYPTO_BACKEND_CFLAGS})
+    else()
+        list(APPEND _CRYPTO_UPSTREAM_CFLAGS -Os)
+    endif()
+    target_compile_options(toob_crypto_upstream PRIVATE ${_CRYPTO_UPSTREAM_CFLAGS})
+
+    if(TOOB_FEATURE_PQC_HYBRID)
+        target_compile_definitions(toob_crypto_upstream PUBLIC TOOB_FEATURE_PQC_HYBRID=1)
+    endif()
+endif()
+
+# ------------------------------------------------------------------------------
+# 4. Target: toob_crypto (Toob-Boot Wrapper / HAL Adapter)
+# ------------------------------------------------------------------------------
+# P10-compliant wrapper implementing the crypto_hal_t interface.
+if(_CRYPTO_ALL_WRAPPERS)
+    add_library(toob_crypto STATIC ${_CRYPTO_ALL_WRAPPERS})
+
+    if(TOOB_FEATURE_PQC_HYBRID)
+        target_compile_definitions(toob_crypto PUBLIC TOOB_FEATURE_PQC_HYBRID=1)
+    endif()
+
+    target_include_directories(toob_crypto PUBLIC
+        ${_CRYPTO_ALL_INCLUDES}
+        ${CMAKE_SOURCE_DIR}/common/include
+        ${TOOB_CORE_DIR}/include
+        ${CMAKE_BINARY_DIR}/generated
+        ${TOOB_SDK_DIR}/libtoob/include
+    )
+
+    # Link upstream into the wrapper
+    if(TARGET toob_crypto_upstream)
+        target_link_libraries(toob_crypto PUBLIC toob_crypto_upstream)
+    endif()
+
+    # Apply strict P10 flags to the wrapper code
+    if(COMMAND toob_apply_strict_flags)
+        toob_apply_strict_flags(toob_crypto TRUE)
+    endif()
 endif()
