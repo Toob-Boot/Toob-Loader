@@ -32,6 +32,9 @@ type ChipEntry struct {
 	ArchVersion      string `toml:"arch_version"`
 	Toolchain        string `toml:"toolchain"`
 	ToolchainVersion string `toml:"toolchain_version"`
+	CryptoBackend    string `toml:"crypto_backend"`
+	CryptoHash       string `toml:"crypto_hash"`
+	CryptoPqc        string `toml:"crypto_pqc"`
 	Spawned          bool   `toml:"spawned"`
 }
 
@@ -114,6 +117,15 @@ func (lf *Lockfile) Save(path string) error {
 		}
 		if e.ToolchainVersion != "" {
 			b.WriteString(fmt.Sprintf("toolchain_version = %q\n", e.ToolchainVersion))
+		}
+		if e.CryptoBackend != "" {
+			b.WriteString(fmt.Sprintf("crypto_backend = %q\n", e.CryptoBackend))
+		}
+		if e.CryptoHash != "" {
+			b.WriteString(fmt.Sprintf("crypto_hash = %q\n", e.CryptoHash))
+		}
+		if e.CryptoPqc != "" {
+			b.WriteString(fmt.Sprintf("crypto_pqc = %q\n", e.CryptoPqc))
 		}
 		if e.Spawned {
 			b.WriteString("spawned = true\n")

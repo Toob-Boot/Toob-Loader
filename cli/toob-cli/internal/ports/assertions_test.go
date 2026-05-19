@@ -126,6 +126,9 @@ func TestPortFieldTypes(t *testing.T) {
 					if pf.Type.String() == "*ports.ChipSources" && rf.Type.String() == "*registry.ChipSources" {
 						continue
 					}
+					if pf.Type.String() == "*ports.ChipCrypto" && rf.Type.String() == "*registry.ChipCrypto" {
+						continue
+					}
 					t.Errorf("\n[BREAKING CHANGE] %s: Field %q type changed.\n"+
 						"  Port expects %s, but implementation has %s.\n"+
 						"  Fix: Update the field type in internal/ports/ports.go to match. This triggers a MAJOR bump.",

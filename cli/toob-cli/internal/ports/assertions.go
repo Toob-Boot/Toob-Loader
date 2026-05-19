@@ -62,6 +62,68 @@ func assertChipFromPort() {
 	}
 }
 
+// --- ChipCrypto ↔ registry.ChipCrypto ---
+
+func assertChipCryptoToPort() {
+	var r registry.ChipCrypto
+	_ = ChipCrypto{
+		Backend: r.Backend, Hash: r.Hash, Pqc: r.Pqc,
+	}
+}
+
+func assertChipCryptoFromPort() {
+	var p ChipCrypto
+	_ = registry.ChipCrypto{
+		Backend: p.Backend, Hash: p.Hash, Pqc: p.Pqc,
+	}
+}
+
+// --- CryptoInfo ↔ RegistryCrypto ---
+
+func assertCryptoToPort() {
+	var r registry.CryptoInfo
+	_ = RegistryCrypto{
+		Name: r.Name, Path: r.Path, Version: r.Version,
+		Description: r.Description, Category: r.Category,
+		License: r.License, MinCoreSdk: r.MinCoreSdk,
+		Wrapper: r.Wrapper, UpstreamSources: r.UpstreamSources,
+		Cflags: r.Cflags, Includes: r.Includes,
+		ChipBinding: r.ChipBinding,
+	}
+}
+
+func assertCryptoFromPort() {
+	var p RegistryCrypto
+	_ = registry.CryptoInfo{
+		Name: p.Name, Path: p.Path, Version: p.Version,
+		Description: p.Description, Category: p.Category,
+		License: p.License, MinCoreSdk: p.MinCoreSdk,
+		Wrapper: p.Wrapper, UpstreamSources: p.UpstreamSources,
+		Cflags: p.Cflags, Includes: p.Includes,
+		ChipBinding: p.ChipBinding,
+	}
+}
+
+// --- DriverInfo ↔ RegistryDriver ---
+
+func assertDriverToPort() {
+	var r registry.DriverInfo
+	_ = RegistryDriver{
+		Name: r.Name, Path: r.Path,
+		Version: r.Version, Description: r.Description,
+		Category: r.Category,
+	}
+}
+
+func assertDriverFromPort() {
+	var p RegistryDriver
+	_ = registry.DriverInfo{
+		Name: p.Name, Path: p.Path,
+		Version: p.Version, Description: p.Description,
+		Category: p.Category,
+	}
+}
+
 // Removed VendorInfo
 
 // --- ArchInfo ↔ RegistryArch ---
@@ -230,7 +292,11 @@ func assertLockChipToPort() {
 		Name: r.Name, Version: r.Version, Arch: r.Arch,
 		ArchVersion:      r.ArchVersion,
 		Toolchain:        r.Toolchain,
-		ToolchainVersion: r.ToolchainVersion, Spawned: r.Spawned,
+		ToolchainVersion: r.ToolchainVersion,
+		CryptoBackend:    r.CryptoBackend,
+		CryptoHash:       r.CryptoHash,
+		CryptoPqc:        r.CryptoPqc,
+		Spawned:          r.Spawned,
 	}
 }
 
@@ -240,7 +306,11 @@ func assertLockChipFromPort() {
 		Name: p.Name, Version: p.Version, Arch: p.Arch,
 		ArchVersion:      p.ArchVersion,
 		Toolchain:        p.Toolchain,
-		ToolchainVersion: p.ToolchainVersion, Spawned: p.Spawned,
+		ToolchainVersion: p.ToolchainVersion,
+		CryptoBackend:    p.CryptoBackend,
+		CryptoHash:       p.CryptoHash,
+		CryptoPqc:        p.CryptoPqc,
+		Spawned:          p.Spawned,
 	}
 }
 
@@ -299,4 +369,7 @@ func assertDeviceToml() {
 	_ = [2]bool{r.BootConfig.EdgeUnattendedMode, p.BootConfig.EdgeUnattendedMode}
 	_ = [2]uint32{r.BootConfig.BackoffBaseS, p.BootConfig.BackoffBaseS}
 	_ = [2]uint32{r.BootConfig.WdtTimeoutMs, p.BootConfig.WDTTimeoutMs}
+	_ = [2]string{r.Crypto.Backend, p.Crypto.Backend}
+	_ = [2]string{r.Crypto.Hash, p.Crypto.Hash}
+	_ = [2]string{r.Crypto.Pqc, p.Crypto.Pqc}
 }

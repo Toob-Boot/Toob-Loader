@@ -22,6 +22,11 @@ type DeviceToml struct {
 		CoreSDK  string `toml:"core_sdk"`
 		Registry string `toml:"registry"`
 	} `toml:"build"`
+	Crypto struct {
+		Backend string `toml:"backend"`
+		Hash    string `toml:"hash"`
+		Pqc     string `toml:"pqc"`
+	} `toml:"crypto"`
 	DriverConfig map[string]interface{} `toml:"driver_config"`
 	Partitions   struct {
 		Stage0Size    uint32 `toml:"stage0_size"`

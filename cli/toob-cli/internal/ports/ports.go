@@ -132,8 +132,10 @@ type RegistryIndex struct {
 	CLICompatibility string                         `json:"cli_compatibility" port:"required"`
 	Chips            map[string]RegistryChip        `json:"chips"             port:"required"`
 	Archs            map[string]RegistryArch        `json:"archs"             port:"required"`
-	Toolchains       map[string]RegistryToolchain   `json:"toolchains"      port:"required"`
-	Integrations     map[string]RegistryIntegration `json:"integrations"  port:"required"`
+	Toolchains       map[string]RegistryToolchain   `json:"toolchains"        port:"required"`
+	Integrations     map[string]RegistryIntegration `json:"integrations"      port:"required"`
+	Drivers          map[string]RegistryDriver      `json:"drivers"           port:"optional"`
+	Crypto           map[string]RegistryCrypto      `json:"crypto"            port:"optional"`
 }
 
 // RegistryChip is a single chip entry in registry.json.
@@ -148,6 +150,39 @@ type RegistryChip struct {
 	Description      string       `json:"description"       port:"optional"`
 	Sources          *ChipSources `json:"sources"           port:"optional"`
 	Includes         []string     `json:"includes"          port:"optional"`
+	Crypto           *ChipCrypto  `json:"crypto"            port:"optional"`
+}
+
+// ChipCrypto defines the default crypto package assignments for a chip.
+type ChipCrypto struct {
+	Backend string `json:"backend" port:"optional"`
+	Hash    string `json:"hash"    port:"optional"`
+	Pqc     string `json:"pqc"     port:"optional"`
+}
+
+// RegistryCrypto is a crypto package entry in registry.json.
+type RegistryCrypto struct {
+	Name            string   `json:"name"             port:"required"`
+	Path            string   `json:"path"             port:"required"`
+	Version         string   `json:"version"          port:"required"`
+	Description     string   `json:"description"      port:"optional"`
+	Category        []string `json:"category"         port:"required"`
+	License         string   `json:"license"          port:"optional"`
+	MinCoreSdk      string   `json:"min_core_sdk"     port:"optional"`
+	Wrapper         *string  `json:"wrapper"          port:"optional"`
+	UpstreamSources []string `json:"upstream_sources" port:"optional"`
+	Cflags          []string `json:"cflags"           port:"optional"`
+	Includes        []string `json:"includes"         port:"optional"`
+	ChipBinding     []string `json:"chip_binding"     port:"optional"`
+}
+
+// RegistryDriver is a driver entry in registry.json.
+type RegistryDriver struct {
+	Name        string `json:"name"        port:"required"`
+	Path        string `json:"path"        port:"required"`
+	Version     string `json:"version"     port:"required"`
+	Description string `json:"description" port:"optional"`
+	Category    string `json:"category"    port:"optional"`
 }
 
 // Removed RegistryVendor
@@ -225,11 +260,12 @@ type HardwareMemory struct {
 
 // DeviceToml is the parsed content of device.toml (user project manifest).
 type DeviceToml struct {
-	Name       string            `json:"name"       port:"required"`
-	Version    string            `json:"version"    port:"optional"`
-	Device     DeviceSection     `json:"device"     port:"required"`
-	Build      BuildSection      `json:"build"      port:"optional"`
-	Partitions PartitionSection  `json:"partitions" port:"required"`
+	Name       string            `json:"name"        port:"required"`
+	Version    string            `json:"version"     port:"optional"`
+	Device     DeviceSection     `json:"device"      port:"required"`
+	Build      BuildSection      `json:"build"       port:"optional"`
+	Crypto     CryptoSection     `json:"crypto"      port:"optional"`
+	Partitions PartitionSection  `json:"partitions"  port:"required"`
 	BootConfig BootConfigSection `json:"boot_config" port:"optional"`
 }
 
@@ -243,6 +279,13 @@ type BuildSection struct {
 	Compiler string `json:"compiler" port:"optional"` // "latest" | specific version
 	CoreSDK  string `json:"core_sdk" port:"optional"` // "main" | tag
 	Registry string `json:"registry" port:"optional"` // "latest" | version
+}
+
+// CryptoSection allows overriding the chip's default crypto packages.
+type CryptoSection struct {
+	Backend string `json:"backend" port:"optional"`
+	Hash    string `json:"hash"    port:"optional"`
+	Pqc     string `json:"pqc"     port:"optional"`
 }
 
 // PartitionSection defines the flash partition layout.
@@ -370,6 +413,7 @@ type ChipManifest struct {
 	MinCompiler    string       `json:"min_compiler"    port:"optional"`
 	Sources        *ChipSources `json:"sources"         port:"optional"`
 	Includes       []string     `json:"includes"        port:"optional"`
+	Crypto         *ChipCrypto  `json:"crypto"          port:"optional"`
 }
 
 // =============================================================================
@@ -392,6 +436,9 @@ type LockfileChipEntry struct {
 	ArchVersion      string `json:"arch_version"      port:"optional"`
 	Toolchain        string `json:"toolchain"         port:"optional"`
 	ToolchainVersion string `json:"toolchain_version" port:"optional"`
+	CryptoBackend    string `json:"crypto_backend"    port:"optional"`
+	CryptoHash       string `json:"crypto_hash"       port:"optional"`
+	CryptoPqc        string `json:"crypto_pqc"        port:"optional"`
 	Spawned          bool   `json:"spawned"           port:"required"`
 }
 

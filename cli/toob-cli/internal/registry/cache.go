@@ -42,6 +42,14 @@ type ChipInfo struct {
 	Verified         bool         `json:"verified"`
 	Sources          *ChipSources `json:"sources,omitempty"`
 	Includes         []string     `json:"includes,omitempty"`
+	Crypto           *ChipCrypto  `json:"crypto,omitempty"`
+}
+
+// ChipCrypto defines the default crypto package assignments for a chip.
+type ChipCrypto struct {
+	Backend string `json:"backend,omitempty"`
+	Hash    string `json:"hash,omitempty"`
+	Pqc     string `json:"pqc,omitempty"`
 }
 
 // Removed VendorInfo
@@ -66,6 +74,31 @@ type IntegrationInfo struct {
 	Description string `json:"description"`
 }
 
+// CryptoInfo holds metadata for a crypto package from registry.json.
+type CryptoInfo struct {
+	Name            string   `json:"name"`
+	Path            string   `json:"path"`
+	Version         string   `json:"version"`
+	Description     string   `json:"description,omitempty"`
+	Category        []string `json:"category"`
+	License         string   `json:"license,omitempty"`
+	MinCoreSdk      string   `json:"min_core_sdk,omitempty"`
+	Wrapper         *string  `json:"wrapper,omitempty"`
+	UpstreamSources []string `json:"upstream_sources,omitempty"`
+	Cflags          []string `json:"cflags,omitempty"`
+	Includes        []string `json:"includes,omitempty"`
+	ChipBinding     []string `json:"chip_binding,omitempty"`
+}
+
+// DriverInfo holds metadata for a driver from registry.json.
+type DriverInfo struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Version     string `json:"version"`
+	Description string `json:"description,omitempty"`
+	Category    string `json:"category,omitempty"`
+}
+
 // Index is the parsed content of registry.json.
 type Index struct {
 	FormatVersion    int                        `json:"format_version"`
@@ -75,6 +108,8 @@ type Index struct {
 	Archs            map[string]ArchInfo        `json:"archs"`
 	Toolchains       map[string]ToolchainInfo   `json:"toolchains"`
 	Integrations     map[string]IntegrationInfo `json:"integrations"`
+	Drivers          map[string]DriverInfo      `json:"drivers"`
+	Crypto           map[string]CryptoInfo      `json:"crypto"`
 }
 
 type MatrixDependencies struct {
@@ -519,6 +554,24 @@ func (c *Cache) ChipSourcePath(name string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(c.dir, ci.Path), nil
+}
+
+// GetCrypto looks up a single crypto package by name.
+func (c *Cache) GetCrypto(name string) (*CryptoInfo, error) {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return nil, err
+	}
+	ci, ok := idx.Crypto[name]
+	if !ok {
+		names := make([]string, 0, len(idx.Crypto))
+		for n := range idx.Crypto {
+			names = append(names, n)
+		}
+		return nil, fmt.Errorf("crypto package '%s' not found in registry. Available: %s",
+			name, strings.Join(names, ", "))
+	}
+	return &ci, nil
 }
 
 // ArchSourcePath returns the absolute path to an architecture's source in the cache.

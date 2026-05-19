@@ -237,10 +237,11 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == 416 {
+	switch resp.StatusCode {
+	case 416:
 		// Requested Range Not Satisfiable - we probably downloaded the whole file already!
 		ui.Muted("Download already complete.")
-	} else if resp.StatusCode == 206 || resp.StatusCode == 200 {
+	case 206, 200:
 		var out *os.File
 		if resp.StatusCode == 206 {
 			// Resuming
@@ -265,7 +266,7 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 		}
 		spinner.Stop()
 		out.Close()
-	} else {
+	default:
 		return fmt.Errorf("server returned %d", resp.StatusCode)
 	}
 

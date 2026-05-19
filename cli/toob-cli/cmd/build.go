@@ -618,10 +618,9 @@ func runNativeBuild(root string) error {
 	}
 
 	coreDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "core")))
-	cryptoDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "crypto")))
 	stage0Dir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "stage0")))
 
-	// HALs: halChipDir already resolved above (step 7). Resolve arch + vendor.
+	// HALs: halChipDir already resolved above (step 7). Resolve arch.
 	halArchDir := filepath.Join(root, "toobloader", "hal", "arch", arch)
 	if _, err := os.Stat(halArchDir); err != nil {
 		halArchDir = filepath.Join(regDir, "arch", arch)
@@ -638,18 +637,135 @@ func runNativeBuild(root string) error {
 	}
 	toobCLIPath = filepath.ToSlash(toobCLIPath)
 
+	// --- Dynamic Crypto Resolution ---
+	// Priority: device.toml override → chip_manifest.json default → empty (slot unused).
+	cryptoSlots := map[string]string{"backend": "", "hash": "", "pqc": ""}
+	if cm.Crypto != nil {
+		if cm.Crypto.Backend != "" {
+			cryptoSlots["backend"] = cm.Crypto.Backend
+		}
+		if cm.Crypto.Hash != "" {
+			cryptoSlots["hash"] = cm.Crypto.Hash
+		}
+		if cm.Crypto.Pqc != "" {
+			cryptoSlots["pqc"] = cm.Crypto.Pqc
+		}
+	}
+	if dt.Crypto.Backend != "" {
+		cryptoSlots["backend"] = dt.Crypto.Backend
+	}
+	if dt.Crypto.Hash != "" {
+		cryptoSlots["hash"] = dt.Crypto.Hash
+	}
+	if dt.Crypto.Pqc != "" {
+		cryptoSlots["pqc"] = dt.Crypto.Pqc
+	}
+
+	var cryptoCMake strings.Builder
+	resolvedCryptoNames := make(map[string]bool) // deduplication tracker
+	for _, slotName := range []string{"backend", "hash", "pqc"} {
+		pkgName := cryptoSlots[slotName]
+		slotUpper := strings.ToUpper(slotName)
+
+		if pkgName == "" {
+			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
+			continue
+		}
+
+		if idx == nil || idx.Crypto == nil {
+			return fmt.Errorf("cannot resolve crypto package '%s': registry index not loaded", pkgName)
+		}
+		cryptoPkg, ok := idx.Crypto[pkgName]
+		if !ok {
+			return fmt.Errorf("crypto package '%s' (slot: %s) not found in registry", pkgName, slotName)
+		}
+
+		// Validate min_core_sdk
+		if cryptoPkg.MinCoreSdk != "" && coreSDKVer != "main" && coreSDKVer != "dev" {
+			vCurrent, errCur := parseCoreSDKVersion(coreSDKVer)
+			vMin, errMin := parseCoreSDKVersion(cryptoPkg.MinCoreSdk)
+			if errCur == nil && errMin == nil && vCurrent.LessThan(vMin) {
+				return fmt.Errorf("crypto package '%s' requires Core SDK >= %s, but resolved version is %s",
+					pkgName, cryptoPkg.MinCoreSdk, coreSDKVer)
+			}
+		}
+
+		// Validate chip_binding
+		if len(cryptoPkg.ChipBinding) > 0 {
+			bound := false
+			for _, b := range cryptoPkg.ChipBinding {
+				if b == chip {
+					bound = true
+					break
+				}
+			}
+			if !bound {
+				return fmt.Errorf("crypto package '%s' is chip-bound to %v, but target chip is '%s'",
+					pkgName, cryptoPkg.ChipBinding, chip)
+			}
+		}
+
+		// Resolve absolute paths
+		pkgDir := filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path))
+
+		// Deduplicate: if this package was already emitted for a previous slot, skip sources
+		isDuplicate := resolvedCryptoNames[pkgName]
+		resolvedCryptoNames[pkgName] = true
+
+		cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED ON)\n", slotUpper))
+		cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_NAME \"%s\")\n", slotUpper, pkgName))
+		cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_DIR \"%s\")\n", slotUpper, pkgDir))
+
+		if !isDuplicate {
+			// Upstream sources
+			var srcPaths []string
+			for _, src := range cryptoPkg.UpstreamSources {
+				srcPaths = append(srcPaths, filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path, src)))
+			}
+			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_SOURCES \"%s\")\n", slotUpper, strings.Join(srcPaths, ";")))
+
+			// Wrapper
+			if cryptoPkg.Wrapper != nil && *cryptoPkg.Wrapper != "" {
+				wrapperPath := filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path, *cryptoPkg.Wrapper))
+				cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_WRAPPER \"%s\")\n", slotUpper, wrapperPath))
+			}
+
+			// Cflags
+			if len(cryptoPkg.Cflags) > 0 {
+				cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_CFLAGS \"%s\")\n", slotUpper, strings.Join(cryptoPkg.Cflags, ";")))
+			}
+
+			// Include directories
+			if len(cryptoPkg.Includes) > 0 {
+				var incPaths []string
+				for _, inc := range cryptoPkg.Includes {
+					incPaths = append(incPaths, filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path, inc)))
+				}
+				cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_INCLUDES \"%s\")\n", slotUpper, strings.Join(incPaths, ";")))
+			}
+		} else {
+			// Duplicate: reference the previously emitted slot
+			cryptoCMake.WriteString(fmt.Sprintf("# %s slot reuses package '%s' (already compiled by another slot)\n", slotUpper, pkgName))
+		}
+	}
+
+	pqcEnabled := cryptoSlots["pqc"] != ""
+
 	configContent := fmt.Sprintf(
 		"set(TOOB_ARCH \"%s\")\nset(TOOB_CHIP \"%s\")\n"+
 			"set(TOOLCHAIN_PREFIX \"%s\")\n"+
 			"set(TOOB_CORE_DIR \"%s\")\n"+
-			"set(TOOB_CRYPTO_DIR \"%s\")\n"+
 			"set(TOOB_STAGE0_DIR \"%s\")\n"+
 			"set(TOOB_HAL_CHIP_DIR \"%s\")\n"+
 			"set(TOOB_HAL_ARCH_DIR \"%s\")\n"+
 			"set(TOOB_SDK_DIR \"%s\")\n"+
-			"set(TOOB_CLI_PATH \"%s\")\n%s",
+			"set(TOOB_CLI_PATH \"%s\")\n"+
+			"set(TOOB_FEATURE_PQC_HYBRID %s)\n"+
+			"%s\n# --- Dynamic Crypto Configuration ---\n%s",
 		arch, chip, toolchainPrefix,
-		coreDir, cryptoDir, stage0Dir, halChipDir, halArchDir, sdkDir, toobCLIPath, driversCMake.String(),
+		coreDir, stage0Dir, halChipDir, halArchDir, sdkDir, toobCLIPath,
+		map[bool]string{true: "ON", false: "OFF"}[pqcEnabled],
+		driversCMake.String(), cryptoCMake.String(),
 	)
 	if err := os.WriteFile(filepath.Join(generatedDir, "toob_config.cmake"), []byte(configContent), 0o644); err != nil {
 		return err
@@ -870,6 +986,10 @@ func classifyBuildError(output string, projectDir string) {
 		ui.ErrorBanner("Core SDK Error",
 			"The error originated in the Toob Core SDK.",
 			"This is usually a bug in the Toob-Loader repository. Please report it.")
+	} else if strings.Contains(outLower, "crypto/") || strings.Contains(outLower, "crypto_monocypher") || strings.Contains(outLower, "crypto_pqc") {
+		ui.ErrorBanner("Cryptography Layer Error",
+			"The compiler found an error in a crypto package.",
+			"Check your [crypto] configuration in device.toml and ensure the package is compatible with your Core SDK version.")
 	} else if strings.Contains(outLower, "src/") || strings.Contains(outLower, "app/") || strings.Contains(outLower, "main/") || strings.Contains(outLower, "components/") || strings.Contains(outLower, projectBase+"/") {
 		ui.ErrorBanner("Application Code Error",
 			"The compiler found an error in your application code.",
