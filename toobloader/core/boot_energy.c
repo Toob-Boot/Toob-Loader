@@ -26,6 +26,7 @@
 
 
 #include "boot_energy.h"
+#include "boot_ct_utils.h"
 #include "boot_delay.h"
 #include "boot_hal.h"
 #include "boot_panic.h"
@@ -38,11 +39,11 @@
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein!");
 
-/* P10 Zero-Trust CFI Constants */
-#define CFI_ENERGY_INIT 0x10101010
-#define CFI_ENERGY_NO_HAL 0x20202020
-#define CFI_ENERGY_PMIC_EVAL 0x40404040
-#define CFI_ENERGY_ADC_EVAL 0x80808080
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define ENERGY_CFI_SLOT_INIT     0
+#define ENERGY_CFI_SLOT_NO_HAL   1
+#define ENERGY_CFI_SLOT_PMIC     2
+#define ENERGY_CFI_SLOT_ADC      3
 
 /**
  * @brief Branchless O(1) 3-Sample Median Filter
@@ -77,7 +78,18 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
     return BOOT_ERR_INVALID_ARG;
   }
 
-  volatile uint32_t energy_cfi = CFI_ENERGY_INIT;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t energy_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&energy_cfi_seed, sizeof(energy_cfi_seed));
+  }
+  uint32_t cfi_tok[4];
+  cfi_tok[0] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_INIT);
+  cfi_tok[1] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_NO_HAL);
+  cfi_tok[2] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_PMIC);
+  cfi_tok[3] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_ADC);
+
+  volatile uint32_t energy_cfi = cfi_tok[0];
 
   /* ====================================================================
    * 2. FAIL-OPEN FÜR NETZBETRIEB (Wall-Powered Devices)
@@ -86,14 +98,15 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
    * netzbetrieben ohne PMIC), wird das Update bedingungslos freigegeben.
    */
   if (!platform->soc) {
-    energy_cfi ^= CFI_ENERGY_NO_HAL;
+    energy_cfi ^= cfi_tok[1];
 
+    uint32_t expected_no_hal = cfi_tok[0] ^ cfi_tok[1];
     volatile uint32_t no_hal_shield_1 = 0, no_hal_shield_2 = 0;
-    if (energy_cfi == (CFI_ENERGY_INIT ^ CFI_ENERGY_NO_HAL))
+    if (energy_cfi == expected_no_hal)
       no_hal_shield_1 = BOOT_OK;
     BOOT_GLITCH_DELAY();
     if (no_hal_shield_1 == BOOT_OK &&
-        energy_cfi == (CFI_ENERGY_INIT ^ CFI_ENERGY_NO_HAL))
+        energy_cfi == expected_no_hal)
       no_hal_shield_2 = BOOT_OK;
 
     if (no_hal_shield_1 == BOOT_OK && no_hal_shield_2 == BOOT_OK &&
@@ -126,7 +139,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
       pmic_sustain_ok = false;
   }
 
-  energy_cfi ^= CFI_ENERGY_PMIC_EVAL;
+  energy_cfi ^= cfi_tok[2];
 
   /* ====================================================================
    * 4. RAW ADC VOLTAGE EVALUATION (Median Filtered)
@@ -180,7 +193,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
     }
   }
 
-  energy_cfi ^= CFI_ENERGY_ADC_EVAL;
+  energy_cfi ^= cfi_tok[3];
 
   /* ====================================================================
    * 5. GLITCH-RESISTANT RESOLUTION & CFI VALIDATION
@@ -188,8 +201,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
    * Ein Angreifer versucht via EMFI, trotz leerem Akku das Update zu
    * erzwingen (um z.B. Tearing zu provozieren und Signaturen zu schwächen).
    */
-  uint32_t expected_cfi =
-      CFI_ENERGY_INIT ^ CFI_ENERGY_PMIC_EVAL ^ CFI_ENERGY_ADC_EVAL;
+  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[2] ^ cfi_tok[3];
 
   volatile uint32_t cfi_shield_1 = 0, cfi_shield_2 = 0;
   if (energy_cfi == expected_cfi)

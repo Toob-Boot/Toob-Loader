@@ -57,6 +57,10 @@ endif()
 
 target_compile_definitions(toob_stage0 PRIVATE TOOB_MINIMAL_CRYPTO=1)
 
+if(TOOB_ARCH STREQUAL "host" OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(toob_stage0 PRIVATE TOOB_ALLOW_DEV_BYPASS=1)
+endif()
+
 # 2. Toob-Boot Core-Includes verfügbar machen (boot_types.h) + Generiertes Config
 target_include_directories(toob_stage0 PRIVATE
     ${TOOB_STAGE0_DIR}/include

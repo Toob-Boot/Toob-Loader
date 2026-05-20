@@ -129,7 +129,10 @@ if(TARGET toob_crypto_upstream)
     target_link_libraries(toob_stage1 PRIVATE toob_crypto toob_crypto_upstream)
 endif()
 
-# 5.3.5 eFuse Link-Time Mocking Strategy (P10 Anti-Brick)
+# 5.3.5 Cloud Command Pipeline
+option(TOOB_FEATURE_CLOUD_COMMANDS "Enable Cloud Command Pipeline" ON)
+
+# 5.3.6 eFuse Link-Time Mocking Strategy (P10 Anti-Brick)
 option(TOOB_MOCK_EFUSES "Use Link-Time Mocking for eFuses" ON)
 if(TOOB_MOCK_EFUSES)
     add_compile_definitions(TOOB_MOCK_EFUSES=1)

@@ -24,6 +24,7 @@ typedef struct {
     uint64_t generated_nonce;     /**< Dem OS bereitzustellende Anti-Replay Nonce */
     bool boot_recovery_os;        /**< Wahr, wenn das Recovery-OS (Fallback) gebootet wird */
     bool is_tentative_boot;       /**< Exported True if the boot is a trial (TXN_COMMIT) and unconfirmed */
+    bool wipe_requested;          /**< Cloud-Command WIPE: OS soll Factory-Reset ausführen */
 } boot_target_config_t;
 
 /**
@@ -51,6 +52,18 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
  *    - Handelt CONFIRM_COMMIT (vom OS) und RECOVERY_RESOLVED (vom SOS-Fallback).
  *    - Validiert die kryptografische active_nonce aus dem TMR gegen Replay-Angriffe.
  *    - Wenn valid: Setzt TMR Fail-Counter deterministisch auf 0 zurück.
+ *    - Sticky Lock: DEVICE_LOCKED überspringt den Confirm-Check komplett.
+ * 
+ * 2.5 CLOUD-COMMAND EVALUATION:
+ *    - Liest CHIP_CLOUD_CMD_SLOT einmalig in die crypto_arena (TOCTOU-safe).
+ *    - Verifiziert das Envelope (Ed25519 + Counter + Device-ID).
+ *    - Bei gültigem Command: Dispatch (KILLSWITCH, UNLOCK, FORCE_UPDATE, etc.).
+ *    - Bei leerem/invalidem Slot: Skip-Pfad (kein Seiteneffekt).
+ *
+ * 2.7 LOCK-STATE GATE:
+ *    - Prüft ob WAL_INTENT_DEVICE_LOCKED aktiv ist.
+ *    - Wenn ja: boot_panic(BOOT_ERR_DEVICE_LOCKED). Kein Return.
+ *    - Wenn nein: CFI-Token für "nicht locked" wird ge-XOR'd.
  * 
  * 3. FALLBACK CASCADES (M-ROLLBACK):
  *    - Verfolgt System-Crashes (WDT, HardFault).

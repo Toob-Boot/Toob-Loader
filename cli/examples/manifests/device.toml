@@ -1,4 +1,5 @@
 [device]
+vendor = "espressif"
 chip = "esp32c6"
 
 [partitions]

@@ -1,0 +1,8 @@
+toob_cloud_cmd = {
+    1: bstr .size 32,    ; device_id (SHA-256 Hash)
+    2: uint .size 1,     ; command (toob_cloud_cmd_t enum)
+    3: uint .size 4,     ; counter_min (Anti-Replay)
+    4: uint .size 4,     ; issued_at (Unix Timestamp)
+    ? 5: bstr,           ; params (optional, command-specific)
+    101: bstr .size 64,  ; signature_ed25519 (EdDSA Signatur über den Rest der Map)
+}

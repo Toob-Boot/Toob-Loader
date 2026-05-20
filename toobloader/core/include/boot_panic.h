@@ -10,9 +10,6 @@
 
 #include "boot_hal.h"
 
-#define COBS_MARKER_START 0x00
-#define COBS_MARKER_END   0x00
-
 /**
  * @brief The exact 104-byte Payload sent by the technician for Stage 1.5 Rescue.
  *        4 (Slot) + 4 (Sequence ID) + 32 (Nonce Echo) + 64 (Ed25519 Sig) = 104 Bytes.

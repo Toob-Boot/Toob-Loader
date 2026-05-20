@@ -29,7 +29,20 @@ _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason)
     (void)reason;
     while(1) { BOOT_GLITCH_DELAY(); } /* Hardware Trap */
 }
+
+_Noreturn static void dead_halt(void) {
+    while (1) {
+        BOOT_GLITCH_DELAY(); /* Intentional starvation of WDT */
+    }
+}
 /* -------------------------------------------------------------------------- */
+
+#ifndef TOOB_ALLOW_DEV_BYPASS
+  #ifdef NDEBUG
+    #error "TOOB_ALLOW_DEV_BYPASS must be explicitly enabled for production builds"
+  #endif
+  #define TOOB_ALLOW_DEV_BYPASS 0
+#endif
 
 /* P10 Rule: O(1) Memory layout, Assembler Jump */
 static void __attribute__((naked)) jump_to_payload(uint32_t vector_table_addr) {
@@ -68,6 +81,49 @@ int main(void) {
   if (platform->wdt)
     platform->wdt->init(BOOT_WDT_TIMEOUT_MS);
 
+  /* 1.5 DSLC Majority Vote Gate (Phase 2) */
+  uint8_t dslc_reads[5];
+  uint8_t confirmed_dslc = 0xFF;
+  bool dslc_found = false;
+  
+  for (int round = 0; round < 5 && !dslc_found; round++) {
+      /* Anti-Sustained-Glitch: Randomisierter Delay zwischen Reads */
+      if (round > 0 && platform->crypto && platform->crypto->random) {
+          uint8_t jitter = 0;
+          platform->crypto->random(&jitter, 1);
+          for (volatile uint32_t d = 0; d < (uint32_t)(jitter & 0x3F); d++) {
+              BOOT_GLITCH_DELAY();
+          }
+      }
+      uint8_t dslc_buf[64];
+      size_t dslc_len = sizeof(dslc_buf);
+      boot_secure_zeroize(dslc_buf, sizeof(dslc_buf)); /* P10 Defensive */
+      
+      if (platform->crypto->read_dslc(dslc_buf, &dslc_len) == BOOT_OK && dslc_len > 0) {
+          dslc_reads[round] = dslc_buf[0];
+      } else {
+          dslc_reads[round] = 0xFF;
+      }
+      
+      if (round >= 2) {
+          /* Suche nach einem Wert, der mindestens 3x vorkommt */
+          for (int i = 0; i <= round && !dslc_found; i++) {
+              int matches = 0;
+              for (int j = 0; j <= round; j++) {
+                  if (dslc_reads[i] == dslc_reads[j]) matches++;
+              }
+              if (matches >= 3) {
+                  confirmed_dslc = dslc_reads[i];
+                  dslc_found = true;
+              }
+          }
+      }
+  }
+  
+  if (!dslc_found) {
+      dead_halt(); /* Fail-Closed! eFuse unstable, erzwinge Hardware-Reset */
+  }
+
   /* 2. Boot Pointer und Tentative Check */
   uint32_t active_slot = stage0_get_active_slot(platform);
   active_slot = stage0_evaluate_tentative(platform, active_slot);
@@ -103,12 +159,21 @@ int main(void) {
   /* 5. Hardware PubKey Laden */
   uint8_t key_idx = stage0_get_active_otp_key_index(platform);
   uint8_t pubkey[32] __attribute__((aligned(8)));
+  boot_secure_zeroize(pubkey, 32);
+  
+#if TOOB_ALLOW_DEV_BYPASS
+  bool is_dev_bypass = false;
+#endif
   if (platform->crypto->read_pubkey(pubkey, 32, key_idx) != BOOT_OK) {
-    while (1) {
-      if (platform->wdt)
-        platform->wdt->kick();
-      BOOT_GLITCH_DELAY();
+#if TOOB_ALLOW_DEV_BYPASS
+    if (confirmed_dslc == 0x00) {
+        is_dev_bypass = true;
+    } else {
+        dead_halt(); /* P10 Hard-Trap statt soft WDT kick */
     }
+#else
+    dead_halt(); /* Produktionsmodus: Bypass ist physikalisch unmöglich */
+#endif
   }
 
   /* 6. Zero-Allocation Hash Computation */
@@ -134,7 +199,16 @@ int main(void) {
   }
 
   /* 8. Glitch-Resistant Ed25519 Verify */
-  int sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
+  int sig_ok = -1;
+#if TOOB_ALLOW_DEV_BYPASS
+  if (is_dev_bypass) {
+      sig_ok = 0; /* DEVELOPMENT MODE: Signatur-Bypass */
+  } else {
+      sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
+  }
+#else
+  sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
+#endif
 
   boot_secure_zeroize(pubkey, 32);
   boot_secure_zeroize(digest, 64);

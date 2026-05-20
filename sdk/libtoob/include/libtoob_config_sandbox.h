@@ -49,4 +49,12 @@
     #define ADDR_CONFIRM_RTC_RAM ((volatile uint64_t*)(&mock_rtc_ram))
 #endif
 
+/* Cloud-Command Envelope Slot (1 Sektor, Bootloader evaluiert bei jedem Boot) */
+#define TOOB_CLOUD_CMD_SLOT_ADDR  0x000F0000
+#define TOOB_CLOUD_CMD_SLOT_SIZE  0x1000
+
+/* KDM A/B Key Delegation Manifest Slots */
+#define TOOB_KDM_SLOT_A_ADDR     0x000F1000
+#define TOOB_KDM_SLOT_B_ADDR     0x000F2000
+
 #endif /* LIBTOOB_CONFIG_SANDBOX_H */

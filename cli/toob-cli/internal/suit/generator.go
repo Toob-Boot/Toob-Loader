@@ -36,10 +36,13 @@ func Generate(outputDir, compilerRoot, projectRoot, cliVersion string) error {
 		ui.Step("zcbor CLI found locally. Generating strict parsers...")
 	}
 
+	cloudCmdCddl := filepath.Join(compilerRoot, "cli", "suit", "toob_cloud_cmd.cddl")
+
 	commands := [][]string{
 		{"code", "-c", suitCddl, "--decode", "-t", "toob_suit", "--output-c", filepath.Join(outputDir, "boot_suit.c"), "--output-h", filepath.Join(outputDir, "boot_suit.h")},
 		{"code", "-c", telemCddl, "--decode", "-t", "toob_telemetry", "--output-c", filepath.Join(outputDir, "toob_telemetry_decode.c"), "--output-h", filepath.Join(outputDir, "toob_telemetry_decode.h")},
 		{"code", "-c", telemCddl, "--encode", "-t", "toob_telemetry", "--output-c", filepath.Join(outputDir, "toob_telemetry_encode.c"), "--output-h", filepath.Join(outputDir, "toob_telemetry_encode.h")},
+		{"code", "-c", cloudCmdCddl, "--decode", "-t", "toob_cloud_cmd", "--output-c", filepath.Join(outputDir, "boot_cloud_cmd_decode.c"), "--output-h", filepath.Join(outputDir, "boot_cloud_cmd_decode.h")},
 	}
 
 	for _, args := range commands {

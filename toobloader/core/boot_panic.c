@@ -25,13 +25,16 @@
  */
 
 #include "boot_panic.h"
-#include "generated_boot_config.h"
-
+#include "boot_cloud_cmd.h"
+#include "boot_cobs.h"
+#include "boot_ct_utils.h"
 #include "boot_crc32.h"
 #include "boot_delay.h"
 #include "boot_secure_zeroize.h"
+#include "generated_boot_config.h"
 #include <stddef.h>
 #include <string.h>
+
 
 /* Terminal State besitzt die Arena nun exklusiv */
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
@@ -60,159 +63,12 @@ _Static_assert(
      PANIC_CHUNK_MAX_SIZE) == BOOT_CRYPTO_ARENA_SIZE,
     "FATAL: Arena Partitioning exceeds total BOOT_CRYPTO_ARENA_SIZE!");
 
-/* P10 Security Constants */
-#define CFI_PANIC_INIT 0xAAAAAAAA
-#define CFI_AUTH_PASSED 0x55AA55AA
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define PANIC_CFI_SLOT_INIT 0
+#define PANIC_CFI_SLOT_AUTH 1
 
-/**
- * @brief Führt einen speichersicheren, konstanten Zeit-Vergleich für 32-Byte
- * Hashes aus. O(1) Laufzeit ohne Timing-Leakage. Doppelt gesichert gegen
- * Voltage-Glitches.
- */
-static inline boot_status_t
-constant_time_memcmp_32_glitch_safe(const uint8_t *a, const uint8_t *b) {
-  uint32_t acc_fwd = 0;
-  uint32_t acc_rev = 0;
-
-  for (uint32_t i = 0; i < 32; i++) {
-    acc_fwd |= (uint32_t)(a[i] ^ b[i]);
-    acc_rev |= (uint32_t)(a[31 - i] ^ b[31 - i]);
-  }
-
-  volatile uint32_t flag1 = 0, flag2 = 0;
-  if (acc_fwd == 0)
-    flag1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (flag1 == BOOT_OK && acc_rev == 0)
-    flag2 = BOOT_OK;
-
-  if (flag1 != BOOT_OK || flag2 != BOOT_OK)
-    return BOOT_ERR_VERIFY;
-  return BOOT_OK;
-}
-
-/**
- * @brief O(1) Branch-freie Überprüfung auf Erased-Flash-Status. Verhindert
- * Timing-Orakel.
- */
-static bool is_fully_erased_constant_time(const uint8_t *buf, size_t len,
-                                          uint8_t erased_val) {
-  uint32_t diff = 0;
-  for (size_t i = 0; i < len; i++) {
-    diff |= (uint32_t)(buf[i] ^ erased_val);
-  }
-  return diff == 0;
-}
-
-/**
- * @brief Streams a buffer to UART using Naked COBS encoding with O(1) memory.
- *        O(n) time complexity and native WDT feeding.
- */
-static void send_cobs_frame(const boot_platform_t *platform,
-                            const uint8_t *data, size_t len) {
-  if (!platform || !platform->console || !platform->console->putchar ||
-      len == 0 || !data)
-    return;
-
-  /* Frame Start Marker (Sync) */
-  platform->console->putchar((char)COBS_MARKER_START);
-
-  size_t ptr = 0;
-  while (ptr < len) {
-    uint8_t code = 1;
-    size_t end = ptr;
-
-    /* Find next zero or hit 254 data bytes limit (0xFF code) */
-    while (end < len && data[end] != 0 && code < 0xFF) {
-      end++;
-      code++;
-    }
-
-    /* Write Block Code */
-    platform->console->putchar((char)code);
-
-    /* Write Block Data */
-    for (size_t i = ptr; i < end; i++) {
-      platform->console->putchar((char)data[i]);
-      if (platform->wdt && platform->wdt->kick)
-        platform->wdt->kick();
-    }
-
-    ptr = end;
-    /* Consume the physical zero that we encoded virtually */
-    if (ptr < len && data[ptr] == 0) {
-      ptr++;
-    }
-  }
-
-  /* Frame End Marker */
-  platform->console->putchar((char)COBS_MARKER_END);
-  if (platform->console->flush) {
-    platform->console->flush();
-  }
-}
-
-/**
- * @brief O(1) in-place Naked COBS Decoder.
- *        Nutzt `__restrict` für Register-Optimierung, da Lese/Schreibzeiger nie
- * kollidieren.
- */
-static boot_status_t cobs_decode_in_place(uint8_t *__restrict data, size_t len,
-                                          size_t *__restrict out_len) {
-  if (!data || !out_len || len == 0)
-    return BOOT_ERR_INVALID_ARG;
-
-  size_t read_idx = 0;
-  size_t write_idx = 0;
-
-  while (read_idx < len) {
-    uint8_t code = data[read_idx++];
-    if (code == 0)
-      return BOOT_ERR_INVALID_ARG; /* Zeroes sind in COBS-Payloads illegal */
-
-    uint8_t copy_len = code - 1;
-
-    /* MATHEMATICAL GLITCH-SHIELD (Verhindert RCE via Pufferüberlauf)
-     * Schützt `read_idx + copy_len > len` vor 32-bit Wraparound und Voltage
-     * Faults! */
-    volatile uint32_t bounds_shield_1 = 0;
-    volatile uint32_t bounds_shield_2 = 0;
-    bool is_within_bounds = (len - read_idx >= copy_len);
-
-    if (is_within_bounds)
-      bounds_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (bounds_shield_1 == BOOT_OK && is_within_bounds)
-      bounds_shield_2 = BOOT_OK;
-
-    if (bounds_shield_1 != BOOT_OK || bounds_shield_2 != BOOT_OK) {
-      return BOOT_ERR_INVALID_ARG; /* Exploit Trap */
-    }
-
-    /* O(1) in-place shift. Funktioniert sicher, da write_idx <= read_idx
-     * garantiert ist */
-    for (uint8_t i = 0; i < copy_len; i++) {
-      data[write_idx++] = data[read_idx++];
-    }
-
-    /* Implizite Nullen wiederherstellen */
-    if (code < 0xFF && read_idx < len) {
-      if (write_idx >= len)
-        return BOOT_ERR_INVALID_ARG;
-      data[write_idx++] = 0x00;
-    }
-  }
-
-  *out_len = write_idx;
-
-  /* P10 Defense: Reste (Trailing Garbage) nullen, um logische Leakage zu
-   * verhindern */
-  if (write_idx < len) {
-    boot_secure_zeroize(&data[write_idx], len - write_idx);
-  }
-
-  return BOOT_OK;
-}
+/* COBS encode/decode/recv extracted to boot_cobs.c (DRY with
+ * boot_provisioning.c) */
 
 /**
  * @brief Terminal Halt State.
@@ -244,6 +100,16 @@ _Noreturn void boot_panic(const boot_platform_t *platform,
 
   uint32_t failed_auth_attempts = 0;
 
+  /* P10 Anti-Power-Cycle-Brute-Force: Lade persistierten Auth-Zähler aus
+   * RTC-Backup Registern, die über Brownout/Software-Reset hinweg überleben.
+   * Falls kein RTC verfügbar: Deterministischer 5s Boot-Delay als Fallback. */
+  if (platform->soc && platform->soc->read_rtc_backup) {
+    platform->soc->read_rtc_backup(RTC_SLOT_AUTH_ATTEMPTS,
+                                   &failed_auth_attempts);
+  } else {
+    boot_delay_with_wdt(platform, 5000);
+  }
+
 session_reset:
   if (platform->console->putchar) {
     /* Initialisierungs-UART Flush */
@@ -267,7 +133,16 @@ session_reset:
   uint8_t *verify_msg = rx_buf + PANIC_RX_MAX_SIZE;
   uint8_t *chunk_buf = verify_msg + PANIC_VERIFY_MAX_SIZE;
 
-  volatile uint32_t panic_cfi = CFI_PANIC_INIT;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t panic_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed));
+  }
+  uint32_t cfi_tok[2];
+  cfi_tok[0] = cfi_derive(panic_cfi_seed, PANIC_CFI_SLOT_INIT);
+  cfi_tok[1] = cfi_derive(panic_cfi_seed, PANIC_CFI_SLOT_AUTH);
+
+  volatile uint32_t panic_cfi = cfi_tok[0];
 
   /* ============================================================================
    * BLOCK 1: Challenge Generation (2FA)
@@ -275,7 +150,7 @@ session_reset:
    */
   size_t challenge_len = 32; /* Nonce Base Size */
 
-  if (platform->crypto->random(challenge_buf, 32) != BOOT_OK) {
+  if (boot_random_safe(platform, challenge_buf, 32) != BOOT_OK) {
     enter_sos_loop(platform); /* Terminal: TRNG Broken */
   }
 
@@ -304,9 +179,7 @@ session_reset:
 
   /* Monotonic Timer zur Erleichterung für das Host-Tooling anfügen */
   uint32_t current_monotonic = 0;
-  if (platform->crypto->read_monotonic_counter) {
-    platform->crypto->read_monotonic_counter(&current_monotonic);
-  }
+  boot_read_monotonic_counter_safe(platform, &current_monotonic);
 
   /* Exakte Speicher-Mappings (Vermeidet Cast-UBs) */
   memcpy(challenge_buf + challenge_len, &current_monotonic,
@@ -317,7 +190,7 @@ session_reset:
   challenge_len += sizeof(reason);
 
   /* Sende Challenge via COBS an den Techniker */
-  send_cobs_frame(platform, challenge_buf, challenge_len);
+  boot_cobs_send_frame(platform, challenge_buf, challenge_len);
 
   /* ============================================================================
    * BLOCK 2: Auth-Token Empfang & P10-Verifikation (Constant Time Logic)
@@ -358,7 +231,7 @@ session_reset:
     size_t decoded_len = 0;
     volatile uint32_t auth_eval = 0;
 
-    if (cobs_decode_in_place(rx_buf, rx_len, &decoded_len) == BOOT_OK) {
+    if (boot_cobs_decode_in_place(rx_buf, rx_len, &decoded_len) == BOOT_OK) {
       if (decoded_len == sizeof(stage15_auth_payload_t)) {
 
         /* Unaligned Access Mitigation: Cortex-M0/M0+ Exception Prevention.
@@ -384,7 +257,7 @@ session_reset:
         bool time_ok = (safe_sequence_id == current_monotonic + 1);
         bool slot_ok = (safe_slot_id == CHIP_STAGING_SLOT_ID);
         boot_status_t nonce_stat =
-            constant_time_memcmp_32_glitch_safe(auth_nonce, challenge_buf);
+            constant_time_memcmp_glitch_safe(auth_nonce, challenge_buf, 32);
 
         /* P10 Glitch-Resistant Auth-Shield */
         volatile uint32_t shield_1 = 0, shield_2 = 0;
@@ -436,7 +309,7 @@ session_reset:
                 platform->crypto->advance_monotonic_counter();
                 current_monotonic = safe_sequence_id;
               }
-              panic_cfi ^= CFI_AUTH_PASSED;
+              panic_cfi ^= cfi_tok[1];
             }
           }
           boot_secure_zeroize(root_pubkey, 32);
@@ -451,6 +324,12 @@ session_reset:
       break; /* Success! Aus Auth-Schleife ausbrechen */
     } else {
       failed_auth_attempts++;
+
+      /* Persistiere Zähler ins RTC-Backup Register gegen Power-Cycle-Bypass */
+      if (platform->soc && platform->soc->write_rtc_backup) {
+        platform->soc->write_rtc_backup(RTC_SLOT_AUTH_ATTEMPTS,
+                                        failed_auth_attempts);
+      }
 
       /* GAP-C06: Serial Rescue DoS Penalty */
       uint32_t shifts = (failed_auth_attempts > 10) ? 10 : failed_auth_attempts;
@@ -469,10 +348,11 @@ session_reset:
   /* MATHEMATISCHER CFI-BEWEIS: Wir blockieren State-Confusion-Glitches, die uns
    * ohne Authentication direkt hier reinspringen lassen würden! */
   volatile uint32_t cfi_proof_1 = 0, cfi_proof_2 = 0;
-  if (panic_cfi == (CFI_PANIC_INIT ^ CFI_AUTH_PASSED))
+  uint32_t expected_panic_cfi = cfi_tok[0] ^ cfi_tok[1];
+  if (panic_cfi == expected_panic_cfi)
     cfi_proof_1 = BOOT_OK;
   BOOT_GLITCH_DELAY();
-  if (cfi_proof_1 == BOOT_OK && panic_cfi == (CFI_PANIC_INIT ^ CFI_AUTH_PASSED))
+  if (cfi_proof_1 == BOOT_OK && panic_cfi == expected_panic_cfi)
     cfi_proof_2 = BOOT_OK;
 
   if (cfi_proof_1 != BOOT_OK || cfi_proof_2 != BOOT_OK) {
@@ -484,8 +364,86 @@ session_reset:
   uint32_t current_sector_end = CHIP_STAGING_SLOT_ABS_ADDR;
   bool staging_erased = false;
 
+  if (reason == BOOT_ERR_DEVICE_LOCKED) {
+    /* ============================================================================
+     * BLOCK 3A: Cloud Command Unlock Pathway (Gerät ist im Soft-Lock)
+     * ============================================================================
+     */
+    while (1) {
+      boot_cobs_send_frame(platform, (const uint8_t *)"LCK", 3);
+
+      boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
+      size_t chunk_len = 0;
+      bool chunk_received = false;
+
+      while (!chunk_received) {
+        if (platform->wdt && platform->wdt->kick)
+          platform->wdt->kick();
+
+        uint8_t c;
+        if (platform->console->getchar &&
+            platform->console->getchar(&c, 500) != BOOT_OK)
+          break;
+
+        if (c == COBS_MARKER_END) {
+          if (chunk_len > 0)
+            chunk_received = true;
+        } else {
+          if (chunk_len < PANIC_CHUNK_MAX_SIZE) {
+            chunk_buf[chunk_len++] = c;
+          } else {
+            boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
+            chunk_len = 0;
+          }
+        }
+      }
+
+      if (!chunk_received)
+        continue;
+
+      size_t payload_len = 0;
+      if (boot_cobs_decode_in_place(chunk_buf, chunk_len, &payload_len) ==
+              BOOT_OK &&
+          payload_len > 0) {
+
+        toob_cloud_cmd_t cmd_intent = TOOB_CMD_NOP;
+        boot_status_t eval_stat = boot_cloud_cmd_evaluate_buffer(
+            platform, chunk_buf, payload_len, crypto_arena, &cmd_intent);
+
+        if (eval_stat == BOOT_OK && cmd_intent == TOOB_CMD_UNLOCK) {
+          /* SUCCESS: Device Unlocked! */
+          boot_cobs_send_frame(platform, (const uint8_t *)"ULK", 3);
+          boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+
+          /* Kaltstart erzwingen */
+          if (platform->console && platform->console->flush)
+            platform->console->flush();
+          if (platform->clock && platform->clock->deinit)
+            platform->clock->deinit();
+
+          uint32_t hang_timeout = 10000000;
+          while (hang_timeout > 0) {
+            BOOT_GLITCH_DELAY();
+            hang_timeout--;
+          }
+          void (*trap)(void) = NULL;
+          trap();
+        } else {
+          /* Falscher Befehl oder Signatur ungültig */
+          boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
+          goto session_reset;
+        }
+      }
+      boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
+    }
+  }
+
+  /* ============================================================================
+   * BLOCK 3B: Normal Firmware Stream Pathway
+   * ============================================================================
+   */
   while (1) {
-    send_cobs_frame(platform, (const uint8_t *)"RDY", 3);
+    boot_cobs_send_frame(platform, (const uint8_t *)"RDY", 3);
 
     boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
     size_t chunk_len = 0;
@@ -518,7 +476,8 @@ session_reset:
       continue;
 
     size_t payload_len = 0;
-    if (cobs_decode_in_place(chunk_buf, chunk_len, &payload_len) == BOOT_OK &&
+    if (boot_cobs_decode_in_place(chunk_buf, chunk_len, &payload_len) ==
+            BOOT_OK &&
         payload_len > 0) {
 
       volatile uint32_t eof_shield_1 = 0, eof_shield_2 = 0;
@@ -530,7 +489,7 @@ session_reset:
         eof_shield_2 = BOOT_OK;
 
       if (eof_shield_1 == BOOT_OK && eof_shield_2 == BOOT_OK) {
-        send_cobs_frame(platform, (const uint8_t *)"ACK", 3);
+        boot_cobs_send_frame(platform, (const uint8_t *)"ACK", 3);
         boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
         /* P10 HANDOFF FIX: Hardware-Reset erzwingen durch absichtliches
@@ -620,11 +579,11 @@ session_reset:
             if (platform->flash->read(erase_target + chk_off, e_buf,
                                       read_len) != BOOT_OK) {
               needs_erase = true;
-              break;
             }
+            /* P10 Timing-Oracle Defense: Full-scan accumulator, no early exit
+             */
             if (!is_fully_erased_constant_time(e_buf, read_len, e_val)) {
               needs_erase = true;
-              break;
             }
             chk_off += read_len;
             if (platform->wdt && platform->wdt->kick)
@@ -706,7 +665,7 @@ session_reset:
 
         if (write_ok) {
           flash_offset += (uint32_t)aligned_len;
-          send_cobs_frame(platform, (const uint8_t *)"ACK", 3);
+          boot_cobs_send_frame(platform, (const uint8_t *)"ACK", 3);
         } else {
           boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
           goto session_reset; /* Schreibfehler oder Bit-Rot -> Absturz und

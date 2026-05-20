@@ -75,16 +75,19 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t boot_failure_count; /* Aktueller Stand des Edge-Recovery Counters */
     uint32_t net_search_accum_ms;/* Anti-Lagerhaus Netz-Suchzeit Akkumulator */
     uint32_t resume_offset;      /* Partielle Download Resume-Stelle (aus WAL Checkpoint) */
+    uint8_t  device_id[32];      /* P10: Unique DICE Device Identity for Cloud Sync */
+    uint8_t  wipe_requested;     /* OS Instruction to wipe user partitions */
+    uint8_t  _padding[7];        /* P10: 8-Byte Alignment Padding */
     uint32_t crc32_trailer;      /* Kryptographische Versiegelung in .noinit durch S1 */
 } toob_handoff_t;
 
 /* Mathematische Perfektion: Compile-Time Checks (P10) */
-_Static_assert(sizeof(toob_handoff_t) == 40, "toob_handoff_t size breach - must be exactly 40 bytes");
+_Static_assert(sizeof(toob_handoff_t) == 80, "toob_handoff_t size breach - must be exactly 80 bytes");
 _Static_assert(sizeof(toob_handoff_t) % 8 == 0, "toob_handoff_t alignment breach - must be 8-byte aligned");
-_Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 36, "crc32_trailer ABI offset drift detected");
+_Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 76, "crc32_trailer ABI offset drift detected");
 
 /* Konstante für struct_version des Handoff-Headers zur Vermeidung von ABI-Drift */
-#define TOOB_HANDOFF_STRUCT_VERSION 0x01000000
+#define TOOB_HANDOFF_STRUCT_VERSION 0x02000000
 
 /*
  * Cross-Compiler Abstraktion für die ".noinit" Linker-Section.
@@ -186,7 +189,9 @@ typedef enum {
     TOOB_WAL_INTENT_NET_SEARCH_ACCUM = 8,
     TOOB_WAL_INTENT_SLEEP_BACKOFF = 9,
     TOOB_WAL_INTENT_TXN_ROLLBACK_PENDING = 10,
-    TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT = 11 /**< OS-Side Checkpoint for resumable OTA downloads */
+    TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT = 11, /**< OS-Side Checkpoint for resumable OTA downloads */
+    TOOB_WAL_INTENT_CLOUD_CMD = 12,
+    TOOB_WAL_INTENT_DEVICE_LOCKED = 13
 } toob_wal_intent_t;
 
 /* 
@@ -225,9 +230,8 @@ typedef struct {
     uint32_t sector_magic;    /**< Immer TOOB_WAL_SECTOR_MAGIC (0x57414C02) */
     uint32_t sequence_id;     /**< Fortlaufende ID für O(1) Sliding-Window Discovery */
     uint32_t erase_count;     /**< Tracks sector wear leveling */
-    uint8_t  _reserved_tmr_space[40]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
+    uint8_t  _reserved_tmr_space[48]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
     uint32_t header_crc32;    /**< Sichert den Sector-Header */
-    uint8_t  _padding[8];     /**< Definiertes statisches Padding für 64-Byte Alignment */
 } toob_wal_sector_header_t;
 
 typedef union {
@@ -236,7 +240,7 @@ typedef union {
 } toob_wal_sector_header_aligned_t;
 
 _Static_assert(sizeof(toob_wal_sector_header_aligned_t) == TOOB_WAL_HEADER_SIZE, "WAL Header Boundary breach!");
-_Static_assert(offsetof(toob_wal_sector_header_t, header_crc32) == 52, "Sector Header Layout Drift: CRC32 must be at offset 52");
+_Static_assert(offsetof(toob_wal_sector_header_t, header_crc32) == 60, "Sector Header Layout Drift: CRC32 must be at offset 60");
 
 /* Extern Definitions (After structs are fully typed!) */
 extern TOOB_NOINIT toob_handoff_t toob_handoff_state;

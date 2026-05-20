@@ -27,6 +27,7 @@
 #include "boot_crc32.h"
 #include "boot_journal.h"
 #include "boot_secure_zeroize.h"
+#include "boot_ct_utils.h"
 #include <string.h>
 
 /* Zero-Allocation: Exklusive Übernahme der Arena für den Swap-Vorgang */
@@ -81,18 +82,7 @@ static boot_status_t compute_flash_crc32(const boot_platform_t *platform,
   return BOOT_OK;
 }
 
-/**
- * @brief Beweist mathematisch, ob ein Puffer komplett den Erased-Status (0xFF)
- * aufweist.
- */
-static bool is_fully_erased(const uint8_t *buf, size_t len,
-                            uint8_t erased_val) {
-  for (size_t i = 0; i < len; i++) {
-    if (buf[i] != erased_val)
-      return false;
-  }
-  return true;
-}
+
 
 /**
  * @brief Kopiert Daten iterativ zwischen Flash-Sektoren mit simultanem
@@ -196,12 +186,11 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
           platform->flash->read(current_addr + chk_off, crypto_arena, read_len);
       if (status != BOOT_OK) {
         needs_erase = true;
-        break;
       }
 
-      if (!is_fully_erased(crypto_arena, read_len, erased_val)) {
+      /* P10 Timing-Oracle Defense: Full-scan accumulator, no early exit */
+      if (!is_fully_erased_constant_time(crypto_arena, read_len, erased_val)) {
         needs_erase = true;
-        break;
       }
       chk_off += (uint32_t)read_len;
     }
@@ -416,7 +405,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
             break;
           }
 
-          if (memcmp(buf_dst, buf_src, step) != 0) {
+          if (constant_time_memcmp_glitch_safe(buf_dst, buf_src, step) != BOOT_OK) {
             is_identical = false;
             break;
           }

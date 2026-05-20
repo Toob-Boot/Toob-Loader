@@ -55,13 +55,15 @@ target_include_directories(toob_heatshrink PUBLIC common/lib/heatshrink)
 # die Datei zur Evaluierungszeit evtl. noch gar nicht im Filebaum liegt.
 set(GENERATED_SUIT_C "${CMAKE_BINARY_DIR}/generated/boot_suit.c")
 set(GENERATED_TELEMETRY_ENCODE_C "${CMAKE_BINARY_DIR}/generated/toob_telemetry_encode.c")
-set_source_files_properties(${GENERATED_SUIT_C} ${GENERATED_TELEMETRY_ENCODE_C} PROPERTIES GENERATED TRUE)
+set(GENERATED_CLOUD_CMD_C "${CMAKE_BINARY_DIR}/generated/boot_cloud_cmd_decode.c")
+set_source_files_properties(${GENERATED_SUIT_C} ${GENERATED_TELEMETRY_ENCODE_C} ${GENERATED_CLOUD_CMD_C} PROPERTIES GENERATED TRUE)
 
 # M-BUILD GAP-Fix: Custom Command zum Aufrufen der SUIT & Config Generation
 add_custom_command(
     OUTPUT ${GENERATED_SUIT_C}
            ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
            ${GENERATED_TELEMETRY_ENCODE_C}
+           ${GENERATED_CLOUD_CMD_C}
            ${CMAKE_BINARY_DIR}/generated/generated_boot_config.h
            ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
     COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/generated
@@ -80,10 +82,15 @@ add_custom_command(
 add_custom_target(generate_manifest
     DEPENDS ${GENERATED_SUIT_C}
             ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
+            ${GENERATED_CLOUD_CMD_C}
             ${CMAKE_BINARY_DIR}/generated/generated_boot_config.h
             ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
 )
 
+
+# P10 Krypto-Härtung: Optionale echte Double-Execution der Ed25519 Verifikation.
+# Detektiert auch algorithmus-interne Faults auf Kosten von ~30-50ms Boot-Zeit.
+option(TOOB_DOUBLE_VERIFY "Enable double-execution of Ed25519 for highest fault resistance (~+30ms)" OFF)
 
 add_library(toob_core STATIC
     ${TOOB_CORE_DIR}/boot_main.c
@@ -95,13 +102,18 @@ add_library(toob_core STATIC
     ${TOOB_CORE_DIR}/boot_swap.c
     ${TOOB_CORE_DIR}/boot_delta.c
     ${TOOB_CORE_DIR}/boot_rollback.c
+    ${TOOB_CORE_DIR}/boot_cobs.c
     ${TOOB_CORE_DIR}/boot_panic.c
+    ${TOOB_CORE_DIR}/boot_provisioning.c
     ${TOOB_CORE_DIR}/boot_confirm.c
     ${TOOB_CORE_DIR}/boot_diag.c
     ${TOOB_CORE_DIR}/boot_energy.c
     ${TOOB_CORE_DIR}/boot_multiimage.c
+    ${TOOB_CORE_DIR}/boot_identity.c
     ${TOOB_CORE_DIR}/boot_delay.c
+    ${TOOB_CORE_DIR}/boot_cloud_cmd.c
     ${GENERATED_SUIT_C}
+    ${GENERATED_CLOUD_CMD_C}
 )
 
 # Harte Abhängigkeits-Schranke: Schützt vor Race-Conditions bei parallelen Builds (ninja -j8)!
@@ -118,6 +130,10 @@ else()
         ${TOOB_CORE_DIR}/boot_secure_zeroize_host.c
     )
     target_compile_definitions(toob_core PUBLIC TOOB_MOCK_TEST)
+endif()
+
+if(TOOB_DOUBLE_VERIFY)
+    target_compile_definitions(toob_core PRIVATE TOOB_DOUBLE_VERIFY=1)
 endif()
 
 # ------------------------------------------------------------------------------

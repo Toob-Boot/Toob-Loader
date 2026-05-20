@@ -38,12 +38,12 @@ _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 1024,
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK MUST be high-hamming distance for Glitch Shielding");
 
-/* P10 CFI Tracking Constants */
-#define CFI_DELTA_INIT 0x10101010
-#define CFI_DELTA_HDR_OK 0x20202020
-#define CFI_DELTA_BASE_OK 0x40404040
-#define CFI_DELTA_EOF 0x80808080
-#define CFI_DELTA_FLUSHED 0x01010101
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define DELTA_CFI_SLOT_INIT     0
+#define DELTA_CFI_SLOT_HDR      1
+#define DELTA_CFI_SLOT_BASE     2
+#define DELTA_CFI_SLOT_EOF      3
+#define DELTA_CFI_SLOT_FLUSHED  4
 
 /* ==============================================================================
  * INTERNAL HELPERS & GLITCH SHIELDS
@@ -53,14 +53,7 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 #include "boot_ct_utils.h"
 
 
-static inline bool is_fully_erased(const uint8_t *buf, size_t len,
-                                   uint8_t erased_val) {
-  for (size_t i = 0; i < len; i++) {
-    if (buf[i] != erased_val)
-      return false;
-  }
-  return true;
-}
+
 
 /**
  * @brief Flushes the internal Write-Combiner RAM to Flash securely.
@@ -98,7 +91,7 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
     uint8_t erased_val = platform->flash->erased_value;
 
     /* P10 FIX: Isolierter Stack-Buffer (Zerstört die Krypto-Arena nicht!) */
-    uint8_t e_buf[64] __attribute__((aligned(8)));
+    uint8_t e_buf[64] __attribute__((aligned(8))) = {0};
     size_t max_step = sizeof(e_buf);
 
     while (chk_off < sec_size) {
@@ -109,11 +102,10 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
       if (platform->flash->read(erase_target + chk_off, e_buf, step) !=
           BOOT_OK) {
         needs_erase = true;
-        break;
       }
-      if (!is_fully_erased(e_buf, step, erased_val)) {
+      /* P10 Timing-Oracle Defense: Full-scan accumulator, no early exit */
+      if (!is_fully_erased_constant_time(e_buf, step, erased_val)) {
         needs_erase = true;
-        break;
       }
       chk_off += (uint32_t)step;
     }
@@ -218,7 +210,18 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     return BOOT_ERR_VERIFY; /* Payload is too small to be a valid TDS stream */
   }
 
-  volatile uint32_t delta_cfi = CFI_DELTA_INIT;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t delta_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&delta_cfi_seed, sizeof(delta_cfi_seed));
+  }
+  uint32_t cfi_tok[4];
+  cfi_tok[0] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_INIT);
+  cfi_tok[1] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_HDR);
+  cfi_tok[2] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_BASE);
+  cfi_tok[3] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_EOF);
+
+  volatile uint32_t delta_cfi = cfi_tok[0];
   boot_status_t status = BOOT_OK;
 
   /* P10 Alignment Guard: Padding des Struct-Offsets für DMA-Sicherheit */
@@ -290,7 +293,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  delta_cfi ^= CFI_DELTA_HDR_OK;
+  delta_cfi ^= cfi_tok[1];
 
   /* ====================================================================
    * STEP 2: PRE-FLIGHT "GHOST-BASE" VERIFICATION
@@ -353,7 +356,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     }
   }
 
-  delta_cfi ^= CFI_DELTA_BASE_OK;
+  delta_cfi ^= cfi_tok[2];
 
   /* ====================================================================
    * STEP 3: ZERO-ALLOCATION SDVM SETUP
@@ -662,10 +665,9 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  delta_cfi ^= CFI_DELTA_EOF;
+  delta_cfi ^= cfi_tok[3];
 
-  uint32_t expected_cfi =
-      CFI_DELTA_INIT ^ CFI_DELTA_HDR_OK ^ CFI_DELTA_BASE_OK ^ CFI_DELTA_EOF;
+  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[1] ^ cfi_tok[2] ^ cfi_tok[3];
   volatile uint32_t cfi_1 = 0, cfi_2 = 0;
   if (delta_cfi == expected_cfi)
     cfi_1 = BOOT_OK;

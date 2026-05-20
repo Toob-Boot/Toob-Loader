@@ -29,58 +29,11 @@
 #include <stddef.h>
 #include <string.h>
 
-/* ==============================================================================
- * Cross-Compiler Glitch-Delay Injection für Fault-Injection (FI) Defense
- * ==============================================================================
- */
-#if defined(__GNUC__) || defined(__clang__)
-#define TOOB_GLITCH_DELAY() __asm__ volatile("nop; nop; nop;")
-#elif defined(__ICCARM__)
-#include <intrinsics.h>
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    __no_operation();                                                          \
-    __no_operation();                                                          \
-    __no_operation();                                                          \
-  } while (0)
-#elif defined(__CC_ARM) || defined(__ARMCC_VERSION)
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    __nop();                                                                   \
-    __nop();                                                                   \
-    __nop();                                                                   \
-  } while (0)
-#else
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    volatile uint32_t _delay = 0;                                              \
-    _delay = 1;                                                                \
-    (void)_delay;                                                              \
-  } while (0)
-#endif
-
 #if TOOB_MOCK_CONFIRM_BACKEND == TOOB_MOCK_CONFIRM_BACKEND_RTC
 /* Instanziiert den x86 Dummy-Pointer zur Laufzeit, um Segfaults auf dem OS-Host
  * zu verhindern */
 uint64_t mock_rtc_ram = 0;
 #endif
-
-/* ==============================================================================
- * INTERNAL HELPERS
- * ==============================================================================
- */
-
-/**
- * @brief OS-Safe Memory Zeroization (Prevents Compiler DCE).
- * Verhindert das "Liegenbleiben" kryptografischer Nonces im OS-RAM.
- */
-static inline void toob_secure_zeroize(void *ptr, size_t len) {
-  volatile uint8_t *p = (volatile uint8_t *)ptr;
-  while (len--) {
-    *p++ = 0;
-  }
-  __asm__ volatile("" : : "g"(ptr) : "memory");
-}
 
 /* ==============================================================================
  * PUBLIC API IMPLEMENTATION

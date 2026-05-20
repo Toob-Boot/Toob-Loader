@@ -22,6 +22,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* RTC-Backup Register Slot Allocation */
+#define RTC_SLOT_AUTH_ATTEMPTS 0
+
 /* --- 1. Flash HAL (Non-Volatile Storage) --- */
 
 #define TOOB_HAL_ABI_V2 0x02000000
@@ -139,13 +142,27 @@ typedef struct {
       const uint8_t *pubkey, size_t pubkey_len);
 
   /* RNG */
+  /**
+   * @brief Generate cryptographic random bytes.
+   * HAL-Contract: Die Implementierung MUSS NIST SP 800-90B
+   * Repetition Count und Adaptive Proportion Tests intern
+   * durchführen. Bei Versagen: BOOT_ERR_CRYPTO zurückgeben.
+   */
   boot_status_t (*random)(uint8_t *buf, size_t len);
 
   uint32_t (*get_last_vendor_error)(void);
 
   /* Hardware Roots (eFuse / OTP) */
   boot_status_t (*read_pubkey)(uint8_t *key, size_t key_len, uint8_t key_index);
+  boot_status_t (*read_chip_uid)(uint8_t *buf, size_t max_len, size_t *out_len);
   boot_status_t (*read_dslc)(uint8_t *buffer, size_t *len);
+  boot_status_t (*write_dslc)(const uint8_t *value, size_t len);
+  /**
+   * @brief Read hardware monotonic counter.
+   * HAL-Contract: Die Implementierung MUSS den gelesenen Wert intern
+   * durch Komplement-Prüfung (read + read_inverted) validieren und
+   * bei Diskrepanz BOOT_ERR_VERIFY zurückgeben.
+   */
   boot_status_t (*read_monotonic_counter)(uint32_t *ctr);
   boot_status_t (*advance_monotonic_counter)(void);
 
@@ -226,8 +243,31 @@ typedef struct {
    */
   bool (*get_recovery_pin_state)(void);
 
+  /**
+   * @brief Power-Cycle-Resiliente RTC-Backup Register.
+   * HAL-Contract: Werte MÜSSEN über Brownout/Software-Reset hinweg
+   * erhalten bleiben. Bei Hardware ohne RTC-Backup: NULL setzen.
+   */
+  boot_status_t (*read_rtc_backup)(uint8_t slot, uint32_t *value);
+  boot_status_t (*write_rtc_backup)(uint8_t slot, uint32_t value);
+
   uint32_t min_battery_mv;
 } soc_hal_t;
+
+/* --- 8. Provisioning HAL (Factory & Lifecycle) --- */
+
+/**
+ * @brief Factory Provisioning and Key-Lock Interface
+ * Extracted from crypto_hal_t to enforce separation of concerns and
+ * ensure that normal firmware cannot accidentally write eFuses.
+ */
+typedef struct {
+    boot_status_t (*burn_pubkey)(const uint8_t *key, size_t len, uint8_t index);
+    boot_status_t (*write_dslc)(uint8_t value);
+    boot_status_t (*set_protection_bits)(uint32_t bitmask);
+    boot_status_t (*enable_secure_boot)(void);
+    boot_status_t (*enable_flash_encryption)(void);
+} provisioning_hal_t;
 
 /* --- Master Platform Container --- */
 
@@ -241,8 +281,9 @@ typedef struct {
   const crypto_hal_t *crypto;   /**< PFLICHT */
   const clock_hal_t *clock;     /**< PFLICHT */
   const wdt_hal_t *wdt;         /**< PFLICHT */
-  const console_hal_t *console; /**< Optional */
-  const soc_hal_t *soc;         /**< Optional */
+  const console_hal_t *console;           /**< Optional */
+  const soc_hal_t *soc;                   /**< Optional */
+  const provisioning_hal_t *provisioning; /**< Optional */
 } boot_platform_t;
 
 /**

@@ -30,39 +30,6 @@
 #include <string.h>
 
 /* ==============================================================================
- * Cross-Compiler Glitch-Delay Injection für Fault-Injection (FI) Defense
- * Erzeugt Instruktions-Barrieren gegen EMFI-bedingte PC-Sprünge, kompatibel
- * mit allen relevanten Cortex-M / RISC-V Compilern des Feature-OS.
- * ==============================================================================
- */
-#if defined(__GNUC__) || defined(__clang__)
-#define TOOB_GLITCH_DELAY() __asm__ volatile("nop; nop; nop;")
-#elif defined(__ICCARM__)
-#include <intrinsics.h>
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    __no_operation();                                                          \
-    __no_operation();                                                          \
-    __no_operation();                                                          \
-  } while (0)
-#elif defined(__CC_ARM) || defined(__ARMCC_VERSION)
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    __nop();                                                                   \
-    __nop();                                                                   \
-    __nop();                                                                   \
-  } while (0)
-#else
-/* Fallback Sequence-Point, falls inline Assembly strikt verboten ist */
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    volatile uint32_t _delay = 0;                                              \
-    _delay = 1;                                                                \
-    (void)_delay;                                                              \
-  } while (0)
-#endif
-
-/* ==============================================================================
  * .noinit RAM Definition (GAP-39)
  * (Wird durch den Linker in die uninitialisierte Sektion gemappt)
  *

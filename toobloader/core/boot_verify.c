@@ -23,6 +23,7 @@
  */
 
 #include "boot_verify.h"
+#include "boot_ct_utils.h"
 #include "boot_secure_zeroize.h"
 #include "boot_types.h"
 #include <stddef.h>
@@ -35,14 +36,15 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein, um "
                "das Double-Check Pattern zu garantieren!");
 
-/* P10 Zero-Trust CFI Constants */
-#define CFI_VERIFY_INIT 0x00000000
-#define CFI_VERIFY_STEP_1 0x11111111
-#define CFI_VERIFY_STEP_2 0x22222222
-#define CFI_VERIFY_STEP_3 0x33333333
-#define CFI_VERIFY_STEP_4 0x44444444
-#define CFI_VERIFY_STEP_5 0x88888888
-#define CFI_VERIFY_STEP_5_SKIP 0x55555555
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define VERIFY_CFI_SLOT_INIT      0
+#define VERIFY_CFI_SLOT_1         1
+#define VERIFY_CFI_SLOT_2         2
+#define VERIFY_CFI_SLOT_3         3
+#define VERIFY_CFI_SLOT_4         4
+#define VERIFY_CFI_SLOT_5         5
+#define VERIFY_CFI_SLOT_5_SKIP    6
+#define VERIFY_CFI_NUM_TOKENS     7
 
 /**
  * @brief O(1) Mathematisch perfekter Buffer-Boundary Check (UB-frei).
@@ -115,9 +117,19 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   boot_status_t final_status =
       BOOT_ERR_VERIFY; /* Grundzustand: Kompromittiert / Default-Deny */
 
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t verify_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&verify_cfi_seed, sizeof(verify_cfi_seed));
+  }
+  uint32_t cfi_tok[VERIFY_CFI_NUM_TOKENS];
+  for (uint8_t i = 0; i < VERIFY_CFI_NUM_TOKENS; i++) {
+    cfi_tok[i] = cfi_derive(verify_cfi_seed, i);
+  }
+
   /* CFI-Akkumulator: Beweist den physischen Durchlauf der Verifikationsblöcke
    */
-  volatile uint32_t execution_path = CFI_VERIFY_INIT;
+  volatile uint32_t execution_path = cfi_tok[VERIFY_CFI_SLOT_INIT];
 
   /* P10 Stack Allocation: 8-Byte Alignment zwingend für HW-Crypto-Cores */
   uint8_t root_pubkey[32] __attribute__((aligned(8)));
@@ -177,7 +189,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= CFI_VERIFY_STEP_1; /* Schritt 1 erfolgreich bewiesen */
+  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_1]; /* Schritt 1 erfolgreich bewiesen */
 
   /* ====================================================================
    * 3. CONSTANT-TIME eFUSE DOWNGRADE CHECK (Side-Channel Closure)
@@ -228,7 +240,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= CFI_VERIFY_STEP_2; /* Schritt 2 erfolgreich bewiesen */
+  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_2]; /* Schritt 2 erfolgreich bewiesen */
 
   /* ====================================================================
    * 4. HARDWARE ROOT-OF-TRUST EXTRACTION (Glitch-Hardened)
@@ -271,7 +283,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= CFI_VERIFY_STEP_3; /* Schritt 3 erfolgreich bewiesen */
+  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_3]; /* Schritt 3 erfolgreich bewiesen */
 
   /* ====================================================================
    * 5. ENVELOPE-FIRST ED25519 VERIFICATION (Glitch Hardened)
@@ -287,10 +299,29 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();
 
-  /* DPA MINIMIZATION: Wir schreddern den Root Key SOFORT nach dem
-   * Signatur-Check! Er darf keine Makrosekunde länger als zwingend nötig im RAM
-   * verweilen. */
+#if TOOB_DOUBLE_VERIFY
+  /* DOUBLE-EXECUTION: Zweiter, vollständiger Krypto-Aufruf detektiert auch
+   * algorithmus-interne Faults (z.B. Glitch im Monocypher Feldmultiplizierer).
+   * Trade-off: root_pubkey bleibt ~30ms länger im RAM (dokumentiert in
+   * docs/security_model.md, Abschnitt "DPA vs. Glitch-Resistenz"). */
+  BOOT_GLITCH_DELAY();
+  boot_status_t verify_stat_2 = platform->crypto->verify_ed25519(
+      work_buffer, local_env.manifest_size, local_env.signature_ed25519,
+      root_pubkey);
+  if (platform->wdt && platform->wdt->kick)
+    platform->wdt->kick();
+
   boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
+
+  if (verify_stat != verify_stat_2 || verify_stat_2 != BOOT_OK) {
+    final_status = BOOT_ERR_VERIFY;
+    goto cleanup;
+  }
+#else
+  /* DPA MINIMIZATION: Root Key wird SOFORT nach dem Signatur-Check geschreddert.
+   * Er darf keine Makrosekunde länger als zwingend nötig im RAM verweilen. */
+  boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
+#endif
 
   if (verify_stat == BOOT_OK) {
     ed_secure_flag_1 = BOOT_OK;
@@ -308,7 +339,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= CFI_VERIFY_STEP_4; /* Schritt 4 erfolgreich bewiesen */
+  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_4]; /* Schritt 4 erfolgreich bewiesen */
 
   /* ====================================================================
    * 6. POST-QUANTUM HYBRID ENFORCEMENT (Bypass Shielded)
@@ -415,7 +446,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     }
 
     execution_path ^=
-        CFI_VERIFY_STEP_5; /* Schritt 5 (PQC) erfolgreich bewiesen */
+        cfi_tok[VERIFY_CFI_SLOT_5]; /* Schritt 5 (PQC) erfolgreich bewiesen */
   } else {
     /* NEGATIVE CFI ROUTING: Beweist physikalisch, dass PQC legitimerweise
      * übersprungen wurde! */
@@ -435,7 +466,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
       goto cleanup;
     }
     execution_path ^=
-        CFI_VERIFY_STEP_5_SKIP; /* Negativer Pfad (Kein PQC) bewiesen */
+        cfi_tok[VERIFY_CFI_SLOT_5_SKIP]; /* Negativer Pfad (Kein PQC) bewiesen */
   }
 
   /* ====================================================================
@@ -444,9 +475,11 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   /* Berechne das erwartete kryptografische Hamming-Weight, das die CPU
    * am Ende des Durchlaufs im CFI-Akkumulator aufweisen muss. */
   uint32_t expected_path =
-      CFI_VERIFY_INIT ^ CFI_VERIFY_STEP_1 ^ CFI_VERIFY_STEP_2 ^
-      CFI_VERIFY_STEP_3 ^ CFI_VERIFY_STEP_4 ^
-      (pqc_required_proven ? CFI_VERIFY_STEP_5 : CFI_VERIFY_STEP_5_SKIP);
+      cfi_tok[VERIFY_CFI_SLOT_INIT] ^ cfi_tok[VERIFY_CFI_SLOT_1] ^
+      cfi_tok[VERIFY_CFI_SLOT_2] ^ cfi_tok[VERIFY_CFI_SLOT_3] ^
+      cfi_tok[VERIFY_CFI_SLOT_4] ^
+      (pqc_required_proven ? cfi_tok[VERIFY_CFI_SLOT_5]
+                           : cfi_tok[VERIFY_CFI_SLOT_5_SKIP]);
 
   volatile uint32_t path_check_1 = 0;
   volatile uint32_t path_check_2 = 0;

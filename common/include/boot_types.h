@@ -68,7 +68,12 @@ typedef enum {
     BOOT_ERR_WAL_LOCKED        = 0xF5C5C5C5,  /**< Transaktion über WAL-Grenzen verboten */
     BOOT_RECOVERY_REQUESTED    = 0xF6D6D6D6,  /**< Manueller/Hardware-Ausgelöster Fallback auf Serial Rescue */
     BOOT_ERR_ABI_MISMATCH      = 0xF7E7E7E7,  /**< HAL ABI-Version eines Structs ist zu alt/inkompatibel */
-    BOOT_ERR_DOWNGRADE         = 0xF8F8F8F8   /**< Hybrid SVN Check fehlgeschlagen (Anti-Rollback) */
+    BOOT_ERR_DOWNGRADE         = 0xF8F8F8F8,  /**< Hybrid SVN Check fehlgeschlagen (Anti-Rollback) */
+    
+    /* Cloud Command Errors */
+    BOOT_ERR_DEVICE_LOCKED       = 0xF9090909,
+    BOOT_ERR_CMD_REPLAY          = 0xFA1A1A1A,
+    BOOT_ERR_CMD_DEVICE_MISMATCH = 0xFB2B2B2B
 } boot_status_t;
 
 /* --- 2. Hardware Reset Reasons --- */
@@ -87,6 +92,20 @@ typedef enum {
   RESET_REASON_SOFTWARE = 5,  /**< NVIC_SystemReset() / Soft-Reboot */
   RESET_REASON_HARD_FAULT = 6 /**< CPU Exception Triggered */
 } reset_reason_t;
+
+/* --- 2.5 Cloud Command Types --- */
+
+/**
+ * @brief Identifiziert den Typ eines signierten Cloud Commands.
+ */
+typedef enum {
+    TOOB_CMD_FORCE_UPDATE  = 0x01,
+    TOOB_CMD_KILLSWITCH    = 0x02,
+    TOOB_CMD_UNLOCK        = 0x03,
+    TOOB_CMD_ROTATE_KEY    = 0x04,
+    TOOB_CMD_WIPE          = 0x05,
+    TOOB_CMD_REVOKE        = 0x06,
+} toob_cloud_cmd_t;
 
 /* --- 3. Stage 1 / Stage 0 Communication & Identity --- */
 

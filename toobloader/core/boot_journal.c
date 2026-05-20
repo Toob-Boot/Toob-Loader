@@ -59,18 +59,6 @@ static bool is_newer_sequence(uint32_t new_seq, uint32_t old_seq) {
          ((new_seq < old_seq) && (old_seq - new_seq > (1U << 31)));
 }
 
-/**
- * @brief Prüft ob ein Buffer komplett den Erased-Status (0xFF) aufweist
- */
-static bool is_fully_erased(const uint8_t *buf, size_t len,
-                            uint8_t erased_val) {
-  for (size_t i = 0; i < len; i++) {
-    if (buf[i] != erased_val)
-      return false;
-  }
-  return true;
-}
-
 #include "boot_ct_utils.h"
 
 /**
@@ -112,7 +100,7 @@ static boot_status_t smart_erase_sector(const boot_platform_t *platform,
   uint8_t erased_val = platform->flash->erased_value;
 
   /* P10 Alignment für Hardware DMAs (Verhindert Unaligned-Exception) */
-  uint8_t chk_buf[64] __attribute__((aligned(8)));
+  uint8_t chk_buf[64] __attribute__((aligned(8))) = {0};
 
   /* Linearer Read-Ahead um festzustellen, ob ein destruktiver Hardware-Erase
    * überhaupt nötig ist */
@@ -123,11 +111,10 @@ static boot_status_t smart_erase_sector(const boot_platform_t *platform,
 
     if (platform->flash->read(addr + chk_off, chk_buf, read_len) != BOOT_OK) {
       needs_erase = true;
-      break;
     }
-    if (!is_fully_erased(chk_buf, read_len, erased_val)) {
+    /* P10 Timing-Oracle Defense: Full-scan accumulator, no early exit */
+    if (!is_fully_erased_constant_time(chk_buf, read_len, erased_val)) {
       needs_erase = true;
-      break;
     }
     chk_off += read_len;
     if (platform->wdt && platform->wdt->kick)
@@ -241,7 +228,8 @@ static uint32_t scan_for_frontier_linear(const boot_platform_t *platform,
 
     /* 1. Erkennung von völlig gelöschtem Flash (Saubere Front) UB-Frei via
      * is_fully_erased */
-    if (is_fully_erased((const uint8_t *)&entry, sizeof(entry), erased_val)) {
+    if (is_fully_erased_constant_time((const uint8_t *)&entry, sizeof(entry),
+                                      erased_val)) {
       boot_secure_zeroize(&entry, sizeof(entry));
       return offset; /* Frontier gefunden! */
     }
@@ -286,7 +274,8 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     return BOOT_ERR_INVALID_ARG;
 
   /* 1. O(1) Static Layout Initialization (Single Source of Truth)
-   * Nutzt P10-Stack-Free Arrays (.rodata) für physikalisch perfekte Asymmetrie */
+   * Nutzt P10-Stack-Free Arrays (.rodata) für physikalisch perfekte Asymmetrie
+   */
   static const uint32_t hw_addrs[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_ADDRS;
   static const size_t hw_sizes[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_SIZES;
 
@@ -623,8 +612,8 @@ boot_status_t boot_journal_append(const boot_platform_t *platform,
     if (platform->flash->read(wal_sector_addrs[active_wal_index] +
                                   target_offset,
                               check_buf, sizeof(check_buf)) == BOOT_OK) {
-      if (!is_fully_erased(check_buf, sizeof(check_buf),
-                           platform->flash->erased_value)) {
+      if (!is_fully_erased_constant_time(check_buf, sizeof(check_buf),
+                                         platform->flash->erased_value)) {
         target_offset = 0; /* Dirty Boundary Detected! Torn Write present! */
         needs_rotation = true;
       }

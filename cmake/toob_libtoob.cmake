@@ -21,6 +21,7 @@
 add_library(toob_libtoob STATIC
     ${TOOB_SDK_DIR}/libtoob/toob_confirm.c
     ${TOOB_SDK_DIR}/libtoob/toob_update.c
+    ${TOOB_SDK_DIR}/libtoob/toob_cloud_submit.c
     ${TOOB_SDK_DIR}/libtoob/toob_diag.c
     ${TOOB_SDK_DIR}/libtoob/toob_handoff.c
     ${TOOB_SDK_DIR}/libtoob/toob_ota.c

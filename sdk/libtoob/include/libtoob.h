@@ -212,6 +212,38 @@ toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
 toob_status_t toob_get_boot_diag_cbor(uint8_t* out_buf, size_t max_len, size_t* out_len);
 
 /* ==============================================================================
+ * Cloud-Command Submission API (Phase 7)
+ * ==============================================================================
+ * Das OS empfängt Cloud-Command Envelopes (CBOR, Ed25519-signiert) vom Server
+ * und delegiert sie über dieses API an den Bootloader. Der Bootloader evaluiert
+ * den Command beim nächsten Boot (Step 2.5 in boot_state.c).
+ */
+
+/**
+ * @brief Schreibt ein Cloud-Command-Envelope in den CHIP_CLOUD_CMD_SLOT.
+ *
+ * Sequenz: Erase → Write → CRC Read-Back → WAL Signal.
+ * Der Bootloader evaluiert den Slot beim nächsten Boot autonom.
+ *
+ * @param envelope  Zeiger auf das rohe CBOR-Envelope (inkl. Signatur).
+ * @param len       Länge des Envelopes in Bytes.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL/Überlänge,
+ *         TOOB_ERR_FLASH bei Erase/Write-Fehler,
+ *         TOOB_ERR_FLASH_HW bei Read-Back-Mismatch.
+ */
+toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len);
+
+/**
+ * @brief Extrahiert die 32-Byte DICE Device-ID aus dem Boot-Handoff.
+ *
+ * @param out_id  Ziel-Buffer (mind. 32 Bytes).
+ * @param id_len  Größe des Buffers. Muss >= 32 sein.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL oder zu kleinem Buffer,
+ *         TOOB_ERR_VERIFY bei korruptem Handoff.
+ */
+toob_status_t toob_get_device_id(uint8_t *out_id, size_t id_len);
+
+/* ==============================================================================
  * Der Hard-Linker Contract "Zero-Bloat Shim"
  * ==============================================================================
  * Toob-Loader verweigert die Kopplung an ausufernde Vendor-SDK SPI Treiber. 

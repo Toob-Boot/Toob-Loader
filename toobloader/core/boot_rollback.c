@@ -46,11 +46,12 @@ _Static_assert(
 
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
 
-/* P10 Revert CFI Constants */
-#define CFI_RB_INIT 0x10101010
-#define CFI_RB_HDR 0x20202020
-#define CFI_RB_VERIFIED 0x40404040
-#define CFI_RB_DONE 0x80808080
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define RB_CFI_SLOT_INIT     0
+#define RB_CFI_SLOT_HDR      1
+#define RB_CFI_SLOT_VERIFIED 2
+#define RB_CFI_SLOT_DONE     3
+#define RB_CFI_NUM_TOKENS    4
 
 #include "boot_ct_utils.h"
 
@@ -103,8 +104,17 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
     return BOOT_ERR_INVALID_ARG;
   }
 
-  /* P10 Control Flow Integrity Tracker (Verhindert PC-Glitches zum Return) */
-  volatile uint32_t cfi_tracker = 0xAAAAAAAA;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t svn_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&svn_cfi_seed, sizeof(svn_cfi_seed));
+  }
+  uint32_t svn_tok[RB_CFI_NUM_TOKENS];
+  for (uint8_t i = 0; i < RB_CFI_NUM_TOKENS; i++) {
+    svn_tok[i] = cfi_derive(svn_cfi_seed, i);
+  }
+
+  volatile uint32_t cfi_tracker = svn_tok[0];
 
   /* 1. Lese persistierte SVN Werte sicher aus WAL TMR Payload */
   wal_tmr_payload_t tmr __attribute__((aligned(8)));
@@ -124,38 +134,35 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
       is_recovery_os ? tmr.svn_recovery_counter : tmr.app_svn;
   boot_secure_zeroize(&tmr, sizeof(tmr)); /* Sensible Daten umgehend abräumen */
 
-  cfi_tracker ^= 0x11111111;
+  cfi_tracker ^= svn_tok[1];
 
   /* 2. Hardware-Root-of-Trust (eFuse Epoch) abrufen (Glitch-Shielded) */
   uint32_t efuse_epoch = 0;
-  if (platform->crypto->read_monotonic_counter) {
-    if (platform->wdt && platform->wdt->kick)
-      platform->wdt->kick();
-    boot_status_t efuse_status =
-        platform->crypto->read_monotonic_counter(&efuse_epoch);
-    if (platform->wdt && platform->wdt->kick)
-      platform->wdt->kick();
+  if (platform->wdt && platform->wdt->kick)
+    platform->wdt->kick();
+  boot_status_t efuse_status = boot_read_monotonic_counter_safe(platform, &efuse_epoch);
+  if (platform->wdt && platform->wdt->kick)
+    platform->wdt->kick();
 
-    /* EMFI Instruction Skip Protection für das eFuse Resultat */
-    volatile uint32_t eshield_1 = 0, eshield_2 = 0;
-    if (efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED)
-      eshield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (eshield_1 == BOOT_OK &&
-        (efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED))
-      eshield_2 = BOOT_OK;
+  /* EMFI Instruction Skip Protection für das eFuse Resultat */
+  volatile uint32_t eshield_1 = 0, eshield_2 = 0;
+  if (efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED)
+    eshield_1 = BOOT_OK;
+  BOOT_GLITCH_DELAY();
+  if (eshield_1 == BOOT_OK &&
+      (efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED))
+    eshield_2 = BOOT_OK;
 
-    if (eshield_1 != BOOT_OK || eshield_2 != BOOT_OK ||
-        eshield_1 != eshield_2) {
-      return BOOT_ERR_VERIFY; /* Trapped Hardware Glitch */
-    }
-
-    if (efuse_status != BOOT_OK && efuse_status != BOOT_ERR_NOT_SUPPORTED) {
-      return efuse_status;
-    }
+  if (eshield_1 != BOOT_OK || eshield_2 != BOOT_OK ||
+      eshield_1 != eshield_2) {
+    return BOOT_ERR_VERIFY; /* Trapped Hardware Glitch */
   }
 
-  cfi_tracker ^= 0x22222222;
+  if (efuse_status != BOOT_OK && efuse_status != BOOT_ERR_NOT_SUPPORTED) {
+    return efuse_status;
+  }
+
+  cfi_tracker ^= svn_tok[2];
 
   /* 3. MATHEMATISCHER GLITCH-BEWEIS (Voltage Skip Protection)
    * Verweigert Downgrades rigoros. Identische Versionen (Re-Flashes) sind für
@@ -185,10 +192,9 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
     return BOOT_ERR_DOWNGRADE;
   }
 
-  cfi_tracker ^= 0x44444444;
+  cfi_tracker ^= svn_tok[3];
 
-  /* Mathematischer Beweis der lückenlosen Ausführung */
-  uint32_t expected_cfi = 0xAAAAAAAA ^ 0x11111111 ^ 0x22222222 ^ 0x44444444;
+  uint32_t expected_cfi = svn_tok[0] ^ svn_tok[1] ^ svn_tok[2] ^ svn_tok[3];
   volatile uint32_t proof_1 = 0, proof_2 = 0;
 
   if (cfi_tracker == expected_cfi)
@@ -354,9 +360,19 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     return BOOT_ERR_INVALID_ARG;
   }
 
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t rv_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&rv_cfi_seed, sizeof(rv_cfi_seed));
+  }
+  uint32_t rv_tok[RB_CFI_NUM_TOKENS];
+  for (uint8_t i = 0; i < RB_CFI_NUM_TOKENS; i++) {
+    rv_tok[i] = cfi_derive(rv_cfi_seed, i);
+  }
+
   boot_status_t status = BOOT_OK;
   uint32_t physical_app_erases = 0;
-  volatile uint32_t revert_cfi = CFI_RB_INIT;
+  volatile uint32_t revert_cfi = rv_tok[0];
 
   /* P10 Pre-Declaration Rule: Alle Intents und Buffer am Scope-Anfang
    * deklarieren, damit der Single-Exit Cleanup niemals über uninitialisierte
@@ -389,7 +405,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
   memcpy(&backup_header, hdr_buf, sizeof(toob_image_header_t));
   boot_secure_zeroize(hdr_buf, sizeof(hdr_buf)); /* Leakage Defense */
 
-  revert_cfi ^= CFI_RB_HDR;
+  revert_cfi ^= rv_tok[1];
 
   /* 2. P10 Glitch-Proof Bounds Check (Verhindert Flash-Exploits durch
    * Header-Fakes) */
@@ -428,7 +444,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     goto revert_cleanup;
   }
 
-  revert_cfi ^= CFI_RB_VERIFIED;
+  revert_cfi ^= rv_tok[2];
 
   /* 3. Resume-Logik (Brownout-Recovery) & Intent-Checkpointing */
   uint32_t dummy_accum = 0;
@@ -646,11 +662,10 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     current_offset += (uint32_t)block_size;
   }
 
-  revert_cfi ^= CFI_RB_DONE;
+  revert_cfi ^= rv_tok[3];
 
   /* CFI Final Resolution */
-  uint32_t expected_cfi =
-      CFI_RB_INIT ^ CFI_RB_HDR ^ CFI_RB_VERIFIED ^ CFI_RB_DONE;
+  uint32_t expected_cfi = rv_tok[0] ^ rv_tok[1] ^ rv_tok[2] ^ rv_tok[3];
   volatile uint32_t cfi_shield_1 = 0, cfi_shield_2 = 0;
 
   if (revert_cfi == expected_cfi)

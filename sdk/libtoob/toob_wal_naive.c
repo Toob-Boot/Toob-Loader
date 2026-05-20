@@ -24,36 +24,6 @@
 #include <stddef.h>
 #include <string.h>
 
-/* ==============================================================================
- * Cross-Compiler Glitch-Delay Injection für Fault-Injection (FI) Defense
- * ==============================================================================
- */
-#if defined(__GNUC__) || defined(__clang__)
-#define TOOB_GLITCH_DELAY() __asm__ volatile("nop; nop; nop;")
-#elif defined(__ICCARM__)
-#include <intrinsics.h>
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    __no_operation();                                                          \
-    __no_operation();                                                          \
-    __no_operation();                                                          \
-  } while (0)
-#elif defined(__CC_ARM) || defined(__ARMCC_VERSION)
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    __nop();                                                                   \
-    __nop();                                                                   \
-    __nop();                                                                   \
-  } while (0)
-#else
-#define TOOB_GLITCH_DELAY()                                                    \
-  do {                                                                         \
-    volatile uint32_t _delay = 0;                                              \
-    _delay = 1;                                                                \
-    (void)_delay;                                                              \
-  } while (0)
-#endif
-
 static const uint32_t wal_sector_addrs[CHIP_WAL_SECTORS] =
     TOOB_WAL_SECTOR_ADDRS;
 static const uint32_t wal_sector_sizes[CHIP_WAL_SECTORS] =
@@ -63,17 +33,6 @@ static const uint32_t wal_sector_sizes[CHIP_WAL_SECTORS] =
  * INTERNAL MATHEMATICS & HELPERS
  * ==============================================================================
  */
-
-/**
- * @brief OS-Safe Memory Zeroization (Prevents DCE).
- */
-static inline void toob_secure_zeroize(void *ptr, size_t len) {
-  volatile uint8_t *p = (volatile uint8_t *)ptr;
-  while (len--) {
-    *p++ = 0;
-  }
-  __asm__ volatile("" : : "g"(ptr) : "memory");
-}
 
 /**
  * @brief RFC 1982 Serial Number Arithmetic (100% Wrap-Around Safe).
@@ -97,32 +56,6 @@ static inline bool is_fully_erased(const uint8_t *buf, size_t len,
       return false;
   }
   return true;
-}
-
-/**
- * @brief Führt einen speichersicheren, konstanten Zeit-Vergleich aus.
- */
-static toob_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
-                                                      const uint8_t *b,
-                                                      size_t len) {
-  uint32_t acc_fwd = 0;
-  uint32_t acc_rev = 0;
-
-  for (size_t i = 0; i < len; i++) {
-    acc_fwd |= (uint32_t)(a[i] ^ b[i]);
-    acc_rev |= (uint32_t)(a[len - 1 - i] ^ b[len - 1 - i]);
-  }
-
-  volatile uint32_t shield_1 = 0, shield_2 = 0;
-  if (acc_fwd == 0)
-    shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (shield_1 == TOOB_OK && acc_rev == 0)
-    shield_2 = TOOB_OK;
-
-  if (shield_1 == TOOB_OK && shield_2 == TOOB_OK && shield_1 == shield_2)
-    return TOOB_OK;
-  return TOOB_ERR_VERIFY;
 }
 
 /* ==============================================================================
@@ -273,7 +206,7 @@ toob_status_t toob_wal_naive_append(const toob_wal_entry_payload_t *intent) {
         if (toob_os_flash_read(active_sector_addr + offset,
                                (uint8_t *)&verify_buf,
                                sizeof(verify_buf)) == TOOB_OK) {
-          if (constant_time_memcmp_glitch_safe((const uint8_t *)&aligned_buf,
+          if (toob_ct_memcmp_glitch_safe((const uint8_t *)&aligned_buf,
                                                (const uint8_t *)&verify_buf,
                                                sizeof(verify_buf)) != TOOB_OK) {
             w_stat = TOOB_ERR_FLASH_HW; /* Bit-Rot / Tearing on write */

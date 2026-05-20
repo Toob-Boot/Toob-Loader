@@ -28,7 +28,6 @@
 #include "boot_secure_zeroize.h"
 #include <string.h>
 
-
 /* Zero-Allocation: Exklusive Übernahme der Arena für das Multi-Image Routing */
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
 
@@ -37,10 +36,10 @@ _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 1024,
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "Glitch-Defense benötigt High-Hamming-Distance BOOT_OK");
 
-/* P10 CFI Constants */
-#define CFI_MI_INIT 0x10101010
-#define CFI_MI_BOUNDS_OK 0x20202020
-#define CFI_MI_COMPLETE 0x40404040
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define MI_CFI_SLOT_INIT 0
+#define MI_CFI_SLOT_BOUNDS 1
+#define MI_CFI_SLOT_COMPLETE 2
 
 /* ==============================================================================
  * INTERNAL MATHEMATICS & GLITCH SHIELDS
@@ -112,7 +111,17 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
   if (num_components > 256)
     return BOOT_ERR_INVALID_ARG;
 
-  volatile uint32_t multi_cfi = CFI_MI_INIT;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t mi_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&mi_cfi_seed, sizeof(mi_cfi_seed));
+  }
+  uint32_t cfi_tok[3];
+  cfi_tok[0] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_INIT);
+  cfi_tok[1] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_BOUNDS);
+  cfi_tok[2] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_COMPLETE);
+
+  volatile uint32_t multi_cfi = cfi_tok[0];
   boot_status_t final_status = BOOT_ERR_VERIFY;
 
   /* ====================================================================
@@ -123,8 +132,9 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
    */
   bool bounds_violation = false;
   for (uint32_t i = 0; i < num_components; i++) {
-    if (!is_target_whitelisted(components[i].target_addr, components[i].image_size,
-                               whitelist, num_regions)) {
+    if (!is_target_whitelisted(components[i].target_addr,
+                               components[i].image_size, whitelist,
+                               num_regions)) {
       bounds_violation = true;
       break;
     }
@@ -149,12 +159,12 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
     return BOOT_ERR_FLASH_BOUNDS; /* Exploit-Attempt Trapped! */
   }
 
-  multi_cfi ^= CFI_MI_BOUNDS_OK;
+  multi_cfi ^= cfi_tok[1];
 
   /* Berechne den dynamisch erwarteten CFI Hash, der am Ende bewiesen werden
    * muss. Verhindert, dass ein Glitch 2 Komponenten überspringt und sich das
    * XOR aufhebt. */
-  uint32_t expected_cfi = CFI_MI_INIT ^ CFI_MI_BOUNDS_OK ^ CFI_MI_COMPLETE;
+  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[1] ^ cfi_tok[2];
   for (uint32_t i = 0; i < num_components; i++) {
     expected_cfi ^= (~components[i].component_id);
   }
@@ -245,8 +255,9 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
     while (written < comp.image_size) {
       if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
-      size_t step = (comp.image_size - written > half_stream) ? half_stream
-                                                        : (comp.image_size - written);
+      size_t step = (comp.image_size - written > half_stream)
+                        ? half_stream
+                        : (comp.image_size - written);
 
       uint32_t src_addr = staging_base + comp.staging_offset + written;
       uint32_t dst_addr = comp.target_addr + written;
@@ -316,7 +327,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
         (~comp.component_id); /* Component flashed & verified successfully */
   }
 
-  multi_cfi ^= CFI_MI_COMPLETE;
+  multi_cfi ^= cfi_tok[2];
 
   /* ====================================================================
    * STEP 4: FINAL ALGEBRAIC RESOLUTION (Glitch Trap)

@@ -26,12 +26,15 @@
 #include "generated_boot_config.h"
 
 #include "boot_crc32.h"
+#include "boot_ct_utils.h"
 #include "boot_delay.h"
 #include "boot_diag.h"
 #include "boot_panic.h"
+#include "boot_provisioning.h"
 #include "boot_secure_zeroize.h"
 #include "boot_state.h"
 #include "boot_journal.h"
+#include "boot_identity.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -47,17 +50,14 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 /* Definition of the central zero-allocation memory block */
 uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE] __attribute__((aligned(8)));
 
-/* P10 Zero-Trust CFI Constants for Master Orchestrator.
- * Collision-Freedom Analysis: All 15 pairwise XOR combinations of these 6
- * tokens are non-zero. No triple-XOR combination equals zero either (verified:
- * each token occupies a unique nibble lane). If a 7th step is ever added,
- * re-verify that no subset of tokens XORs to zero. */
-#define CFI_MAIN_INIT 0x10101010
-#define CFI_MAIN_HW_UP 0x20202020
-#define CFI_MAIN_EXEC 0x40404040
-#define CFI_MAIN_BOUNDS 0x80808080
-#define CFI_MAIN_HANDOFF 0x01010101
-#define CFI_MAIN_HW_DOWN 0x02020202
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define MAIN_CFI_SLOT_INIT    0
+#define MAIN_CFI_SLOT_HW_UP   1
+#define MAIN_CFI_SLOT_EXEC    2
+#define MAIN_CFI_SLOT_BOUNDS  3
+#define MAIN_CFI_SLOT_HANDOFF 4
+#define MAIN_CFI_SLOT_HW_DOWN 5
+#define MAIN_CFI_NUM_TOKENS   6
 
 /* Init-Tracking Bitmask Flags für Fail-Safe Cleanup */
 #define INIT_MASK_CLOCK (1U << 0)
@@ -99,7 +99,10 @@ BOOT_NOINIT toob_boot_diag_t toob_diag_state;
 boot_status_t boot_main(const boot_platform_t *platform,
                         boot_target_config_t *target_out) {
 
-  volatile uint32_t main_cfi = CFI_MAIN_INIT;
+  /* P10 CFI Randomisierung: Seed wird später nach crypto->init gezogen */
+  uint32_t main_cfi_seed = 0;
+  uint32_t cfi_tok[MAIN_CFI_NUM_TOKENS] = {0};
+  volatile uint32_t main_cfi = 0; /* Initialisiert nach TRNG-Seed */
 
   /* P10 Leakage Prevention: Zeroize the output immediately (Zero-Day Fallback)
    */
@@ -238,7 +241,16 @@ boot_status_t boot_main(const boot_platform_t *platform,
     init_mask |= INIT_MASK_SOC;
   }
 
-  main_cfi ^= CFI_MAIN_HW_UP;
+  /* TRNG ist jetzt verfügbar: CFI-Tokens ableiten */
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&main_cfi_seed, sizeof(main_cfi_seed));
+  }
+  for (uint8_t i = 0; i < MAIN_CFI_NUM_TOKENS; i++) {
+    cfi_tok[i] = cfi_derive(main_cfi_seed, i);
+  }
+  main_cfi = cfi_tok[MAIN_CFI_SLOT_INIT];
+
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HW_UP];
   goto init_success;
 
 init_cleanup:
@@ -296,6 +308,27 @@ init_success:
 
   /*
    * ==============================================================================
+   * BLOCK 2.6 - DSLC-Gated Provisioning Entry (Factory Only)
+   * ==============================================================================
+   * Wenn das Gerät unprovisioniert ist (DSLC == 0x00), wird NICHT das OS
+   * gestartet, sondern die UART-Provisioning-Session betreten.
+   * Die Fabrik-Sicherheit wird durch den physischen Zugang zum Gerät
+   * gewährleistet — ein Recovery-Pin ist hier NICHT erforderlich.
+   */
+  if (platform->crypto->read_dslc) {
+    uint8_t dslc_val = 0xFF;
+    size_t dslc_len = 1;
+    if (platform->crypto->read_dslc(&dslc_val, &dslc_len) == BOOT_OK &&
+        dslc_len > 0 && dslc_val == 0x00) {
+      if (platform->provisioning) {
+        boot_provisioning_run(platform);
+        return BOOT_ERR_NOT_SUPPORTED; /* Unreachable P10 Safety */
+      }
+    }
+  }
+
+  /*
+   * ==============================================================================
    * BLOCK 3 - Execution (State Machine Orchestration)
    * ==============================================================================
    */
@@ -327,7 +360,7 @@ init_success:
     goto panic_fallthrough;
   }
 
-  main_cfi ^= CFI_MAIN_EXEC;
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_EXEC];
 
   /*
    * ==============================================================================
@@ -371,7 +404,7 @@ init_success:
     goto panic_fallthrough;
   }
 
-  main_cfi ^= CFI_MAIN_BOUNDS;
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_BOUNDS];
 
   /*
    * ==============================================================================
@@ -412,6 +445,14 @@ init_success:
   local_handoff.net_search_accum_ms = target_out->net_search_accum_ms;
   local_handoff.resume_offset = target_out->resume_offset;
 
+  /* Phase 4: Device-ID Derivation */
+  boot_status_t id_status = boot_derive_device_id(platform, local_handoff.device_id);
+  if (id_status != BOOT_OK) {
+      /* P10 Defensive: Fallback for Development Mode (unprovisioned keys) */
+      boot_secure_zeroize(local_handoff.device_id, 32);
+  }
+  local_handoff.wipe_requested = target_out->wipe_requested ? 1 : 0;
+
   platform->wdt->kick();
 
   size_t handoff_hash_len = offsetof(toob_handoff_t, crc32_trailer);
@@ -436,7 +477,7 @@ init_success:
     goto panic_fallthrough;
   }
 
-  main_cfi ^= CFI_MAIN_HANDOFF;
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HANDOFF];
 
   /*
    * ==============================================================================
@@ -499,7 +540,7 @@ init_success:
   /* Zeitbasis abwerfen */
   platform->clock->deinit();
 
-  main_cfi ^= CFI_MAIN_HW_DOWN;
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HW_DOWN];
 
   /* ==============================================================================
    * FINAL GLITCH-DEFENSE GATE (CFI VALIDATION)
@@ -508,8 +549,10 @@ init_success:
    * durchlaufen wurde. Ein PC-Glitch wird hier in der finalen Taktstufe
    * abgefangen!
    */
-  uint32_t expected_cfi = CFI_MAIN_INIT ^ CFI_MAIN_HW_UP ^ CFI_MAIN_EXEC ^
-                          CFI_MAIN_BOUNDS ^ CFI_MAIN_HANDOFF ^ CFI_MAIN_HW_DOWN;
+  uint32_t expected_cfi = cfi_tok[MAIN_CFI_SLOT_INIT];
+  for (uint8_t i = 1; i < MAIN_CFI_NUM_TOKENS; i++) {
+    expected_cfi ^= cfi_tok[i];
+  }
 
   volatile uint32_t final_shield_1 = 0, final_shield_2 = 0;
 

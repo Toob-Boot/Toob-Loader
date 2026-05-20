@@ -29,12 +29,18 @@ typedef enum {
   WAL_INTENT_CONFIRM_COMMIT = 4,
   WAL_INTENT_RECOVERY_RESOLVED = 5,
   WAL_INTENT_TXN_ROLLBACK = 6,
-  WAL_INTENT_DEPRECATED_NONCE = 7, /**< Deprecated. Nonce resides in TMR payload now */
+  WAL_INTENT_DEPRECATED_NONCE =
+      7, /**< Deprecated. Nonce resides in TMR payload now */
   WAL_INTENT_NET_SEARCH_ACCUM = 8, /**< Anti-Lagerhaus Lockout: Persistiert die
                                       akkumulierte Netz-Suchzeit */
-  WAL_INTENT_SLEEP_BACKOFF = 9, /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
-  WAL_INTENT_TXN_ROLLBACK_PENDING = 10, /**< 1-way Firmware restore in progress */
-  WAL_INTENT_DOWNLOAD_CHECKPOINT = 11 /**< OS-Side Checkpoint for resumable OTA downloads */
+  WAL_INTENT_SLEEP_BACKOFF =
+      9, /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
+  WAL_INTENT_TXN_ROLLBACK_PENDING =
+      10, /**< 1-way Firmware restore in progress */
+  WAL_INTENT_DOWNLOAD_CHECKPOINT =
+      11, /**< OS-Side Checkpoint for resumable OTA downloads */
+  WAL_INTENT_CLOUD_CMD = 12,
+  WAL_INTENT_DEVICE_LOCKED = 13
 } wal_intent_t;
 
 /**
@@ -50,11 +56,16 @@ typedef struct {
   uint32_t app_slot_erase_counter;
   uint32_t staging_slot_erase_counter;
   uint32_t swap_buffer_erase_counter;
-  
-  /* P10 Anti-Replay: Nonce resides in TMR (Hardware-Signed), Not WAL! 
-     Splitted into 32-bit chunks to strictly prevent 8-Byte struct alignment padding. */
+
+  /* P10 Anti-Replay: Nonce resides in TMR (Hardware-Signed), Not WAL!
+     Splitted into 32-bit chunks to strictly prevent 8-Byte struct alignment
+     padding. */
   uint32_t active_nonce_lo;
   uint32_t active_nonce_hi;
+
+  /* Cloud-Command Key Delegation Manifest (KDM) State */
+  uint32_t kdm_sequence;
+  uint32_t active_kdm_slot;
 } wal_tmr_payload_t;
 
 /**
@@ -68,7 +79,6 @@ typedef struct {
   uint32_t erase_count;       /**< Tracks sector wear leveling */
   wal_tmr_payload_t tmr_data; /**< Eine von 3 TMR Kopien (GAP-C01) */
   uint32_t header_crc32;      /**< Sichert den Sector-Header */
-  uint8_t _padding[8];        /**< Definiertes statisches Padding für 64-Byte Alignment */
 } wal_sector_header_t;
 
 /**
@@ -83,17 +93,20 @@ typedef union {
 _Static_assert(
     sizeof(wal_sector_header_aligned_t) % 8 == 0,
     "GAP-C03: WAL Sector Header padding violates hardware alignment!");
-_Static_assert(sizeof(wal_tmr_payload_t) == 40, "ABI Drift: TMR payload must be exactly 40 bytes!");
-_Static_assert(sizeof(wal_sector_header_t) == 64, "ABI Drift: WAL Header must be exactly 64 bytes!");
+_Static_assert(sizeof(wal_tmr_payload_t) == 48,
+               "ABI Drift: TMR payload must be exactly 48 bytes!");
+_Static_assert(sizeof(wal_sector_header_t) == 64,
+               "ABI Drift: WAL Header must be exactly 64 bytes!");
 
 /**
  * @brief Der Payload eines einzelnen angehängten WAL-Eintrags.
  */
 typedef struct {
-  uint32_t magic;      /**< Immer WAL_ENTRY_MAGIC (0xBEEF) */
-  uint32_t intent;     /**< Der Transaction Intent (enum wal_intent_t) */
+  uint32_t magic;  /**< Immer WAL_ENTRY_MAGIC (0xBEEF) */
+  uint32_t intent; /**< Der Transaction Intent (enum wal_intent_t) */
 
-  /* FIX: 64-bit Nonce direkt hier für 8-Byte Alignment ohne Struct-Padding (P10 Struct Geometry) */
+  /* FIX: 64-bit Nonce direkt hier für 8-Byte Alignment ohne Struct-Padding (P10
+   * Struct Geometry) */
   uint64_t expected_nonce; /**< Sichert EXPECTED_NONCE vor dem OS-Jump */
 
   /* Transaktionale Daten für Resume/Checkpointing */
@@ -118,12 +131,25 @@ typedef union {
 _Static_assert(sizeof(wal_entry_aligned_t) % 8 == 0,
                "GAP-C03: WAL padding violates hardware alignment!");
 
-/* P10 Zero-Dependency Sicherung: Zentraler Translation-Layer Check gegen ABI-Drift der Boundaries */
-_Static_assert(sizeof(wal_entry_payload_t) == sizeof(toob_wal_entry_payload_t), "ABI Drift: WAL Entry Type Size Mismatch!");
-_Static_assert((uint32_t)WAL_ENTRY_MAGIC == (uint32_t)TOOB_WAL_ENTRY_MAGIC, "ABI Drift: WAL Entry Magic Mismatch!");
-_Static_assert((int)WAL_INTENT_CONFIRM_COMMIT == (int)TOOB_WAL_INTENT_CONFIRM_COMMIT, "ABI Drift: Enum Confirm Commit Mismatch!");
-_Static_assert((int)WAL_INTENT_UPDATE_PENDING == (int)TOOB_WAL_INTENT_UPDATE_PENDING, "ABI Drift: Enum Update Pending Mismatch!");
-_Static_assert(sizeof(wal_sector_header_t) == sizeof(toob_wal_sector_header_t), "ABI Drift: WAL Header Size Mismatch!");
+/* P10 Zero-Dependency Sicherung: Zentraler Translation-Layer Check gegen
+ * ABI-Drift der Boundaries */
+_Static_assert(sizeof(wal_entry_payload_t) == sizeof(toob_wal_entry_payload_t),
+               "ABI Drift: WAL Entry Type Size Mismatch!");
+_Static_assert((uint32_t)WAL_ENTRY_MAGIC == (uint32_t)TOOB_WAL_ENTRY_MAGIC,
+               "ABI Drift: WAL Entry Magic Mismatch!");
+_Static_assert((int)WAL_INTENT_CONFIRM_COMMIT ==
+                   (int)TOOB_WAL_INTENT_CONFIRM_COMMIT,
+               "ABI Drift: Enum Confirm Commit Mismatch!");
+_Static_assert((int)WAL_INTENT_UPDATE_PENDING ==
+                   (int)TOOB_WAL_INTENT_UPDATE_PENDING,
+               "ABI Drift: Enum Update Pending Mismatch!");
+_Static_assert((int)WAL_INTENT_CLOUD_CMD == (int)TOOB_WAL_INTENT_CLOUD_CMD,
+               "ABI Drift: Enum Cloud Cmd Mismatch!");
+_Static_assert((int)WAL_INTENT_DEVICE_LOCKED ==
+                   (int)TOOB_WAL_INTENT_DEVICE_LOCKED,
+               "ABI Drift: Enum Device Locked Mismatch!");
+_Static_assert(sizeof(wal_sector_header_t) == sizeof(toob_wal_sector_header_t),
+               "ABI Drift: WAL Header Size Mismatch!");
 
 /**
  * @brief Initialisiert das WAL (Scannt Sliding Window & lädt TMR via Majority
