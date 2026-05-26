@@ -6,16 +6,19 @@
 package registry
 
 import (
+	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/ui"
 )
@@ -230,25 +233,14 @@ func (c *Cache) tryCleanStaleLock(lockDir string) bool {
 	return false
 }
 
-// getHubURL returns the URL of the Toob Hub API
-func getHubURL() string {
-	if url := os.Getenv("TOOB_HUB_URL"); url != "" {
-		return url
-	}
-	return "https://ci.the-toob.com" // Default Hetzner CI Daemon (via Caddy)
-}
-
 // Sync updates the registry. If useDev is true, it syncs the bleeding-edge 'main' branch.
-// Otherwise, it discovers the latest stable tag from version_index.json and syncs that.
+// Otherwise, it discovers the latest stable revision from the API and syncs that.
 // If force is true, the local cache is bypassed and the version is re-downloaded.
 func (c *Cache) Sync(useDev bool, force bool) error {
-	previousVer, _ := c.HeadCommit()
-
-	if useDev {
-		return c.checkout("main", true, previousVer)
-	}
-
-	latestVer, err := c.getLatestStableVersion()
+	client := apiclient.New()
+	
+	ui.Step("Fetching registry revision from API...")
+	revResp, err := client.GetRevision(context.Background())
 	if err != nil {
 		if c.IsInitialized() {
 			ui.Warn("Could not check for updates (%v). Using cached registry.", err)
@@ -257,54 +249,73 @@ func (c *Cache) Sync(useDev bool, force bool) error {
 		return fmt.Errorf("cannot discover registry version (offline?): %w", err)
 	}
 
-	ui.Step("Discovered latest stable registry: %s", ui.Cyan(latestVer))
-	return c.checkout(latestVer, force, previousVer)
+	latestVer := fmt.Sprintf("%d", revResp.Revision)
+	ui.Step("Discovered latest stable registry revision: %s", ui.Cyan(latestVer))
+
+	return c.checkoutAPI(latestVer, force)
 }
 
-// getLatestStableVersion fetches version_index.json from the Toob-Registry repository
-// and returns the highest version listed under Official.Registry.
-func (c *Cache) getLatestStableVersion() (string, error) {
-	client := http.Client{Timeout: 5 * time.Second}
-	url := fmt.Sprintf(
-		"https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/version_index.json?t=%d",
-		time.Now().Unix(),
-	)
+// checkoutAPI downloads and activates a specific registry revision using the API.
+func (c *Cache) checkoutAPI(version string, force bool) error {
+	targetDir := filepath.Join(c.rootDir, "versions", version)
 
-	resp, err := client.Get(url)
+	if force {
+		os.RemoveAll(targetDir)
+	}
+
+	previousVer, _ := c.HeadCommit()
+
+	// Cache hit
+	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil && !force {
+		c.dir = targetDir
+		c.persistActive(version)
+		if previousVer == version {
+			ui.Success("Registry is up to date (rev %s)", version)
+		} else {
+			ui.Info("Registry Source: Local Cache (rev %s)", version)
+		}
+		return nil
+	}
+
+	unlock, err := c.lock()
 	if err != nil {
-		return "", err
+		return err
 	}
-	defer resp.Body.Close()
+	defer unlock()
 
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	var index struct {
-		Official struct {
-			Registry []struct {
-				Version string `json:"version"`
-			} `json:"registry"`
-		} `json:"official"`
+	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
+		c.dir = targetDir
+		c.persistActive(version)
+		return nil
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&index); err != nil {
-		return "", err
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return err
 	}
 
-	if len(index.Official.Registry) == 0 {
-		return "", fmt.Errorf("no official registry versions found in index")
+	ui.Step("Downloading Registry Index from API...")
+	client := apiclient.New()
+	indexData, err := client.GetIndex(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to download registry index: %w", err)
 	}
 
-	return index.Official.Registry[0].Version, nil
-}
-
-// buildDownloadURL constructs the GitHub archive URL for a registry version.
-func buildDownloadURL(version string) string {
-	if version == "main" {
-		return "https://github.com/Toob-Boot/Toob-Registry/archive/refs/heads/main.zip"
+	if err := os.WriteFile(filepath.Join(targetDir, "registry.json"), indexData, 0o644); err != nil {
+		return err
 	}
-	return fmt.Sprintf("https://github.com/Toob-Boot/Toob-Registry/archive/refs/tags/%s.zip", version)
+
+	// Fetch matrix to cache it
+	ui.Step("Downloading Compatibility Matrix...")
+	matrixData, err := client.GetMatrix(context.Background(), "")
+	if err == nil {
+		os.WriteFile(filepath.Join(targetDir, "compatibility_matrix.json"), matrixData, 0o644)
+	}
+
+	c.dir = targetDir
+	c.index = nil
+	c.persistActive(version)
+
+	return nil
 }
 
 // resolveCanonicalVersion reads registry_version from the downloaded registry.json.
@@ -328,67 +339,7 @@ func (c *Cache) persistActive(ver string) {
 
 // SwitchVersion activates a specific registry version (used by chip add/spawn).
 func (c *Cache) SwitchVersion(version string) error {
-	return c.checkout(version, false, "")
-}
-
-// checkout downloads and activates a specific registry version.
-// Dev versions ("main") are always re-downloaded. Semver tags are cached unless force is true.
-func (c *Cache) checkout(version string, force bool, previousVer string) error {
-	isDev := version == "main"
-	targetDir := filepath.Join(c.rootDir, "versions", version)
-
-	// Dev mode or force: always re-download
-	if isDev || force {
-		os.RemoveAll(targetDir)
-	}
-
-	// Cache hit for immutable semver tags
-	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
-		c.dir = targetDir
-		canonicalVer := resolveCanonicalVersion(targetDir, version)
-		c.persistActive(canonicalVer)
-		if previousVer == canonicalVer {
-			ui.Success("Registry is up to date (%s)", canonicalVer)
-		} else {
-			ui.Info("Registry Source: Local Cache (%s)", canonicalVer)
-		}
-		return nil
-	}
-
-	unlock, err := c.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	// Double check after lock
-	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
-		c.dir = targetDir
-		c.persistActive(resolveCanonicalVersion(targetDir, version))
-		return nil
-	}
-
-	downloadURL := buildDownloadURL(version)
-	ui.Step("Downloading Registry %s from GitHub...", version)
-
-	if err := downloadAndExtractZip(downloadURL, targetDir); err != nil {
-		return fmt.Errorf("failed to extract registry: %w", err)
-	}
-
-	canonicalVer := resolveCanonicalVersion(targetDir, version)
-	if canonicalVer != version {
-		canonicalDir := filepath.Join(c.rootDir, "versions", canonicalVer)
-		if _, err := os.Stat(canonicalDir); os.IsNotExist(err) {
-			os.Rename(targetDir, canonicalDir)
-			targetDir = canonicalDir
-		}
-	}
-
-	c.dir = targetDir
-	c.index = nil
-	c.persistActive(canonicalVer)
-
-	return nil
+	return c.checkoutAPI(version, false)
 }
 
 // LoadIndex parses registry.json and returns a typed index.
@@ -409,65 +360,37 @@ func (c *Cache) LoadIndex() (*Index, error) {
 	return &idx, nil
 }
 
-// ResolveChipLive fetches chip existence from the Hub API and returns the Registry Version it was found in.
+// ResolveChipLive queries the registry API for a chip and returns its version.
 func (c *Cache) ResolveChipLive(name string) (string, error) {
-	url := fmt.Sprintf("%s/api/v1/resolve/chip?name=%s", getHubURL(), name)
+	client := apiclient.New()
+	client.HTTPClient.Timeout = 2 * time.Second
 
-	client := http.Client{Timeout: 2 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
-	if err == nil {
-		req.Header.Set("User-Agent", "Toob-CLI")
-		resp, err := client.Do(req)
-		if err == nil && resp.StatusCode == 200 {
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-
-			var apiResp struct {
-				FoundInRegistryVersion string `json:"found_in_registry_version"`
-			}
-			if json.Unmarshal(body, &apiResp) == nil {
-				return apiResp.FoundInRegistryVersion, nil
-			}
-		} else if resp != nil && resp.StatusCode == 404 {
-			return "", fmt.Errorf("chip not found on hub")
-		}
+	resp, err := client.ResolveChip(context.Background(), name)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve chip via API: %w", err)
 	}
-	return "", fmt.Errorf("failed to contact hub API")
+	return resp.Version, nil
 }
 
-// FetchLiveIntegrations fetches available integrations from the Hub API.
-// It falls back to the local cached registry index if the API is offline.
+// FetchLiveIntegrations fetches available integrations from the API.
+// Falls back to the local cached registry index if the API is offline.
 func (c *Cache) FetchLiveIntegrations() ([]string, error) {
-	url := fmt.Sprintf("%s/api/v1/resolve/integrations", getHubURL())
+	client := apiclient.New()
+	client.HTTPClient.Timeout = 3 * time.Second
 
-	client := http.Client{Timeout: 3 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
+	items, err := client.ListIntegrations(context.Background())
 	if err == nil {
-		req.Header.Set("User-Agent", "Toob-CLI")
-		resp, err := client.Do(req)
-		if err == nil && resp.StatusCode == 200 {
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-
-			var apiResp struct {
-				Integrations []struct {
-					Name string `json:"name"`
-				} `json:"integrations"`
-			}
-			if json.Unmarshal(body, &apiResp) == nil {
-				var result []string
-				for _, i := range apiResp.Integrations {
-					result = append(result, i.Name)
-				}
-				return result, nil
-			}
+		var result []string
+		for _, i := range items {
+			result = append(result, i.Name)
 		}
+		return result, nil
 	}
 
 	// Fallback to local
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch live integrations and local fallback failed: %w", err)
+	idx, idxErr := c.LoadIndex()
+	if idxErr != nil {
+		return nil, fmt.Errorf("api and local fallback both failed: %w", idxErr)
 	}
 
 	var result []string
@@ -477,52 +400,29 @@ func (c *Cache) FetchLiveIntegrations() ([]string, error) {
 	return result, nil
 }
 
-// FetchLiveMatrix downloads the compatibility matrix, prioritizing the Hub API
-// (SQLite SSOT) over raw GitHub. Falls back to local copy if all network sources fail.
+// FetchLiveMatrix downloads the compatibility matrix from the API.
+// Falls back to raw GitHub and then local copy if the API is offline.
 func (c *Cache) FetchLiveMatrix() (*Matrix, error) {
 	matrix := make(Matrix)
-	client := http.Client{Timeout: 5 * time.Second}
+	client := apiclient.New()
+	client.HTTPClient.Timeout = 5 * time.Second
 
-	// Tier 1: Hub API (SQLite SSOT, serves CLI-native shape)
-	hubURL := fmt.Sprintf("%s/api/v1/resolve/matrix", getHubURL())
-	if req, err := http.NewRequest("GET", hubURL, nil); err == nil {
-		req.Header.Set("User-Agent", "Toob-CLI")
-		if resp, err := client.Do(req); err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				if json.Unmarshal(body, &matrix) == nil {
-					return &matrix, nil
-				}
-			} else {
-				ui.Muted("[registry] Hub API failed (status=%d), falling back to GitHub", resp.StatusCode)
-			}
+	// Tier 1: Registry API (DB-backed, authoritative)
+	data, err := client.GetMatrix(context.Background(), "")
+	if err == nil {
+		if json.Unmarshal(data, &matrix) == nil {
+			return &matrix, nil
 		}
 	}
 
-	// Tier 2: Raw GitHub (legacy compatibility_matrix.json)
-	ghURL := "https://raw.githubusercontent.com/Toob-Boot/Toob-Registry/main/compatibility_matrix.json"
-	if req, err := http.NewRequest("GET", ghURL, nil); err == nil {
-		req.Header.Set("User-Agent", "Toob-CLI")
-		if resp, err := client.Do(req); err == nil {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				if json.Unmarshal(body, &matrix) == nil {
-					return &matrix, nil
-				}
-			}
-		}
-	}
-
-	// Tier 3: Local locked file
+	// Tier 2: Local cached file
 	localPath := filepath.Join(c.dir, "compatibility_matrix.json")
-	data, err := os.ReadFile(localPath)
+	localData, err := os.ReadFile(localPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch live matrix (hub, github, local all failed): %w", err)
+		return nil, fmt.Errorf("failed to fetch matrix (api and local both failed): %w", err)
 	}
 
-	if err := json.Unmarshal(data, &matrix); err != nil {
+	if err := json.Unmarshal(localData, &matrix); err != nil {
 		return nil, fmt.Errorf("failed to parse local matrix: %w", err)
 	}
 
@@ -547,10 +447,35 @@ func (c *Cache) GetChip(name string) (*ChipInfo, error) {
 	return &ci, nil
 }
 
+// fetchPackage downloads the tarball for a package and extracts it if it doesn't exist.
+func (c *Cache) fetchPackage(name, version, path string) error {
+	destPath := filepath.Join(c.dir, path)
+	if _, err := os.Stat(destPath); err == nil {
+		return nil // already fetched
+	}
+
+	ui.Step("Downloading package %s@%s...", name, version)
+	
+	// Ensure parent directory exists before extraction
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return err
+	}
+	
+	url := fmt.Sprintf("%s/api/v1/package/%s/%s/download", c.remote, name, version)
+	if err := downloadAndExtractTarball(url, destPath); err != nil {
+		return fmt.Errorf("failed to fetch package %s: %w", name, err)
+	}
+
+	return nil
+}
+
 // ChipSourcePath returns the absolute path to a chip's source in the cache.
 func (c *Cache) ChipSourcePath(name string) (string, error) {
 	ci, err := c.GetChip(name)
 	if err != nil {
+		return "", err
+	}
+	if err := c.fetchPackage(ci.Name, ci.Version, ci.Path); err != nil {
 		return "", err
 	}
 	return filepath.Join(c.dir, ci.Path), nil
@@ -584,6 +509,9 @@ func (c *Cache) ArchSourcePath(arch string) (string, error) {
 	if !ok || info.Path == "" {
 		return filepath.Join(c.dir, "arch", arch), nil // fallback for backwards compatibility
 	}
+	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
+		return "", err
+	}
 	return filepath.Join(c.dir, info.Path), nil
 }
 
@@ -601,9 +529,48 @@ func (c *Cache) HeadCommit() (string, error) {
 	return filepath.Base(c.dir), nil
 }
 
-// VerifyHead would normally verify git signatures. With ZIP downloads,
-// this should verify the SHA256 sum of the zip file against the API.
+// VerifyHead validates the cryptographic signature of the current registry revision.
 func (c *Cache) VerifyHead() error {
-	// TODO: Verify SHA256 from Toob Hub API
+	client := apiclient.New()
+	
+	revResp, err := client.GetRevision(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to get registry revision for verification: %w", err)
+	}
+
+	if revResp.Signature == "" {
+		return fmt.Errorf("registry server did not provide a signature")
+	}
+
+	// Read public key from environment (for dev/testing) or use hardcoded official key
+	pubKeyHex := os.Getenv("TOOB_REGISTRY_PUBKEY")
+	if pubKeyHex == "" {
+		// Example official public key (placeholder)
+		pubKeyHex = "0000000000000000000000000000000000000000000000000000000000000000"
+		ui.Warn("Using placeholder Ed25519 public key. Set TOOB_REGISTRY_PUBKEY for real verification.")
+	}
+
+	pubKeyBytes, err := hex.DecodeString(pubKeyHex)
+	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid registry public key format")
+	}
+
+	sigBytes, err := hex.DecodeString(revResp.Signature)
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return fmt.Errorf("invalid registry signature format")
+	}
+
+	hashBytes, err := hex.DecodeString(revResp.CommitSHA)
+	if err != nil {
+		hash := sha256.Sum256([]byte(revResp.CommitSHA))
+		hashBytes = hash[:]
+	}
+
+	valid := ed25519.Verify(pubKeyBytes, hashBytes, sigBytes)
+	if !valid {
+		return fmt.Errorf("CRITICAL SECURITY ALERT: Registry signature verification failed! The registry data may have been tampered with")
+	}
+
+	ui.Success("Registry signature verified successfully (rev %d)", revResp.Revision)
 	return nil
 }

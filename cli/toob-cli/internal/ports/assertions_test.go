@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/registry"
@@ -22,6 +23,30 @@ func TestPortFieldCounts(t *testing.T) {
 		portType reflect.Type
 		realType reflect.Type
 	}{
+		// API Client
+		{"RegistryRevisionResponse ↔ apiclient.RevisionResponse",
+			reflect.TypeOf(RegistryRevisionResponse{}), reflect.TypeOf(apiclient.RevisionResponse{})},
+		{"RegistryVersionResponse ↔ apiclient.RegistryVersionResponse",
+			reflect.TypeOf(RegistryVersionResponse{}), reflect.TypeOf(apiclient.RegistryVersionResponse{})},
+		{"ChipResolveResponse ↔ apiclient.ChipResolveResponse",
+			reflect.TypeOf(ChipResolveResponse{}), reflect.TypeOf(apiclient.ChipResolveResponse{})},
+		{"IntegrationItem ↔ apiclient.IntegrationItem",
+			reflect.TypeOf(IntegrationItem{}), reflect.TypeOf(apiclient.IntegrationItem{})},
+		{"LoginResponse ↔ apiclient.LoginResponse",
+			reflect.TypeOf(LoginResponse{}), reflect.TypeOf(apiclient.LoginResponse{})},
+		{"CheckCombinationResponse ↔ apiclient.CheckCombinationResponse",
+			reflect.TypeOf(CheckCombinationResponse{}), reflect.TypeOf(apiclient.CheckCombinationResponse{})},
+		{"PackageResponse ↔ apiclient.PackageResponse",
+			reflect.TypeOf(PackageResponse{}), reflect.TypeOf(apiclient.PackageResponse{})},
+		{"MyPackagesResponse ↔ apiclient.MyPackagesResponse",
+			reflect.TypeOf(MyPackagesResponse{}), reflect.TypeOf(apiclient.MyPackagesResponse{})},
+		{"PublishResponse ↔ apiclient.PublishResponse",
+			reflect.TypeOf(PublishResponse{}), reflect.TypeOf(apiclient.PublishResponse{})},
+		{"SyncDeltaResponse ↔ apiclient.SyncDeltaResponse",
+			reflect.TypeOf(SyncDeltaResponse{}), reflect.TypeOf(apiclient.SyncDeltaResponse{})},
+		{"AckSyncResponse ↔ apiclient.AckSyncResponse",
+			reflect.TypeOf(AckSyncResponse{}), reflect.TypeOf(apiclient.AckSyncResponse{})},
+
 		// Registry
 		{"RegistryIndex ↔ registry.Index",
 			reflect.TypeOf(RegistryIndex{}), reflect.TypeOf(registry.Index{})},
@@ -87,6 +112,28 @@ func TestPortFieldTypes(t *testing.T) {
 		portType reflect.Type
 		realType reflect.Type
 	}{
+		// API Client
+		{"RegistryRevisionResponse ↔ apiclient.RevisionResponse",
+			reflect.TypeOf(RegistryRevisionResponse{}), reflect.TypeOf(apiclient.RevisionResponse{})},
+		{"RegistryVersionResponse ↔ apiclient.RegistryVersionResponse",
+			reflect.TypeOf(RegistryVersionResponse{}), reflect.TypeOf(apiclient.RegistryVersionResponse{})},
+		{"ChipResolveResponse ↔ apiclient.ChipResolveResponse",
+			reflect.TypeOf(ChipResolveResponse{}), reflect.TypeOf(apiclient.ChipResolveResponse{})},
+		{"IntegrationItem ↔ apiclient.IntegrationItem",
+			reflect.TypeOf(IntegrationItem{}), reflect.TypeOf(apiclient.IntegrationItem{})},
+		{"LoginResponse ↔ apiclient.LoginResponse",
+			reflect.TypeOf(LoginResponse{}), reflect.TypeOf(apiclient.LoginResponse{})},
+		{"CheckCombinationResponse ↔ apiclient.CheckCombinationResponse",
+			reflect.TypeOf(CheckCombinationResponse{}), reflect.TypeOf(apiclient.CheckCombinationResponse{})},
+		{"PackageResponse ↔ apiclient.PackageResponse",
+			reflect.TypeOf(PackageResponse{}), reflect.TypeOf(apiclient.PackageResponse{})},
+		{"PublishResponse ↔ apiclient.PublishResponse",
+			reflect.TypeOf(PublishResponse{}), reflect.TypeOf(apiclient.PublishResponse{})},
+		{"SyncDeltaResponse ↔ apiclient.SyncDeltaResponse",
+			reflect.TypeOf(SyncDeltaResponse{}), reflect.TypeOf(apiclient.SyncDeltaResponse{})},
+		{"AckSyncResponse ↔ apiclient.AckSyncResponse",
+			reflect.TypeOf(AckSyncResponse{}), reflect.TypeOf(apiclient.AckSyncResponse{})},
+
 		// RegistryIndex is excluded: its map-value types (RegistryChip vs ChipInfo etc.)
 		// are cross-package mirrors. Each inner type has its own entry below.
 		{"RegistryChip ↔ registry.ChipInfo",

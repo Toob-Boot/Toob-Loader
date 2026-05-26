@@ -11,8 +11,13 @@ import (
 )
 
 const (
-	// DefaultRegistryURL is the upstream toob-registry repository.
-	DefaultRegistryURL = "https://github.com/toob-boot/toob-registry.git"
+	// DefaultRegistryURL is the upstream API endpoint for registry operations.
+	// The CLI communicates with this server for sync, resolve, and publish.
+	DefaultRegistryURL = "https://registry.the-toob.com"
+
+	// LegacyGitRegistryURL is the GitHub repository URL used for ZIP-based sync.
+	// Retained as fallback during the migration period.
+	LegacyGitRegistryURL = "https://github.com/toob-boot/toob-registry.git"
 )
 
 // ToobHome returns ~/.toob/, creating it if necessary.
@@ -134,4 +139,13 @@ func LockfilePath(projectRoot string) string {
 // GitignorePath returns <project>/.gitignore.
 func GitignorePath(projectRoot string) string {
 	return filepath.Join(projectRoot, ".gitignore")
+}
+
+// CredentialsPath returns ~/.toob/credentials.json.
+func CredentialsPath() (string, error) {
+	home, err := ToobHome()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "credentials.json"), nil
 }

@@ -5,15 +5,14 @@
 package regcheck
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/paths"
 )
@@ -72,13 +71,6 @@ func writeCache(c cacheData) {
 	}
 }
 
-func getHubURL() string {
-	if url := os.Getenv("TOOB_HUB_URL"); url != "" {
-		return url
-	}
-	return "https://ci.the-toob.com"
-}
-
 // CheckAsync performs a non-blocking registry freshness check.
 // Returns a channel that will receive the result when ready.
 // If there's no lockfile or the cache is still fresh, returns nil.
@@ -131,46 +123,21 @@ func CheckAsync() <-chan *Result {
 }
 
 func fetchRegistryStatus(lockedVersion string, chipNames []string) *Result {
-	client := http.Client{Timeout: 3 * time.Second}
+	client := apiclient.New()
+	client.HTTPClient.Timeout = 3 * time.Second
 
-	url := fmt.Sprintf("%s/api/v1/resolve/registry?version=latest", getHubURL())
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil
-	}
-	req.Header.Set("User-Agent", "Toob-CLI")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
+	latestVersion, err := client.GetRegistryVersion(context.Background())
+	if err != nil || latestVersion == "" {
 		return nil
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil
-	}
-
-	var apiResp struct {
-		Version string `json:"version"`
-	}
-	if json.Unmarshal(body, &apiResp) != nil || apiResp.Version == "" {
-		return nil
-	}
-
-	latestVersion := apiResp.Version
-
-	// If the Hub returned a branch name (e.g. "main") instead of a semver,
+	// If the API returned a branch name (e.g. "main") instead of a semver,
 	// try to resolve the actual version from the locally cached registry.json.
 	if !strings.Contains(latestVersion, ".") {
 		if resolved := resolveLocalVersion(latestVersion); resolved != "" {
 			latestVersion = resolved
 		} else {
-			return nil // Can't compare branch names meaningfully
+			return nil
 		}
 	}
 
@@ -189,29 +156,18 @@ func fetchRegistryStatus(lockedVersion string, chipNames []string) *Result {
 		Outdated:       true,
 	}
 
-	// Compatibility check: verify locked chips exist in latest registry
 	result.ChipWarnings = checkChipCompatibility(client, chipNames)
 
 	return result
 }
 
-// checkChipCompatibility queries the Hub for each locked chip
+// checkChipCompatibility queries the API for each locked chip
 // and returns warnings for any that don't exist in the latest registry.
-func checkChipCompatibility(client http.Client, chipNames []string) []string {
+func checkChipCompatibility(client *apiclient.Client, chipNames []string) []string {
 	var warnings []string
 	for _, name := range chipNames {
-		url := fmt.Sprintf("%s/api/v1/resolve/chip?name=%s", getHubURL(), name)
-		req, err := http.NewRequest("GET", url, nil)
+		_, err := client.ResolveChip(context.Background(), name)
 		if err != nil {
-			continue
-		}
-		req.Header.Set("User-Agent", "Toob-CLI")
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		resp.Body.Close()
-		if resp.StatusCode == 404 {
 			warnings = append(warnings, name)
 		}
 	}

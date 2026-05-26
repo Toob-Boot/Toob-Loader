@@ -12,6 +12,8 @@
 //	Adding a `port:"optional"` field   = non-breaking
 package ports
 
+import "encoding/json"
+
 // ProtocolVersion is the global contract version embedded into every CLI
 // binary at compile time. The Compiler Container exposes the same value
 // via the Docker label "toob.protocol_version". If they don't match,
@@ -47,53 +49,114 @@ type DockerBuildOutput struct {
 }
 
 // =============================================================================
-// Boundary: CLI → Toob Hub API (HTTP)
+// Boundary: CLI → Toob Registry API (HTTP)
 // =============================================================================
 
-// ResolveRegistryRequest is sent to GET /api/v1/resolve/registry.
-type ResolveRegistryRequest struct {
-	Version string `json:"version" port:"required"` // "latest" | "0.0.1" | ...
+// RegistryRevisionResponse is the JSON body for GET /api/v1/registry/revision.
+type RegistryRevisionResponse struct {
+	Revision      int64  `json:"revision"       port:"required"`
+	FormatVersion int    `json:"format_version" port:"required"`
+	CommitSHA     string `json:"commit_sha"     port:"required"`
+	Signature     string `json:"signature"      port:"optional"`
+	CreatedAt     string `json:"created_at"     port:"required"`
 }
 
-// ResolveRegistryResponse is the JSON body returned by the Hub.
-type ResolveRegistryResponse struct {
-	Version     string `json:"version"      port:"required"`
-	DownloadURL string `json:"download_url" port:"required"`
+// RegistryVersionResponse is the backward-compat JSON body for GET /api/v1/resolve/registry.
+type RegistryVersionResponse struct {
+	Version string `json:"version" port:"required"`
 }
 
-// ResolveChipRequest is sent to GET /api/v1/resolve/chip.
-type ResolveChipRequest struct {
+// ChipResolveResponse is the JSON body for GET /api/v1/resolve/chip.
+type ChipResolveResponse struct {
+	Name     string          `json:"name"     port:"required"`
+	Version  string          `json:"version"  port:"required"`
+	Path     string          `json:"path"     port:"required"`
+	Manifest json.RawMessage `json:"manifest" port:"required"`
+}
+
+// IntegrationItem is a single entry in GET /api/v1/resolve/integrations.
+type IntegrationItem struct {
 	Name    string `json:"name"    port:"required"`
-	Version string `json:"version" port:"optional"`
+	Version string `json:"version" port:"required"`
 }
 
-// ResolveChipResponse is the JSON body returned by the Hub.
-type ResolveChipResponse struct {
-	Chip                   string `json:"chip"                      port:"required"`
-	ChipVersion            string `json:"chip_version"              port:"required"`
-	FoundInRegistryVersion string `json:"found_in_registry_version" port:"required"`
-	RegistryDownloadURL    string `json:"registry_download_url"     port:"required"`
+// LoginResponse is the JSON body for POST /api/v1/auth/github.
+type LoginResponse struct {
+	PublisherID string `json:"publisher_id" port:"required"`
+	Login       string `json:"login"        port:"required"`
+	Role        string `json:"role"         port:"required"`
+	APIKey      string `json:"api_key"      port:"optional"`
+	HasAPIKey   bool   `json:"has_api_key"  port:"required"`
 }
 
-// ResolveEnvironmentRequest is sent to GET /api/v1/resolve/environment.
-type ResolveEnvironmentRequest struct {
-	Chip       string `json:"chip"        port:"required"`
-	CLIVersion string `json:"cli_version" port:"required"`
+// LogoutResponse is the JSON body for POST /api/v1/auth/logout.
+type LogoutResponse struct {
+	Status string `json:"status" port:"required"`
 }
 
-// ResolveEnvironmentResponse is the JSON body returned by the Hub.
-type ResolveEnvironmentResponse struct {
-	Status              string `json:"status"               port:"required"`
-	RecommendedCompiler string `json:"recommended_compiler" port:"required"`
-	RecommendedCoreSDK  string `json:"recommended_core_sdk" port:"required"`
+// CheckCombinationResponse is the JSON body for GET /api/v1/resolve/combination.
+type CheckCombinationResponse struct {
+	Compatible bool   `json:"compatible"  port:"required"`
+	Status     string `json:"status"      port:"required"`
+	LastTested string `json:"last_tested" port:"optional"`
 }
 
-// HubResolveIntegrationsResponse defines GET /api/v1/resolve/integrations response.
-type HubResolveIntegrationsResponse struct {
-	Integrations []struct {
-		Name    string `json:"name"    port:"required"`
-		Version string `json:"version" port:"required"`
-	} `json:"integrations" port:"required"`
+// PackageResponse is the JSON body for GET /api/v1/package/{name}/{version}.
+type PackageResponse struct {
+	Name     string          `json:"name"     port:"required"`
+	Version  string          `json:"version"  port:"required"`
+	Category string          `json:"category" port:"required"`
+	Stage    string          `json:"stage"    port:"required"`
+	Path     string          `json:"path"     port:"required"`
+	Manifest json.RawMessage `json:"manifest" port:"required"`
+}
+
+// MyPackageSummary is the JSON body element for GET /api/v1/packages/mine.
+type MyPackageSummary struct {
+	Name            string `json:"name"             port:"required"`
+	Version         string `json:"version"          port:"required"`
+	Category        string `json:"category"         port:"required"`
+	Stage           string `json:"stage"            port:"required"`
+	StagingStatus   string `json:"staging_status"   port:"optional"`
+	StagingFeedback string `json:"staging_feedback" port:"optional"`
+	TarballSHA      string `json:"tarball_sha"      port:"required"`
+	CreatedAt       string `json:"created_at"       port:"required"`
+}
+
+// MyPackagesResponse is the JSON body for GET /api/v1/packages/mine.
+type MyPackagesResponse struct {
+	Count    int                `json:"count"    port:"required"`
+	Packages []MyPackageSummary `json:"packages" port:"required"`
+}
+
+// PublishResponse is the JSON body for POST /api/v1/publish.
+type PublishResponse struct {
+	Status     string `json:"status"      port:"required"`
+	Name       string `json:"name"        port:"required"`
+	Version    string `json:"version"     port:"required"`
+	TarballSHA string `json:"tarball_sha" port:"required"`
+	Signature  string `json:"signature"   port:"required"`
+}
+
+// UnpublishResponse is the JSON body for DELETE /api/v1/package/{name}/{version}.
+type UnpublishResponse struct {
+	Status  string `json:"status"  port:"required"`
+	Name    string `json:"name"    port:"required"`
+	Version string `json:"version" port:"required"`
+}
+
+// SyncDeltaResponse is the JSON body for GET /api/v1/registry/sync.
+type SyncDeltaResponse struct {
+	Since     int64             `json:"since"     port:"required"`
+	Count     int               `json:"count"     port:"required"`
+	Revisions []json.RawMessage `json:"revisions" port:"required"`
+	HasMore   bool              `json:"has_more"  port:"optional"`
+}
+
+// AckSyncResponse is the JSON body for POST /api/v1/registry/ack.
+type AckSyncResponse struct {
+	Status     string            `json:"status"     port:"required"`
+	Advisories []json.RawMessage `json:"advisories" port:"required"`
 }
 
 // =============================================================================
@@ -365,30 +428,6 @@ type MatrixChip struct {
 	Versions map[string]MatrixVersion `json:"versions" port:"required"`
 }
 
-// =============================================================================
-// Boundary: Toob Hub API (resolve/matrix, resolve/combination)
-// =============================================================================
-
-// HubResolveMatrixRequest defines GET /api/v1/resolve/matrix query params.
-type HubResolveMatrixRequest struct {
-	Chip string `json:"chip" port:"optional"` // Filter by chip name; omit for full matrix
-}
-
-// HubResolveCombinationRequest defines GET /api/v1/resolve/combination query params.
-type HubResolveCombinationRequest struct {
-	Chip        string `json:"chip"         port:"required"`
-	ChipVersion string `json:"chip_version" port:"optional"`
-	CLI         string `json:"cli"          port:"optional"`
-	Core        string `json:"core"         port:"optional"`
-	Compiler    string `json:"compiler"     port:"optional"`
-}
-
-// HubResolveCombinationResponse defines the binary go/no-go validation result.
-type HubResolveCombinationResponse struct {
-	Compatible bool   `json:"compatible"   port:"required"` // true if VERIFIED
-	Status     string `json:"status"       port:"required"` // "VERIFIED" | "UNKNOWN" | error status
-	LastTested string `json:"last_tested"  port:"optional"`
-}
 
 // =============================================================================
 // Boundary: Chip Manifest (chip_manifest.json)

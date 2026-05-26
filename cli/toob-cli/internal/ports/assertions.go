@@ -13,12 +13,159 @@
 package ports
 
 import (
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/toolchain"
 	"github.com/toob-boot/toob/internal/updater"
 )
+
+// --- apiclient ↔ ports ---
+
+func assertRegistryRevisionResponseToPort() {
+	var r apiclient.RevisionResponse
+	_ = RegistryRevisionResponse{
+		Revision: r.Revision, FormatVersion: r.FormatVersion,
+		CommitSHA: r.CommitSHA, CreatedAt: r.CreatedAt,
+	}
+}
+
+func assertRegistryRevisionResponseFromPort() {
+	var p RegistryRevisionResponse
+	_ = apiclient.RevisionResponse{
+		Revision: p.Revision, FormatVersion: p.FormatVersion,
+		CommitSHA: p.CommitSHA, CreatedAt: p.CreatedAt,
+	}
+}
+
+func assertRegistryVersionResponseToPort() {
+	var r apiclient.RegistryVersionResponse
+	_ = RegistryVersionResponse{Version: r.Version}
+}
+
+func assertRegistryVersionResponseFromPort() {
+	var p RegistryVersionResponse
+	_ = apiclient.RegistryVersionResponse{Version: p.Version}
+}
+
+func assertChipResolveResponseToPort() {
+	var r apiclient.ChipResolveResponse
+	_ = ChipResolveResponse{
+		Name: r.Name, Version: r.Version, Path: r.Path, Manifest: r.Manifest,
+	}
+}
+
+func assertChipResolveResponseFromPort() {
+	var p ChipResolveResponse
+	_ = apiclient.ChipResolveResponse{
+		Name: p.Name, Version: p.Version, Path: p.Path, Manifest: p.Manifest,
+	}
+}
+
+func assertIntegrationItemToPort() {
+	var r apiclient.IntegrationItem
+	_ = IntegrationItem{Name: r.Name, Version: r.Version}
+}
+
+func assertIntegrationItemFromPort() {
+	var p IntegrationItem
+	_ = apiclient.IntegrationItem{Name: p.Name, Version: p.Version}
+}
+
+func assertLoginResponseToPort() {
+	var r apiclient.LoginResponse
+	_ = LoginResponse{
+		PublisherID: r.PublisherID, Login: r.Login, Role: r.Role,
+		APIKey: r.APIKey, HasAPIKey: r.HasAPIKey,
+	}
+}
+
+func assertLoginResponseFromPort() {
+	var p LoginResponse
+	_ = apiclient.LoginResponse{
+		PublisherID: p.PublisherID, Login: p.Login, Role: p.Role,
+		APIKey: p.APIKey, HasAPIKey: p.HasAPIKey,
+	}
+}
+
+func assertCheckCombinationResponseToPort() {
+	var r apiclient.CheckCombinationResponse
+	_ = CheckCombinationResponse{
+		Compatible: r.Compatible, Status: r.Status, LastTested: r.LastTested,
+	}
+}
+
+func assertCheckCombinationResponseFromPort() {
+	var p CheckCombinationResponse
+	_ = apiclient.CheckCombinationResponse{
+		Compatible: p.Compatible, Status: p.Status, LastTested: p.LastTested,
+	}
+}
+
+func assertPackageResponseToPort() {
+	var r apiclient.PackageResponse
+	_ = PackageResponse{
+		Name: r.Name, Version: r.Version, Category: r.Category,
+		Stage: r.Stage, Path: r.Path, Manifest: r.Manifest,
+	}
+}
+
+func assertPackageResponseFromPort() {
+	var p PackageResponse
+	_ = apiclient.PackageResponse{
+		Name: p.Name, Version: p.Version, Category: p.Category,
+		Stage: p.Stage, Path: p.Path, Manifest: p.Manifest,
+	}
+}
+
+func assertMyPackagesResponseToPort() {
+	var r apiclient.MyPackagesResponse
+	// Notice: we can't easily assert the array elements directly with struct literal casting if the nested types differ.
+	// But in assertions_test.go it will catch it via reflection. We just verify the top level struct shape here.
+	_ = MyPackagesResponse{Count: r.Count, Packages: nil}
+}
+
+func assertMyPackagesResponseFromPort() {
+	var p MyPackagesResponse
+	_ = apiclient.MyPackagesResponse{Count: p.Count, Packages: nil}
+}
+
+func assertPublishResponseToPort() {
+	var r apiclient.PublishResponse
+	_ = PublishResponse{
+		Status: r.Status, Name: r.Name, Version: r.Version,
+		TarballSHA: r.TarballSHA, Signature: r.Signature,
+	}
+}
+
+func assertPublishResponseFromPort() {
+	var p PublishResponse
+	_ = apiclient.PublishResponse{
+		Status: p.Status, Name: p.Name, Version: p.Version,
+		TarballSHA: p.TarballSHA, Signature: p.Signature,
+	}
+}
+
+func assertSyncDeltaResponseToPort() {
+	var r apiclient.SyncDeltaResponse
+	_ = SyncDeltaResponse{Since: r.Since, Count: r.Count, Revisions: r.Revisions}
+}
+
+func assertSyncDeltaResponseFromPort() {
+	var p SyncDeltaResponse
+	_ = apiclient.SyncDeltaResponse{Since: p.Since, Count: p.Count, Revisions: p.Revisions}
+}
+
+func assertAckSyncResponseToPort() {
+	var r apiclient.AckSyncResponse
+	_ = AckSyncResponse{Status: r.Status, Advisories: r.Advisories}
+}
+
+func assertAckSyncResponseFromPort() {
+	var p AckSyncResponse
+	_ = apiclient.AckSyncResponse{Status: p.Status, Advisories: p.Advisories}
+}
 
 // --- RegistryIndex ↔ registry.Index ---
 
