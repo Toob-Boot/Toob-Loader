@@ -113,6 +113,7 @@ type PackageResponse struct {
 
 // MyPackageSummary is the JSON body element for GET /api/v1/packages/mine.
 type MyPackageSummary struct {
+	ID              string `json:"id"               port:"required"`
 	Name            string `json:"name"             port:"required"`
 	Version         string `json:"version"          port:"required"`
 	Category        string `json:"category"         port:"required"`
@@ -131,11 +132,15 @@ type MyPackagesResponse struct {
 
 // PublishResponse is the JSON body for POST /api/v1/publish.
 type PublishResponse struct {
-	Status     string `json:"status"      port:"required"`
-	Name       string `json:"name"        port:"required"`
-	Version    string `json:"version"     port:"required"`
-	TarballSHA string `json:"tarball_sha" port:"required"`
-	Signature  string `json:"signature"   port:"required"`
+	Status            string   `json:"status"             port:"required"`
+	ID                string   `json:"id"                 port:"required"`
+	Name              string   `json:"name"               port:"required"`
+	Version           string   `json:"version"            port:"required"`
+	Category          string   `json:"category"           port:"required"`
+	Stage             string   `json:"stage"              port:"required"`
+	TarballSHA        string   `json:"tarball_sha"        port:"required"`
+	Signature         string   `json:"signature"          port:"required"`
+	IngestionWarnings []string `json:"ingestion_warnings" port:"optional"`
 }
 
 // UnpublishResponse is the JSON body for DELETE /api/v1/package/{name}/{version}.

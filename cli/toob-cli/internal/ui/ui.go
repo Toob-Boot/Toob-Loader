@@ -92,10 +92,7 @@ func Divider() {
 //
 //	Vendor:         espressif
 func KeyValue(key, val string) {
-	gap := 16 - len(key)
-	if gap < 1 {
-		gap = 1
-	}
+	gap := max(16-len(key), 1)
 	fmt.Fprintf(os.Stderr, "  %s%s%s\n", Gray(key+":"), strings.Repeat(" ", gap), val)
 }
 
@@ -117,20 +114,14 @@ func UpdateBanner(current, latest string) {
 	// Visual length of "Update available " + current + " → " + latest
 	line1 := fmt.Sprintf("Update available %s %s %s", Gray(current), Gray("→"), BoldBrand(latest))
 	visualLen1 := 17 + len(current) + 3 + len(latest) // "Update available " (17) + current + " → " (3) + latest
-	pad1 := width - 2 - visualLen1
-	if pad1 < 0 {
-		pad1 = 0
-	}
+	pad1 := max(width-2-visualLen1, 0)
 	left1 := pad1 / 2
 	right1 := pad1 - left1
 
 	// Visual length of "Run toob update to update"
 	line2 := fmt.Sprintf("Run %s to update", Cyan("toob update"))
 	visualLen2 := 25 // "Run " (4) + "toob update" (11) + " to update" (10)
-	pad2 := width - 2 - visualLen2
-	if pad2 < 0 {
-		pad2 = 0
-	}
+	pad2 := max(width-2-visualLen2, 0)
 	left2 := pad2 / 2
 	right2 := pad2 - left2
 
@@ -158,20 +149,14 @@ func RegistryBanner(current, latest string, chipWarnings []string) {
 	// Line 1: "Registry v1.0.10 → v1.2.0"
 	line1 := fmt.Sprintf("Registry %s %s %s", Gray(current), Gray("→"), BoldCyan(latest))
 	visualLen1 := 9 + len(current) + 3 + len(latest) // "Registry " (9) + current + " → " (3) + latest
-	pad1 := width - 2 - visualLen1
-	if pad1 < 0 {
-		pad1 = 0
-	}
+	pad1 := max(width-2-visualLen1, 0)
 	left1 := pad1 / 2
 	right1 := pad1 - left1
 
 	// Line 2: "Run toob registry sync to update"
 	line2 := fmt.Sprintf("Run %s to update", Cyan("toob registry sync"))
 	visualLen2 := 32 // "Run " (4) + "toob registry sync" (18) + " to update" (10)
-	pad2 := width - 2 - visualLen2
-	if pad2 < 0 {
-		pad2 = 0
-	}
+	pad2 := max(width-2-visualLen2, 0)
 	left2 := pad2 / 2
 	right2 := pad2 - left2
 
@@ -184,10 +169,7 @@ func RegistryBanner(current, latest string, chipWarnings []string) {
 		fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
 		warnLine := fmt.Sprintf("%s Chips not found: %s", Yellow("⚠"), Yellow(strings.Join(chipWarnings, ", ")))
 		warnVisual := 18 + len(strings.Join(chipWarnings, ", ")) // "⚠ Chips not found: " = 20 visually but ⚠ is 1 char
-		warnPad := width - 2 - warnVisual
-		if warnPad < 0 {
-			warnPad = 0
-		}
+		warnPad := max(width-2-warnVisual, 0)
 		wLeft := warnPad / 2
 		wRight := warnPad - wLeft
 		fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", wLeft), warnLine, strings.Repeat(" ", wRight), Cyan("│"))
@@ -244,10 +226,7 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 		}
 
 		visualLen := len(Strip(h))
-		padding := colWidths[i] - visualLen
-		if padding < 0 {
-			padding = 0
-		}
+		padding := max(colWidths[i]-visualLen, 0)
 		hdr.WriteString(h + strings.Repeat(" ", padding))
 	}
 	fmt.Fprintln(os.Stderr)
@@ -276,10 +255,7 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 			}
 
 			visualLen := len(Strip(cell))
-			padding := w - visualLen
-			if padding < 0 {
-				padding = 0
-			}
+			padding := max(w-visualLen, 0)
 
 			line.WriteString(cell + strings.Repeat(" ", padding))
 		}

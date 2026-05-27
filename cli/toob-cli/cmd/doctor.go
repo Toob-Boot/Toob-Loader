@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
@@ -75,6 +76,38 @@ var doctorCmd = &cobra.Command{
 				version = version[:37] + "..."
 			}
 			ui.CheckItem(true, false, check.name, version)
+		}
+
+		// --- Registry Connectivity Checks (Gap 16) ---
+		fmt.Fprintln(os.Stderr)
+		ui.Step("Checking registry connectivity...")
+
+		client := apiclient.New()
+
+		// Ping the API
+		_, revErr := client.GetRevision(cmd_defaultCtx())
+		if revErr != nil {
+			ui.CheckItem(false, false, "Registry API", fmt.Sprintf("unreachable: %v", revErr))
+			allPassed = false
+		} else {
+			ui.CheckItem(true, false, "Registry API", client.BaseURL)
+		}
+
+		// Auth key check
+		if client.HasToken() {
+			_, authErr := client.MyPackages(cmd_defaultCtx())
+			if authErr != nil {
+				ui.CheckItem(false, true, "Auth Token", fmt.Sprintf("invalid or expired: %v", authErr))
+			} else {
+				login := apiclient.GetLogin()
+				detail := "valid"
+				if login != "" {
+					detail = fmt.Sprintf("valid (@%s)", login)
+				}
+				ui.CheckItem(true, false, "Auth Token", detail)
+			}
+		} else {
+			ui.CheckItem(false, true, "Auth Token", "not configured (run 'toob login')")
 		}
 
 		ui.Divider()

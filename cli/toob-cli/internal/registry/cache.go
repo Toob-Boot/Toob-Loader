@@ -186,11 +186,11 @@ func (c *Cache) lock() (func(), error) {
 		return nil, err
 	}
 	lockDir := filepath.Join(filepath.Dir(c.rootDir), "registry.lock")
-	for i := 0; i < 100; i++ { // wait up to 10 seconds
+	for i := range 100 { // wait up to 10 seconds
 		if err := os.Mkdir(lockDir, 0o755); err == nil {
 			// Write PID file for stale-lock detection
 			pidFile := filepath.Join(lockDir, "pid")
-			_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644)
+			_ = os.WriteFile(pidFile, fmt.Appendf(nil, "%d", os.Getpid()), 0o644)
 			return func() { os.RemoveAll(lockDir) }, nil
 		}
 
@@ -238,7 +238,7 @@ func (c *Cache) tryCleanStaleLock(lockDir string) bool {
 // If force is true, the local cache is bypassed and the version is re-downloaded.
 func (c *Cache) Sync(useDev bool, force bool) error {
 	client := apiclient.New()
-	
+
 	ui.Step("Fetching registry revision from API...")
 	revResp, err := client.GetRevision(context.Background())
 	if err != nil {
@@ -455,12 +455,12 @@ func (c *Cache) fetchPackage(name, version, path string) error {
 	}
 
 	ui.Step("Downloading package %s@%s...", name, version)
-	
+
 	// Ensure parent directory exists before extraction
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
 	}
-	
+
 	url := fmt.Sprintf("%s/api/v1/package/%s/%s/download", c.remote, name, version)
 	if err := downloadAndExtractTarball(url, destPath); err != nil {
 		return fmt.Errorf("failed to fetch package %s: %w", name, err)
@@ -532,7 +532,7 @@ func (c *Cache) HeadCommit() (string, error) {
 // VerifyHead validates the cryptographic signature of the current registry revision.
 func (c *Cache) VerifyHead() error {
 	client := apiclient.New()
-	
+
 	revResp, err := client.GetRevision(context.Background())
 	if err != nil {
 		return fmt.Errorf("failed to get registry revision for verification: %w", err)

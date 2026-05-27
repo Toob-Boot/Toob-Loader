@@ -27,7 +27,7 @@ type DeviceToml struct {
 		Hash    string `toml:"hash"`
 		Pqc     string `toml:"pqc"`
 	} `toml:"crypto"`
-	DriverConfig map[string]interface{} `toml:"driver_config"`
+	DriverConfig map[string]any `toml:"driver_config"`
 	Partitions   struct {
 		Stage0Size    uint32 `toml:"stage0_size"`
 		Stage1Size    uint32 `toml:"stage1_size"`
@@ -74,8 +74,8 @@ type HardwareJson struct {
 		RamBase string `json:"ram_base"`
 		RamSize string `json:"ram_size"`
 	} `json:"memory"`
-	Registers map[string]interface{} `json:"registers"`
-	Constants map[string]interface{} `json:"constants"`
+	Registers map[string]any `json:"registers"`
+	Constants map[string]any `json:"constants"`
 }
 
 func ParseToml(path string) (*DeviceToml, error) {

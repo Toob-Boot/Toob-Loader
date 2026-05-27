@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -707,13 +708,7 @@ func runNativeBuild(root string) error {
 
 		// Validate chip_binding
 		if len(cryptoPkg.ChipBinding) > 0 {
-			bound := false
-			for _, b := range cryptoPkg.ChipBinding {
-				if b == chip {
-					bound = true
-					break
-				}
-			}
+			bound := slices.Contains(cryptoPkg.ChipBinding, chip)
 			if !bound {
 				return fmt.Errorf("crypto package '%s' is chip-bound to %v, but target chip is '%s'",
 					pkgName, cryptoPkg.ChipBinding, chip)
@@ -1059,8 +1054,8 @@ func findPythonScriptsBin() string {
 // parseCoreSDKVersion extracts the raw semver from a tag (e.g., core/v1.2.3 -> v1.2.3)
 func parseCoreSDKVersion(tag string) (*semver.Version, error) {
 	cleanTag := tag
-	if strings.HasPrefix(tag, "core/") {
-		cleanTag = strings.TrimPrefix(tag, "core/")
+	if after, ok := strings.CutPrefix(tag, "core/"); ok {
+		cleanTag = after
 	}
 	if !strings.HasPrefix(cleanTag, "v") {
 		cleanTag = "v" + cleanTag

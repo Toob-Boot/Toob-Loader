@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -117,12 +118,13 @@ func FindProjectRoot(start string) (string, error) {
 	case 1:
 		return candidates[0], nil
 	default:
-		msg := fmt.Sprintf("multiple Toob projects found in %s:\n", current)
+		var msg strings.Builder
+		msg.WriteString(fmt.Sprintf("multiple Toob projects found in %s:\n", current))
 		for _, c := range candidates {
-			msg += fmt.Sprintf("  - %s\n", filepath.Base(c))
+			msg.WriteString(fmt.Sprintf("  - %s\n", filepath.Base(c)))
 		}
-		msg += "Use --manifest to specify which device.toml to build."
-		return "", fmt.Errorf("%s", msg)
+		msg.WriteString("Use --manifest to specify which device.toml to build.")
+		return "", fmt.Errorf("%s", msg.String())
 	}
 }
 

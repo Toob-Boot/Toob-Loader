@@ -11,9 +11,12 @@ package apiclient
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,7 +29,17 @@ const (
 	// DefaultBaseURL is the production API endpoint served via Cloudflare.
 	DefaultBaseURL = "https://registry.the-toob.com"
 
-	defaultTimeout = 10 * time.Second
+	// defaultTimeout is the standard timeout for read operations (GET, list, etc.).
+	defaultTimeout = 60 * time.Second
+
+	// uploadTimeout is the extended timeout for write operations (publish, upload).
+	uploadTimeout = 120 * time.Second
+
+	// maxRetries is the number of automatic retries for transient (5xx) errors.
+	maxRetries = 3
+
+	// maxErrorBodySize limits how much of an error response body we read.
+	maxErrorBodySize = 4096
 )
 
 // Client communicates with the Toob Registry API.
@@ -39,15 +52,43 @@ type Client struct {
 // New creates a Client with the resolved base URL and optional auth token.
 func New() *Client {
 	baseURL := resolveBaseURL()
-	token := loadToken()
+	creds := loadCredentials()
 	return &Client{
 		BaseURL: baseURL,
-		Token:   token,
+		Token:   creds.APIKey,
 		HTTPClient: &http.Client{
 			Timeout:   defaultTimeout,
-			Transport: &http.Transport{Proxy: http.ProxyFromEnvironment},
+			Transport: buildTransport(),
 		},
 	}
+}
+
+// buildTransport creates an http.Transport with proxy support and optional
+// custom CA certificate via TOOB_CA_CERT environment variable (Gap 22).
+func buildTransport() *http.Transport {
+	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+
+	caPath := os.Getenv("TOOB_CA_CERT")
+	if caPath != "" {
+		caCert, err := os.ReadFile(caPath)
+		if err == nil {
+			pool, _ := x509.SystemCertPool()
+			if pool == nil {
+				pool = x509.NewCertPool()
+			}
+			pool.AppendCertsFromPEM(caCert)
+			transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+		}
+	}
+
+	return transport
+}
+
+// NewWithTimeout creates a Client with a custom timeout for upload-heavy operations.
+func NewWithTimeout(timeout time.Duration) *Client {
+	c := New()
+	c.HTTPClient.Timeout = timeout
+	return c
 }
 
 // --- URL Resolution ---
@@ -63,10 +104,13 @@ func resolveBaseURL() string {
 	return DefaultBaseURL
 }
 
-// --- Token Management ---
+// --- Credentials Management ---
 
-type credentials struct {
-	APIKey string `json:"api_key"`
+// Credentials holds the persisted authentication state.
+type Credentials struct {
+	APIKey    string `json:"api_key"`
+	Login     string `json:"login,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 func credentialsPath() string {
@@ -77,38 +121,119 @@ func credentialsPath() string {
 	return filepath.Join(home, "credentials.json")
 }
 
-func loadToken() string {
+func loadCredentials() Credentials {
 	path := credentialsPath()
 	if path == "" {
-		return ""
+		return Credentials{}
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return Credentials{}
 	}
-	var creds credentials
+	var creds Credentials
 	if json.Unmarshal(data, &creds) != nil {
-		return ""
+		return Credentials{}
 	}
-	return creds.APIKey
+	return creds
 }
 
-// SaveToken persists an API key to ~/.toob/credentials.json with mode 0600.
-func SaveToken(apiKey string) error {
+// SaveCredentials persists an API key and login to ~/.toob/credentials.json
+// using atomic write (temp file + rename) to prevent corruption from parallel processes.
+func SaveCredentials(apiKey, login string) error {
 	path := credentialsPath()
 	if path == "" {
 		return fmt.Errorf("cannot determine credentials path")
 	}
-	data, _ := json.MarshalIndent(credentials{APIKey: apiKey}, "", "  ")
+
+	creds := Credentials{
+		APIKey:    apiKey,
+		Login:     login,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal credentials: %w", err)
+	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+
+	// Atomic write: write to temp file, then rename to target
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}
+
+// SaveToken is a backward-compatible wrapper around SaveCredentials.
+func SaveToken(apiKey string) error {
+	return SaveCredentials(apiKey, "")
+}
+
+// DeleteCredentials removes the local credentials file.
+func DeleteCredentials() error {
+	path := credentialsPath()
+	if path == "" {
+		return nil
+	}
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 // HasToken returns true if the client has a stored API key.
 func (c *Client) HasToken() bool {
 	return c.Token != ""
+}
+
+// GetLogin returns the stored login name from credentials, if available.
+func GetLogin() string {
+	return loadCredentials().Login
+}
+
+// --- API Error Handling ---
+
+// APIError represents a structured error response from the server.
+type APIError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("HTTP %d", e.StatusCode)
+}
+
+// extractError reads the response body and creates a structured error.
+// This ensures all API methods surface the server's error message to the user.
+func extractError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+
+	var apiErr struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &apiErr) == nil {
+		msg := apiErr.Error
+		if msg == "" {
+			msg = apiErr.Message
+		}
+		if msg != "" {
+			return &APIError{StatusCode: resp.StatusCode, Message: msg}
+		}
+	}
+
+	// Fallback: use raw body if it's short enough, otherwise just the status
+	if len(body) > 0 && len(body) < 512 {
+		return &APIError{StatusCode: resp.StatusCode, Message: string(body)}
+	}
+	return &APIError{StatusCode: resp.StatusCode}
 }
 
 // --- API Methods ---
@@ -243,6 +368,7 @@ func (c *Client) GetPackage(ctx context.Context, name, version string) (*Package
 
 // MyPackageSummary is the shape of GET /api/v1/packages/mine element.
 type MyPackageSummary struct {
+	ID              string `json:"id"`
 	Name            string `json:"name"`
 	Version         string `json:"version"`
 	Category        string `json:"category"`
@@ -270,11 +396,15 @@ func (c *Client) MyPackages(ctx context.Context) (*MyPackagesResponse, error) {
 
 // PublishResponse is the shape of POST /api/v1/publish.
 type PublishResponse struct {
-	Status     string `json:"status"`
-	Name       string `json:"name"`
-	Version    string `json:"version"`
-	TarballSHA string `json:"tarball_sha"`
-	Signature  string `json:"signature"`
+	Status            string   `json:"status"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Version           string   `json:"version"`
+	Category          string   `json:"category"`
+	Stage             string   `json:"stage"`
+	TarballSHA        string   `json:"tarball_sha"`
+	Signature         string   `json:"signature"`
+	IngestionWarnings []string `json:"ingestion_warnings,omitempty"`
 }
 
 // Publish uploads a new package version.
@@ -285,14 +415,14 @@ func (c *Client) Publish(ctx context.Context, body io.Reader, contentType string
 	}
 	req.Header.Set("Content-Type", contentType)
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
-		return nil, fmt.Errorf("api request failed: %w", err)
+		return nil, fmt.Errorf("publish request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("publish failed with HTTP %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, extractError(resp)
 	}
 
 	var result PublishResponse
@@ -300,6 +430,62 @@ func (c *Client) Publish(ctx context.Context, body io.Reader, contentType string
 		return nil, err
 	}
 	return &result, nil
+}
+
+// PromoteResponse is the shape of POST /api/v1/publish/promote.
+type PromoteResponse struct {
+	Status  string `json:"status"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	JobID   string `json:"job_id"`
+	Message string `json:"message"`
+	Warning string `json:"warning,omitempty"`
+}
+
+// Promote triggers compile validation for a dev-stage package.
+func (c *Client) Promote(ctx context.Context, name, version string) (*PromoteResponse, error) {
+	payload, _ := json.Marshal(map[string]string{
+		"name":    name,
+		"version": version,
+	})
+
+	req, err := c.newRequest(ctx, "POST", "/api/v1/publish/promote", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doWithRetry(req)
+	if err != nil {
+		return nil, fmt.Errorf("promote request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		return nil, extractError(resp)
+	}
+
+	var result PromoteResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// CheckNameAvailableResponse is the shape of GET /api/v1/publish/check-name.
+type CheckNameAvailableResponse struct {
+	Available bool   `json:"available"`
+	Message   string `json:"message,omitempty"`
+}
+
+// CheckNameAvailable checks if a package name is still available for publishing.
+func (c *Client) CheckNameAvailable(ctx context.Context, name string) (*CheckNameAvailableResponse, error) {
+	var resp CheckNameAvailableResponse
+	path := fmt.Sprintf("/api/v1/packages/check-name?name=%s", name)
+	if err := c.getJSON(ctx, path, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // UnpublishResponse is the shape of DELETE /api/v1/package/{name}/{version}.
@@ -319,12 +505,12 @@ func (c *Client) Unpublish(ctx context.Context, name, version string) (*Unpublis
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("api request failed: %w", err)
+		return nil, fmt.Errorf("unpublish request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unpublish failed with HTTP %d", resp.StatusCode)
+		return nil, extractError(resp)
 	}
 
 	var result UnpublishResponse
@@ -338,7 +524,7 @@ func (c *Client) Unpublish(ctx context.Context, name, version string) (*Unpublis
 type SyncDeltaResponse struct {
 	Since     int64             `json:"since"`
 	Count     int               `json:"count"`
-	Revisions []json.RawMessage `json:"revisions"` // Opaque for now
+	Revisions []json.RawMessage `json:"revisions"`
 	HasMore   bool              `json:"has_more"`
 }
 
@@ -355,12 +541,12 @@ func (c *Client) GetSyncDelta(ctx context.Context, since int64) (*SyncDeltaRespo
 // AckSyncResponse is the shape of POST /api/v1/registry/ack.
 type AckSyncResponse struct {
 	Status     string            `json:"status"`
-	Advisories []json.RawMessage `json:"advisories"` // Opaque for now
+	Advisories []json.RawMessage `json:"advisories"`
 }
 
 // AckSync acknowledges a registry sync to receive pending security advisories.
 func (c *Client) AckSync(ctx context.Context, revisionID int64, clientInfo string) (*AckSyncResponse, error) {
-	payload, _ := json.Marshal(map[string]interface{}{
+	payload, _ := json.Marshal(map[string]any{
 		"revision_id": revisionID,
 		"client_info": clientInfo,
 	})
@@ -378,7 +564,7 @@ func (c *Client) AckSync(ctx context.Context, revisionID int64, clientInfo strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ack failed with HTTP %d", resp.StatusCode)
+		return nil, extractError(resp)
 	}
 
 	var result AckSyncResponse
@@ -404,7 +590,7 @@ func (c *Client) RotateKey(ctx context.Context, code string) (*LoginResponse, er
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("rotate-key failed with HTTP %d", resp.StatusCode)
+		return nil, extractError(resp)
 	}
 
 	var result LoginResponse
@@ -430,7 +616,7 @@ func (c *Client) Login(ctx context.Context, code string) (*LoginResponse, error)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("login failed with HTTP %d", resp.StatusCode)
+		return nil, extractError(resp)
 	}
 
 	var result LoginResponse
@@ -445,7 +631,7 @@ type LogoutResponse struct {
 	Status string `json:"status"`
 }
 
-// Logout invalidates the publisher's API key.
+// Logout invalidates the publisher's API key on the server.
 func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 	req, err := c.newRequest(ctx, "POST", "/api/v1/auth/logout", nil)
 	if err != nil {
@@ -459,7 +645,7 @@ func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("logout failed with HTTP %d", resp.StatusCode)
+		return nil, extractError(resp)
 	}
 
 	var result LogoutResponse
@@ -467,6 +653,120 @@ func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 		return nil, err
 	}
 	return &result, nil
+}
+
+// --- Token Management ---
+
+// TokenCreateRequest is the payload for POST /api/v1/tokens.
+type TokenCreateRequest struct {
+	Name      string   `json:"name"`
+	Scopes    []string `json:"scopes"`
+	ExpiresIn *int     `json:"expires_in_days,omitempty"`
+}
+
+// TokenCreateResponse is the shape of POST /api/v1/tokens.
+type TokenCreateResponse struct {
+	Token string `json:"token"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+}
+
+// CreateToken creates a new scoped API token.
+func (c *Client) CreateToken(ctx context.Context, req *TokenCreateRequest) (*TokenCreateResponse, error) {
+	payload, _ := json.Marshal(req)
+	httpReq, err := c.newRequest(ctx, "POST", "/api/v1/tokens", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, extractError(resp)
+	}
+
+	var result TokenCreateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// TokenSummary is one element from GET /api/v1/tokens.
+type TokenSummary struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Scopes    []string `json:"scopes"`
+	CreatedAt string   `json:"created_at"`
+	ExpiresAt string   `json:"expires_at,omitempty"`
+	LastUsed  string   `json:"last_used_at,omitempty"`
+}
+
+// TokenListResponse is the shape of GET /api/v1/tokens.
+type TokenListResponse struct {
+	Tokens []TokenSummary `json:"tokens"`
+}
+
+// ListTokens returns all API tokens for the authenticated publisher.
+func (c *Client) ListTokens(ctx context.Context) (*TokenListResponse, error) {
+	var resp TokenListResponse
+	if err := c.getJSON(ctx, "/api/v1/tokens", &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// RevokeToken invalidates a specific API token by ID.
+func (c *Client) RevokeToken(ctx context.Context, tokenID string) error {
+	path := fmt.Sprintf("/api/v1/tokens/%s", tokenID)
+	req, err := c.newRequest(ctx, "DELETE", path, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return extractError(resp)
+	}
+	return nil
+}
+
+// --- Search ---
+
+// SearchResult is one element from GET /api/v1/search.
+type SearchResult struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Category    string `json:"category"`
+	Description string `json:"description,omitempty"`
+	Author      string `json:"author,omitempty"`
+	Downloads   int    `json:"downloads,omitempty"`
+}
+
+// SearchResponse is the shape of GET /api/v1/search.
+type SearchResponse struct {
+	Results []SearchResult `json:"results"`
+	Count   int            `json:"count"`
+}
+
+// Search queries the registry for packages matching a query string.
+func (c *Client) Search(ctx context.Context, query string) (*SearchResponse, error) {
+	var resp SearchResponse
+	path := fmt.Sprintf("/api/v1/search?q=%s", query)
+	if err := c.getJSON(ctx, path, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // --- HTTP Primitives ---
@@ -484,21 +784,53 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	return req, nil
 }
 
-func (c *Client) getJSON(ctx context.Context, path string, target interface{}) error {
+// doWithRetry executes a request with exponential backoff for transient server errors (5xx).
+// Non-5xx responses and client errors are returned immediately without retry.
+func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * 500 * time.Millisecond
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("api request failed: %w", err)
+			continue
+		}
+
+		// Only retry on 5xx server errors
+		if resp.StatusCode >= 500 && attempt < maxRetries {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("server returned HTTP %d (attempt %d/%d)", resp.StatusCode, attempt+1, maxRetries+1)
+			continue
+		}
+
+		return resp, nil
+	}
+	return nil, lastErr
+}
+
+func (c *Client) getJSON(ctx context.Context, path string, target any) error {
 	req, err := c.newRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
-		return fmt.Errorf("api request failed: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("api returned HTTP %d for %s", resp.StatusCode, path)
+		return extractError(resp)
 	}
 
 	return json.NewDecoder(resp.Body).Decode(target)
@@ -510,14 +842,14 @@ func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
 		return nil, err
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
-		return nil, fmt.Errorf("api request failed: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("api returned HTTP %d for %s", resp.StatusCode, path)
+		return nil, extractError(resp)
 	}
 
 	return io.ReadAll(resp.Body)

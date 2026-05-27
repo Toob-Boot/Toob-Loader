@@ -131,10 +131,7 @@ func (s *LiveSpinner) Start() {
 					percent := int((float64(cur) / float64(tot)) * 100)
 					width := 25
 					filled := int((float64(cur) / float64(tot)) * float64(width))
-					empty := width - filled
-					if empty < 0 {
-						empty = 0
-					}
+					empty := max(width-filled, 0)
 					bar := Brand(strings.Repeat("█", filled)) + Gray(strings.Repeat("░", empty))
 
 					timeStr := ""

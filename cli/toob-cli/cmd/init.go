@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/installer"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
@@ -21,6 +24,7 @@ var (
 	initDevContainer bool
 	initSdkUrl       string
 	initSdkRevision  string
+	initPackage      bool
 )
 
 var initCmd = &cobra.Command{
@@ -30,8 +34,16 @@ var initCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectName := args[0]
 
-		validNamePattern := regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+		var validNamePattern *regexp.Regexp
+		if initPackage {
+			validNamePattern = regexp.MustCompile(`^(@[a-zA-Z0-9_-]+/)?[a-zA-Z0-9_-]+$`)
+		} else {
+			validNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+		}
 		if !validNamePattern.MatchString(projectName) {
+			if initPackage {
+				return fmt.Errorf("invalid package name '%s'. Allowed: unscoped 'name' or scoped '@scope/name' containing alphanumeric, dashes, and underscores", projectName)
+			}
 			return fmt.Errorf("invalid project name '%s'. Only alphanumeric characters, dashes, and underscores are allowed", projectName)
 		}
 
@@ -76,6 +88,130 @@ var initCmd = &cobra.Command{
 		if err != nil {
 			initErr = fmt.Errorf("chip %s not found in registry", initChip)
 			return initErr
+		}
+
+		if initPackage {
+			ui.Step("Scaffolding publishable package project '%s'...", projectName)
+			// Get author login
+			author := apiclient.GetLogin()
+			if author == "" {
+				author = "unregistered"
+			}
+
+			// Determine core/toolchain versions from matrix
+			tcVersion := "12.2.0"
+			coreVersion := "1.0.0"
+			if matrix, err := cache.FetchLiveMatrix(); err == nil && matrix != nil {
+				if chipMatrix, ok := (*matrix)[initChip]; ok {
+					for _, v := range chipMatrix.Versions {
+						if v.Dependencies.Toolchain != "" {
+							tcVersion = v.Dependencies.Toolchain
+						}
+						if v.Dependencies.CoreSDK != "" {
+							coreVersion = v.Dependencies.CoreSDK
+						}
+						break
+					}
+				}
+			}
+
+			// Clean base name for files (remove scope if present)
+			baseName := projectName
+			if _, after, ok := strings.Cut(projectName, "/"); ok {
+				baseName = after
+			}
+
+			// 1. Create folders: src, include
+			if err := os.MkdirAll(filepath.Join(projectDir, "src"), 0o755); err != nil {
+				initErr = err
+				return err
+			}
+			if err := os.MkdirAll(filepath.Join(projectDir, "include"), 0o755); err != nil {
+				initErr = err
+				return err
+			}
+
+			// 2. Write driver_manifest.json
+			manifestPath := filepath.Join(projectDir, "driver_manifest.json")
+			manifestJSON := fmt.Sprintf(`{
+  "name": %q,
+  "author": %q,
+  "version": "0.1.0",
+  "description": "Scaffolded driver for %s",
+  "reference_build_context": {
+    "chip": %q,
+    "core_sdk_version": %q,
+    "toolchain_version": %q,
+    "target_architecture": %q
+  },
+  "dependencies": {
+    "core": "^%s"
+  },
+  "sources": [
+    "src/%s.c"
+  ],
+  "includes": [
+    "include"
+  ]
+}
+`, projectName, author, initChip, initChip, coreVersion, tcVersion, ci.Arch, coreVersion, baseName)
+			if err := os.WriteFile(manifestPath, []byte(manifestJSON), 0o644); err != nil {
+				initErr = err
+				return err
+			}
+
+			// 3. Write src/<baseName>.c
+			cPath := filepath.Join(projectDir, "src", baseName+".c")
+			funcName := strings.ReplaceAll(baseName, "-", "_")
+			cCode := fmt.Sprintf(`#include "%s.h"
+
+// TODO: Implement your driver initialization function here
+void %s_init(void) {
+    // Hardware initialization
+}
+`, baseName, funcName)
+			if err := os.WriteFile(cPath, []byte(cCode), 0o644); err != nil {
+				initErr = err
+				return err
+			}
+
+			// 4. Write include/<baseName>.h
+			hPath := filepath.Join(projectDir, "include", baseName+".h")
+			hCode := fmt.Sprintf(`#ifndef %s_H
+#define %s_H
+
+void %s_init(void);
+
+#endif // %s_H
+`, strings.ToUpper(funcName), strings.ToUpper(funcName), funcName, strings.ToUpper(funcName))
+			if err := os.WriteFile(hPath, []byte(hCode), 0o644); err != nil {
+				initErr = err
+				return err
+			}
+
+			// 5. Write .toobignore and .gitignore
+			ignoreList := ".toob/\nbuild/\ncredentials.json\n*.tar.gz\n"
+			if err := os.WriteFile(filepath.Join(projectDir, ".toobignore"), []byte(ignoreList), 0o644); err != nil {
+				initErr = err
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(ignoreList), 0o644); err != nil {
+				initErr = err
+				return err
+			}
+
+			// Initialize git repo
+			gitCmd := exec.Command("git", "init")
+			_ = gitCmd.Run()
+
+			ui.Divider()
+			ui.KeyValue("Package Name", ui.Bold(projectName))
+			ui.KeyValue("Chip", ui.BoldBrand(initChip))
+			ui.KeyValue("Architecture", ui.Cyan(ci.Arch))
+			ui.Divider()
+			ui.Success("Package initialized successfully!")
+			ui.Tip("Run `cd %s` and check out `driver_manifest.json`.", projectName)
+			return nil
 		}
 
 		if initFramework == "" {
@@ -192,4 +328,6 @@ func init() {
 	initCmd.Flags().BoolVar(&initDevContainer, "devcontainer", false, "Generate VS Code DevContainer configuration for isolated builds")
 	initCmd.Flags().StringVar(&initSdkUrl, "sdk-url", "https://github.com/Toob-Boot/Toob-Loader.git", "URL to fetch the Toob-Loader SDK from")
 	initCmd.Flags().StringVar(&initSdkRevision, "sdk-version", "main", "Git branch or tag to use for the Toob-Loader SDK")
+	// TODO (Gap 10): Scaffold a publishable package project with manifest template.
+	initCmd.Flags().BoolVar(&initPackage, "package", false, "Initialize as a publishable package project instead of a firmware application")
 }

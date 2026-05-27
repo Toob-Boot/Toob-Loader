@@ -53,10 +53,7 @@ func (p *ProgressBar) Update(current int) {
 	if p.total > 0 {
 		filled = int((float64(p.current) / float64(p.total)) * float64(p.width))
 	}
-	empty := p.width - filled
-	if empty < 0 {
-		empty = 0
-	}
+	empty := max(p.width-filled, 0)
 
 	bar := Brand(strings.Repeat("█", filled)) + Gray(strings.Repeat("░", empty))
 

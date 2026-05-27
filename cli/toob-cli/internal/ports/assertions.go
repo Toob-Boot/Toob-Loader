@@ -131,11 +131,33 @@ func assertMyPackagesResponseFromPort() {
 	_ = apiclient.MyPackagesResponse{Count: p.Count, Packages: nil}
 }
 
+func assertMyPackageSummaryToPort() {
+	var r apiclient.MyPackageSummary
+	_ = MyPackageSummary{
+		ID: r.ID, Name: r.Name, Version: r.Version,
+		Category: r.Category, Stage: r.Stage,
+		StagingStatus: r.StagingStatus, StagingFeedback: r.StagingFeedback,
+		TarballSHA: r.TarballSHA, CreatedAt: r.CreatedAt,
+	}
+}
+
+func assertMyPackageSummaryFromPort() {
+	var p MyPackageSummary
+	_ = apiclient.MyPackageSummary{
+		ID: p.ID, Name: p.Name, Version: p.Version,
+		Category: p.Category, Stage: p.Stage,
+		StagingStatus: p.StagingStatus, StagingFeedback: p.StagingFeedback,
+		TarballSHA: p.TarballSHA, CreatedAt: p.CreatedAt,
+	}
+}
+
 func assertPublishResponseToPort() {
 	var r apiclient.PublishResponse
 	_ = PublishResponse{
 		Status: r.Status, Name: r.Name, Version: r.Version,
 		TarballSHA: r.TarballSHA, Signature: r.Signature,
+		ID: r.ID, Category: r.Category, Stage: r.Stage,
+		IngestionWarnings: r.IngestionWarnings,
 	}
 }
 
@@ -144,6 +166,8 @@ func assertPublishResponseFromPort() {
 	_ = apiclient.PublishResponse{
 		Status: p.Status, Name: p.Name, Version: p.Version,
 		TarballSHA: p.TarballSHA, Signature: p.Signature,
+		ID: p.ID, Category: p.Category, Stage: p.Stage,
+		IngestionWarnings: p.IngestionWarnings,
 	}
 }
 

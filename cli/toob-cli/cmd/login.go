@@ -1,11 +1,7 @@
 package cmd
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/apiclient"
@@ -18,24 +14,25 @@ var loginCmd = &cobra.Command{
 	Long: `Authenticates your CLI with the Toob Registry API using GitHub OAuth.
 
 After authentication, your API key is stored in ~/.toob/credentials.json
-and automatically used for package publishing and download tracking.`,
+and automatically used for package publishing and download tracking.
+
+Use --rotate to invalidate your current key and generate a new one.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := apiclient.New()
 
-		if client.HasToken() {
-			ui.Info("Already authenticated. Use --force to re-authenticate or 'toob login --rotate' to get a new key.")
-			force, _ := cmd.Flags().GetBool("force")
-			if !force {
-				return nil
-			}
+		rotate, _ := cmd.Flags().GetBool("rotate")
+		force, _ := cmd.Flags().GetBool("force")
+
+		if client.HasToken() && !force && !rotate {
+			ui.Info("Already authenticated. Use --force to re-authenticate or --rotate to get a new key.")
+			return nil
 		}
 
 		ui.Header("GitHub Authentication")
-		ui.Step("Opening GitHub authorization page...")
 
-		// Device Flow: display a URL for the user to visit
+		// Display the authorization URL for the user
 		authURL := client.BaseURL + "/api/v1/auth/github"
-		ui.Info("Visit the following URL to authenticate:")
+		ui.Step("Visit the following URL to authenticate:")
 		ui.KeyValue("URL", ui.Bold(authURL))
 		ui.Divider()
 
@@ -47,54 +44,54 @@ and automatically used for package publishing and download tracking.`,
 			return fmt.Errorf("no authorization code provided")
 		}
 
-		// Exchange code for API token
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-
-		body := fmt.Sprintf(`{"code":%q}`, code)
-		req, err := http.NewRequestWithContext(ctx, "POST", authURL, nil)
-		if err != nil {
-			return err
+		// Branch: rotate existing key vs. fresh login
+		if rotate {
+			return handleRotate(client, code)
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Body = http.NoBody
-
-		// Use the raw HTTP client for the login flow
-		httpClient := &http.Client{Timeout: 15 * time.Second}
-		payload := []byte(body)
-
-		postReq, _ := http.NewRequestWithContext(ctx, "POST", authURL, nil)
-		postReq.Header.Set("Content-Type", "application/json")
-
-		resp, err := httpClient.Post(authURL, "application/json", nil)
-		if err != nil {
-			return fmt.Errorf("failed to exchange code: %w", err)
-		}
-		defer resp.Body.Close()
-
-		// For a real implementation, we'd POST with the code body.
-		// This is structured for the actual OAuth code exchange.
-		_ = payload
-		_ = postReq
-
-		var loginResp apiclient.LoginResponse
-		if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
-			return fmt.Errorf("failed to parse response: %w", err)
-		}
-
-		if loginResp.APIKey != "" {
-			if err := apiclient.SaveToken(loginResp.APIKey); err != nil {
-				return fmt.Errorf("failed to save token: %w", err)
-			}
-			ui.Success("Authenticated as @%s (Role: %s)", loginResp.Login, loginResp.Role)
-			ui.Tip("Your API key has been stored in ~/.toob/credentials.json")
-		} else if loginResp.HasAPIKey {
-			ui.Success("Authenticated as @%s (Role: %s)", loginResp.Login, loginResp.Role)
-			ui.Info("You already have an API key. Use 'toob login --rotate' to generate a new one.")
-		}
-
-		return nil
+		return handleLogin(client, code)
 	},
+}
+
+// handleLogin exchanges the OAuth code for an API key via the Login endpoint.
+func handleLogin(client *apiclient.Client, code string) error {
+	loginResp, err := client.Login(cmd_defaultCtx(), code)
+	if err != nil {
+		return fmt.Errorf("login failed: %w", err)
+	}
+
+	if loginResp.APIKey != "" {
+		if err := apiclient.SaveCredentials(loginResp.APIKey, loginResp.Login); err != nil {
+			return fmt.Errorf("failed to save credentials: %w", err)
+		}
+		ui.Success("Authenticated as @%s (Role: %s)", loginResp.Login, loginResp.Role)
+		ui.Tip("Your API key has been stored in ~/.toob/credentials.json")
+	} else if loginResp.HasAPIKey {
+		ui.Success("Authenticated as @%s (Role: %s)", loginResp.Login, loginResp.Role)
+		ui.Info("You already have an API key. Use 'toob login --rotate' to generate a new one.")
+	}
+
+	return nil
+}
+
+// handleRotate exchanges the OAuth code for a rotated API key, invalidating the old one.
+func handleRotate(client *apiclient.Client, code string) error {
+	ui.Step("Rotating API key...")
+	rotateResp, err := client.RotateKey(cmd_defaultCtx(), code)
+	if err != nil {
+		return fmt.Errorf("key rotation failed: %w", err)
+	}
+
+	if rotateResp.APIKey == "" {
+		return fmt.Errorf("server did not return a new API key")
+	}
+
+	if err := apiclient.SaveCredentials(rotateResp.APIKey, rotateResp.Login); err != nil {
+		return fmt.Errorf("failed to save credentials: %w", err)
+	}
+
+	ui.Success("API key rotated for @%s", rotateResp.Login)
+	ui.Tip("Your new key has been stored. The old key is now invalid.")
+	return nil
 }
 
 func init() {

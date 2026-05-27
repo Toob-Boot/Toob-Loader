@@ -401,6 +401,30 @@ static inline boot_status_t boot_random_safe(
     return BOOT_OK;
 }
 
+/**
+ * @brief Deterministic CFI Token Derivation from TRNG Seed.
+ *
+ * Derives a unique, non-zero 32-bit token from a random seed and a slot index.
+ * Uses Fibonacci hashing (golden ratio constant) with avalanche mixing to
+ * guarantee collision-freedom across slots for any given seed.
+ *
+ * SECURITY PROPERTIES:
+ * - Bit 0 forced to 1: Token is guaranteed non-zero (XOR no-op immunity)
+ * - Avalanche: Single-bit change in seed/slot flips ~50% of output bits
+ * - Without knowing the seed, an attacker cannot predict the expected CFI path
+ *
+ * @param seed  32-bit TRNG value, unique per boot cycle
+ * @param slot  Token index (0..N) within the function's CFI sequence
+ * @return Non-zero 32-bit token
+ */
+static inline uint32_t cfi_derive(uint32_t seed, uint8_t slot) {
+  uint32_t h = seed ^ ((uint32_t)slot * 0x9E3779B9u); /* Fibonacci Hashing */
+  h ^= h >> 16;
+  h *= 0x45D9F3Bu;
+  h ^= h >> 16;
+  return h | 1u; /* Bit 0 erzwungen: Garantiert niemals 0 */
+}
+
 #endif /* BOOT_CT_UTILS_H */
 
 
@@ -1390,12 +1414,13 @@ extern int cbor_decode_toob_cloud_cmd(const uint8_t *payload,
                                       toob_cloud_cmd_envelope_t *result,
                                       size_t *payload_len_out);
 
-/* CFI Constants für die Pipeline */
-#define CFI_CMD_INIT 0x00000000
-#define CFI_CMD_PARSE 0x11111111
-#define CFI_CMD_ID 0x22222222
-#define CFI_CMD_COUNTER 0x33333333
-#define CFI_CMD_VERIFY 0x44444444
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define CMD_CFI_SLOT_INIT    0
+#define CMD_CFI_SLOT_PARSE   1
+#define CMD_CFI_SLOT_ID      2
+#define CMD_CFI_SLOT_COUNTER 3
+#define CMD_CFI_SLOT_VERIFY  4
+#define CMD_CFI_NUM_TOKENS   5
 
 /**
  * @brief Lädt den aktiven Cloud-Public-Key (KDM A/B Slots) in den Puffer.
@@ -1518,7 +1543,17 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
                                              uint8_t *crypto_arena,
                                              toob_cloud_cmd_t *out_cmd) {
   boot_status_t final_status = BOOT_ERR_VERIFY;
-  volatile uint32_t execution_path = CFI_CMD_INIT;
+
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t cmd_cfi_seed = 0;
+  if (platform && platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&cmd_cfi_seed, sizeof(cmd_cfi_seed));
+  }
+  uint32_t cfi_tok[CMD_CFI_NUM_TOKENS];
+  for (uint8_t i = 0; i < CMD_CFI_NUM_TOKENS; i++) {
+    cfi_tok[i] = cfi_derive(cmd_cfi_seed, i);
+  }
+  volatile uint32_t execution_path = cfi_tok[CMD_CFI_SLOT_INIT];
 
   if (!platform || !platform->crypto || !envelope_buf || !crypto_arena ||
       !out_cmd) {
@@ -1535,7 +1570,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     final_status = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
-  execution_path ^= CFI_CMD_PARSE;
+  execution_path ^= cfi_tok[CMD_CFI_SLOT_PARSE];
 
   /* 2. Device-ID Match (Glitch-Safe) */
   uint8_t local_id[32];
@@ -1560,7 +1595,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     final_status = BOOT_ERR_VERIFY;
     goto cleanup;
   }
-  execution_path ^= CFI_CMD_ID;
+  execution_path ^= cfi_tok[CMD_CFI_SLOT_ID];
 
   /* 3. Anti-Replay Counter Check */
   if (!platform->crypto->advance_monotonic_counter) {
@@ -1585,7 +1620,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     final_status = BOOT_ERR_DOWNGRADE;
     goto cleanup;
   }
-  execution_path ^= CFI_CMD_COUNTER;
+  execution_path ^= cfi_tok[CMD_CFI_SLOT_COUNTER];
 
   /* 4. Signature Verification */
   uint8_t cloud_pubkey[32] __attribute__((aligned(8)));
@@ -1635,7 +1670,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     final_status = BOOT_ERR_VERIFY;
     goto cleanup;
   }
-  execution_path ^= CFI_CMD_VERIFY;
+  execution_path ^= cfi_tok[CMD_CFI_SLOT_VERIFY];
 
   /* 5. Exhaustion Defense: Advance Counter ONLY after successful verify */
   /* Burn the exact difference */
@@ -1661,8 +1696,10 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
   }
 
   /* 6. CFI Resolution & Dispatch */
-  uint32_t expected_path = CFI_CMD_INIT ^ CFI_CMD_PARSE ^ CFI_CMD_ID ^
-                           CFI_CMD_COUNTER ^ CFI_CMD_VERIFY;
+  uint32_t expected_path = cfi_tok[CMD_CFI_SLOT_INIT];
+  for (uint8_t i = 1; i < CMD_CFI_NUM_TOKENS; i++) {
+    expected_path ^= cfi_tok[i];
+  }
   volatile uint32_t path_check_1 = 0, path_check_2 = 0;
   if (execution_path == expected_path)
     path_check_1 = BOOT_OK;
@@ -2283,12 +2320,12 @@ _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 1024,
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK MUST be high-hamming distance for Glitch Shielding");
 
-/* P10 CFI Tracking Constants */
-#define CFI_DELTA_INIT 0x10101010
-#define CFI_DELTA_HDR_OK 0x20202020
-#define CFI_DELTA_BASE_OK 0x40404040
-#define CFI_DELTA_EOF 0x80808080
-#define CFI_DELTA_FLUSHED 0x01010101
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define DELTA_CFI_SLOT_INIT     0
+#define DELTA_CFI_SLOT_HDR      1
+#define DELTA_CFI_SLOT_BASE     2
+#define DELTA_CFI_SLOT_EOF      3
+#define DELTA_CFI_SLOT_FLUSHED  4
 
 /* ==============================================================================
  * INTERNAL HELPERS & GLITCH SHIELDS
@@ -2455,7 +2492,18 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     return BOOT_ERR_VERIFY; /* Payload is too small to be a valid TDS stream */
   }
 
-  volatile uint32_t delta_cfi = CFI_DELTA_INIT;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t delta_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&delta_cfi_seed, sizeof(delta_cfi_seed));
+  }
+  uint32_t cfi_tok[4];
+  cfi_tok[0] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_INIT);
+  cfi_tok[1] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_HDR);
+  cfi_tok[2] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_BASE);
+  cfi_tok[3] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_EOF);
+
+  volatile uint32_t delta_cfi = cfi_tok[0];
   boot_status_t status = BOOT_OK;
 
   /* P10 Alignment Guard: Padding des Struct-Offsets für DMA-Sicherheit */
@@ -2527,7 +2575,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  delta_cfi ^= CFI_DELTA_HDR_OK;
+  delta_cfi ^= cfi_tok[1];
 
   /* ====================================================================
    * STEP 2: PRE-FLIGHT "GHOST-BASE" VERIFICATION
@@ -2590,7 +2638,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     }
   }
 
-  delta_cfi ^= CFI_DELTA_BASE_OK;
+  delta_cfi ^= cfi_tok[2];
 
   /* ====================================================================
    * STEP 3: ZERO-ALLOCATION SDVM SETUP
@@ -2899,10 +2947,9 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  delta_cfi ^= CFI_DELTA_EOF;
+  delta_cfi ^= cfi_tok[3];
 
-  uint32_t expected_cfi =
-      CFI_DELTA_INIT ^ CFI_DELTA_HDR_OK ^ CFI_DELTA_BASE_OK ^ CFI_DELTA_EOF;
+  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[1] ^ cfi_tok[2] ^ cfi_tok[3];
   volatile uint32_t cfi_1 = 0, cfi_2 = 0;
   if (delta_cfi == expected_cfi)
     cfi_1 = BOOT_OK;
@@ -3029,6 +3076,7 @@ FILE: toobloader/core/boot_energy.c
 
 
 #include "boot_energy.h"
+#include "boot_ct_utils.h"
 #include "boot_delay.h"
 #include "boot_hal.h"
 #include "boot_panic.h"
@@ -3041,11 +3089,11 @@ FILE: toobloader/core/boot_energy.c
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein!");
 
-/* P10 Zero-Trust CFI Constants */
-#define CFI_ENERGY_INIT 0x10101010
-#define CFI_ENERGY_NO_HAL 0x20202020
-#define CFI_ENERGY_PMIC_EVAL 0x40404040
-#define CFI_ENERGY_ADC_EVAL 0x80808080
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define ENERGY_CFI_SLOT_INIT     0
+#define ENERGY_CFI_SLOT_NO_HAL   1
+#define ENERGY_CFI_SLOT_PMIC     2
+#define ENERGY_CFI_SLOT_ADC      3
 
 /**
  * @brief Branchless O(1) 3-Sample Median Filter
@@ -3080,7 +3128,18 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
     return BOOT_ERR_INVALID_ARG;
   }
 
-  volatile uint32_t energy_cfi = CFI_ENERGY_INIT;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t energy_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&energy_cfi_seed, sizeof(energy_cfi_seed));
+  }
+  uint32_t cfi_tok[4];
+  cfi_tok[0] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_INIT);
+  cfi_tok[1] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_NO_HAL);
+  cfi_tok[2] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_PMIC);
+  cfi_tok[3] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_ADC);
+
+  volatile uint32_t energy_cfi = cfi_tok[0];
 
   /* ====================================================================
    * 2. FAIL-OPEN FÜR NETZBETRIEB (Wall-Powered Devices)
@@ -3089,14 +3148,15 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
    * netzbetrieben ohne PMIC), wird das Update bedingungslos freigegeben.
    */
   if (!platform->soc) {
-    energy_cfi ^= CFI_ENERGY_NO_HAL;
+    energy_cfi ^= cfi_tok[1];
 
+    uint32_t expected_no_hal = cfi_tok[0] ^ cfi_tok[1];
     volatile uint32_t no_hal_shield_1 = 0, no_hal_shield_2 = 0;
-    if (energy_cfi == (CFI_ENERGY_INIT ^ CFI_ENERGY_NO_HAL))
+    if (energy_cfi == expected_no_hal)
       no_hal_shield_1 = BOOT_OK;
     BOOT_GLITCH_DELAY();
     if (no_hal_shield_1 == BOOT_OK &&
-        energy_cfi == (CFI_ENERGY_INIT ^ CFI_ENERGY_NO_HAL))
+        energy_cfi == expected_no_hal)
       no_hal_shield_2 = BOOT_OK;
 
     if (no_hal_shield_1 == BOOT_OK && no_hal_shield_2 == BOOT_OK &&
@@ -3129,7 +3189,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
       pmic_sustain_ok = false;
   }
 
-  energy_cfi ^= CFI_ENERGY_PMIC_EVAL;
+  energy_cfi ^= cfi_tok[2];
 
   /* ====================================================================
    * 4. RAW ADC VOLTAGE EVALUATION (Median Filtered)
@@ -3183,7 +3243,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
     }
   }
 
-  energy_cfi ^= CFI_ENERGY_ADC_EVAL;
+  energy_cfi ^= cfi_tok[3];
 
   /* ====================================================================
    * 5. GLITCH-RESISTANT RESOLUTION & CFI VALIDATION
@@ -3191,8 +3251,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
    * Ein Angreifer versucht via EMFI, trotz leerem Akku das Update zu
    * erzwingen (um z.B. Tearing zu provozieren und Signaturen zu schwächen).
    */
-  uint32_t expected_cfi =
-      CFI_ENERGY_INIT ^ CFI_ENERGY_PMIC_EVAL ^ CFI_ENERGY_ADC_EVAL;
+  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[2] ^ cfi_tok[3];
 
   volatile uint32_t cfi_shield_1 = 0, cfi_shield_2 = 0;
   if (energy_cfi == expected_cfi)
@@ -4213,6 +4272,7 @@ FILE: toobloader/core/boot_main.c
 #include "generated_boot_config.h"
 
 #include "boot_crc32.h"
+#include "boot_ct_utils.h"
 #include "boot_delay.h"
 #include "boot_diag.h"
 #include "boot_panic.h"
@@ -4236,17 +4296,14 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 /* Definition of the central zero-allocation memory block */
 uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE] __attribute__((aligned(8)));
 
-/* P10 Zero-Trust CFI Constants for Master Orchestrator.
- * Collision-Freedom Analysis: All 15 pairwise XOR combinations of these 6
- * tokens are non-zero. No triple-XOR combination equals zero either (verified:
- * each token occupies a unique nibble lane). If a 7th step is ever added,
- * re-verify that no subset of tokens XORs to zero. */
-#define CFI_MAIN_INIT 0x10101010
-#define CFI_MAIN_HW_UP 0x20202020
-#define CFI_MAIN_EXEC 0x40404040
-#define CFI_MAIN_BOUNDS 0x80808080
-#define CFI_MAIN_HANDOFF 0x01010101
-#define CFI_MAIN_HW_DOWN 0x02020202
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define MAIN_CFI_SLOT_INIT    0
+#define MAIN_CFI_SLOT_HW_UP   1
+#define MAIN_CFI_SLOT_EXEC    2
+#define MAIN_CFI_SLOT_BOUNDS  3
+#define MAIN_CFI_SLOT_HANDOFF 4
+#define MAIN_CFI_SLOT_HW_DOWN 5
+#define MAIN_CFI_NUM_TOKENS   6
 
 /* Init-Tracking Bitmask Flags für Fail-Safe Cleanup */
 #define INIT_MASK_CLOCK (1U << 0)
@@ -4288,7 +4345,10 @@ BOOT_NOINIT toob_boot_diag_t toob_diag_state;
 boot_status_t boot_main(const boot_platform_t *platform,
                         boot_target_config_t *target_out) {
 
-  volatile uint32_t main_cfi = CFI_MAIN_INIT;
+  /* P10 CFI Randomisierung: Seed wird später nach crypto->init gezogen */
+  uint32_t main_cfi_seed = 0;
+  uint32_t cfi_tok[MAIN_CFI_NUM_TOKENS] = {0};
+  volatile uint32_t main_cfi = 0; /* Initialisiert nach TRNG-Seed */
 
   /* P10 Leakage Prevention: Zeroize the output immediately (Zero-Day Fallback)
    */
@@ -4427,7 +4487,16 @@ boot_status_t boot_main(const boot_platform_t *platform,
     init_mask |= INIT_MASK_SOC;
   }
 
-  main_cfi ^= CFI_MAIN_HW_UP;
+  /* TRNG ist jetzt verfügbar: CFI-Tokens ableiten */
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&main_cfi_seed, sizeof(main_cfi_seed));
+  }
+  for (uint8_t i = 0; i < MAIN_CFI_NUM_TOKENS; i++) {
+    cfi_tok[i] = cfi_derive(main_cfi_seed, i);
+  }
+  main_cfi = cfi_tok[MAIN_CFI_SLOT_INIT];
+
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HW_UP];
   goto init_success;
 
 init_cleanup:
@@ -4537,7 +4606,7 @@ init_success:
     goto panic_fallthrough;
   }
 
-  main_cfi ^= CFI_MAIN_EXEC;
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_EXEC];
 
   /*
    * ==============================================================================
@@ -4581,7 +4650,7 @@ init_success:
     goto panic_fallthrough;
   }
 
-  main_cfi ^= CFI_MAIN_BOUNDS;
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_BOUNDS];
 
   /*
    * ==============================================================================
@@ -4654,7 +4723,7 @@ init_success:
     goto panic_fallthrough;
   }
 
-  main_cfi ^= CFI_MAIN_HANDOFF;
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HANDOFF];
 
   /*
    * ==============================================================================
@@ -4717,7 +4786,7 @@ init_success:
   /* Zeitbasis abwerfen */
   platform->clock->deinit();
 
-  main_cfi ^= CFI_MAIN_HW_DOWN;
+  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HW_DOWN];
 
   /* ==============================================================================
    * FINAL GLITCH-DEFENSE GATE (CFI VALIDATION)
@@ -4726,8 +4795,10 @@ init_success:
    * durchlaufen wurde. Ein PC-Glitch wird hier in der finalen Taktstufe
    * abgefangen!
    */
-  uint32_t expected_cfi = CFI_MAIN_INIT ^ CFI_MAIN_HW_UP ^ CFI_MAIN_EXEC ^
-                          CFI_MAIN_BOUNDS ^ CFI_MAIN_HANDOFF ^ CFI_MAIN_HW_DOWN;
+  uint32_t expected_cfi = cfi_tok[MAIN_CFI_SLOT_INIT];
+  for (uint8_t i = 1; i < MAIN_CFI_NUM_TOKENS; i++) {
+    expected_cfi ^= cfi_tok[i];
+  }
 
   volatile uint32_t final_shield_1 = 0, final_shield_2 = 0;
 
@@ -5119,7 +5190,6 @@ FILE: toobloader/core/boot_multiimage.c
 #include "boot_secure_zeroize.h"
 #include <string.h>
 
-
 /* Zero-Allocation: Exklusive Übernahme der Arena für das Multi-Image Routing */
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
 
@@ -5128,10 +5198,10 @@ _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 1024,
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "Glitch-Defense benötigt High-Hamming-Distance BOOT_OK");
 
-/* P10 CFI Constants */
-#define CFI_MI_INIT 0x10101010
-#define CFI_MI_BOUNDS_OK 0x20202020
-#define CFI_MI_COMPLETE 0x40404040
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define MI_CFI_SLOT_INIT 0
+#define MI_CFI_SLOT_BOUNDS 1
+#define MI_CFI_SLOT_COMPLETE 2
 
 /* ==============================================================================
  * INTERNAL MATHEMATICS & GLITCH SHIELDS
@@ -5203,7 +5273,17 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
   if (num_components > 256)
     return BOOT_ERR_INVALID_ARG;
 
-  volatile uint32_t multi_cfi = CFI_MI_INIT;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t mi_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&mi_cfi_seed, sizeof(mi_cfi_seed));
+  }
+  uint32_t cfi_tok[3];
+  cfi_tok[0] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_INIT);
+  cfi_tok[1] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_BOUNDS);
+  cfi_tok[2] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_COMPLETE);
+
+  volatile uint32_t multi_cfi = cfi_tok[0];
   boot_status_t final_status = BOOT_ERR_VERIFY;
 
   /* ====================================================================
@@ -5214,8 +5294,9 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
    */
   bool bounds_violation = false;
   for (uint32_t i = 0; i < num_components; i++) {
-    if (!is_target_whitelisted(components[i].target_addr, components[i].image_size,
-                               whitelist, num_regions)) {
+    if (!is_target_whitelisted(components[i].target_addr,
+                               components[i].image_size, whitelist,
+                               num_regions)) {
       bounds_violation = true;
       break;
     }
@@ -5240,12 +5321,12 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
     return BOOT_ERR_FLASH_BOUNDS; /* Exploit-Attempt Trapped! */
   }
 
-  multi_cfi ^= CFI_MI_BOUNDS_OK;
+  multi_cfi ^= cfi_tok[1];
 
   /* Berechne den dynamisch erwarteten CFI Hash, der am Ende bewiesen werden
    * muss. Verhindert, dass ein Glitch 2 Komponenten überspringt und sich das
    * XOR aufhebt. */
-  uint32_t expected_cfi = CFI_MI_INIT ^ CFI_MI_BOUNDS_OK ^ CFI_MI_COMPLETE;
+  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[1] ^ cfi_tok[2];
   for (uint32_t i = 0; i < num_components; i++) {
     expected_cfi ^= (~components[i].component_id);
   }
@@ -5336,8 +5417,9 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
     while (written < comp.image_size) {
       if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
-      size_t step = (comp.image_size - written > half_stream) ? half_stream
-                                                        : (comp.image_size - written);
+      size_t step = (comp.image_size - written > half_stream)
+                        ? half_stream
+                        : (comp.image_size - written);
 
       uint32_t src_addr = staging_base + comp.staging_offset + written;
       uint32_t dst_addr = comp.target_addr + written;
@@ -5407,7 +5489,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
         (~comp.component_id); /* Component flashed & verified successfully */
   }
 
-  multi_cfi ^= CFI_MI_COMPLETE;
+  multi_cfi ^= cfi_tok[2];
 
   /* ====================================================================
    * STEP 4: FINAL ALGEBRAIC RESOLUTION (Glitch Trap)
@@ -5472,8 +5554,8 @@ FILE: toobloader/core/boot_panic.c
 #include "boot_panic.h"
 #include "boot_cloud_cmd.h"
 #include "boot_cobs.h"
-#include "boot_crc32.h"
 #include "boot_ct_utils.h"
+#include "boot_crc32.h"
 #include "boot_delay.h"
 #include "boot_secure_zeroize.h"
 #include "generated_boot_config.h"
@@ -5508,9 +5590,9 @@ _Static_assert(
      PANIC_CHUNK_MAX_SIZE) == BOOT_CRYPTO_ARENA_SIZE,
     "FATAL: Arena Partitioning exceeds total BOOT_CRYPTO_ARENA_SIZE!");
 
-/* P10 Security Constants */
-#define CFI_PANIC_INIT 0xAAAAAAAA
-#define CFI_AUTH_PASSED 0x55AA55AA
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define PANIC_CFI_SLOT_INIT 0
+#define PANIC_CFI_SLOT_AUTH 1
 
 /* COBS encode/decode/recv extracted to boot_cobs.c (DRY with
  * boot_provisioning.c) */
@@ -5578,7 +5660,16 @@ session_reset:
   uint8_t *verify_msg = rx_buf + PANIC_RX_MAX_SIZE;
   uint8_t *chunk_buf = verify_msg + PANIC_VERIFY_MAX_SIZE;
 
-  volatile uint32_t panic_cfi = CFI_PANIC_INIT;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t panic_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed));
+  }
+  uint32_t cfi_tok[2];
+  cfi_tok[0] = cfi_derive(panic_cfi_seed, PANIC_CFI_SLOT_INIT);
+  cfi_tok[1] = cfi_derive(panic_cfi_seed, PANIC_CFI_SLOT_AUTH);
+
+  volatile uint32_t panic_cfi = cfi_tok[0];
 
   /* ============================================================================
    * BLOCK 1: Challenge Generation (2FA)
@@ -5745,7 +5836,7 @@ session_reset:
                 platform->crypto->advance_monotonic_counter();
                 current_monotonic = safe_sequence_id;
               }
-              panic_cfi ^= CFI_AUTH_PASSED;
+              panic_cfi ^= cfi_tok[1];
             }
           }
           boot_secure_zeroize(root_pubkey, 32);
@@ -5784,10 +5875,11 @@ session_reset:
   /* MATHEMATISCHER CFI-BEWEIS: Wir blockieren State-Confusion-Glitches, die uns
    * ohne Authentication direkt hier reinspringen lassen würden! */
   volatile uint32_t cfi_proof_1 = 0, cfi_proof_2 = 0;
-  if (panic_cfi == (CFI_PANIC_INIT ^ CFI_AUTH_PASSED))
+  uint32_t expected_panic_cfi = cfi_tok[0] ^ cfi_tok[1];
+  if (panic_cfi == expected_panic_cfi)
     cfi_proof_1 = BOOT_OK;
   BOOT_GLITCH_DELAY();
-  if (cfi_proof_1 == BOOT_OK && panic_cfi == (CFI_PANIC_INIT ^ CFI_AUTH_PASSED))
+  if (cfi_proof_1 == BOOT_OK && panic_cfi == expected_panic_cfi)
     cfi_proof_2 = BOOT_OK;
 
   if (cfi_proof_1 != BOOT_OK || cfi_proof_2 != BOOT_OK) {
@@ -6477,11 +6569,12 @@ _Static_assert(
 
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
 
-/* P10 Revert CFI Constants */
-#define CFI_RB_INIT 0x10101010
-#define CFI_RB_HDR 0x20202020
-#define CFI_RB_VERIFIED 0x40404040
-#define CFI_RB_DONE 0x80808080
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define RB_CFI_SLOT_INIT     0
+#define RB_CFI_SLOT_HDR      1
+#define RB_CFI_SLOT_VERIFIED 2
+#define RB_CFI_SLOT_DONE     3
+#define RB_CFI_NUM_TOKENS    4
 
 #include "boot_ct_utils.h"
 
@@ -6534,8 +6627,17 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
     return BOOT_ERR_INVALID_ARG;
   }
 
-  /* P10 Control Flow Integrity Tracker (Verhindert PC-Glitches zum Return) */
-  volatile uint32_t cfi_tracker = 0xAAAAAAAA;
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t svn_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&svn_cfi_seed, sizeof(svn_cfi_seed));
+  }
+  uint32_t svn_tok[RB_CFI_NUM_TOKENS];
+  for (uint8_t i = 0; i < RB_CFI_NUM_TOKENS; i++) {
+    svn_tok[i] = cfi_derive(svn_cfi_seed, i);
+  }
+
+  volatile uint32_t cfi_tracker = svn_tok[0];
 
   /* 1. Lese persistierte SVN Werte sicher aus WAL TMR Payload */
   wal_tmr_payload_t tmr __attribute__((aligned(8)));
@@ -6555,7 +6657,7 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
       is_recovery_os ? tmr.svn_recovery_counter : tmr.app_svn;
   boot_secure_zeroize(&tmr, sizeof(tmr)); /* Sensible Daten umgehend abräumen */
 
-  cfi_tracker ^= 0x11111111;
+  cfi_tracker ^= svn_tok[1];
 
   /* 2. Hardware-Root-of-Trust (eFuse Epoch) abrufen (Glitch-Shielded) */
   uint32_t efuse_epoch = 0;
@@ -6583,7 +6685,7 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
     return efuse_status;
   }
 
-  cfi_tracker ^= 0x22222222;
+  cfi_tracker ^= svn_tok[2];
 
   /* 3. MATHEMATISCHER GLITCH-BEWEIS (Voltage Skip Protection)
    * Verweigert Downgrades rigoros. Identische Versionen (Re-Flashes) sind für
@@ -6613,10 +6715,9 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
     return BOOT_ERR_DOWNGRADE;
   }
 
-  cfi_tracker ^= 0x44444444;
+  cfi_tracker ^= svn_tok[3];
 
-  /* Mathematischer Beweis der lückenlosen Ausführung */
-  uint32_t expected_cfi = 0xAAAAAAAA ^ 0x11111111 ^ 0x22222222 ^ 0x44444444;
+  uint32_t expected_cfi = svn_tok[0] ^ svn_tok[1] ^ svn_tok[2] ^ svn_tok[3];
   volatile uint32_t proof_1 = 0, proof_2 = 0;
 
   if (cfi_tracker == expected_cfi)
@@ -6782,9 +6883,19 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     return BOOT_ERR_INVALID_ARG;
   }
 
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t rv_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&rv_cfi_seed, sizeof(rv_cfi_seed));
+  }
+  uint32_t rv_tok[RB_CFI_NUM_TOKENS];
+  for (uint8_t i = 0; i < RB_CFI_NUM_TOKENS; i++) {
+    rv_tok[i] = cfi_derive(rv_cfi_seed, i);
+  }
+
   boot_status_t status = BOOT_OK;
   uint32_t physical_app_erases = 0;
-  volatile uint32_t revert_cfi = CFI_RB_INIT;
+  volatile uint32_t revert_cfi = rv_tok[0];
 
   /* P10 Pre-Declaration Rule: Alle Intents und Buffer am Scope-Anfang
    * deklarieren, damit der Single-Exit Cleanup niemals über uninitialisierte
@@ -6817,7 +6928,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
   memcpy(&backup_header, hdr_buf, sizeof(toob_image_header_t));
   boot_secure_zeroize(hdr_buf, sizeof(hdr_buf)); /* Leakage Defense */
 
-  revert_cfi ^= CFI_RB_HDR;
+  revert_cfi ^= rv_tok[1];
 
   /* 2. P10 Glitch-Proof Bounds Check (Verhindert Flash-Exploits durch
    * Header-Fakes) */
@@ -6856,7 +6967,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     goto revert_cleanup;
   }
 
-  revert_cfi ^= CFI_RB_VERIFIED;
+  revert_cfi ^= rv_tok[2];
 
   /* 3. Resume-Logik (Brownout-Recovery) & Intent-Checkpointing */
   uint32_t dummy_accum = 0;
@@ -7074,11 +7185,10 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     current_offset += (uint32_t)block_size;
   }
 
-  revert_cfi ^= CFI_RB_DONE;
+  revert_cfi ^= rv_tok[3];
 
   /* CFI Final Resolution */
-  uint32_t expected_cfi =
-      CFI_RB_INIT ^ CFI_RB_HDR ^ CFI_RB_VERIFIED ^ CFI_RB_DONE;
+  uint32_t expected_cfi = rv_tok[0] ^ rv_tok[1] ^ rv_tok[2] ^ rv_tok[3];
   volatile uint32_t cfi_shield_1 = 0, cfi_shield_2 = 0;
 
   if (revert_cfi == expected_cfi)
@@ -7197,18 +7307,16 @@ FILE: toobloader/core/boot_state.c
 #include "boot_verify.h"
 #include <string.h>
 
-#include "boot_ct_utils.h"
-/* P10 Zero-Trust CFI Constants (High Hamming Distance)
- * Collision-Freedom: All 28 pairwise XOR and 56 triple-XOR combinations
- * of these 8 tokens are non-zero (verified: disjoint nibble lanes). */
-#define CFI_TOKEN_INIT 0xAAAAAAAA
-#define CFI_STEP_1 0x11111111
-#define CFI_STEP_2 0x22222222
-#define CFI_STEP_2_5 0xF0F0F0F0 /* Cloud-Command Evaluation */
-#define CFI_STEP_2_7 0x0A0A0A0A /* Lock-State Gate */
-#define CFI_STEP_3 0x44444444
-#define CFI_STEP_4 0x88888888
-#define CFI_STEP_5 0x0F0F0F0F
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define STATE_CFI_SLOT_INIT   0
+#define STATE_CFI_SLOT_1      1
+#define STATE_CFI_SLOT_2      2
+#define STATE_CFI_SLOT_2_5    3 /* Cloud-Command Evaluation */
+#define STATE_CFI_SLOT_2_7    4 /* Lock-State Gate */
+#define STATE_CFI_SLOT_3      5
+#define STATE_CFI_SLOT_4      6
+#define STATE_CFI_SLOT_5      7
+#define STATE_CFI_NUM_TOKENS  8
 
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
 
@@ -7247,7 +7355,8 @@ static inline bool is_buffer_within(const uint8_t *inner, size_t inner_len,
 static boot_status_t _handle_cloud_cmd(const boot_platform_t *platform,
                                        wal_entry_payload_t *open_txn,
                                        boot_target_config_t *target_out,
-                                       volatile uint32_t *cfi_acc) {
+                                       volatile uint32_t *cfi_acc,
+                                       uint32_t cfi_token) {
   toob_cloud_cmd_t cmd_intent = TOOB_CMD_NOP;
 
   boot_status_t eval_stat =
@@ -7257,7 +7366,7 @@ static boot_status_t _handle_cloud_cmd(const boot_platform_t *platform,
     /* Kein gültiger Command im Slot (leerer Slot, Parse-Error, Replay, etc.).
      * Das ist der Normalfall beim Boot ohne Cloud-Interaktion.
      * Kein Seiteneffekt. Skip-Pfad. */
-    *cfi_acc ^= CFI_STEP_2_5;
+    *cfi_acc ^= cfi_token;
     return BOOT_OK;
   }
 
@@ -7332,7 +7441,7 @@ static boot_status_t _handle_cloud_cmd(const boot_platform_t *platform,
     (void)platform->flash->erase_sector(CHIP_CLOUD_CMD_SLOT_ABS_ADDR);
   }
 
-  *cfi_acc ^= CFI_STEP_2_5;
+  *cfi_acc ^= cfi_token;
   return BOOT_OK;
 }
 
@@ -7340,7 +7449,8 @@ static boot_status_t _handle_rollback_flow(const boot_platform_t *platform,
                                            wal_tmr_payload_t *current_tmr,
                                            wal_entry_payload_t *open_txn,
                                            boot_target_config_t *target_out,
-                                           volatile uint32_t *cfi_acc) {
+                                           volatile uint32_t *cfi_acc,
+                                           uint32_t cfi_token) {
   boot_status_t status = BOOT_OK;
 
   /* P10 Glitch Protection: Evaluierung des Counter-Status */
@@ -7389,18 +7499,19 @@ static boot_status_t _handle_rollback_flow(const boot_platform_t *platform,
 
   /* Logik-Bombe gefixt: Bei erfolgreicher Ausführung wird der CFI-Token exakt
    * verrechnet */
-  *cfi_acc ^= CFI_STEP_3;
+  *cfi_acc ^= cfi_token;
   return BOOT_OK;
 }
 
 static boot_status_t _handle_update_flow(const boot_platform_t *platform,
                                          wal_entry_payload_t *open_txn,
                                          uint32_t *extracted_svn,
-                                         volatile uint32_t *cfi_acc) {
+                                         volatile uint32_t *cfi_acc,
+                                         uint32_t cfi_token) {
   if (open_txn->intent != WAL_INTENT_UPDATE_PENDING) {
     /* Logik-Bombe gefixt: CFI Kaskade sicher schließen, falls kein Update
      * läuft! */
-    *cfi_acc ^= CFI_STEP_4;
+    *cfi_acc ^= cfi_token;
     return BOOT_OK; /* Safe Exit: No update pending */
   }
 
@@ -7912,7 +8023,7 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
 #endif
 
   if (flow_final_status == BOOT_OK) {
-    *cfi_acc ^= CFI_STEP_4;
+    *cfi_acc ^= cfi_token;
   }
   return flow_final_status;
 }
@@ -7939,8 +8050,18 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
    */
   boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
 
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t state_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&state_cfi_seed, sizeof(state_cfi_seed));
+  }
+  uint32_t cfi_tok[STATE_CFI_NUM_TOKENS];
+  for (uint8_t i = 0; i < STATE_CFI_NUM_TOKENS; i++) {
+    cfi_tok[i] = cfi_derive(state_cfi_seed, i);
+  }
+
   /* Global Control Flow Integrity (CFI) Accumulator */
-  volatile uint32_t state_cfi = CFI_TOKEN_INIT;
+  volatile uint32_t state_cfi = cfi_tok[STATE_CFI_SLOT_INIT];
 
   wal_entry_payload_t open_txn;
   wal_tmr_payload_t current_tmr;
@@ -7976,7 +8097,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
     core_status = BOOT_OK; /* Normalize clean state */
   }
 
-  state_cfi ^= CFI_STEP_1; /* Proof Step 1 */
+  state_cfi ^= cfi_tok[STATE_CFI_SLOT_1]; /* Proof Step 1 */
   platform->wdt->kick();
 
   /*
@@ -8063,7 +8184,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
     }
   }
 
-  state_cfi ^= CFI_STEP_2; /* Proof Step 2 */
+  state_cfi ^= cfi_tok[STATE_CFI_SLOT_2]; /* Proof Step 2 */
 
   /*
    * ==============================================================================
@@ -8072,7 +8193,8 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
    * Evaluiert den CHIP_CLOUD_CMD_SLOT. Muss VOR dem Lock-Gate (Step 2.7)
    * laufen, damit ein TOOB_CMD_UNLOCK den Lock aufheben kann.
    */
-  core_status = _handle_cloud_cmd(platform, &open_txn, target_out, &state_cfi);
+  core_status = _handle_cloud_cmd(platform, &open_txn, target_out, &state_cfi,
+                                   cfi_tok[STATE_CFI_SLOT_2_5]);
   if (core_status != BOOT_OK)
     goto state_cleanup;
 
@@ -8103,7 +8225,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
     }
   }
 
-  state_cfi ^= CFI_STEP_2_7; /* Proof: Device is NOT locked */
+  state_cfi ^= cfi_tok[STATE_CFI_SLOT_2_7]; /* Proof: Device is NOT locked */
 
   /*
    * ==============================================================================
@@ -8137,7 +8259,8 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   }
 
   core_status = _handle_rollback_flow(platform, &current_tmr, &open_txn,
-                                      target_out, &state_cfi);
+                                      target_out, &state_cfi,
+                                      cfi_tok[STATE_CFI_SLOT_3]);
   if (core_status != BOOT_OK)
     goto state_cleanup;
 
@@ -8151,7 +8274,8 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   uint32_t extracted_svn = 0;
 
   core_status =
-      _handle_update_flow(platform, &open_txn, &extracted_svn, &state_cfi);
+      _handle_update_flow(platform, &open_txn, &extracted_svn, &state_cfi,
+                          cfi_tok[STATE_CFI_SLOT_4]);
   if (core_status != BOOT_OK)
     goto state_cleanup;
 
@@ -8229,7 +8353,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
 
   target_out->net_search_accum_ms = active_net_accum;
   target_out->resume_offset = resume_offset;
-  state_cfi ^= CFI_STEP_5;
+  state_cfi ^= cfi_tok[STATE_CFI_SLOT_5];
 
 state_cleanup:
   /* ==============================================================================
@@ -8242,9 +8366,10 @@ state_cleanup:
    * überschrieben werden!
    */
   if (core_status == BOOT_OK) {
-    uint32_t expected_cfi = CFI_TOKEN_INIT ^ CFI_STEP_1 ^ CFI_STEP_2 ^
-                            CFI_STEP_2_5 ^ CFI_STEP_2_7 ^ CFI_STEP_3 ^
-                            CFI_STEP_4 ^ CFI_STEP_5;
+    uint32_t expected_cfi = cfi_tok[STATE_CFI_SLOT_INIT];
+    for (uint8_t i = 1; i < STATE_CFI_NUM_TOKENS; i++) {
+      expected_cfi ^= cfi_tok[i];
+    }
     volatile uint32_t cfi_shield_1 = 0;
     volatile uint32_t cfi_shield_2 = 0;
 
@@ -8888,6 +9013,7 @@ FILE: toobloader/core/boot_verify.c
  */
 
 #include "boot_verify.h"
+#include "boot_ct_utils.h"
 #include "boot_secure_zeroize.h"
 #include "boot_types.h"
 #include <stddef.h>
@@ -8900,14 +9026,15 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein, um "
                "das Double-Check Pattern zu garantieren!");
 
-/* P10 Zero-Trust CFI Constants */
-#define CFI_VERIFY_INIT 0x00000000
-#define CFI_VERIFY_STEP_1 0x11111111
-#define CFI_VERIFY_STEP_2 0x22222222
-#define CFI_VERIFY_STEP_3 0x33333333
-#define CFI_VERIFY_STEP_4 0x44444444
-#define CFI_VERIFY_STEP_5 0x88888888
-#define CFI_VERIFY_STEP_5_SKIP 0x55555555
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define VERIFY_CFI_SLOT_INIT      0
+#define VERIFY_CFI_SLOT_1         1
+#define VERIFY_CFI_SLOT_2         2
+#define VERIFY_CFI_SLOT_3         3
+#define VERIFY_CFI_SLOT_4         4
+#define VERIFY_CFI_SLOT_5         5
+#define VERIFY_CFI_SLOT_5_SKIP    6
+#define VERIFY_CFI_NUM_TOKENS     7
 
 /**
  * @brief O(1) Mathematisch perfekter Buffer-Boundary Check (UB-frei).
@@ -8980,9 +9107,19 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   boot_status_t final_status =
       BOOT_ERR_VERIFY; /* Grundzustand: Kompromittiert / Default-Deny */
 
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t verify_cfi_seed = 0;
+  if (platform->crypto && platform->crypto->random) {
+    platform->crypto->random((uint8_t *)&verify_cfi_seed, sizeof(verify_cfi_seed));
+  }
+  uint32_t cfi_tok[VERIFY_CFI_NUM_TOKENS];
+  for (uint8_t i = 0; i < VERIFY_CFI_NUM_TOKENS; i++) {
+    cfi_tok[i] = cfi_derive(verify_cfi_seed, i);
+  }
+
   /* CFI-Akkumulator: Beweist den physischen Durchlauf der Verifikationsblöcke
    */
-  volatile uint32_t execution_path = CFI_VERIFY_INIT;
+  volatile uint32_t execution_path = cfi_tok[VERIFY_CFI_SLOT_INIT];
 
   /* P10 Stack Allocation: 8-Byte Alignment zwingend für HW-Crypto-Cores */
   uint8_t root_pubkey[32] __attribute__((aligned(8)));
@@ -9042,7 +9179,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= CFI_VERIFY_STEP_1; /* Schritt 1 erfolgreich bewiesen */
+  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_1]; /* Schritt 1 erfolgreich bewiesen */
 
   /* ====================================================================
    * 3. CONSTANT-TIME eFUSE DOWNGRADE CHECK (Side-Channel Closure)
@@ -9093,7 +9230,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= CFI_VERIFY_STEP_2; /* Schritt 2 erfolgreich bewiesen */
+  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_2]; /* Schritt 2 erfolgreich bewiesen */
 
   /* ====================================================================
    * 4. HARDWARE ROOT-OF-TRUST EXTRACTION (Glitch-Hardened)
@@ -9136,7 +9273,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= CFI_VERIFY_STEP_3; /* Schritt 3 erfolgreich bewiesen */
+  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_3]; /* Schritt 3 erfolgreich bewiesen */
 
   /* ====================================================================
    * 5. ENVELOPE-FIRST ED25519 VERIFICATION (Glitch Hardened)
@@ -9192,7 +9329,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= CFI_VERIFY_STEP_4; /* Schritt 4 erfolgreich bewiesen */
+  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_4]; /* Schritt 4 erfolgreich bewiesen */
 
   /* ====================================================================
    * 6. POST-QUANTUM HYBRID ENFORCEMENT (Bypass Shielded)
@@ -9299,7 +9436,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     }
 
     execution_path ^=
-        CFI_VERIFY_STEP_5; /* Schritt 5 (PQC) erfolgreich bewiesen */
+        cfi_tok[VERIFY_CFI_SLOT_5]; /* Schritt 5 (PQC) erfolgreich bewiesen */
   } else {
     /* NEGATIVE CFI ROUTING: Beweist physikalisch, dass PQC legitimerweise
      * übersprungen wurde! */
@@ -9319,7 +9456,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
       goto cleanup;
     }
     execution_path ^=
-        CFI_VERIFY_STEP_5_SKIP; /* Negativer Pfad (Kein PQC) bewiesen */
+        cfi_tok[VERIFY_CFI_SLOT_5_SKIP]; /* Negativer Pfad (Kein PQC) bewiesen */
   }
 
   /* ====================================================================
@@ -9328,9 +9465,11 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   /* Berechne das erwartete kryptografische Hamming-Weight, das die CPU
    * am Ende des Durchlaufs im CFI-Akkumulator aufweisen muss. */
   uint32_t expected_path =
-      CFI_VERIFY_INIT ^ CFI_VERIFY_STEP_1 ^ CFI_VERIFY_STEP_2 ^
-      CFI_VERIFY_STEP_3 ^ CFI_VERIFY_STEP_4 ^
-      (pqc_required_proven ? CFI_VERIFY_STEP_5 : CFI_VERIFY_STEP_5_SKIP);
+      cfi_tok[VERIFY_CFI_SLOT_INIT] ^ cfi_tok[VERIFY_CFI_SLOT_1] ^
+      cfi_tok[VERIFY_CFI_SLOT_2] ^ cfi_tok[VERIFY_CFI_SLOT_3] ^
+      cfi_tok[VERIFY_CFI_SLOT_4] ^
+      (pqc_required_proven ? cfi_tok[VERIFY_CFI_SLOT_5]
+                           : cfi_tok[VERIFY_CFI_SLOT_5_SKIP]);
 
   volatile uint32_t path_check_1 = 0;
   volatile uint32_t path_check_2 = 0;
@@ -9368,6 +9507,377 @@ cleanup:
 
   return final_status;
 }
+
+======================================================================
+FILE: toobloader/core/registry_production_architecture.md
+======================================================================
+
+# Toob Registry — Production Architecture
+
+## 1. Problem Statement
+
+The current registry lives entirely on GitHub as `Toob-Boot/Toob-Registry`. Scripts, workflows, Go tooling, and actual hardware data (chips, drivers, crypto, arch) coexist in one repo. The CLI downloads ZIP archives directly from GitHub. This creates three critical risks:
+
+1. **GitHub as SPOF** — If GitHub is down, no CLI can sync, no builds can resolve dependencies
+2. **No immutability guarantee** — Git history can be force-pushed; no WORM protection
+3. **Mixed concerns** — Internal CI scripts (`semver_calc.go`, `build_registry.go`) are public alongside consumable registry data
+
+---
+
+## 2. Repository Split
+
+### Toob-Registry (Private Monorepo — existing)
+
+The **internal development repo**. Stays as submodule of `Toob-Loader`. Contains everything:
+
+```
+Toob-Registry/                    (Private)
+├── .github/workflows/            ← CI/CD pipelines
+│   ├── main-release.yml
+│   ├── pr-validator.yml
+│   ├── version-index.yml
+│   └── community-ingest.yml      ← [NEW] mirrors PRs from Public
+├── scripts/                      ← Go build/release tooling
+│   ├── build_registry.go
+│   ├── semver_calc.go            ← becomes revision_calc.go
+│   ├── matrix_generator.go
+│   └── ...
+├── chips/                        ← Hardware data (source of truth)
+├── drivers/
+├── crypto/
+├── arch/
+├── soc/
+├── toolchains/
+├── integrations/
+├── registry.json                 ← Generated index
+└── docs/
+```
+
+### Toob-Registry-Public (Public Read-Only Mirror — new)
+
+The **community-facing repo**. Contains only consumable registry content. No scripts, no workflows (except the PR template).
+
+```
+Toob-Registry-Public/             (Public)
+├── chips/
+├── drivers/
+├── crypto/
+├── arch/
+├── soc/
+├── toolchains/
+├── integrations/
+├── registry.json
+├── compatibility_matrix.json
+├── CONTRIBUTING.md
+└── README.md
+```
+
+### Sync Direction
+
+```
+Community PR ──► Toob-Registry-Public ──► community-ingest.yml
+                                              │
+                                              ▼
+                                    Toob-Registry (Private)
+                                         │ (merge + test)
+                                         ▼
+                                    Release Pipeline
+                                         │
+                            ┌────────────┼────────────┐
+                            ▼            ▼            ▼
+                     PostgreSQL    S3 Storage    Public Mirror
+                     (metadata)   (tarballs)    (git push)
+```
+
+---
+
+## 3. Infrastructure Topology
+
+```
+                         ┌──────────────────────┐
+                         │   CLOUDFLARE CDN      │
+                         │   (Edge Cache + WAF)  │
+                         └──────────┬───────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+          ┌─────────────────┐             ┌─────────────────┐
+          │  API Server 1   │             │  API Server 2   │
+          │  (Falkenstein)   │             │  (Helsinki)     │
+          │  Go Binary       │             │  Go Binary       │
+          │  CX22 ~4€/mo    │             │  CX22 ~4€/mo    │
+          └────────┬────────┘             └────────┬────────┘
+                   │                               │
+                   └───────────┬───────────────────┘
+                               │
+                   ┌───────────┴───────────┐
+                   ▼                       ▼
+         ┌──────────────────┐    ┌──────────────────┐
+         │ Managed Postgres │    │ Hetzner Object   │
+         │ (Primary + RR)   │    │ Storage (S3)     │
+         │ Metadata + Matrix│    │ WORM-Locked      │
+         └──────────────────┘    │ .tar.gz Packages │
+                                 └────────▲─────────┘
+                                          │ Upload
+                              ┌───────────┴──────────┐
+                              │  Ephemeral Workers   │
+                              │  (Nomad + Firecracker)│
+                              │  CCX22 Dedicated CPU  │
+                              │  On-Demand Scaling    │
+                              └──────────────────────┘
+```
+
+### Component Roles
+
+| Component | Purpose | Cost |
+|---|---|---|
+| **Cloudflare** (Free/Pro) | DDoS protection, edge caching of registry.json + tarballs, geo-routing to nearest API | ~0€ |
+| **API Server ×2** (CX22) | Go API serving registry queries, tarball URLs, matrix lookups | ~8€/mo |
+| **Managed PostgreSQL** | Package metadata, compatibility matrix, revision tracking | ~10€/mo |
+| **S3 Object Storage** | Immutable tarball storage with WORM Object Locking | ~2€/mo base |
+| **Build Workers** (CCX22) | Ephemeral Firecracker MicroVMs for compilation, pay-per-minute | Variable |
+
+**Base cost without build load: ~20€/month**
+
+---
+
+## 4. Versioning: Monotonic Integer Revision
+
+SemVer inheritance is replaced by a simple, monotonically increasing integer.
+
+```
+registry_revision: 1
+registry_revision: 2   ← any change to any package
+registry_revision: 3
+...
+```
+
+Individual packages keep their own SemVer (e.g. `monocypher@1.2.1`), but the **global registry state** is tracked by a single integer. This simplifies sync logic enormously:
+
+```
+CLI: "I have revision 47"
+API: "Current is 52. Here are the 5 changelog entries."
+```
+
+### PostgreSQL Schema (Core)
+
+```sql
+CREATE TABLE registry_revisions (
+    revision    BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    commit_sha  TEXT NOT NULL,
+    changelog   JSONB NOT NULL  -- [{package, old_version, new_version, bump_type}]
+);
+
+CREATE TABLE packages (
+    name        TEXT PRIMARY KEY,
+    category    TEXT NOT NULL,   -- 'chip', 'driver', 'crypto', 'arch', 'toolchain', 'integration'
+    version     TEXT NOT NULL,
+    revision    BIGINT REFERENCES registry_revisions(revision),
+    manifest    JSONB NOT NULL,  -- full chip_manifest.json / driver manifest
+    tarball_sha TEXT NOT NULL,
+    tarball_url TEXT NOT NULL,   -- S3 presigned or CDN path
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE compatibility_matrix (
+    id              BIGSERIAL PRIMARY KEY,
+    chip            TEXT NOT NULL,
+    chip_version    TEXT NOT NULL,
+    env_hash        TEXT NOT NULL,
+    dependencies    JSONB NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING, VERIFIED, FAILED
+    tested_at       TIMESTAMPTZ,
+    revision        BIGINT REFERENCES registry_revisions(revision)
+);
+```
+
+---
+
+## 5. The PR-to-Release Security Pipeline
+
+### Phase 1: Community Contribution (Public Repo)
+
+1. Contributor opens PR against `Toob-Registry-Public`
+2. GitHub Actions runs **read-only** linting (clang-tidy, manifest schema validation)
+3. No secrets, no write access, no cache persistence
+
+### Phase 2: Ingestion (Private Monorepo)
+
+4. `community-ingest.yml` on `Toob-Registry` creates an isolated branch mirroring the PR changes
+5. Ephemeral CI runner on Hetzner executes the full compatibility matrix dry-run:
+   - Compile test against all affected chips × RTOS combinations
+   - Static analysis (SAST) for crypto and HAL code
+   - No artifacts uploaded, no DB writes
+6. Results are posted back to the PR on `Toob-Registry-Public` via GitHub API
+
+### Phase 3: Human Review Gate
+
+7. Core team reviews the code on the private monorepo branch
+8. **Four-eyes principle**: At least one certified maintainer must approve
+9. Merge to `main` on `Toob-Registry`
+
+### Phase 4: Atomic Release
+
+10. `main-release.yml` triggers:
+    - `revision_calc.go` increments the global revision integer
+    - `build_registry.go` regenerates `registry.json`
+    - Each changed package is tarball'd and **signed** (Ed25519 via KMS)
+    - Tarballs uploaded to S3 with **Object Locking (WORM)**
+    - Metadata written to PostgreSQL (atomic transaction)
+    - Cloudflare cache purged for affected paths
+
+### Phase 5: Distribution
+
+11. `registry.json` committed to `Toob-Registry` main
+12. Public mirror bot pushes content (no scripts) to `Toob-Registry-Public`
+13. CLI users see new packages immediately via API or `toob registry sync`
+
+---
+
+## 6. API Server Design
+
+### Endpoints
+
+```
+GET  /api/v1/registry/revision          → { "revision": 52 }
+GET  /api/v1/registry/sync?since=47     → { "changes": [...], "revision": 52 }
+GET  /api/v1/registry/index             → full registry.json (Cloudflare cached)
+
+GET  /api/v1/resolve/chip?name=esp32c6  → chip manifest + tarball URL
+GET  /api/v1/resolve/matrix             → compatibility matrix
+GET  /api/v1/resolve/integrations       → available RTOS integrations
+
+GET  /api/v1/package/{name}/download    → 302 redirect to S3 signed URL
+GET  /api/v1/package/{name}/signature   → Ed25519 signature of tarball
+
+POST /api/v1/admin/publish              → (authenticated) trigger release
+POST /api/v1/admin/matrix-trigger       → (authenticated) retry failed matrix jobs
+POST /api/v1/admin/cache-purge          → (authenticated) Cloudflare invalidation
+```
+
+### Cloudflare Caching Strategy
+
+| Path Pattern | Cache TTL | Rationale |
+|---|---|---|
+| `/api/v1/registry/index` | 5 min | Frequently polled, tolerates slight staleness |
+| `/api/v1/package/*/download` | 24h | Tarballs are immutable (WORM) |
+| `/api/v1/registry/revision` | 30s | Lightweight polling endpoint |
+| `/api/v1/resolve/*` | 2 min | Near-realtime for interactive CLI |
+
+---
+
+## 7. CLI Integration Changes
+
+The CLI currently downloads ZIP archives from GitHub. The migration path:
+
+### Current Flow
+```
+CLI → GitHub raw (version_index.json) → GitHub archive ZIP → local cache
+```
+
+### Target Flow
+```
+CLI → Cloudflare/API (revision check) → S3 tarball (per-package) → local cache
+```
+
+### Key Changes in `internal/registry/cache.go`
+
+1. **`getLatestStableVersion()`** — Query `/api/v1/registry/revision` instead of GitHub raw
+2. **`buildDownloadURL()`** — Return API package download URL instead of GitHub archive URL
+3. **`Sync()`** — Differential sync: only download changed packages since last known revision
+4. **`VerifyHead()`** — Verify Ed25519 signature of each tarball against embedded public key
+5. **Fallback chain preserved**: API → GitHub mirror → local cache
+
+### Backward Compatibility
+
+The `registry.json` format stays identical. The CLI just changes *where* it fetches from. Old CLI versions still work via the GitHub mirror.
+
+---
+
+## 8. Build Worker Architecture
+
+### Nomad + Firecracker
+
+```
+Build Request (API Queue)
+        │
+        ▼
+   Nomad Scheduler
+        │
+        ▼
+   Hetzner API: Spin up CCX22 (dedicated CPU)
+        │
+        ▼
+   Firecracker MicroVM (ephemeral)
+   ┌──────────────────────────────┐
+   │  Minimal Linux Kernel        │
+   │  toob-compiler Docker image  │
+   │  Compile → tarball → S3     │
+   │  Sign hash via KMS API      │
+   └──────────────────────────────┘
+        │
+        ▼
+   VM destroyed (zero state residue)
+```
+
+### Security Properties
+
+- **Hardware isolation**: Firecracker uses KVM, not container namespaces
+- **Network sandboxing**: Egress whitelist only (github.com, S3 endpoint, API server)
+- **No shared caches**: Each MicroVM boots from a read-only rootfs
+- **Ephemeral**: VM is destroyed after single job, no cross-contamination possible
+- **OIDC tokens**: Short-lived credentials per job, no static secrets on workers
+
+---
+
+## 9. Security Model Summary
+
+| Attack Vector | Mitigation |
+|---|---|
+| GitHub compromise | Registry data served from S3/PostgreSQL, not GitHub. Mirror is read-only |
+| Cache poisoning | No shared caches. Ephemeral workers. Per-branch cache isolation |
+| Tarball tampering | S3 WORM Object Locking. Ed25519 signatures verified by CLI |
+| Token theft | OIDC short-lived tokens. No `pull_request_target`. Minimal GitHub permissions |
+| Supply chain injection | Four-eyes review. Isolated CI dry-runs. No auto-merge |
+| DDoS | Cloudflare WAF + rate limiting. API servers behind edge cache |
+| Data exfiltration from builds | Firecracker isolation. Strict egress firewall |
+| Single region failure | Multi-region API (Falkenstein + Helsinki). Cloudflare geo-routing |
+
+---
+
+## 10. Phased Rollout
+
+### Phase 1: Repository Split (Week 1)
+- Populate `Toob-Registry-Public` with content-only export from `Toob-Registry`
+- Set up mirror bot (GitHub Action on private repo → push to public)
+- Add `CONTRIBUTING.md` and PR templates to public repo
+
+### Phase 2: API + Database (Week 2-3)
+- Deploy Go API server on Hetzner CX22 (single region first)
+- Set up Managed PostgreSQL, import current `registry.json` into SQL schema
+- Wire Cloudflare DNS and caching rules
+
+### Phase 3: S3 + Signatures (Week 3-4)
+- Configure Hetzner Object Storage with WORM
+- Implement tarball packaging + Ed25519 signing in release pipeline
+- Migrate CLI to fetch from API (keep GitHub fallback)
+
+### Phase 4: Second Region + Hardening (Week 5-6)
+- Deploy API Server 2 in Helsinki
+- Cloudflare load balancing between regions
+- Integer revision system replaces SemVer inheritance
+
+### Phase 5: Build Cloud (Week 7+)
+- Nomad cluster on Hetzner
+- Firecracker integration for ephemeral build workers
+- Community PR ingestion pipeline (`community-ingest.yml`)
+
+### Phase 6: OTA / Update Cloud (Future)
+- Firmware delivery via same S3 + Cloudflare infrastructure
+- Device fleet management API
+- Rollout policies (canary, staged, geographic)
+
 
 ======================================================================
 FILE: toobloader/ports/esp_idf/CMakeLists.txt
@@ -10147,6 +10657,311 @@ int stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig,
 }
 
 ======================================================================
+FILE: sdk/libtoob/include/libtoob.h
+======================================================================
+
+/**
+ * ==============================================================================
+ * Toob-Boot C-Interface (libtoob.h)
+ * ==============================================================================
+ * 
+ * REFERENCED SPECIFICATIONS:
+ * - docs/libtoob_api.md (API definitions, toob_status_t, .noinit references)
+ * - docs/concept_fusion.md (Strict isolation policy, State Machine interactions)
+ * - docs/structure_plan.md (Strict isolation from core/ headers)
+ * - docs/testing_requirements.md (P10 compliance & Interface definition standards)
+ *
+ * This is the EXCLUSIVE OS-side API for Toob-Boot interaction.
+ * Es spannt den C++ kompatiblen Schutzschirm (extern "C") für externe Feature-OS.
+ */
+
+#ifndef LIBTOOB_H
+#define LIBTOOB_H
+
+/* 
+ * ARCHITEKTUR-GRUND: System-Header MÜSSEN vor dem `extern "C"` Block geladen 
+ * werden, da eingebaute C++ Systembibliotheken bei geschachteltem `extern "C"` 
+ * crashen können. 
+ */
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "libtoob_types.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ==============================================================================
+ * P10 Compliance & Symmetrie Validierungen
+ * ============================================================================== */
+
+/* GAP-39: Strict 8-Byte Formatierung für Boundaries */
+_Static_assert(sizeof(toob_handoff_t) % 8 == 0, "GAP-39: toob_handoff_t size must align to 8 bytes.");
+_Static_assert(sizeof(toob_boot_diag_t) % 8 == 0, "GAP-39: toob_boot_diag_t size must align to 8 bytes.");
+
+/* Host-Compiler Symmetrie Check */
+#ifndef TOOB_NOINIT
+#error "FATAL: Host-Compiler lacks TOOB_NOINIT support. Must provide fallback for .noinit section mapping."
+#endif
+
+/* ==============================================================================
+ * Handoff Verification Guard
+ * ==============================================================================
+ * Das `.noinit` RAM enthält illegitimate Garbage-Werte, wenn das OS durch den 
+ * Watchdog abgewürgt wird, ohne dass Toob-Boot involviert war. Das Lesen der 
+ * ungeschützten Boot-Variablen OHNE vorherige CRC-32 Validation riskiert Boot-Loop Crashes!
+ */
+
+/**
+ * @brief Validiert die Integrität der .noinit Toob-Boot Boundary (GAP-Handoff).
+ * @return TOOB_OK bei validem Magic/CRC-32, TOOB_ERR_VERIFY bei Fehler.
+ */
+toob_status_t toob_validate_handoff(void);
+
+/**
+ * @brief Liefert eine sichere, verifizierte "By-Value"-Kopie der Handoff-Daten.
+ * @param out_handoff Pointer auf eine vom OS allozierte Ausgabestruktur.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY wenn CRC ungültig, TOOB_ERR_INVALID_ARG bei NULL.
+ */
+toob_status_t toob_get_handoff(toob_handoff_t* out_handoff);
+
+/**
+ * @brief P10 Absicherungsmakro zur ausfallsicheren OS-Initialisierung.
+ * @note  Kapselt die unabdingbare `toob_validate_handoff()` Routine.
+ *        Wird vorab in das Feature OS `main()` verankert, um die Bootloader-Brücke 
+ *        atomar abzusichern. Der While-Lock verhindert die Propagation korrupter Pointers.
+ */
+#define TOOB_OS_INIT_OR_PANIC() \
+    do { \
+        if (toob_validate_handoff() != TOOB_OK) { \
+            /* PANIC: .noinit Korruption! Eskaliere Hardware-Trap für Systeme ohne WDT! */ \
+            while (true) { TOOB_TRAP(); } \
+        } \
+    } while (false)
+
+/* ==============================================================================
+ * Primary Feature-OS API (IDE-UX & Doxygen Mappings)
+ * ============================================================================== */
+
+/**
+ * @brief Bestätigt das asynchrone OTA-Update (Commit Flag).
+ * 
+ * @note  [GAP-07: Network Watchdog TTL]
+ *        Das Feature-OS MUSS diese Funktion rufen, um ein laufendes Update 
+ *        als erfolgreich zu flaggen. Nutzt das Update ein Cloud-Handshake 
+ *        (z.B. DICE/CDI), MUSS das OS zwingend die Cloud-Bestätigung abwarten. 
+ *        Dafür sammelt das OS "Network-TTL" Minuten via WAL. Bei Überschreiten 
+ *        dieses TTLs führt das Ausbleiben des Aufrufs unwiderruflich zum Rollback.
+ * 
+ * @return TOOB_OK bei Erfolg, passender toob_status_t (z.B. TOOB_ERR_FLASH) bei Fehler.
+ */
+toob_status_t toob_confirm_boot(void);
+
+/**
+ * @brief Befreit das Recovery-OS aus dem Rettungsmodus (Anti Roach-Motel).
+ * @note  Sobald das Recovery-OS die App repariert hat, MUSS es diese Funktion 
+ *        aufrufen, um den RECOVERY_RESOLVED Intent ins WAL zu schreiben.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_FLASH bei Hardwarefehlern.
+ */
+toob_status_t toob_recovery_resolved(void);
+
+/**
+ * @brief Akkumuliert die aktive Cloud-Suchzeit (Anti-Lagerhaus Lockout).
+ * @param active_search_ms Dauer der aktiven Netzwerk-Suche seit dem letzten Reset.
+ * @return TOOB_OK bei Erfolg.
+ */
+toob_status_t toob_accumulate_net_search(uint32_t active_search_ms);
+
+/**
+ * @brief Extrahiert die rohen Hardware-Metriken aus dem .noinit RAM.
+ * 
+ * @note  [CRA Regulatorik & CBOR Extraktion]
+ *        Liest die `toob_boot_diag_t` Struktur. Diese enthält u.A. den 
+ *        kryptographischen SHA-256 Digest der SBOM, was direkt der Erfüllung
+ *        des EU Cyber Resilience Acts 2027 (CRA) dient. Die weiterführende 
+ *        Telemetrie zur Hardware-Lebensdauer ist optional via CBOR verpackt.
+ *
+ * @param diag Zeiger auf die vom OS bereitgestellte Struct-Instanz.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY bei gebrochener Checksumme.
+ */
+toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
+
+/* ==============================================================================
+ * Toob-Boot OTA Daemon (Network-Agnostic Stream Writer)
+ * ============================================================================== */
+
+/**
+ * @brief Initializes the OTA Daemon for receiving a new update stream.
+ * @param total_size Expected total size of the incoming image (Manifest + Payload).
+ * @param image_type 0 for OS Update (App), 3 for Bootloader Update (Stage 1).
+ * @return TOOB_OK on success, TOOB_ERR_INVALID_ARG if size exceeds staging slot.
+ */
+toob_status_t toob_ota_begin(uint32_t total_size, uint8_t image_type);
+
+/**
+ * @brief Initializes the OTA Daemon with streaming SHA-256 verification (Zero-Bloat).
+ * @param total_size Expected total size.
+ * @param image_type 0 for OS Update, 3 for Bootloader.
+ * @param expected_sha256 32-byte hash to verify the stream against.
+ * @return TOOB_OK on success.
+ */
+toob_status_t toob_ota_begin_verified(uint32_t total_size, uint8_t image_type, const uint8_t expected_sha256[32]);
+
+/**
+ * @brief Resumes a partially downloaded OTA update.
+ * @param resume_offset Output pointer for the byte offset to resume from.
+ * @return TOOB_OK if resumable, TOOB_ERR_NOT_FOUND if no partial download exists.
+ */
+toob_status_t toob_ota_resume(uint32_t* resume_offset);
+
+/**
+ * @brief Aborts an active OTA download and securely zeroizes buffers.
+ * @return TOOB_OK.
+ */
+toob_status_t toob_ota_abort(void);
+
+/**
+ * @brief Processes a chunk of incoming bytes, writing them linearly to Staging.
+ * @param chunk Pointer to the downloaded bytes.
+ * @param len Length of the chunk.
+ * @return TOOB_OK, or TOOB_ERR_FLASH on write error.
+ */
+toob_status_t toob_ota_process_chunk(const uint8_t* chunk, uint32_t len);
+
+/**
+ * @brief Finalizes the OTA process and registers the update intent in the WAL.
+ * @return TOOB_OK on success. The system should be rebooted immediately after.
+ */
+toob_status_t toob_ota_finalize(void);
+
+/**
+ * @brief Registriert ein empfangenes SUIT-Manifest im Write-Ahead-Log (WAL).
+ * 
+ * @note  [GAP-37: P10 WAL-Atomarität]
+ *        Toob-Loader stützt sich auf absolute P10-Resilienz. Ein Crash (Brownout) 
+ *        während der Ausführung dieser Funktion hinterlässt niemals einen halben
+ *        Zustand! Das System evaluiert CRC-gesicherte 64-Byte WAL-Sektoren beim
+ *        nächsten Boot und schließt das Update ab, oder verwirft das Rausch-Fragment.
+ *
+ * @param manifest_flash_addr Absolute, hardware-bündige Flash-Adresse des Manifests im SPI.
+ * @return TOOB_OK bei erfolgreichem WAL-Append.
+ */
+toob_status_t toob_set_next_update(uint32_t manifest_flash_addr);
+
+/**
+ * @brief Extrahiert die rohen Hardware-Metriken aus dem .noinit RAM.
+ * 
+ * @note  [CRA Regulatorik & CBOR Extraktion]
+ *        Liest die `toob_boot_diag_t` Struktur. Diese enthält u.A. den 
+ *        kryptographischen SHA-256 Digest der SBOM, was direkt der Erfüllung
+ *        des EU Cyber Resilience Acts 2027 (CRA) dient. Die weiterführende 
+ *        Telemetrie zur Hardware-Lebensdauer ist optional via CBOR verpackt.
+ *
+ * @param diag Zeiger auf die vom OS bereitgestellte Struct-Instanz.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY bei gebrochener Checksumme.
+ */
+toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
+
+/**
+ * @brief Extrahiert die Diagnosedaten kodiert im Cloud-tauglichen CBOR-Format.
+ * @param out_buf Buffer für den CBOR-Stream
+ * @param max_len Maximale Größe von out_buf
+ * @param out_len Tatsächliche Größe des geschriebenen CBOR-Streams
+ * @return TOOB_OK bei Erfolg
+ */
+toob_status_t toob_get_boot_diag_cbor(uint8_t* out_buf, size_t max_len, size_t* out_len);
+
+/* ==============================================================================
+ * Cloud-Command Submission API (Phase 7)
+ * ==============================================================================
+ * Das OS empfängt Cloud-Command Envelopes (CBOR, Ed25519-signiert) vom Server
+ * und delegiert sie über dieses API an den Bootloader. Der Bootloader evaluiert
+ * den Command beim nächsten Boot (Step 2.5 in boot_state.c).
+ */
+
+/**
+ * @brief Schreibt ein Cloud-Command-Envelope in den CHIP_CLOUD_CMD_SLOT.
+ *
+ * Sequenz: Erase → Write → CRC Read-Back → WAL Signal.
+ * Der Bootloader evaluiert den Slot beim nächsten Boot autonom.
+ *
+ * @param envelope  Zeiger auf das rohe CBOR-Envelope (inkl. Signatur).
+ * @param len       Länge des Envelopes in Bytes.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL/Überlänge,
+ *         TOOB_ERR_FLASH bei Erase/Write-Fehler,
+ *         TOOB_ERR_FLASH_HW bei Read-Back-Mismatch.
+ */
+toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len);
+
+/**
+ * @brief Extrahiert die 32-Byte DICE Device-ID aus dem Boot-Handoff.
+ *
+ * @param out_id  Ziel-Buffer (mind. 32 Bytes).
+ * @param id_len  Größe des Buffers. Muss >= 32 sein.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL oder zu kleinem Buffer,
+ *         TOOB_ERR_VERIFY bei korruptem Handoff.
+ */
+toob_status_t toob_get_device_id(uint8_t *out_id, size_t id_len);
+
+/* ==============================================================================
+ * Der Hard-Linker Contract "Zero-Bloat Shim"
+ * ==============================================================================
+ * Toob-Loader verweigert die Kopplung an ausufernde Vendor-SDK SPI Treiber. 
+ * Um dem Bootloader dennoch persistente WAL-Transktionen (`toob_set_next_update`) 
+ * zu ermöglichen, fordert die Library exakt diese beiden Symbole als harten Linker-Contract ein. 
+ * Das Feature-OS (z.B. der Zephyr OS Storage API Stack) MUSS diese in seinem C/C++ Code 
+ * zwingend physikalisch bereitstellen! Ein Fehlen führt absichtlich zu einem 
+ * "Undefined Symbol" Kompilierungsabbruch (Fail-Fast).
+ */
+
+/**
+ * @brief Zero-Bloat Hook: Physikalischer Flash-Lesezugriff.
+ * @param addr Absolute Byte-Adresse im SPI Flash.
+ * @param buf Datenpuffer im lokalen OS-SRAM.
+ * @param len Länge der zu lesenden Daten.
+ * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
+ */
+toob_status_t toob_os_flash_read(uint32_t addr, uint8_t* buf, uint32_t len);
+
+/**
+ * @brief Zero-Bloat Hook: Physikalischer Flash-Schreibzugriff.
+ * @param addr Absolute Byte-Adresse im SPI Flash (Muss an Page-Boundary ausgerichtet sein).
+ * @param buf Zu schreibender, konstanter Datenpuffer.
+ * @param len Länge der zu schreibenden Daten.
+ * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
+ */
+toob_status_t toob_os_flash_write(uint32_t addr, const uint8_t* buf, uint32_t len);
+
+/**
+ * @brief Zero-Bloat Hook: Physikalischer Flash-Löschzugriff.
+ * @param addr Absolute Byte-Adresse im SPI Flash (Muss Sektor-bündig sein).
+ * @param len Länge der zu löschenden Daten (Muss Sektor-bündig sein).
+ * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
+ */
+toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len);
+
+/* ==============================================================================
+ * Zero-Bloat Cryptography Hooks (Hardware Acceleration OS-Side)
+ * ============================================================================== */
+
+typedef struct {
+    uint8_t opaque[128]; /* Context buffer for the OS hardware crypto driver */
+} toob_os_sha256_ctx_t;
+
+toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx);
+toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* data, uint32_t len);
+toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIBTOOB_H */
+
+
+======================================================================
 FILE: sdk/libtoob/include/libtoob_config_sandbox.h
 ======================================================================
 
@@ -10465,311 +11280,6 @@ extern TOOB_NOINIT toob_handoff_t toob_handoff_state;
 extern TOOB_NOINIT toob_boot_diag_t toob_diag_state;
 
 #endif /* LIBTOOB_TYPES_H */
-
-
-======================================================================
-FILE: sdk/libtoob/include/libtoob.h
-======================================================================
-
-/**
- * ==============================================================================
- * Toob-Boot C-Interface (libtoob.h)
- * ==============================================================================
- * 
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (API definitions, toob_status_t, .noinit references)
- * - docs/concept_fusion.md (Strict isolation policy, State Machine interactions)
- * - docs/structure_plan.md (Strict isolation from core/ headers)
- * - docs/testing_requirements.md (P10 compliance & Interface definition standards)
- *
- * This is the EXCLUSIVE OS-side API for Toob-Boot interaction.
- * Es spannt den C++ kompatiblen Schutzschirm (extern "C") für externe Feature-OS.
- */
-
-#ifndef LIBTOOB_H
-#define LIBTOOB_H
-
-/* 
- * ARCHITEKTUR-GRUND: System-Header MÜSSEN vor dem `extern "C"` Block geladen 
- * werden, da eingebaute C++ Systembibliotheken bei geschachteltem `extern "C"` 
- * crashen können. 
- */
-#include <stdint.h>
-#include <stdbool.h>
-#include <stddef.h>
-
-#include "libtoob_types.h"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-/* ==============================================================================
- * P10 Compliance & Symmetrie Validierungen
- * ============================================================================== */
-
-/* GAP-39: Strict 8-Byte Formatierung für Boundaries */
-_Static_assert(sizeof(toob_handoff_t) % 8 == 0, "GAP-39: toob_handoff_t size must align to 8 bytes.");
-_Static_assert(sizeof(toob_boot_diag_t) % 8 == 0, "GAP-39: toob_boot_diag_t size must align to 8 bytes.");
-
-/* Host-Compiler Symmetrie Check */
-#ifndef TOOB_NOINIT
-#error "FATAL: Host-Compiler lacks TOOB_NOINIT support. Must provide fallback for .noinit section mapping."
-#endif
-
-/* ==============================================================================
- * Handoff Verification Guard
- * ==============================================================================
- * Das `.noinit` RAM enthält illegitimate Garbage-Werte, wenn das OS durch den 
- * Watchdog abgewürgt wird, ohne dass Toob-Boot involviert war. Das Lesen der 
- * ungeschützten Boot-Variablen OHNE vorherige CRC-32 Validation riskiert Boot-Loop Crashes!
- */
-
-/**
- * @brief Validiert die Integrität der .noinit Toob-Boot Boundary (GAP-Handoff).
- * @return TOOB_OK bei validem Magic/CRC-32, TOOB_ERR_VERIFY bei Fehler.
- */
-toob_status_t toob_validate_handoff(void);
-
-/**
- * @brief Liefert eine sichere, verifizierte "By-Value"-Kopie der Handoff-Daten.
- * @param out_handoff Pointer auf eine vom OS allozierte Ausgabestruktur.
- * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY wenn CRC ungültig, TOOB_ERR_INVALID_ARG bei NULL.
- */
-toob_status_t toob_get_handoff(toob_handoff_t* out_handoff);
-
-/**
- * @brief P10 Absicherungsmakro zur ausfallsicheren OS-Initialisierung.
- * @note  Kapselt die unabdingbare `toob_validate_handoff()` Routine.
- *        Wird vorab in das Feature OS `main()` verankert, um die Bootloader-Brücke 
- *        atomar abzusichern. Der While-Lock verhindert die Propagation korrupter Pointers.
- */
-#define TOOB_OS_INIT_OR_PANIC() \
-    do { \
-        if (toob_validate_handoff() != TOOB_OK) { \
-            /* PANIC: .noinit Korruption! Eskaliere Hardware-Trap für Systeme ohne WDT! */ \
-            while (true) { TOOB_TRAP(); } \
-        } \
-    } while (false)
-
-/* ==============================================================================
- * Primary Feature-OS API (IDE-UX & Doxygen Mappings)
- * ============================================================================== */
-
-/**
- * @brief Bestätigt das asynchrone OTA-Update (Commit Flag).
- * 
- * @note  [GAP-07: Network Watchdog TTL]
- *        Das Feature-OS MUSS diese Funktion rufen, um ein laufendes Update 
- *        als erfolgreich zu flaggen. Nutzt das Update ein Cloud-Handshake 
- *        (z.B. DICE/CDI), MUSS das OS zwingend die Cloud-Bestätigung abwarten. 
- *        Dafür sammelt das OS "Network-TTL" Minuten via WAL. Bei Überschreiten 
- *        dieses TTLs führt das Ausbleiben des Aufrufs unwiderruflich zum Rollback.
- * 
- * @return TOOB_OK bei Erfolg, passender toob_status_t (z.B. TOOB_ERR_FLASH) bei Fehler.
- */
-toob_status_t toob_confirm_boot(void);
-
-/**
- * @brief Befreit das Recovery-OS aus dem Rettungsmodus (Anti Roach-Motel).
- * @note  Sobald das Recovery-OS die App repariert hat, MUSS es diese Funktion 
- *        aufrufen, um den RECOVERY_RESOLVED Intent ins WAL zu schreiben.
- * @return TOOB_OK bei Erfolg, TOOB_ERR_FLASH bei Hardwarefehlern.
- */
-toob_status_t toob_recovery_resolved(void);
-
-/**
- * @brief Akkumuliert die aktive Cloud-Suchzeit (Anti-Lagerhaus Lockout).
- * @param active_search_ms Dauer der aktiven Netzwerk-Suche seit dem letzten Reset.
- * @return TOOB_OK bei Erfolg.
- */
-toob_status_t toob_accumulate_net_search(uint32_t active_search_ms);
-
-/**
- * @brief Extrahiert die rohen Hardware-Metriken aus dem .noinit RAM.
- * 
- * @note  [CRA Regulatorik & CBOR Extraktion]
- *        Liest die `toob_boot_diag_t` Struktur. Diese enthält u.A. den 
- *        kryptographischen SHA-256 Digest der SBOM, was direkt der Erfüllung
- *        des EU Cyber Resilience Acts 2027 (CRA) dient. Die weiterführende 
- *        Telemetrie zur Hardware-Lebensdauer ist optional via CBOR verpackt.
- *
- * @param diag Zeiger auf die vom OS bereitgestellte Struct-Instanz.
- * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY bei gebrochener Checksumme.
- */
-toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
-
-/* ==============================================================================
- * Toob-Boot OTA Daemon (Network-Agnostic Stream Writer)
- * ============================================================================== */
-
-/**
- * @brief Initializes the OTA Daemon for receiving a new update stream.
- * @param total_size Expected total size of the incoming image (Manifest + Payload).
- * @param image_type 0 for OS Update (App), 3 for Bootloader Update (Stage 1).
- * @return TOOB_OK on success, TOOB_ERR_INVALID_ARG if size exceeds staging slot.
- */
-toob_status_t toob_ota_begin(uint32_t total_size, uint8_t image_type);
-
-/**
- * @brief Initializes the OTA Daemon with streaming SHA-256 verification (Zero-Bloat).
- * @param total_size Expected total size.
- * @param image_type 0 for OS Update, 3 for Bootloader.
- * @param expected_sha256 32-byte hash to verify the stream against.
- * @return TOOB_OK on success.
- */
-toob_status_t toob_ota_begin_verified(uint32_t total_size, uint8_t image_type, const uint8_t expected_sha256[32]);
-
-/**
- * @brief Resumes a partially downloaded OTA update.
- * @param resume_offset Output pointer for the byte offset to resume from.
- * @return TOOB_OK if resumable, TOOB_ERR_NOT_FOUND if no partial download exists.
- */
-toob_status_t toob_ota_resume(uint32_t* resume_offset);
-
-/**
- * @brief Aborts an active OTA download and securely zeroizes buffers.
- * @return TOOB_OK.
- */
-toob_status_t toob_ota_abort(void);
-
-/**
- * @brief Processes a chunk of incoming bytes, writing them linearly to Staging.
- * @param chunk Pointer to the downloaded bytes.
- * @param len Length of the chunk.
- * @return TOOB_OK, or TOOB_ERR_FLASH on write error.
- */
-toob_status_t toob_ota_process_chunk(const uint8_t* chunk, uint32_t len);
-
-/**
- * @brief Finalizes the OTA process and registers the update intent in the WAL.
- * @return TOOB_OK on success. The system should be rebooted immediately after.
- */
-toob_status_t toob_ota_finalize(void);
-
-/**
- * @brief Registriert ein empfangenes SUIT-Manifest im Write-Ahead-Log (WAL).
- * 
- * @note  [GAP-37: P10 WAL-Atomarität]
- *        Toob-Loader stützt sich auf absolute P10-Resilienz. Ein Crash (Brownout) 
- *        während der Ausführung dieser Funktion hinterlässt niemals einen halben
- *        Zustand! Das System evaluiert CRC-gesicherte 64-Byte WAL-Sektoren beim
- *        nächsten Boot und schließt das Update ab, oder verwirft das Rausch-Fragment.
- *
- * @param manifest_flash_addr Absolute, hardware-bündige Flash-Adresse des Manifests im SPI.
- * @return TOOB_OK bei erfolgreichem WAL-Append.
- */
-toob_status_t toob_set_next_update(uint32_t manifest_flash_addr);
-
-/**
- * @brief Extrahiert die rohen Hardware-Metriken aus dem .noinit RAM.
- * 
- * @note  [CRA Regulatorik & CBOR Extraktion]
- *        Liest die `toob_boot_diag_t` Struktur. Diese enthält u.A. den 
- *        kryptographischen SHA-256 Digest der SBOM, was direkt der Erfüllung
- *        des EU Cyber Resilience Acts 2027 (CRA) dient. Die weiterführende 
- *        Telemetrie zur Hardware-Lebensdauer ist optional via CBOR verpackt.
- *
- * @param diag Zeiger auf die vom OS bereitgestellte Struct-Instanz.
- * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY bei gebrochener Checksumme.
- */
-toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
-
-/**
- * @brief Extrahiert die Diagnosedaten kodiert im Cloud-tauglichen CBOR-Format.
- * @param out_buf Buffer für den CBOR-Stream
- * @param max_len Maximale Größe von out_buf
- * @param out_len Tatsächliche Größe des geschriebenen CBOR-Streams
- * @return TOOB_OK bei Erfolg
- */
-toob_status_t toob_get_boot_diag_cbor(uint8_t* out_buf, size_t max_len, size_t* out_len);
-
-/* ==============================================================================
- * Cloud-Command Submission API (Phase 7)
- * ==============================================================================
- * Das OS empfängt Cloud-Command Envelopes (CBOR, Ed25519-signiert) vom Server
- * und delegiert sie über dieses API an den Bootloader. Der Bootloader evaluiert
- * den Command beim nächsten Boot (Step 2.5 in boot_state.c).
- */
-
-/**
- * @brief Schreibt ein Cloud-Command-Envelope in den CHIP_CLOUD_CMD_SLOT.
- *
- * Sequenz: Erase → Write → CRC Read-Back → WAL Signal.
- * Der Bootloader evaluiert den Slot beim nächsten Boot autonom.
- *
- * @param envelope  Zeiger auf das rohe CBOR-Envelope (inkl. Signatur).
- * @param len       Länge des Envelopes in Bytes.
- * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL/Überlänge,
- *         TOOB_ERR_FLASH bei Erase/Write-Fehler,
- *         TOOB_ERR_FLASH_HW bei Read-Back-Mismatch.
- */
-toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len);
-
-/**
- * @brief Extrahiert die 32-Byte DICE Device-ID aus dem Boot-Handoff.
- *
- * @param out_id  Ziel-Buffer (mind. 32 Bytes).
- * @param id_len  Größe des Buffers. Muss >= 32 sein.
- * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL oder zu kleinem Buffer,
- *         TOOB_ERR_VERIFY bei korruptem Handoff.
- */
-toob_status_t toob_get_device_id(uint8_t *out_id, size_t id_len);
-
-/* ==============================================================================
- * Der Hard-Linker Contract "Zero-Bloat Shim"
- * ==============================================================================
- * Toob-Loader verweigert die Kopplung an ausufernde Vendor-SDK SPI Treiber. 
- * Um dem Bootloader dennoch persistente WAL-Transktionen (`toob_set_next_update`) 
- * zu ermöglichen, fordert die Library exakt diese beiden Symbole als harten Linker-Contract ein. 
- * Das Feature-OS (z.B. der Zephyr OS Storage API Stack) MUSS diese in seinem C/C++ Code 
- * zwingend physikalisch bereitstellen! Ein Fehlen führt absichtlich zu einem 
- * "Undefined Symbol" Kompilierungsabbruch (Fail-Fast).
- */
-
-/**
- * @brief Zero-Bloat Hook: Physikalischer Flash-Lesezugriff.
- * @param addr Absolute Byte-Adresse im SPI Flash.
- * @param buf Datenpuffer im lokalen OS-SRAM.
- * @param len Länge der zu lesenden Daten.
- * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
- */
-toob_status_t toob_os_flash_read(uint32_t addr, uint8_t* buf, uint32_t len);
-
-/**
- * @brief Zero-Bloat Hook: Physikalischer Flash-Schreibzugriff.
- * @param addr Absolute Byte-Adresse im SPI Flash (Muss an Page-Boundary ausgerichtet sein).
- * @param buf Zu schreibender, konstanter Datenpuffer.
- * @param len Länge der zu schreibenden Daten.
- * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
- */
-toob_status_t toob_os_flash_write(uint32_t addr, const uint8_t* buf, uint32_t len);
-
-/**
- * @brief Zero-Bloat Hook: Physikalischer Flash-Löschzugriff.
- * @param addr Absolute Byte-Adresse im SPI Flash (Muss Sektor-bündig sein).
- * @param len Länge der zu löschenden Daten (Muss Sektor-bündig sein).
- * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
- */
-toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len);
-
-/* ==============================================================================
- * Zero-Bloat Cryptography Hooks (Hardware Acceleration OS-Side)
- * ============================================================================== */
-
-typedef struct {
-    uint8_t opaque[128]; /* Context buffer for the OS hardware crypto driver */
-} toob_os_sha256_ctx_t;
-
-toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx);
-toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* data, uint32_t len);
-toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* LIBTOOB_H */
 
 
 ======================================================================
@@ -14687,6 +15197,487 @@ greatest_run_info greatest_info
 
 
 ======================================================================
+FILE: common/lib/heatshrink/heatshrink.c
+======================================================================
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <assert.h>
+#include <string.h>
+#include <fcntl.h>
+#include <getopt.h>
+
+#include "heatshrink_encoder.h"
+#include "heatshrink_decoder.h"
+
+#define DEF_WINDOW_SZ2 11
+#define DEF_LOOKAHEAD_SZ2 4
+#define DEF_DECODER_INPUT_BUFFER_SIZE 256
+#define DEF_BUFFER_SIZE (64 * 1024)
+
+#if 0
+#define LOG(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define LOG(...) /* NO-OP */
+#endif
+
+#if _WIN32
+#include <errno.h>
+#define HEATSHRINK_ERR(retval, ...) do { \
+fprintf(stderr, __VA_ARGS__); \
+fprintf(stderr, "Undefined error: %d\n", errno); \
+exit(retval); \
+} while(0)
+#else
+#include <err.h>
+#define HEATSHRINK_ERR(...) err(__VA_ARGS__)
+#endif
+
+/*
+ * We have to open binary files with the O_BINARY flag on Windows. Most other
+ * platforms don't differentiate between binary and non-binary files.
+ */
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
+static const int version_major = HEATSHRINK_VERSION_MAJOR;
+static const int version_minor = HEATSHRINK_VERSION_MINOR;
+static const int version_patch = HEATSHRINK_VERSION_PATCH;
+static const char author[] = HEATSHRINK_AUTHOR;
+static const char url[] = HEATSHRINK_URL;
+
+static void usage(void) {
+    fprintf(stderr, "heatshrink version %u.%u.%u by %s\n",
+        version_major, version_minor, version_patch, author);
+    fprintf(stderr, "Home page: %s\n\n", url);
+    fprintf(stderr,
+        "Usage:\n"
+        "  heatshrink [-h] [-e|-d] [-v] [-w SIZE] [-l BITS] [IN_FILE] [OUT_FILE]\n"
+        "\n"
+        "heatshrink compresses or decompresses byte streams using LZSS, and is\n"
+        "designed especially for embedded, low-memory, and/or hard real-time\n"
+        "systems.\n"
+        "\n"
+        " -h        print help\n"
+        " -e        encode (compress, default)\n"
+        " -d        decode (decompress)\n"
+        " -v        verbose (print input & output sizes, compression ratio, etc.)\n"
+        "\n"
+        " -w SIZE   Base-2 log of LZSS sliding window size\n"
+        "\n"
+        "    A larger value allows searches a larger history of the data for repeated\n"
+        "    patterns, potentially compressing more effectively, but will use\n"
+        "    more memory and processing time.\n"
+        "    Recommended default: -w 8 (embedded systems), -w 10 (elsewhere)\n"
+        "  \n"
+        " -l BITS   Number of bits used for back-reference lengths\n"
+        "\n"
+        "    A larger value allows longer substitutions, but since all\n"
+        "    back-references must use -w + -l bits, larger -w or -l can be\n"
+        "    counterproductive if most patterns are small and/or local.\n"
+        "    Recommended default: -l 4\n"
+        "\n"
+        " If IN_FILE or OUT_FILE are unspecified, they will default to\n"
+        " \"-\" for standard input and standard output, respectively.\n");
+    exit(1);
+}
+
+typedef enum { IO_READ, IO_WRITE, } IO_mode;
+typedef enum { OP_ENC, OP_DEC, } Operation;
+
+typedef struct {
+    int fd;                     /* file descriptor */
+    IO_mode mode;
+    size_t fill;                /* fill index */
+    size_t read;                /* read index */
+    size_t size;
+    size_t total;
+    uint8_t buf[];
+} io_handle;
+
+typedef struct {
+    uint8_t window_sz2;
+    uint8_t lookahead_sz2;
+    size_t decoder_input_buffer_size;
+    size_t buffer_size;
+    uint8_t verbose;
+    Operation cmd;
+    char *in_fname;
+    char *out_fname;
+    io_handle *in;
+    io_handle *out;
+} config;
+
+static void die(char *msg) {
+    fprintf(stderr, "%s\n", msg);
+    exit(EXIT_FAILURE);
+}
+
+static void report(config *cfg);
+
+/* Open an IO handle. Returns NULL on error. */
+static io_handle *handle_open(char *fname, IO_mode m, size_t buf_sz) {
+    io_handle *io = NULL;
+    io = malloc(sizeof(*io) + buf_sz);
+    if (io == NULL) { return NULL; }
+    memset(io, 0, sizeof(*io) + buf_sz);
+    io->fd = -1;
+    io->size = buf_sz;
+    io->mode = m;
+
+    if (m == IO_READ) {
+        if (0 == strcmp("-", fname)) {
+            io->fd = STDIN_FILENO;
+        } else {
+            io->fd = open(fname, O_RDONLY | O_BINARY);
+        }
+    } else if (m == IO_WRITE) {
+        if (0 == strcmp("-", fname)) {
+            io->fd = STDOUT_FILENO;
+        } else {
+            io->fd = open(fname, O_WRONLY | O_BINARY | O_CREAT | O_TRUNC /*| O_EXCL*/, 0644);
+        }
+    }
+
+    if (io->fd == -1) {         /* failed to open */
+        free(io);
+        HEATSHRINK_ERR(1, "open");
+        return NULL;
+    }
+
+    return io;
+}
+
+/* Read SIZE bytes from an IO handle and return a pointer to the content.
+ * BUF contains at least size_t bytes. Returns 0 on EOF, -1 on error. */
+static ssize_t handle_read(io_handle *io, size_t size, uint8_t **buf) {
+    LOG("@ read %zd\n", size);
+    if (buf == NULL) { return -1; }
+    if (size > io->size) {
+        fprintf(stderr, "size %zd, io->size %zd\n", size, io->size);
+        return -1;
+    }
+    if (io->mode != IO_READ) { return -1; }
+
+    size_t rem = io->fill - io->read;
+    if (rem >= size) {
+        *buf = &io->buf[io->read];
+        return size;
+    } else {                    /* read and replenish */
+        if (io->fd == -1) {     /* already closed, return what we've got */
+            *buf = &io->buf[io->read];
+            return rem;
+        }
+
+        memmove(io->buf, &io->buf[io->read], rem);
+        io->fill -= io->read;
+        io->read = 0;
+        ssize_t read_sz = read(io->fd, &io->buf[io->fill], io->size - io->fill);
+        if (read_sz < 0) { HEATSHRINK_ERR(1, "read"); }
+        io->total += read_sz;
+        if (read_sz == 0) {     /* EOF */
+            if (close(io->fd) < 0) { HEATSHRINK_ERR(1, "close"); }
+            io->fd = -1;
+        }
+        io->fill += read_sz;
+        *buf = io->buf;
+        return io->fill > size ? size : io->fill;
+    }
+}
+
+/* Drop the oldest SIZE bytes from the buffer. Returns <0 on error. */
+static int handle_drop(io_handle *io, size_t size) {
+    LOG("@ drop %zd\n", size);
+    if (io->read + size <= io->fill) {
+        io->read += size;
+    } else {
+        return -1;
+    }
+    if (io->read == io->fill) {
+        io->read = 0;
+        io->fill = 0;
+    }
+    return 0;
+}
+
+/* Sink SIZE bytes from INPUT into the io handle. Returns the number of
+ * bytes written, or -1 on error. */
+static ssize_t handle_sink(io_handle *io, size_t size, uint8_t *input) {
+    LOG("@ sink %zd\n", size);
+    if (size > io->size) { return -1; }
+    if (io->mode != IO_WRITE) { return -1; }
+
+    if (io->fill + size > io->size) {
+        ssize_t written = write(io->fd, io->buf, io->fill);
+        LOG("@ flushing %zd, wrote %zd\n", io->fill, written);
+        io->total += written;
+        if (written == -1) { HEATSHRINK_ERR(1, "write"); }
+        memmove(io->buf, &io->buf[written], io->fill - written);
+        io->fill -= written;
+    }
+    memcpy(&io->buf[io->fill], input, size);
+    io->fill += size;
+    return size;
+}
+
+static void handle_close(io_handle *io) {
+    if (io->fd != -1) {
+        if (io->mode == IO_WRITE) {
+            ssize_t written = write(io->fd, io->buf, io->fill);
+            io->total += written;
+            LOG("@ close: flushing %zd, wrote %zd\n", io->fill, written);
+            if (written == -1) { HEATSHRINK_ERR(1, "write"); }
+        }
+        close(io->fd);
+        io->fd = -1;
+    }
+}
+
+static void close_and_report(config *cfg) {
+    handle_close(cfg->in);
+    handle_close(cfg->out);
+    if (cfg->verbose) { report(cfg); }
+    free(cfg->in);
+    free(cfg->out);
+}
+
+static int encoder_sink_read(config *cfg, heatshrink_encoder *hse,
+        uint8_t *data, size_t data_sz) {
+    size_t out_sz = 4096;
+    uint8_t out_buf[out_sz];
+    memset(out_buf, 0, out_sz);
+    size_t sink_sz = 0;
+    size_t poll_sz = 0;
+    HSE_sink_res sres;
+    HSE_poll_res pres;
+    HSE_finish_res fres;
+    io_handle *out = cfg->out;
+
+    size_t sunk = 0;
+    do {
+        if (data_sz > 0) {
+            sres = heatshrink_encoder_sink(hse, &data[sunk], data_sz - sunk, &sink_sz);
+            if (sres < 0) { die("sink"); }
+            sunk += sink_sz;
+        }
+        
+        do {
+            pres = heatshrink_encoder_poll(hse, out_buf, out_sz, &poll_sz);
+            if (pres < 0) { die("poll"); }
+            if (handle_sink(out, poll_sz, out_buf) < 0) die("handle_sink");
+        } while (pres == HSER_POLL_MORE);
+        
+        if (poll_sz == 0 && data_sz == 0) {
+            fres = heatshrink_encoder_finish(hse);
+            if (fres < 0) { die("finish"); }
+            if (fres == HSER_FINISH_DONE) { return 1; }
+        }
+    } while (sunk < data_sz);
+    return 0;
+}
+
+static int encode(config *cfg) {
+    uint8_t window_sz2 = cfg->window_sz2;
+    size_t window_sz = 1 << window_sz2; 
+    heatshrink_encoder *hse = heatshrink_encoder_alloc(window_sz2, cfg->lookahead_sz2);
+    if (hse == NULL) { die("failed to init encoder: bad settings"); }
+    ssize_t read_sz = 0;
+    io_handle *in = cfg->in;
+
+    /* Process input until end of stream */
+    while (1) {
+        uint8_t *input = NULL;
+        read_sz = handle_read(in, window_sz, &input);
+        if (input == NULL) {
+            fprintf(stderr, "handle read failure\n");
+            die("read");
+        }
+        if (read_sz < 0) { die("read"); }
+
+        /* Pass read to encoder and check if input is fully processed. */
+        if (encoder_sink_read(cfg, hse, input, read_sz)) break;
+
+        if (handle_drop(in, read_sz) < 0) { die("drop"); }
+    };
+
+    if (read_sz == -1) { HEATSHRINK_ERR(1, "read"); }
+
+    heatshrink_encoder_free(hse);
+    close_and_report(cfg);
+    return 0;
+}
+
+static int decoder_sink_read(config *cfg, heatshrink_decoder *hsd,
+        uint8_t *data, size_t data_sz) {
+    io_handle *out = cfg->out;
+    size_t sink_sz = 0;
+    size_t poll_sz = 0;
+    size_t out_sz = 4096;
+    uint8_t out_buf[out_sz];
+    memset(out_buf, 0, out_sz);
+
+    HSD_sink_res sres;
+    HSD_poll_res pres;
+    HSD_finish_res fres;
+
+    size_t sunk = 0;
+    do {
+        if (data_sz > 0) {
+            sres = heatshrink_decoder_sink(hsd, &data[sunk], data_sz - sunk, &sink_sz);
+            if (sres < 0) { die("sink"); }
+            sunk += sink_sz;
+        }
+
+        do {
+            pres = heatshrink_decoder_poll(hsd, out_buf, out_sz, &poll_sz);
+            if (pres < 0) { die("poll"); }
+            if (handle_sink(out, poll_sz, out_buf) < 0) die("handle_sink");
+        } while (pres == HSDR_POLL_MORE);
+        
+        if (data_sz == 0 && poll_sz == 0) {
+            fres = heatshrink_decoder_finish(hsd);
+            if (fres < 0) { die("finish"); }
+            if (fres == HSDR_FINISH_DONE) { return 1; }
+        }
+    } while (sunk < data_sz);
+
+    return 0;
+}
+
+static int decode(config *cfg) {
+    uint8_t window_sz2 = cfg->window_sz2;
+    size_t window_sz = 1 << window_sz2;
+    size_t ibs = cfg->decoder_input_buffer_size;
+    heatshrink_decoder *hsd = heatshrink_decoder_alloc(ibs,
+        window_sz2, cfg->lookahead_sz2);
+    if (hsd == NULL) { die("failed to init decoder"); }
+
+    ssize_t read_sz = 0;
+
+    io_handle *in = cfg->in;
+
+    HSD_finish_res fres;
+
+    /* Process input until end of stream */
+    while (1) {
+        uint8_t *input = NULL;
+        read_sz = handle_read(in, window_sz, &input);
+        if (input == NULL) {
+            fprintf(stderr, "handle read failure\n");
+            die("read");
+        }
+        if (read_sz == 0) {
+            fres = heatshrink_decoder_finish(hsd);
+            if (fres < 0) { die("finish"); }
+            if (fres == HSDR_FINISH_DONE) break;
+        } else if (read_sz < 0) {
+            die("read");
+        } else {
+            if (decoder_sink_read(cfg, hsd, input, read_sz)) { break; }
+            if (handle_drop(in, read_sz) < 0) { die("drop"); }
+        }
+    }
+    if (read_sz == -1) { HEATSHRINK_ERR(1, "read"); }
+        
+    heatshrink_decoder_free(hsd);
+    close_and_report(cfg);
+    return 0;
+}
+
+static void report(config *cfg) {
+    size_t inb = cfg->in->total;
+    size_t outb = cfg->out->total;
+    fprintf(cfg->out->fd == STDOUT_FILENO ? stderr : stdout,
+        "%s %0.2f %%\t %zd -> %zd (-w %u -l %u)\n",
+        cfg->in_fname, 100.0 - (100.0 * outb) / inb, inb, outb,
+        cfg->window_sz2, cfg->lookahead_sz2);
+}
+
+static void proc_args(config *cfg, int argc, char **argv) {
+    cfg->window_sz2 = DEF_WINDOW_SZ2;
+    cfg->lookahead_sz2 = DEF_LOOKAHEAD_SZ2;
+    cfg->buffer_size = DEF_BUFFER_SIZE;
+    cfg->decoder_input_buffer_size = DEF_DECODER_INPUT_BUFFER_SIZE;
+    cfg->cmd = OP_ENC;
+    cfg->verbose = 0;
+    cfg->in_fname = "-";
+    cfg->out_fname = "-";
+
+    int a = 0;
+    while ((a = getopt(argc, argv, "hedi:w:l:v")) != -1) {
+        switch (a) {
+        case 'h':               /* help */
+            usage();
+        case 'e':               /* encode */
+            cfg->cmd = OP_ENC; break;
+        case 'd':               /* decode */
+            cfg->cmd = OP_DEC; break;
+        case 'i':               /* input buffer size */
+            cfg->decoder_input_buffer_size = atoi(optarg);
+            break;
+        case 'w':               /* window bits */
+            cfg->window_sz2 = atoi(optarg);
+            break;
+        case 'l':               /* lookahead bits */
+            cfg->lookahead_sz2 = atoi(optarg);
+            break;
+        case 'v':               /* verbosity++ */
+            cfg->verbose++;
+            break;
+        case '?':               /* unknown argument */
+        default:
+            usage();
+        }
+    }
+    argc -= optind;
+    argv += optind;
+    if (argc > 0) {
+        cfg->in_fname = argv[0];
+        argc--;
+        argv++;
+    }
+    if (argc > 0) { cfg->out_fname = argv[0]; }
+}
+
+int main(int argc, char **argv) {
+    config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    proc_args(&cfg, argc, argv);
+
+    if (0 == strcmp(cfg.in_fname, cfg.out_fname)
+        && (0 != strcmp("-", cfg.in_fname))) {
+        fprintf(stderr, "Refusing to overwrite file '%s' with itself.\n", cfg.in_fname);
+        exit(1);
+    }
+
+    cfg.in = handle_open(cfg.in_fname, IO_READ, cfg.buffer_size);
+    if (cfg.in == NULL) { die("Failed to open input file for read"); }
+    cfg.out = handle_open(cfg.out_fname, IO_WRITE, cfg.buffer_size);
+    if (cfg.out == NULL) { die("Failed to open output file for write"); }
+
+#if _WIN32
+    /*
+     * On Windows, stdin and stdout default to text mode. Switch them to
+     * binary mode before sending data through them.
+     */
+    _setmode(STDOUT_FILENO, O_BINARY);
+    _setmode(STDIN_FILENO, O_BINARY);
+#endif
+
+    if (cfg.cmd == OP_ENC) {
+        return encode(&cfg);
+    } else if (cfg.cmd == OP_DEC) {
+        return decode(&cfg);
+    } else {
+        usage();
+    }
+}
+
+
+======================================================================
 FILE: common/lib/heatshrink/heatshrink_common.h
 ======================================================================
 
@@ -15985,487 +16976,6 @@ HSE_finish_res heatshrink_encoder_finish(heatshrink_encoder *hse);
 
 
 ======================================================================
-FILE: common/lib/heatshrink/heatshrink.c
-======================================================================
-
-#include <stdlib.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <stdint.h>
-#include <assert.h>
-#include <string.h>
-#include <fcntl.h>
-#include <getopt.h>
-
-#include "heatshrink_encoder.h"
-#include "heatshrink_decoder.h"
-
-#define DEF_WINDOW_SZ2 11
-#define DEF_LOOKAHEAD_SZ2 4
-#define DEF_DECODER_INPUT_BUFFER_SIZE 256
-#define DEF_BUFFER_SIZE (64 * 1024)
-
-#if 0
-#define LOG(...) fprintf(stderr, __VA_ARGS__)
-#else
-#define LOG(...) /* NO-OP */
-#endif
-
-#if _WIN32
-#include <errno.h>
-#define HEATSHRINK_ERR(retval, ...) do { \
-fprintf(stderr, __VA_ARGS__); \
-fprintf(stderr, "Undefined error: %d\n", errno); \
-exit(retval); \
-} while(0)
-#else
-#include <err.h>
-#define HEATSHRINK_ERR(...) err(__VA_ARGS__)
-#endif
-
-/*
- * We have to open binary files with the O_BINARY flag on Windows. Most other
- * platforms don't differentiate between binary and non-binary files.
- */
-#ifndef O_BINARY
-#define O_BINARY 0
-#endif
-
-static const int version_major = HEATSHRINK_VERSION_MAJOR;
-static const int version_minor = HEATSHRINK_VERSION_MINOR;
-static const int version_patch = HEATSHRINK_VERSION_PATCH;
-static const char author[] = HEATSHRINK_AUTHOR;
-static const char url[] = HEATSHRINK_URL;
-
-static void usage(void) {
-    fprintf(stderr, "heatshrink version %u.%u.%u by %s\n",
-        version_major, version_minor, version_patch, author);
-    fprintf(stderr, "Home page: %s\n\n", url);
-    fprintf(stderr,
-        "Usage:\n"
-        "  heatshrink [-h] [-e|-d] [-v] [-w SIZE] [-l BITS] [IN_FILE] [OUT_FILE]\n"
-        "\n"
-        "heatshrink compresses or decompresses byte streams using LZSS, and is\n"
-        "designed especially for embedded, low-memory, and/or hard real-time\n"
-        "systems.\n"
-        "\n"
-        " -h        print help\n"
-        " -e        encode (compress, default)\n"
-        " -d        decode (decompress)\n"
-        " -v        verbose (print input & output sizes, compression ratio, etc.)\n"
-        "\n"
-        " -w SIZE   Base-2 log of LZSS sliding window size\n"
-        "\n"
-        "    A larger value allows searches a larger history of the data for repeated\n"
-        "    patterns, potentially compressing more effectively, but will use\n"
-        "    more memory and processing time.\n"
-        "    Recommended default: -w 8 (embedded systems), -w 10 (elsewhere)\n"
-        "  \n"
-        " -l BITS   Number of bits used for back-reference lengths\n"
-        "\n"
-        "    A larger value allows longer substitutions, but since all\n"
-        "    back-references must use -w + -l bits, larger -w or -l can be\n"
-        "    counterproductive if most patterns are small and/or local.\n"
-        "    Recommended default: -l 4\n"
-        "\n"
-        " If IN_FILE or OUT_FILE are unspecified, they will default to\n"
-        " \"-\" for standard input and standard output, respectively.\n");
-    exit(1);
-}
-
-typedef enum { IO_READ, IO_WRITE, } IO_mode;
-typedef enum { OP_ENC, OP_DEC, } Operation;
-
-typedef struct {
-    int fd;                     /* file descriptor */
-    IO_mode mode;
-    size_t fill;                /* fill index */
-    size_t read;                /* read index */
-    size_t size;
-    size_t total;
-    uint8_t buf[];
-} io_handle;
-
-typedef struct {
-    uint8_t window_sz2;
-    uint8_t lookahead_sz2;
-    size_t decoder_input_buffer_size;
-    size_t buffer_size;
-    uint8_t verbose;
-    Operation cmd;
-    char *in_fname;
-    char *out_fname;
-    io_handle *in;
-    io_handle *out;
-} config;
-
-static void die(char *msg) {
-    fprintf(stderr, "%s\n", msg);
-    exit(EXIT_FAILURE);
-}
-
-static void report(config *cfg);
-
-/* Open an IO handle. Returns NULL on error. */
-static io_handle *handle_open(char *fname, IO_mode m, size_t buf_sz) {
-    io_handle *io = NULL;
-    io = malloc(sizeof(*io) + buf_sz);
-    if (io == NULL) { return NULL; }
-    memset(io, 0, sizeof(*io) + buf_sz);
-    io->fd = -1;
-    io->size = buf_sz;
-    io->mode = m;
-
-    if (m == IO_READ) {
-        if (0 == strcmp("-", fname)) {
-            io->fd = STDIN_FILENO;
-        } else {
-            io->fd = open(fname, O_RDONLY | O_BINARY);
-        }
-    } else if (m == IO_WRITE) {
-        if (0 == strcmp("-", fname)) {
-            io->fd = STDOUT_FILENO;
-        } else {
-            io->fd = open(fname, O_WRONLY | O_BINARY | O_CREAT | O_TRUNC /*| O_EXCL*/, 0644);
-        }
-    }
-
-    if (io->fd == -1) {         /* failed to open */
-        free(io);
-        HEATSHRINK_ERR(1, "open");
-        return NULL;
-    }
-
-    return io;
-}
-
-/* Read SIZE bytes from an IO handle and return a pointer to the content.
- * BUF contains at least size_t bytes. Returns 0 on EOF, -1 on error. */
-static ssize_t handle_read(io_handle *io, size_t size, uint8_t **buf) {
-    LOG("@ read %zd\n", size);
-    if (buf == NULL) { return -1; }
-    if (size > io->size) {
-        fprintf(stderr, "size %zd, io->size %zd\n", size, io->size);
-        return -1;
-    }
-    if (io->mode != IO_READ) { return -1; }
-
-    size_t rem = io->fill - io->read;
-    if (rem >= size) {
-        *buf = &io->buf[io->read];
-        return size;
-    } else {                    /* read and replenish */
-        if (io->fd == -1) {     /* already closed, return what we've got */
-            *buf = &io->buf[io->read];
-            return rem;
-        }
-
-        memmove(io->buf, &io->buf[io->read], rem);
-        io->fill -= io->read;
-        io->read = 0;
-        ssize_t read_sz = read(io->fd, &io->buf[io->fill], io->size - io->fill);
-        if (read_sz < 0) { HEATSHRINK_ERR(1, "read"); }
-        io->total += read_sz;
-        if (read_sz == 0) {     /* EOF */
-            if (close(io->fd) < 0) { HEATSHRINK_ERR(1, "close"); }
-            io->fd = -1;
-        }
-        io->fill += read_sz;
-        *buf = io->buf;
-        return io->fill > size ? size : io->fill;
-    }
-}
-
-/* Drop the oldest SIZE bytes from the buffer. Returns <0 on error. */
-static int handle_drop(io_handle *io, size_t size) {
-    LOG("@ drop %zd\n", size);
-    if (io->read + size <= io->fill) {
-        io->read += size;
-    } else {
-        return -1;
-    }
-    if (io->read == io->fill) {
-        io->read = 0;
-        io->fill = 0;
-    }
-    return 0;
-}
-
-/* Sink SIZE bytes from INPUT into the io handle. Returns the number of
- * bytes written, or -1 on error. */
-static ssize_t handle_sink(io_handle *io, size_t size, uint8_t *input) {
-    LOG("@ sink %zd\n", size);
-    if (size > io->size) { return -1; }
-    if (io->mode != IO_WRITE) { return -1; }
-
-    if (io->fill + size > io->size) {
-        ssize_t written = write(io->fd, io->buf, io->fill);
-        LOG("@ flushing %zd, wrote %zd\n", io->fill, written);
-        io->total += written;
-        if (written == -1) { HEATSHRINK_ERR(1, "write"); }
-        memmove(io->buf, &io->buf[written], io->fill - written);
-        io->fill -= written;
-    }
-    memcpy(&io->buf[io->fill], input, size);
-    io->fill += size;
-    return size;
-}
-
-static void handle_close(io_handle *io) {
-    if (io->fd != -1) {
-        if (io->mode == IO_WRITE) {
-            ssize_t written = write(io->fd, io->buf, io->fill);
-            io->total += written;
-            LOG("@ close: flushing %zd, wrote %zd\n", io->fill, written);
-            if (written == -1) { HEATSHRINK_ERR(1, "write"); }
-        }
-        close(io->fd);
-        io->fd = -1;
-    }
-}
-
-static void close_and_report(config *cfg) {
-    handle_close(cfg->in);
-    handle_close(cfg->out);
-    if (cfg->verbose) { report(cfg); }
-    free(cfg->in);
-    free(cfg->out);
-}
-
-static int encoder_sink_read(config *cfg, heatshrink_encoder *hse,
-        uint8_t *data, size_t data_sz) {
-    size_t out_sz = 4096;
-    uint8_t out_buf[out_sz];
-    memset(out_buf, 0, out_sz);
-    size_t sink_sz = 0;
-    size_t poll_sz = 0;
-    HSE_sink_res sres;
-    HSE_poll_res pres;
-    HSE_finish_res fres;
-    io_handle *out = cfg->out;
-
-    size_t sunk = 0;
-    do {
-        if (data_sz > 0) {
-            sres = heatshrink_encoder_sink(hse, &data[sunk], data_sz - sunk, &sink_sz);
-            if (sres < 0) { die("sink"); }
-            sunk += sink_sz;
-        }
-        
-        do {
-            pres = heatshrink_encoder_poll(hse, out_buf, out_sz, &poll_sz);
-            if (pres < 0) { die("poll"); }
-            if (handle_sink(out, poll_sz, out_buf) < 0) die("handle_sink");
-        } while (pres == HSER_POLL_MORE);
-        
-        if (poll_sz == 0 && data_sz == 0) {
-            fres = heatshrink_encoder_finish(hse);
-            if (fres < 0) { die("finish"); }
-            if (fres == HSER_FINISH_DONE) { return 1; }
-        }
-    } while (sunk < data_sz);
-    return 0;
-}
-
-static int encode(config *cfg) {
-    uint8_t window_sz2 = cfg->window_sz2;
-    size_t window_sz = 1 << window_sz2; 
-    heatshrink_encoder *hse = heatshrink_encoder_alloc(window_sz2, cfg->lookahead_sz2);
-    if (hse == NULL) { die("failed to init encoder: bad settings"); }
-    ssize_t read_sz = 0;
-    io_handle *in = cfg->in;
-
-    /* Process input until end of stream */
-    while (1) {
-        uint8_t *input = NULL;
-        read_sz = handle_read(in, window_sz, &input);
-        if (input == NULL) {
-            fprintf(stderr, "handle read failure\n");
-            die("read");
-        }
-        if (read_sz < 0) { die("read"); }
-
-        /* Pass read to encoder and check if input is fully processed. */
-        if (encoder_sink_read(cfg, hse, input, read_sz)) break;
-
-        if (handle_drop(in, read_sz) < 0) { die("drop"); }
-    };
-
-    if (read_sz == -1) { HEATSHRINK_ERR(1, "read"); }
-
-    heatshrink_encoder_free(hse);
-    close_and_report(cfg);
-    return 0;
-}
-
-static int decoder_sink_read(config *cfg, heatshrink_decoder *hsd,
-        uint8_t *data, size_t data_sz) {
-    io_handle *out = cfg->out;
-    size_t sink_sz = 0;
-    size_t poll_sz = 0;
-    size_t out_sz = 4096;
-    uint8_t out_buf[out_sz];
-    memset(out_buf, 0, out_sz);
-
-    HSD_sink_res sres;
-    HSD_poll_res pres;
-    HSD_finish_res fres;
-
-    size_t sunk = 0;
-    do {
-        if (data_sz > 0) {
-            sres = heatshrink_decoder_sink(hsd, &data[sunk], data_sz - sunk, &sink_sz);
-            if (sres < 0) { die("sink"); }
-            sunk += sink_sz;
-        }
-
-        do {
-            pres = heatshrink_decoder_poll(hsd, out_buf, out_sz, &poll_sz);
-            if (pres < 0) { die("poll"); }
-            if (handle_sink(out, poll_sz, out_buf) < 0) die("handle_sink");
-        } while (pres == HSDR_POLL_MORE);
-        
-        if (data_sz == 0 && poll_sz == 0) {
-            fres = heatshrink_decoder_finish(hsd);
-            if (fres < 0) { die("finish"); }
-            if (fres == HSDR_FINISH_DONE) { return 1; }
-        }
-    } while (sunk < data_sz);
-
-    return 0;
-}
-
-static int decode(config *cfg) {
-    uint8_t window_sz2 = cfg->window_sz2;
-    size_t window_sz = 1 << window_sz2;
-    size_t ibs = cfg->decoder_input_buffer_size;
-    heatshrink_decoder *hsd = heatshrink_decoder_alloc(ibs,
-        window_sz2, cfg->lookahead_sz2);
-    if (hsd == NULL) { die("failed to init decoder"); }
-
-    ssize_t read_sz = 0;
-
-    io_handle *in = cfg->in;
-
-    HSD_finish_res fres;
-
-    /* Process input until end of stream */
-    while (1) {
-        uint8_t *input = NULL;
-        read_sz = handle_read(in, window_sz, &input);
-        if (input == NULL) {
-            fprintf(stderr, "handle read failure\n");
-            die("read");
-        }
-        if (read_sz == 0) {
-            fres = heatshrink_decoder_finish(hsd);
-            if (fres < 0) { die("finish"); }
-            if (fres == HSDR_FINISH_DONE) break;
-        } else if (read_sz < 0) {
-            die("read");
-        } else {
-            if (decoder_sink_read(cfg, hsd, input, read_sz)) { break; }
-            if (handle_drop(in, read_sz) < 0) { die("drop"); }
-        }
-    }
-    if (read_sz == -1) { HEATSHRINK_ERR(1, "read"); }
-        
-    heatshrink_decoder_free(hsd);
-    close_and_report(cfg);
-    return 0;
-}
-
-static void report(config *cfg) {
-    size_t inb = cfg->in->total;
-    size_t outb = cfg->out->total;
-    fprintf(cfg->out->fd == STDOUT_FILENO ? stderr : stdout,
-        "%s %0.2f %%\t %zd -> %zd (-w %u -l %u)\n",
-        cfg->in_fname, 100.0 - (100.0 * outb) / inb, inb, outb,
-        cfg->window_sz2, cfg->lookahead_sz2);
-}
-
-static void proc_args(config *cfg, int argc, char **argv) {
-    cfg->window_sz2 = DEF_WINDOW_SZ2;
-    cfg->lookahead_sz2 = DEF_LOOKAHEAD_SZ2;
-    cfg->buffer_size = DEF_BUFFER_SIZE;
-    cfg->decoder_input_buffer_size = DEF_DECODER_INPUT_BUFFER_SIZE;
-    cfg->cmd = OP_ENC;
-    cfg->verbose = 0;
-    cfg->in_fname = "-";
-    cfg->out_fname = "-";
-
-    int a = 0;
-    while ((a = getopt(argc, argv, "hedi:w:l:v")) != -1) {
-        switch (a) {
-        case 'h':               /* help */
-            usage();
-        case 'e':               /* encode */
-            cfg->cmd = OP_ENC; break;
-        case 'd':               /* decode */
-            cfg->cmd = OP_DEC; break;
-        case 'i':               /* input buffer size */
-            cfg->decoder_input_buffer_size = atoi(optarg);
-            break;
-        case 'w':               /* window bits */
-            cfg->window_sz2 = atoi(optarg);
-            break;
-        case 'l':               /* lookahead bits */
-            cfg->lookahead_sz2 = atoi(optarg);
-            break;
-        case 'v':               /* verbosity++ */
-            cfg->verbose++;
-            break;
-        case '?':               /* unknown argument */
-        default:
-            usage();
-        }
-    }
-    argc -= optind;
-    argv += optind;
-    if (argc > 0) {
-        cfg->in_fname = argv[0];
-        argc--;
-        argv++;
-    }
-    if (argc > 0) { cfg->out_fname = argv[0]; }
-}
-
-int main(int argc, char **argv) {
-    config cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    proc_args(&cfg, argc, argv);
-
-    if (0 == strcmp(cfg.in_fname, cfg.out_fname)
-        && (0 != strcmp("-", cfg.in_fname))) {
-        fprintf(stderr, "Refusing to overwrite file '%s' with itself.\n", cfg.in_fname);
-        exit(1);
-    }
-
-    cfg.in = handle_open(cfg.in_fname, IO_READ, cfg.buffer_size);
-    if (cfg.in == NULL) { die("Failed to open input file for read"); }
-    cfg.out = handle_open(cfg.out_fname, IO_WRITE, cfg.buffer_size);
-    if (cfg.out == NULL) { die("Failed to open output file for write"); }
-
-#if _WIN32
-    /*
-     * On Windows, stdin and stdout default to text mode. Switch them to
-     * binary mode before sending data through them.
-     */
-    _setmode(STDOUT_FILENO, O_BINARY);
-    _setmode(STDIN_FILENO, O_BINARY);
-#endif
-
-    if (cfg.cmd == OP_ENC) {
-        return encode(&cfg);
-    } else if (cfg.cmd == OP_DEC) {
-        return decode(&cfg);
-    } else {
-        usage();
-    }
-}
-
-
-======================================================================
 FILE: common/lib/heatshrink/README.md
 ======================================================================
 
@@ -16607,745 +17117,6 @@ documentation.
 ## Build Status
 
   [![Build Status](https://travis-ci.org/atomicobject/heatshrink.png)](http://travis-ci.org/atomicobject/heatshrink)
-
-
-======================================================================
-FILE: common/lib/heatshrink/test_heatshrink_dynamic_theft.c
-======================================================================
-
-#include "heatshrink_config.h"
-#ifdef HEATSHRINK_HAS_THEFT
-
-#include <stdint.h>
-#include <ctype.h>
-#include <assert.h>
-#include <string.h>
-#include <sys/time.h>
-
-#include "heatshrink_encoder.h"
-#include "heatshrink_decoder.h"
-#include "greatest.h"
-#include "theft.h"
-
-#if !HEATSHRINK_DYNAMIC_ALLOC
-#error Must set HEATSHRINK_DYNAMIC_ALLOC to 1 for this test suite.
-#endif
-
-SUITE(properties);
-
-// Buffers, 16 MB each
-#define BUF_SIZE (16 * 1024L * 1024)
-/* static uint8_t *input; */
-static uint8_t *output;
-static uint8_t *output2;
-
-typedef struct {
-    int limit;
-    int fails;
-    int dots;
-    uint16_t decoder_buffer_size;
-} test_env;
-
-typedef struct {
-    size_t size;
-    uint8_t buf[];
-} rbuf;
-
-static void *rbuf_alloc_cb(struct theft *t, theft_hash seed, void *env) {
-    test_env *te = (test_env *)env;
-    //printf("seed is 0x%016llx\n", seed);
-
-    size_t sz = (size_t)(seed % te->limit) + 1;
-    rbuf *r = malloc(sizeof(rbuf) + sz);
-    if (r == NULL) { return THEFT_ERROR; }
-    r->size = sz;
-
-    for (size_t i = 0; i < sz; i += sizeof(theft_hash)) {
-        theft_hash s = theft_random(t);
-        for (uint8_t b = 0; b < sizeof(theft_hash); b++) {
-            if (i + b >= sz) { break; }
-            r->buf[i + b] = (uint8_t) (s >> (8*b)) & 0xff;
-        }
-    }
-
-    return r;
-}
-
-static void rbuf_free_cb(void *instance, void *env) {
-    free(instance);
-    (void)env;
-}
-
-static uint64_t rbuf_hash_cb(void *instance, void *env) {
-    rbuf *r = (rbuf *)instance;
-    (void)env;
-    return theft_hash_onepass(r->buf, r->size);
-}
-
-/* Make a copy of a buffer, keeping NEW_SZ bytes starting at OFFSET. */
-static void *copy_rbuf_subset(rbuf *cur, size_t new_sz, size_t byte_offset) {
-    if (new_sz == 0) { return THEFT_DEAD_END; }
-    rbuf *nr = malloc(sizeof(rbuf) + new_sz);
-    if (nr == NULL) { return THEFT_ERROR; }
-    nr->size = new_sz;
-    memcpy(nr->buf, &cur->buf[byte_offset], new_sz);
-    /* printf("%zu -> %zu\n", cur->size, new_sz); */
-    return nr;
-}
-
-/* Make a copy of a buffer, but only PORTION, starting OFFSET in
- * (e.g. the third quarter is (0.25 at +0.75). Rounds to ints. */
-static void *copy_rbuf_percent(rbuf *cur, float portion, float offset) {
-    size_t new_sz = cur->size * portion;
-    size_t byte_offset = (size_t)(cur->size * offset);
-    return copy_rbuf_subset(cur, new_sz, byte_offset);
-}
-
-/* How to shrink a random buffer to a simpler one. */
-static void *rbuf_shrink_cb(void *instance, uint32_t tactic, void *env) {
-    rbuf *cur = (rbuf *)instance;
-
-    if (tactic == 0) {          /* first half */
-        return copy_rbuf_percent(cur, 0.5, 0);
-    } else if (tactic == 1) {   /* second half */
-        return copy_rbuf_percent(cur, 0.5, 0.5);
-    } else if (tactic <= 18) {  /* drop 1-16 bytes at start */
-        const int last_tactic = 1;
-        const size_t drop = tactic - last_tactic;
-        if (cur->size < drop) { return THEFT_DEAD_END; }
-        return copy_rbuf_subset(cur, cur->size - drop, drop);
-    } else if (tactic <= 34) {  /* drop 1-16 bytes at end */
-        const int last_tactic = 18;
-        const size_t drop = tactic - last_tactic;
-        if (cur->size < drop) { return THEFT_DEAD_END; }
-        return copy_rbuf_subset(cur, cur->size - drop, 0);
-    } else if (tactic == 35) {
-        /* Divide every byte by 2, saturating at 0 */
-        rbuf *cp = copy_rbuf_percent(cur, 1, 0);
-        if (cp == NULL) { return THEFT_ERROR; }
-        for (size_t i = 0; i < cp->size; i++) { cp->buf[i] /= 2; }
-        return cp;
-    } else if (tactic == 36) {
-        /* subtract 1 from every byte, saturating at 0 */
-        rbuf *cp = copy_rbuf_percent(cur, 1, 0);
-        if (cp == NULL) { return THEFT_ERROR; }
-        for (size_t i = 0; i < cp->size; i++) {
-            if (cp->buf[i] > 0) { cp->buf[i]--; }
-        }
-        return cp;
-    } else {
-        (void)env;
-        return THEFT_NO_MORE_TACTICS;
-    }
-
-    return THEFT_NO_MORE_TACTICS;
-}
-
-static void rbuf_print_cb(FILE *f, void *instance, void *env) {
-    rbuf *r = (rbuf *)instance;
-    (void)env;
-    fprintf(f, "buf[%zd]:\n    ", r->size);
-    uint8_t bytes = 0;
-    for (size_t i = 0; i < r->size; i++) {
-        fprintf(f, "%02x", r->buf[i]);
-        bytes++;
-        if (bytes == 16) {
-            fprintf(f, "\n    ");
-            bytes = 0;
-        }
-    }
-    fprintf(f, "\n");
-}
-
-static struct theft_type_info rbuf_info = {
-    .alloc = rbuf_alloc_cb,
-    .free = rbuf_free_cb,
-    .hash = rbuf_hash_cb,
-    .shrink = rbuf_shrink_cb,
-    .print = rbuf_print_cb,
-};
-
-static void *window_alloc_cb(struct theft *t, theft_seed seed, void *env) {
-    uint8_t *window = malloc(sizeof(uint8_t));
-    if (window == NULL) { return THEFT_ERROR; }
-    *window = (seed % (HEATSHRINK_MAX_WINDOW_BITS - HEATSHRINK_MIN_WINDOW_BITS))
-      + HEATSHRINK_MIN_WINDOW_BITS;
-    (void)t;
-    (void)env;
-    return window;
-}
-
-static void window_free_cb(void *instance, void *env) {
-    free(instance);
-    (void)env;
-}
-
-static theft_hash window_hash_cb(void *instance, void *env) {
-    (void)env;
-    return *(uint8_t *)instance;
-}
-
-static void window_print_cb(FILE *f, void *instance, void *env) {
-    fprintf(f, "%u", (*(uint8_t *)instance));
-    (void)env;
-}
-
-static struct theft_type_info window_info = {
-    .alloc = window_alloc_cb,
-    .free = window_free_cb,
-    .hash = window_hash_cb,
-    .print = window_print_cb,
-};
-
-static void *lookahead_alloc_cb(struct theft *t, theft_seed seed, void *env) {
-    uint8_t *window = malloc(sizeof(uint8_t));
-    if (window == NULL) { return THEFT_ERROR; }
-    *window = (seed % (HEATSHRINK_MAX_WINDOW_BITS - HEATSHRINK_MIN_LOOKAHEAD_BITS))
-      + HEATSHRINK_MIN_LOOKAHEAD_BITS;
-    (void)t;
-    (void)env;
-    return window;
-}
-
-static void lookahead_free_cb(void *instance, void *env) {
-    free(instance);
-    (void)env;
-}
-
-static theft_hash lookahead_hash_cb(void *instance, void *env) {
-    (void)env;
-    return *(uint8_t *)instance;
-}
-
-static void lookahead_print_cb(FILE *f, void *instance, void *env) {
-    fprintf(f, "%u", (*(uint8_t *)instance));
-    (void)env;
-}
-
-static struct theft_type_info lookahead_info = {
-    .alloc = lookahead_alloc_cb,
-    .free = lookahead_free_cb,
-    .hash = lookahead_hash_cb,
-    .print = lookahead_print_cb,
-};
-
-
-static void *decoder_buf_alloc_cb(struct theft *t, theft_seed seed, void *env) {
-    uint16_t *size = malloc(sizeof(uint16_t));
-    if (size == NULL) { return THEFT_ERROR; }
-
-    /* Get a random uint16_t, and only keep bottom 0-15 bits at random,
-     * to bias towards smaller buffers. */
-    *size = seed & 0xFFFF;
-    *size &= (1 << (theft_random(t) & 0xF)) - 1;
-
-    if (*size == 0) { *size = 1; }   // round up to 1
-    (void)t;
-    (void)env;
-    return size;
-}
-
-static void decoder_buf_free_cb(void *instance, void *env) {
-    free(instance);
-    (void)env;
-}
-
-static theft_hash decoder_buf_hash_cb(void *instance, void *env) {
-    (void)env;
-    return *(uint16_t *)instance;
-}
-
-static void decoder_buf_print_cb(FILE *f, void *instance, void *env) {
-    fprintf(f, "%u", (*(uint16_t *)instance));
-    (void)env;
-}
-
-static struct theft_type_info decoder_buf_info = {
-    .alloc = decoder_buf_alloc_cb,
-    .free = decoder_buf_free_cb,
-    .hash = decoder_buf_hash_cb,
-    .print = decoder_buf_print_cb,
-};
-
-static theft_progress_callback_res
-progress_cb(struct theft_trial_info *info, void *env) {
-    test_env *te = (test_env *)env;
-    if ((info->trial & 0xff) == 0) {
-        printf(".");
-        fflush(stdout);
-        te->dots++;
-        if (te->dots == 64) {
-            printf("\n");
-            te->dots = 0;
-        }
-    }
-
-    if (info->status == THEFT_TRIAL_FAIL) {
-        te->fails++;
-        rbuf *cur = info->args[0];
-        if (cur->size < 5) { return THEFT_PROGRESS_HALT; }
-    }
-
-    if (te->fails > 10) {
-        return THEFT_PROGRESS_HALT;
-    }
-    return THEFT_PROGRESS_CONTINUE;
-}
-
-/* For an arbitrary input buffer, it should never get stuck in a
- * state where the data has been sunk but no data can be polled. */
-static theft_trial_res
-prop_should_not_get_stuck(void *input, void *window, void *lookahead) {
-    assert(window);
-    uint8_t window_sz2 = *(uint8_t *)window;
-    assert(lookahead);
-    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
-    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
-
-    heatshrink_decoder *hsd = heatshrink_decoder_alloc((64 * 1024L) - 1,
-        window_sz2, lookahead_sz2);
-    if (hsd == NULL) { return THEFT_TRIAL_ERROR; }
-
-    rbuf *r = (rbuf *)input;
-
-    size_t count = 0;
-    HSD_sink_res sres = heatshrink_decoder_sink(hsd, r->buf, r->size, &count);
-    if (sres != HSDR_SINK_OK) { return THEFT_TRIAL_ERROR; }
-    
-    size_t out_sz = 0;
-    HSD_poll_res pres = heatshrink_decoder_poll(hsd, output, BUF_SIZE, &out_sz);
-    if (pres != HSDR_POLL_EMPTY) { return THEFT_TRIAL_FAIL; }
-    
-    HSD_finish_res fres = heatshrink_decoder_finish(hsd);
-    heatshrink_decoder_free(hsd);
-    if (fres != HSDR_FINISH_DONE) { return THEFT_TRIAL_FAIL; }
-
-    return THEFT_TRIAL_PASS;
-}
-
-static bool get_time_seed(theft_seed *seed)
-{
-    struct timeval tv;
-    if (-1 == gettimeofday(&tv, NULL)) { return false; }
-    *seed = (theft_seed)((tv.tv_sec << 32) | tv.tv_usec);
-    /* printf("seed is 0x%016llx\n", *seed); */
-    return true;
-}
-
-TEST decoder_fuzzing_should_not_detect_stuck_state(void) {
-    // Get a random number seed based on the time
-    theft_seed seed;
-    if (!get_time_seed(&seed)) { FAIL(); }
-    
-    /* Pass the max buffer size for this property (4 KB) in a closure */
-    test_env env = { .limit = 1 << 12 };
-
-    theft_seed always_seeds = { 0xe87bb1f61032a061 };
-
-    struct theft *t = theft_init(0);
-    struct theft_cfg cfg = {
-        .name = __func__,
-        .fun = prop_should_not_get_stuck,
-        .type_info = { &rbuf_info, &window_info, &lookahead_info },
-        .seed = seed,
-        .trials = 100000,
-        .progress_cb = progress_cb,
-        .env = &env,
-
-        .always_seeds = &always_seeds,
-        .always_seed_count = 1,
-    };
-
-    theft_run_res res = theft_run(t, &cfg);
-    theft_free(t);
-    printf("\n");
-    GREATEST_ASSERT_EQm("should_not_get_stuck", THEFT_RUN_PASS, res);
-    PASS();
-}
-
-static bool do_compress(heatshrink_encoder *hse,
-        uint8_t *input, size_t input_size,
-        uint8_t *output, size_t output_buf_size, size_t *output_used_size) {
-    size_t sunk = 0;
-    size_t polled = 0;
-
-    while (sunk < input_size) {
-        size_t sunk_size = 0;
-        HSE_sink_res esres = heatshrink_encoder_sink(hse,
-            &input[sunk], input_size - sunk, &sunk_size);
-        if (esres != HSER_SINK_OK) { return false; }
-        sunk += sunk_size;
-
-        HSE_poll_res epres = HSER_POLL_ERROR_NULL;
-        do {
-            size_t poll_size = 0;
-            epres = heatshrink_encoder_poll(hse,
-                &output[polled], output_buf_size - polled, &poll_size);
-            if (epres < 0) { return false; }
-            polled += poll_size;
-        } while (epres == HSER_POLL_MORE);
-    }
-    
-    HSE_finish_res efres = heatshrink_encoder_finish(hse);
-    while (efres == HSER_FINISH_MORE) {
-        size_t poll_size = 0;
-        HSE_poll_res epres = heatshrink_encoder_poll(hse,
-            &output[polled], output_buf_size - polled, &poll_size);
-        if (epres < 0) { return false; }
-        polled += poll_size;
-        efres = heatshrink_encoder_finish(hse);
-    }
-    *output_used_size = polled;
-    return efres == HSER_FINISH_DONE;
-}
-
-static bool do_decompress(heatshrink_decoder *hsd,
-        uint8_t *input, size_t input_size,
-        uint8_t *output, size_t output_buf_size, size_t *output_used_size) {
-    size_t sunk = 0;
-    size_t polled = 0;
-
-    while (sunk < input_size) {
-        size_t sunk_size = 0;
-        HSD_sink_res dsres = heatshrink_decoder_sink(hsd,
-            &input[sunk], input_size - sunk, &sunk_size);
-        if (dsres != HSDR_SINK_OK) { return false; }
-        sunk += sunk_size;
-
-        HSD_poll_res dpres = HSDR_POLL_ERROR_NULL;
-        do {
-            size_t poll_size = 0;
-            dpres = heatshrink_decoder_poll(hsd,
-                &output[polled], output_buf_size - polled, &poll_size);
-            if (dpres < 0) { return false; }
-            polled += poll_size;
-        } while (dpres == HSDR_POLL_MORE);
-    }
-    
-    HSD_finish_res dfres = heatshrink_decoder_finish(hsd);
-    while (dfres == HSDR_FINISH_MORE) {
-        size_t poll_size = 0;
-        HSD_poll_res dpres = heatshrink_decoder_poll(hsd,
-            &output[polled], output_buf_size - polled, &poll_size);
-        if (dpres < 0) { return false; }
-        polled += poll_size;
-        dfres = heatshrink_decoder_finish(hsd);
-    }
-
-    *output_used_size = polled;
-    return dfres == HSDR_FINISH_DONE;
-}
-
-static theft_trial_res
-prop_encoded_and_decoded_data_should_match(void *input,
-        void *window, void *lookahead, void *decoder_buffer_size) {
-    assert(window);
-    uint8_t window_sz2 = *(uint8_t *)window;
-    assert(lookahead);
-    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
-    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
-
-    heatshrink_encoder *hse = heatshrink_encoder_alloc(window_sz2, lookahead_sz2);
-    if (hse == NULL) { return THEFT_TRIAL_ERROR; }
-
-    assert(decoder_buffer_size);
-    uint16_t buf_size = *(uint16_t *)decoder_buffer_size;
-    heatshrink_decoder *hsd = heatshrink_decoder_alloc(buf_size, window_sz2, lookahead_sz2);
-    if (hsd == NULL) { return THEFT_TRIAL_ERROR; }
-    
-    rbuf *r = (rbuf *)input;
-
-    size_t compressed_size = 0;
-    if (!do_compress(hse, r->buf, r->size, output,
-            BUF_SIZE, &compressed_size)) {
-        return THEFT_TRIAL_ERROR;
-    }
-
-    size_t decompressed_size = 0;
-    if (!do_decompress(hsd, output, compressed_size, output2,
-            BUF_SIZE, &decompressed_size)) {
-        return THEFT_TRIAL_ERROR;
-    }
-
-    // verify decompressed output matches original input
-    if (r->size != decompressed_size) {
-        return THEFT_TRIAL_FAIL;
-    }
-    if (0 != memcmp(output2, r->buf, decompressed_size)) {
-        return THEFT_TRIAL_FAIL;
-    }
-    
-    heatshrink_encoder_free(hse);
-    heatshrink_decoder_free(hsd);
-    return THEFT_TRIAL_PASS;
-}
-
-TEST encoded_and_decoded_data_should_match(void) {
-    test_env env = { .limit = 1 << 11 };
-    
-    theft_seed seed;
-    if (!get_time_seed(&seed)) { FAIL(); }
-
-    struct theft *t = theft_init(0);
-    struct theft_cfg cfg = {
-        .name = __func__,
-        .fun = prop_encoded_and_decoded_data_should_match,
-        .type_info = { &rbuf_info, &window_info, &lookahead_info, &decoder_buf_info, },
-        .seed = seed,
-        .trials = 1000000,
-        .env = &env,
-        .progress_cb = progress_cb,
-    };
-
-    theft_run_res res = theft_run(t, &cfg);
-    theft_free(t);
-    printf("\n");
-    ASSERT_EQ(THEFT_RUN_PASS, res);
-    PASS();
-}
-
-static size_t ceil_nine_eighths(size_t sz) {
-    return sz + sz/8 + (sz & 0x07 ? 1 : 0);
-}
-
-static theft_trial_res
-prop_encoding_data_should_never_increase_it_by_more_than_an_eighth_at_worst(void *input,
-        void *window, void *lookahead) {
-    assert(window);
-    uint8_t window_sz2 = *(uint8_t *)window;
-    assert(lookahead);
-    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
-    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
-
-    heatshrink_encoder *hse = heatshrink_encoder_alloc(window_sz2, lookahead_sz2);
-    if (hse == NULL) { return THEFT_TRIAL_ERROR; }
-    
-    rbuf *r = (rbuf *)input;
-
-    size_t compressed_size = 0;
-    if (!do_compress(hse, r->buf, r->size, output,
-            BUF_SIZE, &compressed_size)) {
-        return THEFT_TRIAL_ERROR;
-    }
-
-    size_t ceil_9_8s = ceil_nine_eighths(r->size);
-    if (compressed_size > ceil_9_8s) {
-        return THEFT_TRIAL_FAIL;
-    }
-
-    heatshrink_encoder_free(hse);
-    return THEFT_TRIAL_PASS;
-}
-
-TEST encoding_data_should_never_increase_it_by_more_than_an_eighth_at_worst(void) {
-    test_env env = { .limit = 1 << 11 };
-    
-    theft_seed seed;
-    if (!get_time_seed(&seed)) { FAIL(); }
-
-    struct theft *t = theft_init(0);
-    struct theft_cfg cfg = {
-        .name = __func__,
-        .fun = prop_encoding_data_should_never_increase_it_by_more_than_an_eighth_at_worst,
-        .type_info = { &rbuf_info, &window_info, &lookahead_info },
-        .seed = seed,
-        .trials = 10000,
-        .env = &env,
-        .progress_cb = progress_cb,
-    };
-
-    theft_run_res res = theft_run(t, &cfg);
-    theft_free(t);
-    printf("\n");
-    ASSERT_EQ(THEFT_RUN_PASS, res);
-    PASS();
-}
-
-static theft_trial_res
-prop_encoder_should_always_make_progress(void *instance, void *window, void *lookahead) {
-    assert(window);
-    uint8_t window_sz2 = *(uint8_t *)window;
-    assert(lookahead);
-    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
-    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
-
-    heatshrink_encoder *hse = heatshrink_encoder_alloc(window_sz2, lookahead_sz2);
-    if (hse == NULL) { return THEFT_TRIAL_ERROR; }
-    
-    rbuf *r = (rbuf *)instance;
-
-    size_t sunk = 0;
-    int no_progress = 0;
-
-    while (1) {
-        if (sunk < r->size) {
-            size_t input_size = 0;
-            HSE_sink_res esres = heatshrink_encoder_sink(hse,
-                &r->buf[sunk], r->size - sunk, &input_size);
-            if (esres != HSER_SINK_OK) { return THEFT_TRIAL_ERROR; }
-            sunk += input_size;
-        } else {
-            HSE_finish_res efres = heatshrink_encoder_finish(hse);
-            if (efres == HSER_FINISH_DONE) {
-                break;
-            } else if (efres != HSER_FINISH_MORE) {
-                printf("FAIL %d\n", __LINE__);
-                return THEFT_TRIAL_FAIL;
-            }
-        }
-
-        size_t output_size = 0;
-        HSE_poll_res epres = heatshrink_encoder_poll(hse,
-            output, BUF_SIZE, &output_size);
-        if (epres < 0) { return THEFT_TRIAL_ERROR; }
-        if (output_size == 0 && sunk == r->size) {
-            no_progress++;
-            if (no_progress > 2) {
-                return THEFT_TRIAL_FAIL;
-            }
-        } else {
-            no_progress = 0;
-        }
-    }
-
-    heatshrink_encoder_free(hse);
-    return THEFT_TRIAL_PASS;
-}
-
-TEST encoder_should_always_make_progress(void) {
-    test_env env = { .limit = 1 << 15 };
-    
-    theft_seed seed;
-    if (!get_time_seed(&seed)) { FAIL(); }
-
-    struct theft *t = theft_init(0);
-    struct theft_cfg cfg = {
-        .name = __func__,
-        .fun = prop_encoder_should_always_make_progress,
-        .type_info = { &rbuf_info, &window_info, &lookahead_info },
-        .seed = seed,
-        .trials = 10000,
-        .env = &env,
-        .progress_cb = progress_cb,
-    };
-
-    theft_run_res res = theft_run(t, &cfg);
-    theft_free(t);
-    printf("\n");
-    ASSERT_EQ(THEFT_RUN_PASS, res);
-    PASS();
-}
-
-static theft_trial_res
-prop_decoder_should_always_make_progress(void *instance, void *window, void *lookahead) {
-    assert(window);
-    uint8_t window_sz2 = *(uint8_t *)window;
-    assert(lookahead);
-    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
-    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
-
-    heatshrink_decoder *hsd = heatshrink_decoder_alloc(512, window_sz2, lookahead_sz2);
-    if (hsd == NULL) {
-        fprintf(stderr, "Failed to alloc decoder\n");
-        return THEFT_TRIAL_ERROR;
-    }
-    
-    rbuf *r = (rbuf *)instance;
-
-    size_t sunk = 0;
-    int no_progress = 0;
-
-    while (1) {
-        if (sunk < r->size) {
-            size_t input_size = 0;
-            HSD_sink_res sres = heatshrink_decoder_sink(hsd,
-                &r->buf[sunk], r->size - sunk, &input_size);
-            if (sres < 0) {
-                fprintf(stderr, "Sink error %d\n", sres);
-                return THEFT_TRIAL_ERROR;
-            }
-            sunk += input_size;
-        } else {
-            HSD_finish_res fres = heatshrink_decoder_finish(hsd);
-            if (fres == HSDR_FINISH_DONE) {
-                break;
-            } else if (fres != HSDR_FINISH_MORE) {
-                printf("FAIL %d\n", __LINE__);
-                return THEFT_TRIAL_FAIL;
-            }
-        }
-
-        size_t output_size = 0;
-        HSD_poll_res pres = heatshrink_decoder_poll(hsd,
-            output, sizeof(output), &output_size);
-        if (pres < 0) {
-            fprintf(stderr, "poll error: %d\n", pres);
-            return THEFT_TRIAL_ERROR;
-        }
-        if (output_size == 0 && sunk == r->size) {
-            no_progress++;
-            if (no_progress > 2) {
-                return THEFT_TRIAL_FAIL;
-            }
-        } else {
-            no_progress = 0;
-        }
-    }
-
-    heatshrink_decoder_free(hsd);
-    return THEFT_TRIAL_PASS;
-}
-
-TEST decoder_should_always_make_progress(void) {
-    test_env env = { .limit = 1 << 15 };
-    
-    theft_seed seed;
-    if (!get_time_seed(&seed)) { FAIL(); }
-
-    struct theft *t = theft_init(0);
-    struct theft_cfg cfg = {
-        .name = __func__,
-        .fun = prop_decoder_should_always_make_progress,
-        .type_info = { &rbuf_info, &window_info, &lookahead_info },
-        .seed = seed,
-        .trials = 10000,
-        .env = &env,
-        .progress_cb = progress_cb,
-    };
-
-    theft_run_res res = theft_run(t, &cfg);
-    theft_free(t);
-    printf("\n");
-    ASSERT_EQ(THEFT_RUN_PASS, res);
-    PASS();
-}
-
-static void setup_cb(void *udata) {
-    (void)udata;
-    memset(output, 0, BUF_SIZE);
-    memset(output2, 0, BUF_SIZE);
-}
-
-SUITE(properties) {
-    output = malloc(BUF_SIZE);
-    assert(output);
-    output2 = malloc(BUF_SIZE);
-    assert(output2);
-    
-    GREATEST_SET_SETUP_CB(setup_cb, NULL);
-
-    RUN_TEST(decoder_fuzzing_should_not_detect_stuck_state);
-    RUN_TEST(encoded_and_decoded_data_should_match);
-    RUN_TEST(encoding_data_should_never_increase_it_by_more_than_an_eighth_at_worst);
-    RUN_TEST(encoder_should_always_make_progress);
-    RUN_TEST(decoder_should_always_make_progress);
-
-    free(output);
-    free(output2);
-}
-#else
-struct because_iso_c_requires_at_least_one_declaration;
-#endif
 
 
 ======================================================================
@@ -18372,6 +18143,745 @@ int main(int argc, char **argv) {
     #endif
     GREATEST_MAIN_END();        /* display results */
 }
+
+
+======================================================================
+FILE: common/lib/heatshrink/test_heatshrink_dynamic_theft.c
+======================================================================
+
+#include "heatshrink_config.h"
+#ifdef HEATSHRINK_HAS_THEFT
+
+#include <stdint.h>
+#include <ctype.h>
+#include <assert.h>
+#include <string.h>
+#include <sys/time.h>
+
+#include "heatshrink_encoder.h"
+#include "heatshrink_decoder.h"
+#include "greatest.h"
+#include "theft.h"
+
+#if !HEATSHRINK_DYNAMIC_ALLOC
+#error Must set HEATSHRINK_DYNAMIC_ALLOC to 1 for this test suite.
+#endif
+
+SUITE(properties);
+
+// Buffers, 16 MB each
+#define BUF_SIZE (16 * 1024L * 1024)
+/* static uint8_t *input; */
+static uint8_t *output;
+static uint8_t *output2;
+
+typedef struct {
+    int limit;
+    int fails;
+    int dots;
+    uint16_t decoder_buffer_size;
+} test_env;
+
+typedef struct {
+    size_t size;
+    uint8_t buf[];
+} rbuf;
+
+static void *rbuf_alloc_cb(struct theft *t, theft_hash seed, void *env) {
+    test_env *te = (test_env *)env;
+    //printf("seed is 0x%016llx\n", seed);
+
+    size_t sz = (size_t)(seed % te->limit) + 1;
+    rbuf *r = malloc(sizeof(rbuf) + sz);
+    if (r == NULL) { return THEFT_ERROR; }
+    r->size = sz;
+
+    for (size_t i = 0; i < sz; i += sizeof(theft_hash)) {
+        theft_hash s = theft_random(t);
+        for (uint8_t b = 0; b < sizeof(theft_hash); b++) {
+            if (i + b >= sz) { break; }
+            r->buf[i + b] = (uint8_t) (s >> (8*b)) & 0xff;
+        }
+    }
+
+    return r;
+}
+
+static void rbuf_free_cb(void *instance, void *env) {
+    free(instance);
+    (void)env;
+}
+
+static uint64_t rbuf_hash_cb(void *instance, void *env) {
+    rbuf *r = (rbuf *)instance;
+    (void)env;
+    return theft_hash_onepass(r->buf, r->size);
+}
+
+/* Make a copy of a buffer, keeping NEW_SZ bytes starting at OFFSET. */
+static void *copy_rbuf_subset(rbuf *cur, size_t new_sz, size_t byte_offset) {
+    if (new_sz == 0) { return THEFT_DEAD_END; }
+    rbuf *nr = malloc(sizeof(rbuf) + new_sz);
+    if (nr == NULL) { return THEFT_ERROR; }
+    nr->size = new_sz;
+    memcpy(nr->buf, &cur->buf[byte_offset], new_sz);
+    /* printf("%zu -> %zu\n", cur->size, new_sz); */
+    return nr;
+}
+
+/* Make a copy of a buffer, but only PORTION, starting OFFSET in
+ * (e.g. the third quarter is (0.25 at +0.75). Rounds to ints. */
+static void *copy_rbuf_percent(rbuf *cur, float portion, float offset) {
+    size_t new_sz = cur->size * portion;
+    size_t byte_offset = (size_t)(cur->size * offset);
+    return copy_rbuf_subset(cur, new_sz, byte_offset);
+}
+
+/* How to shrink a random buffer to a simpler one. */
+static void *rbuf_shrink_cb(void *instance, uint32_t tactic, void *env) {
+    rbuf *cur = (rbuf *)instance;
+
+    if (tactic == 0) {          /* first half */
+        return copy_rbuf_percent(cur, 0.5, 0);
+    } else if (tactic == 1) {   /* second half */
+        return copy_rbuf_percent(cur, 0.5, 0.5);
+    } else if (tactic <= 18) {  /* drop 1-16 bytes at start */
+        const int last_tactic = 1;
+        const size_t drop = tactic - last_tactic;
+        if (cur->size < drop) { return THEFT_DEAD_END; }
+        return copy_rbuf_subset(cur, cur->size - drop, drop);
+    } else if (tactic <= 34) {  /* drop 1-16 bytes at end */
+        const int last_tactic = 18;
+        const size_t drop = tactic - last_tactic;
+        if (cur->size < drop) { return THEFT_DEAD_END; }
+        return copy_rbuf_subset(cur, cur->size - drop, 0);
+    } else if (tactic == 35) {
+        /* Divide every byte by 2, saturating at 0 */
+        rbuf *cp = copy_rbuf_percent(cur, 1, 0);
+        if (cp == NULL) { return THEFT_ERROR; }
+        for (size_t i = 0; i < cp->size; i++) { cp->buf[i] /= 2; }
+        return cp;
+    } else if (tactic == 36) {
+        /* subtract 1 from every byte, saturating at 0 */
+        rbuf *cp = copy_rbuf_percent(cur, 1, 0);
+        if (cp == NULL) { return THEFT_ERROR; }
+        for (size_t i = 0; i < cp->size; i++) {
+            if (cp->buf[i] > 0) { cp->buf[i]--; }
+        }
+        return cp;
+    } else {
+        (void)env;
+        return THEFT_NO_MORE_TACTICS;
+    }
+
+    return THEFT_NO_MORE_TACTICS;
+}
+
+static void rbuf_print_cb(FILE *f, void *instance, void *env) {
+    rbuf *r = (rbuf *)instance;
+    (void)env;
+    fprintf(f, "buf[%zd]:\n    ", r->size);
+    uint8_t bytes = 0;
+    for (size_t i = 0; i < r->size; i++) {
+        fprintf(f, "%02x", r->buf[i]);
+        bytes++;
+        if (bytes == 16) {
+            fprintf(f, "\n    ");
+            bytes = 0;
+        }
+    }
+    fprintf(f, "\n");
+}
+
+static struct theft_type_info rbuf_info = {
+    .alloc = rbuf_alloc_cb,
+    .free = rbuf_free_cb,
+    .hash = rbuf_hash_cb,
+    .shrink = rbuf_shrink_cb,
+    .print = rbuf_print_cb,
+};
+
+static void *window_alloc_cb(struct theft *t, theft_seed seed, void *env) {
+    uint8_t *window = malloc(sizeof(uint8_t));
+    if (window == NULL) { return THEFT_ERROR; }
+    *window = (seed % (HEATSHRINK_MAX_WINDOW_BITS - HEATSHRINK_MIN_WINDOW_BITS))
+      + HEATSHRINK_MIN_WINDOW_BITS;
+    (void)t;
+    (void)env;
+    return window;
+}
+
+static void window_free_cb(void *instance, void *env) {
+    free(instance);
+    (void)env;
+}
+
+static theft_hash window_hash_cb(void *instance, void *env) {
+    (void)env;
+    return *(uint8_t *)instance;
+}
+
+static void window_print_cb(FILE *f, void *instance, void *env) {
+    fprintf(f, "%u", (*(uint8_t *)instance));
+    (void)env;
+}
+
+static struct theft_type_info window_info = {
+    .alloc = window_alloc_cb,
+    .free = window_free_cb,
+    .hash = window_hash_cb,
+    .print = window_print_cb,
+};
+
+static void *lookahead_alloc_cb(struct theft *t, theft_seed seed, void *env) {
+    uint8_t *window = malloc(sizeof(uint8_t));
+    if (window == NULL) { return THEFT_ERROR; }
+    *window = (seed % (HEATSHRINK_MAX_WINDOW_BITS - HEATSHRINK_MIN_LOOKAHEAD_BITS))
+      + HEATSHRINK_MIN_LOOKAHEAD_BITS;
+    (void)t;
+    (void)env;
+    return window;
+}
+
+static void lookahead_free_cb(void *instance, void *env) {
+    free(instance);
+    (void)env;
+}
+
+static theft_hash lookahead_hash_cb(void *instance, void *env) {
+    (void)env;
+    return *(uint8_t *)instance;
+}
+
+static void lookahead_print_cb(FILE *f, void *instance, void *env) {
+    fprintf(f, "%u", (*(uint8_t *)instance));
+    (void)env;
+}
+
+static struct theft_type_info lookahead_info = {
+    .alloc = lookahead_alloc_cb,
+    .free = lookahead_free_cb,
+    .hash = lookahead_hash_cb,
+    .print = lookahead_print_cb,
+};
+
+
+static void *decoder_buf_alloc_cb(struct theft *t, theft_seed seed, void *env) {
+    uint16_t *size = malloc(sizeof(uint16_t));
+    if (size == NULL) { return THEFT_ERROR; }
+
+    /* Get a random uint16_t, and only keep bottom 0-15 bits at random,
+     * to bias towards smaller buffers. */
+    *size = seed & 0xFFFF;
+    *size &= (1 << (theft_random(t) & 0xF)) - 1;
+
+    if (*size == 0) { *size = 1; }   // round up to 1
+    (void)t;
+    (void)env;
+    return size;
+}
+
+static void decoder_buf_free_cb(void *instance, void *env) {
+    free(instance);
+    (void)env;
+}
+
+static theft_hash decoder_buf_hash_cb(void *instance, void *env) {
+    (void)env;
+    return *(uint16_t *)instance;
+}
+
+static void decoder_buf_print_cb(FILE *f, void *instance, void *env) {
+    fprintf(f, "%u", (*(uint16_t *)instance));
+    (void)env;
+}
+
+static struct theft_type_info decoder_buf_info = {
+    .alloc = decoder_buf_alloc_cb,
+    .free = decoder_buf_free_cb,
+    .hash = decoder_buf_hash_cb,
+    .print = decoder_buf_print_cb,
+};
+
+static theft_progress_callback_res
+progress_cb(struct theft_trial_info *info, void *env) {
+    test_env *te = (test_env *)env;
+    if ((info->trial & 0xff) == 0) {
+        printf(".");
+        fflush(stdout);
+        te->dots++;
+        if (te->dots == 64) {
+            printf("\n");
+            te->dots = 0;
+        }
+    }
+
+    if (info->status == THEFT_TRIAL_FAIL) {
+        te->fails++;
+        rbuf *cur = info->args[0];
+        if (cur->size < 5) { return THEFT_PROGRESS_HALT; }
+    }
+
+    if (te->fails > 10) {
+        return THEFT_PROGRESS_HALT;
+    }
+    return THEFT_PROGRESS_CONTINUE;
+}
+
+/* For an arbitrary input buffer, it should never get stuck in a
+ * state where the data has been sunk but no data can be polled. */
+static theft_trial_res
+prop_should_not_get_stuck(void *input, void *window, void *lookahead) {
+    assert(window);
+    uint8_t window_sz2 = *(uint8_t *)window;
+    assert(lookahead);
+    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
+    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
+
+    heatshrink_decoder *hsd = heatshrink_decoder_alloc((64 * 1024L) - 1,
+        window_sz2, lookahead_sz2);
+    if (hsd == NULL) { return THEFT_TRIAL_ERROR; }
+
+    rbuf *r = (rbuf *)input;
+
+    size_t count = 0;
+    HSD_sink_res sres = heatshrink_decoder_sink(hsd, r->buf, r->size, &count);
+    if (sres != HSDR_SINK_OK) { return THEFT_TRIAL_ERROR; }
+    
+    size_t out_sz = 0;
+    HSD_poll_res pres = heatshrink_decoder_poll(hsd, output, BUF_SIZE, &out_sz);
+    if (pres != HSDR_POLL_EMPTY) { return THEFT_TRIAL_FAIL; }
+    
+    HSD_finish_res fres = heatshrink_decoder_finish(hsd);
+    heatshrink_decoder_free(hsd);
+    if (fres != HSDR_FINISH_DONE) { return THEFT_TRIAL_FAIL; }
+
+    return THEFT_TRIAL_PASS;
+}
+
+static bool get_time_seed(theft_seed *seed)
+{
+    struct timeval tv;
+    if (-1 == gettimeofday(&tv, NULL)) { return false; }
+    *seed = (theft_seed)((tv.tv_sec << 32) | tv.tv_usec);
+    /* printf("seed is 0x%016llx\n", *seed); */
+    return true;
+}
+
+TEST decoder_fuzzing_should_not_detect_stuck_state(void) {
+    // Get a random number seed based on the time
+    theft_seed seed;
+    if (!get_time_seed(&seed)) { FAIL(); }
+    
+    /* Pass the max buffer size for this property (4 KB) in a closure */
+    test_env env = { .limit = 1 << 12 };
+
+    theft_seed always_seeds = { 0xe87bb1f61032a061 };
+
+    struct theft *t = theft_init(0);
+    struct theft_cfg cfg = {
+        .name = __func__,
+        .fun = prop_should_not_get_stuck,
+        .type_info = { &rbuf_info, &window_info, &lookahead_info },
+        .seed = seed,
+        .trials = 100000,
+        .progress_cb = progress_cb,
+        .env = &env,
+
+        .always_seeds = &always_seeds,
+        .always_seed_count = 1,
+    };
+
+    theft_run_res res = theft_run(t, &cfg);
+    theft_free(t);
+    printf("\n");
+    GREATEST_ASSERT_EQm("should_not_get_stuck", THEFT_RUN_PASS, res);
+    PASS();
+}
+
+static bool do_compress(heatshrink_encoder *hse,
+        uint8_t *input, size_t input_size,
+        uint8_t *output, size_t output_buf_size, size_t *output_used_size) {
+    size_t sunk = 0;
+    size_t polled = 0;
+
+    while (sunk < input_size) {
+        size_t sunk_size = 0;
+        HSE_sink_res esres = heatshrink_encoder_sink(hse,
+            &input[sunk], input_size - sunk, &sunk_size);
+        if (esres != HSER_SINK_OK) { return false; }
+        sunk += sunk_size;
+
+        HSE_poll_res epres = HSER_POLL_ERROR_NULL;
+        do {
+            size_t poll_size = 0;
+            epres = heatshrink_encoder_poll(hse,
+                &output[polled], output_buf_size - polled, &poll_size);
+            if (epres < 0) { return false; }
+            polled += poll_size;
+        } while (epres == HSER_POLL_MORE);
+    }
+    
+    HSE_finish_res efres = heatshrink_encoder_finish(hse);
+    while (efres == HSER_FINISH_MORE) {
+        size_t poll_size = 0;
+        HSE_poll_res epres = heatshrink_encoder_poll(hse,
+            &output[polled], output_buf_size - polled, &poll_size);
+        if (epres < 0) { return false; }
+        polled += poll_size;
+        efres = heatshrink_encoder_finish(hse);
+    }
+    *output_used_size = polled;
+    return efres == HSER_FINISH_DONE;
+}
+
+static bool do_decompress(heatshrink_decoder *hsd,
+        uint8_t *input, size_t input_size,
+        uint8_t *output, size_t output_buf_size, size_t *output_used_size) {
+    size_t sunk = 0;
+    size_t polled = 0;
+
+    while (sunk < input_size) {
+        size_t sunk_size = 0;
+        HSD_sink_res dsres = heatshrink_decoder_sink(hsd,
+            &input[sunk], input_size - sunk, &sunk_size);
+        if (dsres != HSDR_SINK_OK) { return false; }
+        sunk += sunk_size;
+
+        HSD_poll_res dpres = HSDR_POLL_ERROR_NULL;
+        do {
+            size_t poll_size = 0;
+            dpres = heatshrink_decoder_poll(hsd,
+                &output[polled], output_buf_size - polled, &poll_size);
+            if (dpres < 0) { return false; }
+            polled += poll_size;
+        } while (dpres == HSDR_POLL_MORE);
+    }
+    
+    HSD_finish_res dfres = heatshrink_decoder_finish(hsd);
+    while (dfres == HSDR_FINISH_MORE) {
+        size_t poll_size = 0;
+        HSD_poll_res dpres = heatshrink_decoder_poll(hsd,
+            &output[polled], output_buf_size - polled, &poll_size);
+        if (dpres < 0) { return false; }
+        polled += poll_size;
+        dfres = heatshrink_decoder_finish(hsd);
+    }
+
+    *output_used_size = polled;
+    return dfres == HSDR_FINISH_DONE;
+}
+
+static theft_trial_res
+prop_encoded_and_decoded_data_should_match(void *input,
+        void *window, void *lookahead, void *decoder_buffer_size) {
+    assert(window);
+    uint8_t window_sz2 = *(uint8_t *)window;
+    assert(lookahead);
+    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
+    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
+
+    heatshrink_encoder *hse = heatshrink_encoder_alloc(window_sz2, lookahead_sz2);
+    if (hse == NULL) { return THEFT_TRIAL_ERROR; }
+
+    assert(decoder_buffer_size);
+    uint16_t buf_size = *(uint16_t *)decoder_buffer_size;
+    heatshrink_decoder *hsd = heatshrink_decoder_alloc(buf_size, window_sz2, lookahead_sz2);
+    if (hsd == NULL) { return THEFT_TRIAL_ERROR; }
+    
+    rbuf *r = (rbuf *)input;
+
+    size_t compressed_size = 0;
+    if (!do_compress(hse, r->buf, r->size, output,
+            BUF_SIZE, &compressed_size)) {
+        return THEFT_TRIAL_ERROR;
+    }
+
+    size_t decompressed_size = 0;
+    if (!do_decompress(hsd, output, compressed_size, output2,
+            BUF_SIZE, &decompressed_size)) {
+        return THEFT_TRIAL_ERROR;
+    }
+
+    // verify decompressed output matches original input
+    if (r->size != decompressed_size) {
+        return THEFT_TRIAL_FAIL;
+    }
+    if (0 != memcmp(output2, r->buf, decompressed_size)) {
+        return THEFT_TRIAL_FAIL;
+    }
+    
+    heatshrink_encoder_free(hse);
+    heatshrink_decoder_free(hsd);
+    return THEFT_TRIAL_PASS;
+}
+
+TEST encoded_and_decoded_data_should_match(void) {
+    test_env env = { .limit = 1 << 11 };
+    
+    theft_seed seed;
+    if (!get_time_seed(&seed)) { FAIL(); }
+
+    struct theft *t = theft_init(0);
+    struct theft_cfg cfg = {
+        .name = __func__,
+        .fun = prop_encoded_and_decoded_data_should_match,
+        .type_info = { &rbuf_info, &window_info, &lookahead_info, &decoder_buf_info, },
+        .seed = seed,
+        .trials = 1000000,
+        .env = &env,
+        .progress_cb = progress_cb,
+    };
+
+    theft_run_res res = theft_run(t, &cfg);
+    theft_free(t);
+    printf("\n");
+    ASSERT_EQ(THEFT_RUN_PASS, res);
+    PASS();
+}
+
+static size_t ceil_nine_eighths(size_t sz) {
+    return sz + sz/8 + (sz & 0x07 ? 1 : 0);
+}
+
+static theft_trial_res
+prop_encoding_data_should_never_increase_it_by_more_than_an_eighth_at_worst(void *input,
+        void *window, void *lookahead) {
+    assert(window);
+    uint8_t window_sz2 = *(uint8_t *)window;
+    assert(lookahead);
+    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
+    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
+
+    heatshrink_encoder *hse = heatshrink_encoder_alloc(window_sz2, lookahead_sz2);
+    if (hse == NULL) { return THEFT_TRIAL_ERROR; }
+    
+    rbuf *r = (rbuf *)input;
+
+    size_t compressed_size = 0;
+    if (!do_compress(hse, r->buf, r->size, output,
+            BUF_SIZE, &compressed_size)) {
+        return THEFT_TRIAL_ERROR;
+    }
+
+    size_t ceil_9_8s = ceil_nine_eighths(r->size);
+    if (compressed_size > ceil_9_8s) {
+        return THEFT_TRIAL_FAIL;
+    }
+
+    heatshrink_encoder_free(hse);
+    return THEFT_TRIAL_PASS;
+}
+
+TEST encoding_data_should_never_increase_it_by_more_than_an_eighth_at_worst(void) {
+    test_env env = { .limit = 1 << 11 };
+    
+    theft_seed seed;
+    if (!get_time_seed(&seed)) { FAIL(); }
+
+    struct theft *t = theft_init(0);
+    struct theft_cfg cfg = {
+        .name = __func__,
+        .fun = prop_encoding_data_should_never_increase_it_by_more_than_an_eighth_at_worst,
+        .type_info = { &rbuf_info, &window_info, &lookahead_info },
+        .seed = seed,
+        .trials = 10000,
+        .env = &env,
+        .progress_cb = progress_cb,
+    };
+
+    theft_run_res res = theft_run(t, &cfg);
+    theft_free(t);
+    printf("\n");
+    ASSERT_EQ(THEFT_RUN_PASS, res);
+    PASS();
+}
+
+static theft_trial_res
+prop_encoder_should_always_make_progress(void *instance, void *window, void *lookahead) {
+    assert(window);
+    uint8_t window_sz2 = *(uint8_t *)window;
+    assert(lookahead);
+    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
+    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
+
+    heatshrink_encoder *hse = heatshrink_encoder_alloc(window_sz2, lookahead_sz2);
+    if (hse == NULL) { return THEFT_TRIAL_ERROR; }
+    
+    rbuf *r = (rbuf *)instance;
+
+    size_t sunk = 0;
+    int no_progress = 0;
+
+    while (1) {
+        if (sunk < r->size) {
+            size_t input_size = 0;
+            HSE_sink_res esres = heatshrink_encoder_sink(hse,
+                &r->buf[sunk], r->size - sunk, &input_size);
+            if (esres != HSER_SINK_OK) { return THEFT_TRIAL_ERROR; }
+            sunk += input_size;
+        } else {
+            HSE_finish_res efres = heatshrink_encoder_finish(hse);
+            if (efres == HSER_FINISH_DONE) {
+                break;
+            } else if (efres != HSER_FINISH_MORE) {
+                printf("FAIL %d\n", __LINE__);
+                return THEFT_TRIAL_FAIL;
+            }
+        }
+
+        size_t output_size = 0;
+        HSE_poll_res epres = heatshrink_encoder_poll(hse,
+            output, BUF_SIZE, &output_size);
+        if (epres < 0) { return THEFT_TRIAL_ERROR; }
+        if (output_size == 0 && sunk == r->size) {
+            no_progress++;
+            if (no_progress > 2) {
+                return THEFT_TRIAL_FAIL;
+            }
+        } else {
+            no_progress = 0;
+        }
+    }
+
+    heatshrink_encoder_free(hse);
+    return THEFT_TRIAL_PASS;
+}
+
+TEST encoder_should_always_make_progress(void) {
+    test_env env = { .limit = 1 << 15 };
+    
+    theft_seed seed;
+    if (!get_time_seed(&seed)) { FAIL(); }
+
+    struct theft *t = theft_init(0);
+    struct theft_cfg cfg = {
+        .name = __func__,
+        .fun = prop_encoder_should_always_make_progress,
+        .type_info = { &rbuf_info, &window_info, &lookahead_info },
+        .seed = seed,
+        .trials = 10000,
+        .env = &env,
+        .progress_cb = progress_cb,
+    };
+
+    theft_run_res res = theft_run(t, &cfg);
+    theft_free(t);
+    printf("\n");
+    ASSERT_EQ(THEFT_RUN_PASS, res);
+    PASS();
+}
+
+static theft_trial_res
+prop_decoder_should_always_make_progress(void *instance, void *window, void *lookahead) {
+    assert(window);
+    uint8_t window_sz2 = *(uint8_t *)window;
+    assert(lookahead);
+    uint8_t lookahead_sz2 = *(uint8_t *)lookahead;
+    if (lookahead_sz2 >= window_sz2) { return THEFT_TRIAL_SKIP; }
+
+    heatshrink_decoder *hsd = heatshrink_decoder_alloc(512, window_sz2, lookahead_sz2);
+    if (hsd == NULL) {
+        fprintf(stderr, "Failed to alloc decoder\n");
+        return THEFT_TRIAL_ERROR;
+    }
+    
+    rbuf *r = (rbuf *)instance;
+
+    size_t sunk = 0;
+    int no_progress = 0;
+
+    while (1) {
+        if (sunk < r->size) {
+            size_t input_size = 0;
+            HSD_sink_res sres = heatshrink_decoder_sink(hsd,
+                &r->buf[sunk], r->size - sunk, &input_size);
+            if (sres < 0) {
+                fprintf(stderr, "Sink error %d\n", sres);
+                return THEFT_TRIAL_ERROR;
+            }
+            sunk += input_size;
+        } else {
+            HSD_finish_res fres = heatshrink_decoder_finish(hsd);
+            if (fres == HSDR_FINISH_DONE) {
+                break;
+            } else if (fres != HSDR_FINISH_MORE) {
+                printf("FAIL %d\n", __LINE__);
+                return THEFT_TRIAL_FAIL;
+            }
+        }
+
+        size_t output_size = 0;
+        HSD_poll_res pres = heatshrink_decoder_poll(hsd,
+            output, sizeof(output), &output_size);
+        if (pres < 0) {
+            fprintf(stderr, "poll error: %d\n", pres);
+            return THEFT_TRIAL_ERROR;
+        }
+        if (output_size == 0 && sunk == r->size) {
+            no_progress++;
+            if (no_progress > 2) {
+                return THEFT_TRIAL_FAIL;
+            }
+        } else {
+            no_progress = 0;
+        }
+    }
+
+    heatshrink_decoder_free(hsd);
+    return THEFT_TRIAL_PASS;
+}
+
+TEST decoder_should_always_make_progress(void) {
+    test_env env = { .limit = 1 << 15 };
+    
+    theft_seed seed;
+    if (!get_time_seed(&seed)) { FAIL(); }
+
+    struct theft *t = theft_init(0);
+    struct theft_cfg cfg = {
+        .name = __func__,
+        .fun = prop_decoder_should_always_make_progress,
+        .type_info = { &rbuf_info, &window_info, &lookahead_info },
+        .seed = seed,
+        .trials = 10000,
+        .env = &env,
+        .progress_cb = progress_cb,
+    };
+
+    theft_run_res res = theft_run(t, &cfg);
+    theft_free(t);
+    printf("\n");
+    ASSERT_EQ(THEFT_RUN_PASS, res);
+    PASS();
+}
+
+static void setup_cb(void *udata) {
+    (void)udata;
+    memset(output, 0, BUF_SIZE);
+    memset(output2, 0, BUF_SIZE);
+}
+
+SUITE(properties) {
+    output = malloc(BUF_SIZE);
+    assert(output);
+    output2 = malloc(BUF_SIZE);
+    assert(output2);
+    
+    GREATEST_SET_SETUP_CB(setup_cb, NULL);
+
+    RUN_TEST(decoder_fuzzing_should_not_detect_stuck_state);
+    RUN_TEST(encoded_and_decoded_data_should_match);
+    RUN_TEST(encoding_data_should_never_increase_it_by_more_than_an_eighth_at_worst);
+    RUN_TEST(encoder_should_always_make_progress);
+    RUN_TEST(decoder_should_always_make_progress);
+
+    free(output);
+    free(output2);
+}
+#else
+struct because_iso_c_requires_at_least_one_declaration;
+#endif
 
 
 ======================================================================

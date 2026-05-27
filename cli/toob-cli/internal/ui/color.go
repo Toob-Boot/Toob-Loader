@@ -83,9 +83,6 @@ func Strip(s string) string {
 // Pad returns a string padded with dots to a target width, used for timing tables.
 func Pad(label string, width int) string {
 	stripped := Strip(label)
-	gap := width - len(stripped)
-	if gap < 2 {
-		gap = 2
-	}
+	gap := max(width-len(stripped), 2)
 	return fmt.Sprintf("%s %s", label, strings.Repeat("·", gap))
 }
