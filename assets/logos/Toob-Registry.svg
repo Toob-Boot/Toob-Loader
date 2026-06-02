@@ -1,0 +1,57 @@
+<svg width="57" height="34" viewBox="0 0 57 34" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+  .light-logo-group { display: inline; }
+  .dark-logo-group { display: none; }
+  @media (prefers-color-scheme: dark) {
+    .light-logo-group { display: none; }
+    .dark-logo-group { display: inline; }
+  }
+</style>
+<g class="light-logo-group">
+  <path d="M49.8 6.54C51.2533 6.54 52.3933 6.84 53.22 7.44C54.06 8.02667 54.48 8.94667 54.48 10.2C54.48 10.96 54.3067 11.62 53.96 12.18C53.6133 12.74 53.1267 13.18 52.5 13.5C51.8867 13.82 51.16 14 50.32 14.04L50.04 13.04C51.0133 13.0667 51.8867 13.24 52.66 13.56C53.4333 13.88 54.0467 14.3267 54.5 14.9C54.9533 15.4733 55.18 16.1533 55.18 16.94C55.18 17.66 55.0467 18.28 54.78 18.8C54.5133 19.3067 54.1533 19.7267 53.7 20.06C53.2467 20.38 52.7333 20.62 52.16 20.78C51.5867 20.9267 50.9933 21 50.38 21H46.08V6.54H49.8ZM50.2 12.88C51 12.88 51.58 12.66 51.94 12.22C52.3 11.7667 52.48 11.22 52.48 10.58C52.48 9.82 52.2467 9.26667 51.78 8.92C51.3133 8.57333 50.6867 8.4 49.9 8.4H48.02V12.88H50.2ZM50.28 19.2C50.8133 19.2 51.3 19.12 51.74 18.96C52.1933 18.8 52.5467 18.5533 52.8 18.22C53.0667 17.8867 53.2 17.4667 53.2 16.96C53.2 16.4 53.0467 15.96 52.74 15.64C52.4467 15.32 52.0667 15.0933 51.6 14.96C51.1333 14.8133 50.6533 14.74 50.16 14.74H48.02V19.2H50.28Z" fill="black"/>
+  <path d="M1.02 6.54H10.62V8.4H6.74V21H4.8V8.4H1.02V6.54Z" fill="black"/>
+  <rect x="21.7651" y="24.0718" width="5.58835" height="6.79407" transform="rotate(-45 21.7651 24.0718)" fill="#C0FFCC"/>
+  <rect x="21.2537" y="25.3839" width="1.28962" height="5.09555" transform="rotate(-45 21.2537 25.3839)" fill="#C0FFCC"/>
+  <rect x="21.958" y="25.4803" width="1.28962" height="5.09555" transform="rotate(-45 21.958 25.4803)" fill="#C0FFCC"/>
+  <rect x="33.2566" y="22.1886" width="5.58835" height="6.79407" transform="rotate(135 33.2566 22.1886)" fill="#C0FFCC"/>
+  <rect x="33.1677" y="20.2759" width="1.28962" height="3.96321" transform="rotate(135 33.1677 20.2759)" fill="#C0FFCC"/>
+  <rect x="33.064" y="20.78" width="1.28962" height="5.09555" transform="rotate(135 33.064 20.78)" fill="#C0FFCC"/>
+  <rect x="25.4128" y="20.4242" width="1.28962" height="1.13234" transform="rotate(-45 25.4128 20.4242)" fill="#C0FFCC"/>
+  <rect x="29.4163" y="24.4276" width="1.28962" height="1.13234" transform="rotate(-45 29.4163 24.4276)" fill="#C0FFCC"/>
+  <rect x="28.7119" y="24.3313" width="1.28962" height="1.13234" transform="rotate(-45 28.7119 24.3313)" fill="#C0FFCC"/>
+  <circle cx="25.1442" cy="25.4905" r="2.97807" transform="rotate(135 25.1442 25.4905)" stroke="#010101" stroke-width="2"/>
+  <path d="M31.788 23.0323C32.9524 21.8679 32.9524 19.9801 31.788 18.8158C30.6237 17.6514 28.7359 17.6514 27.5715 18.8158" stroke="#010101" stroke-width="2"/>
+  <rect x="32.5103" y="23.7357" width="6.86831" height="1.98969" transform="rotate(135 32.5103 23.7357)" fill="black"/>
+  <rect x="28.301" y="19.5002" width="6.58623" height="2.00048" transform="rotate(135 28.301 19.5002)" fill="black"/>
+  <circle cx="36" cy="13.75" r="6.25" transform="rotate(-180 36 13.75)" stroke="#010101" stroke-width="2"/>
+  <circle cx="36" cy="13.75" r="6.25" transform="rotate(-180 36 13.75)" stroke="#010101" stroke-width="2"/>
+  <circle cx="19" cy="13.75" r="6.25" transform="rotate(-180 19 13.75)" stroke="#010101" stroke-width="2"/>
+  <rect x="34" y="11" width="1" height="1" fill="black"/>
+  <rect x="37" y="11" width="1" height="1" fill="black"/>
+  <rect x="33" y="14" width="1" height="1" fill="black"/>
+  <rect x="34" y="15" width="1" height="1" fill="black"/>
+  <rect x="35" y="15" width="1" height="1" fill="black"/>
+  <rect x="36" y="15" width="1" height="1" fill="black"/>
+  <rect x="37" y="15" width="1" height="1" fill="black"/>
+  <rect x="38" y="14" width="1" height="1" fill="black"/>
+</g>
+<g class="dark-logo-group" transform="translate(0, 2.5)">
+  <path d="M49.8 2.54C51.2533 2.54 52.3933 2.84 53.22 3.44C54.06 4.02667 54.48 4.94667 54.48 6.2C54.48 6.96 54.3067 7.62 53.96 8.18C53.6133 8.74 53.1267 9.18 52.5 9.5C51.8867 9.82 51.16 10 50.32 10.04L50.04 9.04C51.0133 9.06667 51.8867 9.24 52.66 9.56C53.4333 9.88 54.0467 10.3267 54.5 10.9C54.9533 11.4733 55.18 12.1533 55.18 12.94C55.18 13.66 55.0467 14.28 54.78 14.8C54.5133 15.3067 54.1533 15.7267 53.7 16.06C53.2467 16.38 52.7333 16.62 52.16 16.78C51.5867 16.9267 50.9933 17 50.38 17H46.08V2.54H49.8ZM50.2 8.88C51 8.88 51.58 8.66 51.94 8.22C52.3 7.76667 52.48 7.22 52.48 6.58C52.48 5.82 52.2467 5.26667 51.78 4.92C51.3133 4.57333 50.6867 4.4 49.9 4.4H48.02V8.88H50.2ZM50.28 15.2C50.8133 15.2 51.3 15.12 51.74 14.96C52.1933 14.8 52.5467 14.5533 52.8 14.22C53.0667 13.8867 53.2 13.4667 53.2 12.96C53.2 12.4 53.0467 11.96 52.74 11.64C52.4467 11.32 52.0667 11.0933 51.6 10.96C51.1333 10.8133 50.6533 10.74 50.16 10.74H48.02V15.2H50.28Z" fill="white"/>
+  <path d="M1.02 2.54H10.62V4.4H6.74V17H4.8V4.4H1.02V2.54Z" fill="white"/>
+  <circle cx="36" cy="9.75" r="6.25" transform="rotate(-180 36 9.75)" stroke="white" stroke-width="2"/>
+  <circle cx="36" cy="9.75" r="6.25" transform="rotate(-180 36 9.75)" stroke="white" stroke-width="2"/>
+  <circle cx="19" cy="9.75" r="6.25" transform="rotate(-180 19 9.75)" stroke="white" stroke-width="2"/>
+  <rect x="34" y="7" width="1" height="1" fill="white"/>
+  <rect x="37" y="7" width="1" height="1" fill="white"/>
+  <rect x="33" y="10" width="1" height="1" fill="white"/>
+  <rect x="34" y="11" width="1" height="1" fill="white"/>
+  <rect x="35" y="11" width="1" height="1" fill="white"/>
+  <rect x="36" y="11" width="1" height="1" fill="white"/>
+  <rect x="37" y="11" width="1" height="1" fill="white"/>
+  <rect x="38" y="10" width="1" height="1" fill="white"/>
+  <circle cx="25.1442" cy="21.4905" r="2.97807" transform="rotate(135 25.1442 21.4905)" stroke="#C0FFCC" stroke-width="2"/>
+  <path d="M31.788 19.0323C32.9524 17.8679 32.9524 15.9801 31.788 14.8158C30.6237 13.6514 28.7359 13.6514 27.5715 14.8158" stroke="#C0FFCC" stroke-width="2"/>
+  <rect x="31.8068" y="19.7357" width="5.87347" height="0.994844" transform="rotate(135 31.8068 19.7357)" fill="white" stroke="#C0FFCC" stroke-width="0.994844"/>
+  <rect x="27.5939" y="15.5002" width="5.58623" height="1.00048" transform="rotate(135 27.5939 15.5002)" fill="white" stroke="#C0FFCC"/>
+</g>
+</svg>

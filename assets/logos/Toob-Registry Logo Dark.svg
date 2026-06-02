@@ -1,0 +1,19 @@
+<svg width="57" height="29" viewBox="0 0 57 29" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M49.8 2.54C51.2533 2.54 52.3933 2.84 53.22 3.44C54.06 4.02667 54.48 4.94667 54.48 6.2C54.48 6.96 54.3067 7.62 53.96 8.18C53.6133 8.74 53.1267 9.18 52.5 9.5C51.8867 9.82 51.16 10 50.32 10.04L50.04 9.04C51.0133 9.06667 51.8867 9.24 52.66 9.56C53.4333 9.88 54.0467 10.3267 54.5 10.9C54.9533 11.4733 55.18 12.1533 55.18 12.94C55.18 13.66 55.0467 14.28 54.78 14.8C54.5133 15.3067 54.1533 15.7267 53.7 16.06C53.2467 16.38 52.7333 16.62 52.16 16.78C51.5867 16.9267 50.9933 17 50.38 17H46.08V2.54H49.8ZM50.2 8.88C51 8.88 51.58 8.66 51.94 8.22C52.3 7.76667 52.48 7.22 52.48 6.58C52.48 5.82 52.2467 5.26667 51.78 4.92C51.3133 4.57333 50.6867 4.4 49.9 4.4H48.02V8.88H50.2ZM50.28 15.2C50.8133 15.2 51.3 15.12 51.74 14.96C52.1933 14.8 52.5467 14.5533 52.8 14.22C53.0667 13.8867 53.2 13.4667 53.2 12.96C53.2 12.4 53.0467 11.96 52.74 11.64C52.4467 11.32 52.0667 11.0933 51.6 10.96C51.1333 10.8133 50.6533 10.74 50.16 10.74H48.02V15.2H50.28Z" fill="white"/>
+<path d="M1.02 2.54H10.62V4.4H6.74V17H4.8V4.4H1.02V2.54Z" fill="white"/>
+<circle cx="36" cy="9.75" r="6.25" transform="rotate(-180 36 9.75)" stroke="white" stroke-width="2"/>
+<circle cx="36" cy="9.75" r="6.25" transform="rotate(-180 36 9.75)" stroke="white" stroke-width="2"/>
+<circle cx="19" cy="9.75" r="6.25" transform="rotate(-180 19 9.75)" stroke="white" stroke-width="2"/>
+<rect x="34" y="7" width="1" height="1" fill="white"/>
+<rect x="37" y="7" width="1" height="1" fill="white"/>
+<rect x="33" y="10" width="1" height="1" fill="white"/>
+<rect x="34" y="11" width="1" height="1" fill="white"/>
+<rect x="35" y="11" width="1" height="1" fill="white"/>
+<rect x="36" y="11" width="1" height="1" fill="white"/>
+<rect x="37" y="11" width="1" height="1" fill="white"/>
+<rect x="38" y="10" width="1" height="1" fill="white"/>
+<circle cx="25.1442" cy="21.4905" r="2.97807" transform="rotate(135 25.1442 21.4905)" stroke="#C0FFCC" stroke-width="2"/>
+<path d="M31.788 19.0323C32.9524 17.8679 32.9524 15.9801 31.788 14.8158C30.6237 13.6514 28.7359 13.6514 27.5715 14.8158" stroke="#C0FFCC" stroke-width="2"/>
+<rect x="31.8068" y="19.7357" width="5.87347" height="0.994844" transform="rotate(135 31.8068 19.7357)" fill="white" stroke="#C0FFCC" stroke-width="0.994844"/>
+<rect x="27.5939" y="15.5002" width="5.58623" height="1.00048" transform="rotate(135 27.5939 15.5002)" fill="white" stroke="#C0FFCC"/>
+</svg>

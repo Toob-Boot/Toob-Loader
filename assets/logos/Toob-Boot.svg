@@ -1,0 +1,39 @@
+<svg width="57" height="20" viewBox="0 0 57 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+<style>
+  .letter-text { fill: black; }
+  .toggle-bg { fill: #C0FFCC; }
+  .toggle-border-line { stroke: #010101; }
+  .slider-line { fill: black; }
+  .knob-circle { stroke: #010101; }
+  .knob-face { fill: black; }
+
+  @media (prefers-color-scheme: dark) {
+    .letter-text { fill: white; }
+    .toggle-bg { fill: none; }
+    .toggle-border-line { stroke: #C0FFCC; }
+    .slider-line { fill: #C0FFCC; }
+    .knob-circle { stroke: white; }
+    .knob-face { fill: white; }
+  }
+</style>
+<path class="letter-text" d="M49.8 0.539999C51.2533 0.539999 52.3933 0.839999 53.22 1.44C54.06 2.02667 54.48 2.94667 54.48 4.2C54.48 4.96 54.3067 5.62 53.96 6.18C53.6133 6.74 53.1267 7.18 52.5 7.5C51.8867 7.82 51.16 8 50.32 8.04L50.04 7.04C51.0133 7.06667 51.8867 7.24 52.66 7.56C53.4333 7.88 54.0467 8.32667 54.5 8.9C54.9533 9.47333 55.18 10.1533 55.18 10.94C55.18 11.66 55.0467 12.28 54.78 12.8C54.5133 13.3067 54.1533 13.7267 53.7 14.06C53.2467 14.38 52.7333 14.62 52.16 14.78C51.5867 14.9267 50.9933 15 50.38 15H46.08V0.539999H49.8ZM50.2 6.88C51 6.88 51.58 6.66 51.94 6.22C52.3 5.76667 52.48 5.22 52.48 4.58C52.48 3.82 52.2467 3.26667 51.78 2.92C51.3133 2.57333 50.6867 2.4 49.9 2.4H48.02V6.88H50.2ZM50.28 13.2C50.8133 13.2 51.3 13.12 51.74 12.96C52.1933 12.8 52.5467 12.5533 52.8 12.22C53.0667 11.8867 53.2 11.4667 53.2 10.96C53.2 10.4 53.0467 9.96 52.74 9.64C52.4467 9.32 52.0667 9.09333 51.6 8.96C51.1333 8.81333 50.6533 8.74 50.16 8.74H48.02V13.2H50.28Z"/>
+<path class="letter-text" d="M1.02 0.539999H10.62V2.4H6.74V15H4.8V2.4H1.02V0.539999Z"/>
+<rect class="toggle-bg" x="17" y="2" width="13" height="12"/>
+<rect class="toggle-bg" x="14" y="3" width="3" height="9"/>
+<rect class="toggle-bg" x="15" y="4" width="3" height="9"/>
+<rect class="toggle-bg" x="29" y="2" width="3" height="2"/>
+<rect class="toggle-bg" x="29" y="12" width="3" height="2"/>
+<rect class="toggle-bg" x="28" y="11" width="3" height="2"/>
+<rect class="slider-line" x="36.25" y="15" width="17" height="2" transform="rotate(-180 36.25 15)"/>
+<rect class="slider-line" x="36.25" y="2.5" width="17" height="2" transform="rotate(-180 36.25 2.5)"/>
+<path class="toggle-border-line" d="M19.25 1.5C15.7982 1.5 13 4.29822 13 7.75C13 11.2018 15.7982 14 19.25 14" stroke-width="2"/>
+<circle class="knob-circle" cx="36" cy="7.75" r="6.25" transform="rotate(-180 36 7.75)" stroke-width="2"/>
+<rect class="knob-face" x="34" y="5" width="1" height="1"/>
+<rect class="knob-face" x="37" y="5" width="1" height="1"/>
+<rect class="knob-face" x="33" y="8" width="1" height="1"/>
+<rect class="knob-face" x="34" y="9" width="1" height="1"/>
+<rect class="knob-face" x="35" y="9" width="1" height="1"/>
+<rect class="knob-face" x="36" y="9" width="1" height="1"/>
+<rect class="knob-face" x="37" y="9" width="1" height="1"/>
+<rect class="knob-face" x="38" y="8" width="1" height="1"/>
+</svg>

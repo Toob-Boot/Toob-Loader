@@ -626,6 +626,35 @@ func (c *Client) Login(ctx context.Context, code string) (*LoginResponse, error)
 	return &result, nil
 }
 
+// TokenExchange exchanges the temporary session code and PKCE verifier for the final API key.
+func (c *Client) TokenExchange(ctx context.Context, code, verifier string) (*LoginResponse, error) {
+	payload, _ := json.Marshal(map[string]string{
+		"code":          code,
+		"code_verifier": verifier,
+	})
+	req, err := c.newRequest(ctx, "POST", "/api/v1/auth/token", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, extractError(resp)
+	}
+
+	var result LoginResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // LogoutResponse is the shape of POST /api/v1/auth/logout.
 type LogoutResponse struct {
 	Status string `json:"status"`
