@@ -325,7 +325,8 @@ func printMatrixCompatibility(matrix *registry.Matrix, chipName, chipVersion str
 			if strings.TrimPrefix(vKey, "v") == searchVer {
 				var verifiedClis []string
 				for cliVer, info := range verEntry.VerifiedCliVersions {
-					if info.Status == "SUCCESS" {
+					status := strings.ToUpper(info.Status)
+					if status == "SUCCESS" || status == "VERIFIED" {
 						verifiedClis = append(verifiedClis, cliVer)
 					}
 				}
@@ -410,10 +411,13 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo, allowLinks bool) ([]st
 	if ci.Sources != nil {
 		for _, driverFile := range ci.Sources.Drivers {
 			if strings.HasPrefix(driverFile, "drivers/") {
-				driverDir := filepath.Dir(driverFile) // e.g., drivers/uart/esp_uart_v1
+				driverDir := filepath.Dir(driverFile)
 				driverDst := filepath.Join(inst.hal, filepath.FromSlash(driverDir))
 				if _, err := os.Stat(driverDst); os.IsNotExist(err) {
-					driverSrc := filepath.Join(inst.cache.Dir(), filepath.FromSlash(driverDir))
+					driverSrc, err := inst.cache.DriverSourcePath(driverDir)
+					if err != nil {
+						return created, err
+					}
 					if err := copyTree(driverSrc, driverDst, allowLinks); err != nil {
 						return created, err
 					}
@@ -426,35 +430,46 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo, allowLinks bool) ([]st
 	}
 	for _, inc := range ci.Includes {
 		if strings.HasPrefix(inc, "drivers/") || strings.HasPrefix(inc, "soc/") || strings.HasPrefix(inc, "shared/") {
-			driverDst := filepath.Join(inst.hal, filepath.FromSlash(inc))
-			if _, err := os.Stat(driverDst); os.IsNotExist(err) {
-				driverSrc := filepath.Join(inst.cache.Dir(), filepath.FromSlash(inc))
-				if err := copyTree(driverSrc, driverDst, allowLinks); err != nil {
+			incDst := filepath.Join(inst.hal, filepath.FromSlash(inc))
+			if _, err := os.Stat(incDst); os.IsNotExist(err) {
+				var incSrc string
+				var fetchErr error
+				if strings.HasPrefix(inc, "soc/") {
+					incSrc, fetchErr = inst.cache.SoCSourcePath(inc)
+				} else {
+					incSrc, fetchErr = inst.cache.DriverSourcePath(inc)
+				}
+				if fetchErr != nil {
+					return created, fetchErr
+				}
+				if err := copyTree(incSrc, incDst, allowLinks); err != nil {
 					return created, err
 				}
-				created = append(created, driverDst)
+				created = append(created, incDst)
 			} else if inst.lock.Registry.Version != "" {
-				ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", driverDst)
+				ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", incDst)
 			}
 		}
 	}
 
 	// Toolchain file
-	tcName := "toolchain.cmake"
-	tcDst := filepath.Join(inst.root, "cmake", tcName)
+	tcDst := filepath.Join(inst.root, "cmake", "toolchain.cmake")
 	if _, err := os.Stat(tcDst); os.IsNotExist(err) {
 		tcDirName := strings.TrimSuffix(ci.CompilerPrefix, "-")
-		tcSrc := filepath.Join(inst.cache.Dir(), "toolchains", tcDirName, "toolchain.cmake")
-		if _, err := os.Stat(tcSrc); err == nil {
-			data, err := os.ReadFile(tcSrc)
-			if err != nil {
-				return created, err
+		tcConfigDir, fetchErr := inst.cache.ToolchainConfigPath(tcDirName)
+		if fetchErr == nil {
+			tcSrc := filepath.Join(tcConfigDir, "toolchain.cmake")
+			if _, err := os.Stat(tcSrc); err == nil {
+				data, err := os.ReadFile(tcSrc)
+				if err != nil {
+					return created, err
+				}
+				os.MkdirAll(filepath.Dir(tcDst), 0o755)
+				if err := os.WriteFile(tcDst, data, 0o644); err != nil {
+					return created, err
+				}
+				created = append(created, tcDst)
 			}
-			os.MkdirAll(filepath.Dir(tcDst), 0o755)
-			if err := os.WriteFile(tcDst, data, 0o644); err != nil {
-				return created, err
-			}
-			created = append(created, tcDst)
 		}
 	}
 

@@ -12,7 +12,10 @@
 //	Adding a `port:"optional"` field   = non-breaking
 package ports
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ProtocolVersion is the global contract version embedded into every CLI
 // binary at compile time. The Compiler Container exposes the same value
@@ -78,6 +81,20 @@ type ChipResolveResponse struct {
 type IntegrationItem struct {
 	Name    string `json:"name"    port:"required"`
 	Version string `json:"version" port:"required"`
+}
+
+// MatrixEntry represents a single verified (or pending) build combination
+// for a chip at a specific version.
+type MatrixEntry struct {
+	ID             int64           `json:"id"              port:"required"`
+	Chip           string          `json:"chip"            port:"required"`
+	ChipVersion    string          `json:"chip_version"    port:"required"`
+	EnvHash        string          `json:"env_hash"        port:"required"`
+	Dependencies   json.RawMessage `json:"dependencies"    port:"required"`
+	CombinationKey string          `json:"combination_key" port:"required"`
+	Status         string          `json:"status"          port:"required"`
+	TestedAt       *time.Time      `json:"tested_at"       port:"optional"`
+	Revision       *int64          `json:"revision"        port:"optional"`
 }
 
 // LoginResponse is the JSON body for POST /api/v1/auth/github.

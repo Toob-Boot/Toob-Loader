@@ -16,7 +16,7 @@ type Context struct {
 	ProjectDir      string
 	ChipName        string
 	ChipInfo        *registry.ChipInfo
-	RegistryDir     string
+	Cache           *registry.Cache
 	NoVSCode        bool
 	UseDevContainer bool
 	SdkUrl          string
@@ -43,7 +43,15 @@ func (g *IntegrationGenerator) Generate(ctx Context) error {
 		return err
 	}
 
-	tmplDir := filepath.Join(ctx.RegistryDir, "integrations", strings.ToLower(g.Framework), "files")
+	if ctx.Cache == nil {
+		return fmt.Errorf("FATAL: Cache is required for scaffolding")
+	}
+
+	intDir, err := ctx.Cache.IntegrationSourcePath(strings.ToLower(g.Framework))
+	if err != nil {
+		return fmt.Errorf("FATAL: Failed to resolve integration '%s': %w", g.Framework, err)
+	}
+	tmplDir := filepath.Join(intDir, "files")
 	if _, err := os.Stat(tmplDir); os.IsNotExist(err) {
 		return fmt.Errorf("FATAL: Integration files not found for framework '%s' in registry", g.Framework)
 	}
@@ -88,12 +96,18 @@ func (g *IntegrationGenerator) Generate(ctx Context) error {
 		return nil
 	})
 }
-
 func GenerateDeviceToml(ctx Context) error {
-	tmplPath := filepath.Join(ctx.RegistryDir, "chips", ctx.ChipName, "template_device.toml")
+	if ctx.Cache == nil {
+		return fmt.Errorf("FATAL: Cache is required for generating device.toml")
+	}
+
+	chipDir, err := ctx.Cache.ChipSourcePath(ctx.ChipName)
+	if err != nil {
+		return fmt.Errorf("FATAL: Failed to resolve chip '%s': %w", ctx.ChipName, err)
+	}
+	tmplPath := filepath.Join(chipDir, "template_device.toml")
 
 	var tmpl *template.Template
-	var err error
 
 	if _, err := os.Stat(tmplPath); os.IsNotExist(err) {
 		return fmt.Errorf("FATAL: No template_device.toml found in registry for chip '%s'", ctx.ChipName)

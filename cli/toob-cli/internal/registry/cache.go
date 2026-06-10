@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,10 @@ import (
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/ui"
 )
+
+// downloadTimeout is the timeout for tarball downloads, intentionally longer
+// than the API read timeout because tarballs transfer significantly more data.
+const downloadTimeout = 120 * time.Second
 
 type ChipSources struct {
 	Startup  string   `json:"startup"`
@@ -308,7 +313,9 @@ func (c *Cache) checkoutAPI(version string, force bool) error {
 	ui.Step("Downloading Compatibility Matrix...")
 	matrixData, err := client.GetMatrix(context.Background(), "")
 	if err == nil {
-		os.WriteFile(filepath.Join(targetDir, "compatibility_matrix.json"), matrixData, 0o644)
+		if raw, err := json.Marshal(matrixData); err == nil {
+			os.WriteFile(filepath.Join(targetDir, "compatibility_matrix.json"), raw, 0o644)
+		}
 	}
 
 	c.dir = targetDir
@@ -401,18 +408,16 @@ func (c *Cache) FetchLiveIntegrations() ([]string, error) {
 }
 
 // FetchLiveMatrix downloads the compatibility matrix from the API.
-// Falls back to raw GitHub and then local copy if the API is offline.
+// Falls back to local cached copy if the API is offline.
 func (c *Cache) FetchLiveMatrix() (*Matrix, error) {
-	matrix := make(Matrix)
 	client := apiclient.New()
 	client.HTTPClient.Timeout = 5 * time.Second
 
 	// Tier 1: Registry API (DB-backed, authoritative)
-	data, err := client.GetMatrix(context.Background(), "")
+	entries, err := client.GetMatrix(context.Background(), "")
 	if err == nil {
-		if json.Unmarshal(data, &matrix) == nil {
-			return &matrix, nil
-		}
+		matrix := convertFlatMatrixToMap(entries)
+		return &matrix, nil
 	}
 
 	// Tier 2: Local cached file
@@ -422,11 +427,78 @@ func (c *Cache) FetchLiveMatrix() (*Matrix, error) {
 		return nil, fmt.Errorf("failed to fetch matrix (api and local both failed): %w", err)
 	}
 
-	if err := json.Unmarshal(localData, &matrix); err != nil {
-		return nil, fmt.Errorf("failed to parse local matrix: %w", err)
+	matrix, err := parseMatrixData(localData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse matrix: %w", err)
 	}
 
 	return &matrix, nil
+}
+
+// convertFlatMatrixToMap converts a slice of flat MatrixEntry items into the nested Map format.
+func convertFlatMatrixToMap(entries []apiclient.MatrixEntry) Matrix {
+	matrix := make(Matrix)
+	for _, entry := range entries {
+		parts := strings.Split(entry.CombinationKey, "::")
+		var cliVal string
+		for _, p := range parts {
+			if strings.HasPrefix(p, "cli=") {
+				cliVal = strings.TrimPrefix(p, "cli=")
+			}
+		}
+		if cliVal == "" {
+			continue
+		}
+
+		chip := entry.Chip
+		chipVer := entry.ChipVersion
+
+		chipEntry, exists := matrix[chip]
+		if !exists {
+			chipEntry = MatrixChip{Versions: make(map[string]MatrixVersion)}
+			matrix[chip] = chipEntry
+		}
+
+		verEntry, exists := chipEntry.Versions[chipVer]
+		if !exists {
+			var deps MatrixDependencies
+			if len(entry.Dependencies) > 0 {
+				_ = json.Unmarshal(entry.Dependencies, &deps)
+			}
+			verEntry = MatrixVersion{
+				EnvironmentHash:     entry.EnvHash,
+				Dependencies:        deps,
+				VerifiedCliVersions: make(map[string]MatrixVerifiedCli),
+			}
+			chipEntry.Versions[chipVer] = verEntry
+		}
+
+		var lastTested string
+		if entry.TestedAt != nil {
+			lastTested = entry.TestedAt.Format(time.RFC3339)
+		}
+
+		verEntry.VerifiedCliVersions[cliVal] = MatrixVerifiedCli{
+			Status:     entry.Status,
+			LastTested: lastTested,
+		}
+	}
+	return matrix
+}
+
+// parseMatrixData parses matrix data dynamically to support both flat list and nested map formats.
+func parseMatrixData(data []byte) (Matrix, error) {
+	var entries []apiclient.MatrixEntry
+	if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
+		return convertFlatMatrixToMap(entries), nil
+	}
+
+	var matrix Matrix
+	if err := json.Unmarshal(data, &matrix); err == nil {
+		return matrix, nil
+	}
+
+	return nil, fmt.Errorf("unknown compatibility matrix format")
 }
 
 // GetChip looks up a single chip by name.
@@ -461,8 +533,13 @@ func (c *Cache) fetchPackage(name, version, path string) error {
 		return err
 	}
 
+	httpClient := &http.Client{
+		Timeout:   downloadTimeout,
+		Transport: apiclient.BuildTransport(),
+	}
+
 	url := fmt.Sprintf("%s/api/v1/package/%s/%s/download", c.remote, name, version)
-	if err := downloadAndExtractTarball(url, destPath); err != nil {
+	if err := downloadAndExtractTarball(httpClient, url, destPath); err != nil {
 		return fmt.Errorf("failed to fetch package %s: %w", name, err)
 	}
 
@@ -508,6 +585,96 @@ func (c *Cache) ArchSourcePath(arch string) (string, error) {
 	info, ok := idx.Archs[arch]
 	if !ok || info.Path == "" {
 		return filepath.Join(c.dir, "arch", arch), nil // fallback for backwards compatibility
+	}
+	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
+		return "", err
+	}
+	return filepath.Join(c.dir, info.Path), nil
+}
+
+// DriverSourcePath returns the absolute path to a driver directory in the cache.
+// The driverDir should be a relative path like "drivers/uart/esp_uart_v1".
+func (c *Cache) DriverSourcePath(driverDir string) (string, error) {
+	destPath := filepath.Join(c.dir, filepath.FromSlash(driverDir))
+	if _, err := os.Stat(destPath); err == nil {
+		return destPath, nil
+	}
+
+	// Derive package name from the directory path (e.g. "drivers/uart/esp_uart_v1" -> "esp_uart_v1")
+	pkgName := filepath.Base(driverDir)
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return "", err
+	}
+
+	if info, ok := idx.Drivers[pkgName]; ok {
+		if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
+			return "", err
+		}
+		return filepath.Join(c.dir, filepath.FromSlash(info.Path)), nil
+	}
+
+	// Fallback: try fetching with the directory path as-is
+	if err := c.fetchPackage(pkgName, "latest", driverDir); err != nil {
+		return "", fmt.Errorf("driver '%s' not found in registry and download failed: %w", driverDir, err)
+	}
+	return destPath, nil
+}
+
+// CryptoSourcePath returns the absolute path to a crypto package in the cache.
+func (c *Cache) CryptoSourcePath(name string) (string, error) {
+	ci, err := c.GetCrypto(name)
+	if err != nil {
+		return "", err
+	}
+	if err := c.fetchPackage(ci.Name, ci.Version, ci.Path); err != nil {
+		return "", err
+	}
+	return filepath.Join(c.dir, ci.Path), nil
+}
+
+// ToolchainConfigPath returns the absolute path to a toolchain's config directory
+// (containing toolchain.cmake) in the cache.
+func (c *Cache) ToolchainConfigPath(toolchainName string) (string, error) {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return "", err
+	}
+	info, ok := idx.Toolchains[toolchainName]
+	if !ok || info.Path == "" {
+		return filepath.Join(c.dir, "toolchains", toolchainName), nil
+	}
+	if err := c.fetchPackage(toolchainName, info.Version, info.Path); err != nil {
+		return "", err
+	}
+	return filepath.Join(c.dir, info.Path), nil
+}
+
+// SoCSourcePath returns the absolute path to a SoC include directory in the cache.
+// The socDir should be a relative path like "soc" or "soc/esp32c6".
+func (c *Cache) SoCSourcePath(socDir string) (string, error) {
+	destPath := filepath.Join(c.dir, filepath.FromSlash(socDir))
+	if _, err := os.Stat(destPath); err == nil {
+		return destPath, nil
+	}
+
+	pkgName := filepath.Base(socDir)
+	if err := c.fetchPackage(pkgName, "latest", socDir); err != nil {
+		return "", fmt.Errorf("SoC package '%s' not available: %w", socDir, err)
+	}
+	return destPath, nil
+}
+
+// IntegrationSourcePath returns the absolute path to an integration framework
+// directory in the cache.
+func (c *Cache) IntegrationSourcePath(framework string) (string, error) {
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return "", err
+	}
+	info, ok := idx.Integrations[framework]
+	if !ok || info.Path == "" {
+		return filepath.Join(c.dir, "integrations", framework), nil
 	}
 	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
 		return "", err

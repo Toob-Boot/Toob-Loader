@@ -275,7 +275,7 @@ void %s_init(void);
 			ProjectDir:      projectDir,
 			ChipName:        initChip,
 			ChipInfo:        ci,
-			RegistryDir:     cache.Dir(),
+			Cache:           cache,
 			NoVSCode:        initNoVSCode,
 			UseDevContainer: initDevContainer,
 			SdkUrl:          initSdkUrl,

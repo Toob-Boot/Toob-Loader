@@ -1,7 +1,13 @@
 package ports
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/toob-boot/toob/internal/apiclient"
@@ -32,6 +38,8 @@ func TestPortFieldCounts(t *testing.T) {
 			reflect.TypeFor[ChipResolveResponse](), reflect.TypeFor[apiclient.ChipResolveResponse]()},
 		{"IntegrationItem ↔ apiclient.IntegrationItem",
 			reflect.TypeFor[IntegrationItem](), reflect.TypeFor[apiclient.IntegrationItem]()},
+		{"MatrixEntry ↔ apiclient.MatrixEntry",
+			reflect.TypeFor[MatrixEntry](), reflect.TypeFor[apiclient.MatrixEntry]()},
 		{"LoginResponse ↔ apiclient.LoginResponse",
 			reflect.TypeFor[LoginResponse](), reflect.TypeFor[apiclient.LoginResponse]()},
 		{"CheckCombinationResponse ↔ apiclient.CheckCombinationResponse",
@@ -123,6 +131,8 @@ func TestPortFieldTypes(t *testing.T) {
 			reflect.TypeFor[ChipResolveResponse](), reflect.TypeFor[apiclient.ChipResolveResponse]()},
 		{"IntegrationItem ↔ apiclient.IntegrationItem",
 			reflect.TypeFor[IntegrationItem](), reflect.TypeFor[apiclient.IntegrationItem]()},
+		{"MatrixEntry ↔ apiclient.MatrixEntry",
+			reflect.TypeFor[MatrixEntry](), reflect.TypeFor[apiclient.MatrixEntry]()},
 		{"LoginResponse ↔ apiclient.LoginResponse",
 			reflect.TypeFor[LoginResponse](), reflect.TypeFor[apiclient.LoginResponse]()},
 		{"CheckCombinationResponse ↔ apiclient.CheckCombinationResponse",
@@ -187,6 +197,123 @@ func TestPortFieldTypes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPortsGoASTValidation parses ports.go using the Go AST and verifies
+// that every exported struct field carries both required annotations:
+//
+//  1. A `port` tag with value "required" or "optional".
+//  2. A `json` tag for wire-format serialization.
+//
+// This catches developer mistakes (missing or malformed tags) locally
+// during `go test`, before the CI semver-tool ever runs. Without this
+// gate, a missing tag would cause the semver differ to silently default
+// to PATCH — potentially shipping a breaking change unversioned.
+func TestPortsGoASTValidation(t *testing.T) {
+	portsFile := locatePortsGo(t)
+
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, portsFile, nil, 0)
+	if err != nil {
+		t.Fatalf("Failed to parse ports.go: %v", err)
+	}
+
+	for _, decl := range node.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.TYPE {
+			continue
+		}
+
+		for _, spec := range genDecl.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok || !typeSpec.Name.IsExported() {
+				continue
+			}
+
+			structType, ok := typeSpec.Type.(*ast.StructType)
+			if !ok {
+				continue
+			}
+
+			validateStructFields(t, fset, typeSpec.Name.Name, structType)
+		}
+	}
+}
+
+// validateStructFields checks every exported field in a single struct definition.
+func validateStructFields(t *testing.T, fset *token.FileSet, structName string, st *ast.StructType) {
+	t.Helper()
+
+	for _, field := range st.Fields.List {
+		if len(field.Names) == 0 || !field.Names[0].IsExported() {
+			continue
+		}
+		fieldName := field.Names[0].Name
+		pos := fset.Position(field.Pos())
+
+		// Every exported field must carry a struct tag
+		if field.Tag == nil {
+			t.Errorf("\n[MISSING TAG] %s.%s (at %s):\n"+
+				"  Exported struct field has no struct tag.\n"+
+				"  Fix: Add `json:\"...\" port:\"required\"` or `port:\"optional\"`.",
+				structName, fieldName, pos)
+			continue
+		}
+
+		// Strip surrounding backticks to get the raw tag string
+		rawTag := field.Tag.Value[1 : len(field.Tag.Value)-1]
+		tag := reflect.StructTag(rawTag)
+
+		// Validate `port` tag presence and value
+		portVal, portOK := tag.Lookup("port")
+		if !portOK {
+			t.Errorf("\n[MISSING PORT TAG] %s.%s (at %s):\n"+
+				"  Field has a struct tag but no `port` annotation.\n"+
+				"  Fix: Add `port:\"required\"` or `port:\"optional\"`.",
+				structName, fieldName, pos)
+		} else if portVal != "required" && portVal != "optional" {
+			t.Errorf("\n[INVALID PORT TAG] %s.%s (at %s):\n"+
+				"  port tag has value %q, expected \"required\" or \"optional\".\n"+
+				"  Fix: Change to `port:\"required\"` or `port:\"optional\"`.",
+				structName, fieldName, pos, portVal)
+		}
+
+		// Validate `json` tag presence
+		jsonVal, jsonOK := tag.Lookup("json")
+		if !jsonOK || jsonVal == "" {
+			t.Errorf("\n[MISSING JSON TAG] %s.%s (at %s):\n"+
+				"  Field has no `json` tag for wire-format serialization.\n"+
+				"  Fix: Add `json:\"field_name\"` matching the wire format.",
+				structName, fieldName, pos)
+		} else if jsonVal == "-" {
+			t.Errorf("\n[EXCLUDED JSON TAG] %s.%s (at %s):\n"+
+				"  Field has `json:\"-\"` which excludes it from serialization.\n"+
+				"  A port contract field must participate in the wire format.",
+				structName, fieldName, pos)
+		} else {
+			// Verify the json key is a valid lowercase identifier (no spaces, no uppercase)
+			wireKey := jsonVal
+			if idx := strings.Index(wireKey, ","); idx != -1 {
+				wireKey = wireKey[:idx]
+			}
+			if wireKey != strings.ToLower(wireKey) {
+				t.Errorf("\n[NON-STANDARD JSON KEY] %s.%s (at %s):\n"+
+					"  json tag key %q contains uppercase characters.\n"+
+					"  Convention: Use snake_case for all wire-format keys.",
+					structName, fieldName, pos, wireKey)
+			}
+		}
+	}
+}
+
+// locatePortsGo resolves the absolute path to ports.go relative to this test file.
+func locatePortsGo(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("Failed to determine test file location via runtime.Caller")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "ports.go")
 }
 
 func reportFieldDiff(t *testing.T, testName string, portType, realType reflect.Type) {

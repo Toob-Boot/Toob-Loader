@@ -73,6 +73,26 @@ func assertIntegrationItemFromPort() {
 	_ = apiclient.IntegrationItem{Name: p.Name, Version: p.Version}
 }
 
+func assertMatrixEntryToPort() {
+	var r apiclient.MatrixEntry
+	_ = MatrixEntry{
+		ID: r.ID, Chip: r.Chip, ChipVersion: r.ChipVersion,
+		EnvHash: r.EnvHash, Dependencies: r.Dependencies,
+		CombinationKey: r.CombinationKey, Status: r.Status,
+		TestedAt: r.TestedAt, Revision: r.Revision,
+	}
+}
+
+func assertMatrixEntryFromPort() {
+	var p MatrixEntry
+	_ = apiclient.MatrixEntry{
+		ID: p.ID, Chip: p.Chip, ChipVersion: p.ChipVersion,
+		EnvHash: p.EnvHash, Dependencies: p.Dependencies,
+		CombinationKey: p.CombinationKey, Status: p.Status,
+		TestedAt: p.TestedAt, Revision: p.Revision,
+	}
+}
+
 func assertLoginResponseToPort() {
 	var r apiclient.LoginResponse
 	_ = LoginResponse{

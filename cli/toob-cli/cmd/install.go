@@ -1,7 +1,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/lockfile"
@@ -46,8 +50,67 @@ var installCmd = &cobra.Command{
 
 		installedCount := 0
 		for _, chip := range lf.Chips {
+			// 1. Pre-fetch Chip Package
+			ui.Step("Pre-fetching chip package '%s'...", chip.Name)
+			chipDir, err := cache.ChipSourcePath(chip.Name)
+			if err != nil {
+				return fmt.Errorf("failed to pre-fetch chip package '%s': %w", chip.Name, err)
+			}
+
+			// 2. Parse chip_manifest.json to resolve drivers & other dependencies
+			var chipManifest struct {
+				Drivers    []string `json:"drivers"`
+				Arch       string   `json:"arch"`
+				Toolchain  string   `json:"toolchain"`
+				MinCoreSDK string   `json:"min_core_sdk"`
+				Includes   []string `json:"includes"`
+			}
+			manifestPath := filepath.Join(chipDir, "chip_manifest.json")
+			if manifestData, err := os.ReadFile(manifestPath); err == nil {
+				if err := json.Unmarshal(manifestData, &chipManifest); err == nil {
+					// Pre-fetch Architecture
+					if chipManifest.Arch != "" {
+						ui.Step("Pre-fetching architecture '%s'...", chipManifest.Arch)
+						if _, err := cache.ArchSourcePath(chipManifest.Arch); err != nil {
+							ui.Warn("Failed to pre-fetch architecture '%s': %v", chipManifest.Arch, err)
+						}
+					}
+					// Pre-fetch Drivers
+					for _, drv := range chipManifest.Drivers {
+						ui.Step("Pre-fetching driver '%s'...", drv)
+						if _, err := cache.DriverSourcePath(drv); err != nil {
+							ui.Warn("Failed to pre-fetch driver '%s': %v", drv, err)
+						}
+					}
+					// Pre-fetch SoC package if needed
+					if len(chipManifest.Includes) > 0 {
+						ui.Step("Pre-fetching SoC includes...")
+						if _, err := cache.SoCSourcePath("soc"); err != nil {
+							ui.Warn("Failed to pre-fetch SoC package: %v", err)
+						}
+					}
+				}
+			}
+
+			// 3. Pre-fetch Crypto Packages
+			for _, cryptoPkg := range []string{chip.CryptoBackend, chip.CryptoHash, chip.CryptoPqc} {
+				if cryptoPkg != "" {
+					ui.Step("Pre-fetching crypto package '%s'...", cryptoPkg)
+					if _, err := cache.CryptoSourcePath(cryptoPkg); err != nil {
+						ui.Warn("Failed to pre-fetch crypto package '%s': %v", cryptoPkg, err)
+					}
+				}
+			}
+
 			if chip.Toolchain == "" {
 				continue
+			}
+
+			// 4. Pre-fetch Toolchain configuration (toolchain.cmake)
+			tcName := strings.TrimSuffix(chip.Toolchain, "-")
+			ui.Step("Pre-fetching toolchain config for '%s'...", tcName)
+			if _, err := cache.ToolchainConfigPath(tcName); err != nil {
+				ui.Warn("Failed to pre-fetch toolchain config '%s': %v", tcName, err)
 			}
 
 			// Resolve expected version. Fallback to registry if lockfile is missing it.
@@ -58,7 +121,7 @@ var installCmd = &cobra.Command{
 
 			ui.Step("Ensuring toolchain %s (v%s) for chip %s", chip.Toolchain, expectedVersion, chip.Name)
 
-			_, err := toolchain.EnsureAvailable(chip.Toolchain, expectedVersion, cache.Dir())
+			_, err = toolchain.EnsureAvailable(chip.Toolchain, expectedVersion, cache.Dir())
 			if err != nil {
 				return fmt.Errorf("failed to install toolchain %s: %w", chip.Toolchain, err)
 			}

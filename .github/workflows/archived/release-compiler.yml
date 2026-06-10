@@ -35,21 +35,27 @@ jobs:
           CLI_REF=$(jq -r '.cli.source.ref' compiler/compiler_manifest.json)
           PROTOCOL_VERSION=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
           REPOSITORY=$(jq -r '.distribution.repository' compiler/compiler_manifest.json)
+          BASE_IMAGE=$(jq -r '.base_image.image' compiler/compiler_manifest.json)
 
           echo "CLI_VERSION=$CLI_VERSION" >> $GITHUB_ENV
           echo "CLI_REF=$CLI_REF" >> $GITHUB_ENV
           echo "PROTOCOL_VERSION=$PROTOCOL_VERSION" >> $GITHUB_ENV
           echo "REPOSITORY=$REPOSITORY" >> $GITHUB_ENV
+          echo "BASE_IMAGE=$BASE_IMAGE" >> $GITHUB_ENV
 
-          echo ">>> Compiler v${RAW_VERSION} | CLI v${CLI_VERSION} | Protocol v${PROTOCOL_VERSION}"
+          echo ">>> Compiler v${RAW_VERSION} | CLI v${CLI_VERSION} | Protocol v${PROTOCOL_VERSION} | Base Image ${BASE_IMAGE}"
 
       - name: Build Docker Image
         working-directory: cli/.pipeline-repo
         run: |
           echo ">>> Building ${REPOSITORY}:v${RAW_VERSION}..."
 
+          # Provide the manifest to the build context for dynamic package parsing
+          cp ../../compiler/compiler_manifest.json .
+
           docker build \
             --no-cache \
+            --build-arg BASE_IMAGE=${BASE_IMAGE} \
             --build-arg CLI_VERSION=${CLI_REF} \
             --build-arg COMPILER_VERSION=${RAW_VERSION} \
             --build-arg PROTOCOL_VERSION=${PROTOCOL_VERSION} \

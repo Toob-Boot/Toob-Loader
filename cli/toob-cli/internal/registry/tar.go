@@ -194,15 +194,22 @@ func matchComponent(name, pattern string) bool {
 }
 
 // downloadAndExtractTarball downloads a .tar.gz from a URL and extracts it into targetDir.
-// It skips the root folder of the archive if it exists.
-func downloadAndExtractTarball(url string, targetDir string) error {
-	resp, err := http.Get(url)
+// The caller must provide a properly configured *http.Client that respects enterprise
+// transport settings (CA certificates via TOOB_CA_CERT, proxy via HTTP_PROXY, timeouts).
+func downloadAndExtractTarball(client *http.Client, url string, targetDir string) error {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request for %s: %w", url, err)
+	}
+	req.Header.Set("User-Agent", "Toob-CLI")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status %d from %s", resp.StatusCode, url)
 	}
 

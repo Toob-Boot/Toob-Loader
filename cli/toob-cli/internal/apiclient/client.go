@@ -32,8 +32,8 @@ const (
 	// defaultTimeout is the standard timeout for read operations (GET, list, etc.).
 	defaultTimeout = 60 * time.Second
 
-	// uploadTimeout is the extended timeout for write operations (publish, upload).
-	uploadTimeout = 120 * time.Second
+	// UploadTimeout is the extended timeout for write operations (publish, upload).
+	UploadTimeout = 120 * time.Second
 
 	// maxRetries is the number of automatic retries for transient (5xx) errors.
 	maxRetries = 3
@@ -58,14 +58,16 @@ func New() *Client {
 		Token:   creds.APIKey,
 		HTTPClient: &http.Client{
 			Timeout:   defaultTimeout,
-			Transport: buildTransport(),
+			Transport: BuildTransport(),
 		},
 	}
 }
 
-// buildTransport creates an http.Transport with proxy support and optional
-// custom CA certificate via TOOB_CA_CERT environment variable (Gap 22).
-func buildTransport() *http.Transport {
+// BuildTransport creates an http.Transport with proxy support and optional
+// custom CA certificate via TOOB_CA_CERT environment variable.
+// Exported so other packages can build HTTP clients with the same enterprise
+// network configuration (CA roots, proxy) without duplicating this logic.
+func BuildTransport() *http.Transport {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
 
 	caPath := os.Getenv("TOOB_CA_CERT")
@@ -308,13 +310,31 @@ func (c *Client) ListIntegrations(ctx context.Context) ([]IntegrationItem, error
 	return items, nil
 }
 
+// MatrixEntry represents a single verified (or pending) build combination
+// for a chip at a specific version.
+type MatrixEntry struct {
+	ID             int64           `json:"id"`
+	Chip           string          `json:"chip"`
+	ChipVersion    string          `json:"chip_version"`
+	EnvHash        string          `json:"env_hash"`
+	Dependencies   json.RawMessage `json:"dependencies"`
+	CombinationKey string          `json:"combination_key"`
+	Status         string          `json:"status"`
+	TestedAt       *time.Time      `json:"tested_at"`
+	Revision       *int64          `json:"revision"`
+}
+
 // GetMatrix returns the full or chip-filtered compatibility matrix.
-func (c *Client) GetMatrix(ctx context.Context, chip string) (json.RawMessage, error) {
+func (c *Client) GetMatrix(ctx context.Context, chip string) ([]MatrixEntry, error) {
 	path := "/api/v1/resolve/matrix"
 	if chip != "" {
 		path += "?chip=" + chip
 	}
-	return c.getRaw(ctx, path)
+	var entries []MatrixEntry
+	if err := c.getJSON(ctx, path, &entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 // LoginResponse is the shape of POST /api/v1/auth/github.

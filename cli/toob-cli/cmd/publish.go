@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/apiclient"
+	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/ui"
 )
@@ -35,7 +36,7 @@ Examples:
   toob registry publish ./my-driver --skip-git-check`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := apiclient.New()
+		client := apiclient.NewWithTimeout(apiclient.UploadTimeout)
 		if !client.HasToken() {
 			return fmt.Errorf("not logged in — run 'toob login' first")
 		}
@@ -394,12 +395,9 @@ var registryCleanCmd = &cobra.Command{
 	Short: "Remove the local registry cache",
 	Long:  `Purges the local registry cache (~/.toob/registry) and forces a fresh sync on the next operation.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cache := registry.NewCache("")
-		dir := cache.Dir()
-
-		if dir == "" {
-			ui.Info("No registry cache found.")
-			return nil
+		dir, err := paths.RegistryDir()
+		if err != nil {
+			return err
 		}
 
 		ui.Step("Removing registry cache at %s...", dir)
@@ -607,9 +605,10 @@ func checkManifestDependencies(ctx context.Context, dir string, client *apiclien
 			if cleanVer != "" {
 				pkgResp, err := client.GetPackage(ctx, depName, cleanVer)
 				if err == nil && pkgResp != nil {
-					if pkgResp.Stage == "revoked" {
+					switch pkgResp.Stage {
+					case "revoked":
 						ui.Warn("Dependency %s@%s matches a REVOKED version in the registry.", depName, depVerConstraint)
-					} else if pkgResp.Stage == "archived" {
+					case "archived":
 						ui.Info("Dependency %s@%s is archived in the registry.", depName, depVerConstraint)
 					}
 				}

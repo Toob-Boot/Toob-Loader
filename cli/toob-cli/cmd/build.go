@@ -41,6 +41,7 @@ var (
 	flagBuildDir      string
 	flagToolchainPath string
 	flagNative        bool
+	flagCloud         bool
 	flagSkipChecks    bool
 )
 
@@ -86,6 +87,7 @@ func init() {
 	buildCmd.Flags().StringVar(&flagBuildDir, "build-dir", "", "Build output directory (default: builds/build_<chip>)")
 	buildCmd.Flags().StringVar(&flagToolchainPath, "toolchain-path", "", "Path to the cross-compiler bin/ directory")
 	buildCmd.Flags().BoolVar(&flagNative, "native", false, "Force native build (use local toolchains instead of Docker)")
+	buildCmd.Flags().BoolVar(&flagCloud, "cloud", false, "Compile firmware in the cloud (not yet supported)")
 }
 
 func runBuild(cmd *cobra.Command, args []string) error {
@@ -142,6 +144,10 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		if err == nil && !constraint.Check(cliVer) {
 			return fmt.Errorf("HAL Registry requires CLI Version %s. You are using CLI v%s. Please upgrade your CLI or use an older registry version.", idx.CliCompatibility, Version)
 		}
+	}
+
+	if flagCloud {
+		return fmt.Errorf("cloud build is not supported yet; remote compilation will be available in a future release")
 	}
 
 	if flagNative {
@@ -378,7 +384,7 @@ func runNativeBuild(root string) error {
 
 		lastSetupResume = time.Now()
 	}
-	regDir := cache.Dir()
+
 
 	// Load Registry Index ONCE
 	idx, err := cache.LoadIndex()
@@ -389,12 +395,20 @@ func runNativeBuild(root string) error {
 	// 3. Resolve hardware.json & chip_manifest.json (HAL Registry Inheritance)
 	hwJSON := filepath.Join(root, "toobloader", "hal", "chips", chip, "hardware.json")
 	if _, err := os.Stat(hwJSON); err != nil {
-		hwJSON = filepath.Join(regDir, "chips", chip, "hardware.json")
+		chipDir, chipErr := cache.ChipSourcePath(chip)
+		if chipErr != nil {
+			return fmt.Errorf("failed to resolve chip '%s' from registry: %w", chip, chipErr)
+		}
+		hwJSON = filepath.Join(chipDir, "hardware.json")
 	}
 
 	cmPath := filepath.Join(root, "toobloader", "hal", "chips", chip, "chip_manifest.json")
 	if _, err := os.Stat(cmPath); err != nil {
-		cmPath = filepath.Join(regDir, "chips", chip, "chip_manifest.json")
+		chipDir, chipErr := cache.ChipSourcePath(chip)
+		if chipErr != nil {
+			return fmt.Errorf("failed to resolve chip '%s' from registry: %w", chip, chipErr)
+		}
+		cmPath = filepath.Join(chipDir, "chip_manifest.json")
 	}
 
 	// Read Chip Manifest FIRST
@@ -416,10 +430,12 @@ func runNativeBuild(root string) error {
 			}
 		}
 	} else {
-		ui.Step("Chip '%s' not found locally. Auto-syncing registry...", chip)
-		if err := cache.Sync(false, false); err != nil {
-			return fmt.Errorf("chip_manifest.json not found and registry sync failed: %w", err)
+		ui.Step("Chip '%s' not found locally. Resolving from registry...", chip)
+		chipDir, chipErr := cache.ChipSourcePath(chip)
+		if chipErr != nil {
+			return fmt.Errorf("chip '%s' not found locally or in registry: %w", chip, chipErr)
 		}
+		cmPath = filepath.Join(chipDir, "chip_manifest.json")
 		if data, err := os.ReadFile(cmPath); err == nil {
 			json.Unmarshal(data, &cm)
 			if cm.Arch != "" {
@@ -552,7 +568,9 @@ func runNativeBuild(root string) error {
 	// Phase 3 Fix: Inject HAL paths to Manifest Compiler so it finds Registry sources
 	halChipDir := filepath.Join(root, "toobloader", "hal", "chips", chip)
 	if _, err := os.Stat(halChipDir); err != nil {
-		halChipDir = filepath.Join(regDir, "chips", chip)
+		if chipDir, chipErr := cache.ChipSourcePath(chip); chipErr == nil {
+			halChipDir = chipDir
+		}
 	}
 
 	var driverDirs []string
@@ -560,15 +578,19 @@ func runNativeBuild(root string) error {
 	if idx != nil {
 		if cInfo, ok := idx.Chips[chip]; ok && cInfo.Sources != nil {
 			for _, drvPath := range cInfo.Sources.Drivers {
-				drvDir := filepath.Join(regDir, filepath.Dir(drvPath))
+				drvRelDir := filepath.Dir(drvPath)
+				drvDir, err := cache.DriverSourcePath(filepath.ToSlash(drvRelDir))
+				if err != nil {
+					ui.Warn("Could not resolve driver '%s': %v", drvRelDir, err)
+					continue
+				}
 				driverDirs = append(driverDirs, drvDir)
 				driversCMake.WriteString(fmt.Sprintf("list(APPEND TOOB_DRIVERS \"%s\")\n", filepath.ToSlash(drvDir)))
 			}
 		}
 	}
 
-	socDir := filepath.Join(regDir, "soc")
-	if _, err := os.Stat(socDir); err == nil {
+	if socDir, err := cache.SoCSourcePath("soc"); err == nil {
 		driverDirs = append(driverDirs, socDir)
 	}
 
@@ -624,7 +646,11 @@ func runNativeBuild(root string) error {
 
 	// Calculate toolchain.cmake name based on architecture
 	toolchainDirName := strings.TrimSuffix(toolchainPrefix, "-")
-	toolchainFile := filepath.Join(regDir, "toolchains", toolchainDirName, "toolchain.cmake")
+	tcConfigDir, tcErr := cache.ToolchainConfigPath(toolchainDirName)
+	if tcErr != nil {
+		return fmt.Errorf("failed to resolve toolchain config for '%s': %w", toolchainDirName, tcErr)
+	}
+	toolchainFile := filepath.Join(tcConfigDir, "toolchain.cmake")
 	if _, err := os.Stat(toolchainFile); err != nil {
 		return fmt.Errorf("registry toolchain missing: %s", toolchainFile)
 	}
@@ -635,7 +661,9 @@ func runNativeBuild(root string) error {
 	// HALs: halChipDir already resolved above (step 7). Resolve arch.
 	halArchDir := filepath.Join(root, "toobloader", "hal", "arch", arch)
 	if _, err := os.Stat(halArchDir); err != nil {
-		halArchDir = filepath.Join(regDir, "arch", arch)
+		if archDir, archErr := cache.ArchSourcePath(arch); archErr == nil {
+			halArchDir = archDir
+		}
 	}
 
 	halChipDir = filepath.ToSlash(halChipDir)
@@ -715,15 +743,14 @@ func runNativeBuild(root string) error {
 			}
 		}
 
-		// Resolve absolute paths and verify existence in registry cache
-		pkgDir := filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path))
-
-		if _, err := os.Stat(filepath.Join(regDir, cryptoPkg.Path)); os.IsNotExist(err) {
-			ui.Warn("Crypto package '%s' (slot: %s) not found in registry cache at '%s'. "+
-				"The registry version may predate crypto support. Disabling slot.", pkgName, slotName, pkgDir)
+		// Resolve absolute paths and verify existence via API fetch
+		cryptoDir, cryptoErr := cache.CryptoSourcePath(pkgName)
+		if cryptoErr != nil {
+			ui.Warn("Crypto package '%s' (slot: %s) not available: %v. Disabling slot.", pkgName, slotName, cryptoErr)
 			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
 			continue
 		}
+		pkgDir := filepath.ToSlash(cryptoDir)
 
 		// Deduplicate: if this package was already emitted for a previous slot, skip sources
 		isDuplicate := resolvedCryptoNames[pkgName]
@@ -737,13 +764,13 @@ func runNativeBuild(root string) error {
 			// Upstream sources
 			var srcPaths []string
 			for _, src := range cryptoPkg.UpstreamSources {
-				srcPaths = append(srcPaths, filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path, src)))
+				srcPaths = append(srcPaths, filepath.ToSlash(filepath.Join(cryptoDir, src)))
 			}
 			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_SOURCES \"%s\")\n", slotUpper, strings.Join(srcPaths, ";")))
 
 			// Wrapper
 			if cryptoPkg.Wrapper != nil && *cryptoPkg.Wrapper != "" {
-				wrapperPath := filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path, *cryptoPkg.Wrapper))
+				wrapperPath := filepath.ToSlash(filepath.Join(cryptoDir, *cryptoPkg.Wrapper))
 				cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_WRAPPER \"%s\")\n", slotUpper, wrapperPath))
 			}
 
@@ -756,7 +783,7 @@ func runNativeBuild(root string) error {
 			if len(cryptoPkg.Includes) > 0 {
 				var incPaths []string
 				for _, inc := range cryptoPkg.Includes {
-					incPaths = append(incPaths, filepath.ToSlash(filepath.Join(regDir, cryptoPkg.Path, inc)))
+					incPaths = append(incPaths, filepath.ToSlash(filepath.Join(cryptoDir, inc)))
 				}
 				cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_INCLUDES \"%s\")\n", slotUpper, strings.Join(incPaths, ";")))
 			}

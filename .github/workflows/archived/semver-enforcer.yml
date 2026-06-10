@@ -28,6 +28,13 @@ jobs:
         with:
           install-native-deps: "true"
 
+      - name: Run Go Unit and Contract Tests
+        run: |
+          echo ">>> Verifying ports contract mapping and CLI unit tests..."
+          cd cli/toob-cli
+          go test -v ./internal/ports/...
+          go test -v ./...
+
       - name: Configure Git Identity
         run: |
           git config user.name "Toob ABI Oracle"
@@ -269,6 +276,7 @@ jobs:
           MINOR=$(echo $RAW_VERSION | cut -d. -f2)
           PATCH=$(echo $RAW_VERSION | cut -d. -f3)
 
+          # --- Prepare ports.go snapshots for diffing ---
           mkdir -p cli_abi_workspace
           cp cli/toob-cli/internal/ports/ports.go cli_abi_workspace/ports_current.go
 
@@ -278,13 +286,38 @@ jobs:
               touch cli_abi_workspace/ports_old.go
           fi
 
-          echo ">>> Running AST-based Contract Differ..."
+          # --- Build and run the AST-based Contract Differ ---
+          echo ">>> Building semver-tool..."
           cd cli/toob-cli
-          go build -o /tmp/semver-tool ./internal/ports/cmd/semver
-          BUMP_TYPE=$(/tmp/semver-tool ../../cli_abi_workspace/ports_old.go ../../cli_abi_workspace/ports_current.go | tail -n 1)
+          if ! go build -o /tmp/semver-tool ./internal/ports/cmd/semver; then
+              echo ">>> [FATAL] semver-tool compilation failed. Cannot determine version bump."
+              exit 1
+          fi
+
+          echo ">>> Running AST-based Contract Differ..."
+          TOOL_OUTPUT=$(/tmp/semver-tool ../../cli_abi_workspace/ports_old.go ../../cli_abi_workspace/ports_current.go 2>&1) || {
+              echo ">>> [FATAL] semver-tool exited with non-zero status."
+              echo ">>> Tool output:"
+              echo "$TOOL_OUTPUT"
+              exit 1
+          }
+
+          # Extract the final verdict (last line of stdout)
+          BUMP_TYPE=$(echo "$TOOL_OUTPUT" | tail -n 1 | tr -d '[:space:]')
           cd ../../
+
+          # Validate output is exactly one of the expected values
+          if [ "$BUMP_TYPE" != "MAJOR" ] && [ "$BUMP_TYPE" != "MINOR" ] && [ "$BUMP_TYPE" != "PATCH" ]; then
+              echo ">>> [FATAL] semver-tool returned unexpected bump type: '$BUMP_TYPE'"
+              echo ">>> Expected exactly one of: MAJOR, MINOR, PATCH"
+              echo ">>> Full tool output:"
+              echo "$TOOL_OUTPUT"
+              exit 1
+          fi
+
           echo ">>> [RESULT] Contract Differ determined bump type: $BUMP_TYPE"
 
+          # --- Apply version bump ---
           if [ "$BUMP_TYPE" = "MAJOR" ]; then
               MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
           elif [ "$BUMP_TYPE" = "MINOR" ]; then
@@ -307,7 +340,7 @@ jobs:
       - name: ABI Orakel (Compiler Container)
         if: env.CHECK_COMPILER == 'true'
         run: |
-          echo ">>> [Compiler Oracle] Starting manifest-based version analysis..."
+          echo ">>> [Compiler Oracle] Starting dependency-based version analysis..."
 
           LAST_TAG=$(git describe --tags --match "compiler/v*" --abbrev=0 2>/dev/null || echo "compiler/v0.0.0")
           echo ">>> [Compiler Oracle] Baseline Tag: $LAST_TAG"
@@ -317,29 +350,122 @@ jobs:
           MINOR=$(echo $CURRENT_VERSION | cut -d. -f2)
           PATCH=$(echo $CURRENT_VERSION | cut -d. -f3)
 
+          # ------------------------------------------------------------------
+          # Semantic version comparison helper.
+          #
+          # Compares two dotted version strings and outputs the SemVer
+          # category of change: MAJOR, MINOR, PATCH, or NONE.
+          # ------------------------------------------------------------------
+          semver_diff() {
+              local old_ver="$1"
+              local new_ver="$2"
+
+              local old_major=$(echo "$old_ver" | cut -d. -f1)
+              local old_minor=$(echo "$old_ver" | cut -d. -f2)
+              local new_major=$(echo "$new_ver" | cut -d. -f1)
+              local new_minor=$(echo "$new_ver" | cut -d. -f2)
+
+              if [ "$old_major" != "$new_major" ]; then
+                  echo "MAJOR"
+              elif [ "$old_minor" != "$new_minor" ]; then
+                  echo "MINOR"
+              elif [ "$old_ver" != "$new_ver" ]; then
+                  echo "PATCH"
+              else
+                  echo "NONE"
+              fi
+          }
+
+          # ------------------------------------------------------------------
+          # Promote BUMP to the higher of its current value and the candidate.
+          # Ordering: MAJOR > MINOR > PATCH
+          # ------------------------------------------------------------------
+          promote_bump() {
+              local current="$1"
+              local candidate="$2"
+
+              case "$candidate" in
+                  MAJOR) echo "MAJOR" ;;
+                  MINOR) [ "$current" = "MAJOR" ] && echo "MAJOR" || echo "MINOR" ;;
+                  PATCH) echo "$current" ;;
+                  *)     echo "$current" ;;
+              esac
+          }
+
           BUMP="PATCH"
+
           if [ "$LAST_TAG" != "compiler/v0.0.0" ]; then
               OLD_MANIFEST=$(git show $LAST_TAG:compiler/compiler_manifest.json 2>/dev/null || echo '{}')
 
+              # --- 1. Protocol Version (MAJOR if changed) ---
               OLD_PROTOCOL=$(echo "$OLD_MANIFEST" | jq -r '.protocol_version // 0')
               NEW_PROTOCOL=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
               if [ "$OLD_PROTOCOL" != "$NEW_PROTOCOL" ]; then
+                  echo ">>> [Compiler Oracle] protocol_version changed: $OLD_PROTOCOL → $NEW_PROTOCOL (MAJOR)"
                   BUMP="MAJOR"
               fi
 
-              if [ "$BUMP" = "PATCH" ]; then
-                  OLD_BASE=$(echo "$OLD_MANIFEST" | jq -r '.base_image.image // ""')
-                  NEW_BASE=$(jq -r '.base_image.image' compiler/compiler_manifest.json)
-                  OLD_SYSPKG=$(echo "$OLD_MANIFEST" | jq -cS '.system_packages // []')
-                  NEW_SYSPKG=$(jq -cS '.system_packages' compiler/compiler_manifest.json)
-                  if [ "$OLD_BASE" != "$NEW_BASE" ] || [ "$OLD_SYSPKG" != "$NEW_SYSPKG" ]; then
-                      BUMP="MINOR"
+              # --- 2. Embedded CLI Version ---
+              OLD_CLI=$(echo "$OLD_MANIFEST" | jq -r '.cli.version // "0.0.0"')
+              NEW_CLI=$(jq -r '.cli.version' compiler/compiler_manifest.json)
+              if [ "$OLD_CLI" != "$NEW_CLI" ]; then
+                  CLI_DIFF=$(semver_diff "$OLD_CLI" "$NEW_CLI")
+                  echo ">>> [Compiler Oracle] CLI version changed: $OLD_CLI → $NEW_CLI ($CLI_DIFF)"
+                  # CLI MAJOR → Compiler MAJOR, CLI MINOR → Compiler MINOR, CLI PATCH → Compiler PATCH
+                  BUMP=$(promote_bump "$BUMP" "$CLI_DIFF")
+              fi
+
+              # --- 3. Embedded Core SDK Version ---
+              OLD_CORE=$(echo "$OLD_MANIFEST" | jq -r '.core_sdk.version // "0.0.0"')
+              NEW_CORE=$(jq -r '.core_sdk.version' compiler/compiler_manifest.json)
+              if [ "$OLD_CORE" != "$NEW_CORE" ]; then
+                  CORE_DIFF=$(semver_diff "$OLD_CORE" "$NEW_CORE")
+                  echo ">>> [Compiler Oracle] Core SDK version changed: $OLD_CORE → $NEW_CORE ($CORE_DIFF)"
+                  # Core SDK MAJOR/MINOR → Compiler MINOR (dependency update, not a compiler ABI break)
+                  # Core SDK PATCH → Compiler PATCH
+                  if [ "$CORE_DIFF" = "MAJOR" ] || [ "$CORE_DIFF" = "MINOR" ]; then
+                      BUMP=$(promote_bump "$BUMP" "MINOR")
+                  else
+                      BUMP=$(promote_bump "$BUMP" "PATCH")
                   fi
+              fi
+
+              # --- 4. Base Image (MINOR if changed) ---
+              OLD_BASE=$(echo "$OLD_MANIFEST" | jq -r '.base_image.image // ""')
+              NEW_BASE=$(jq -r '.base_image.image' compiler/compiler_manifest.json)
+              if [ "$OLD_BASE" != "$NEW_BASE" ]; then
+                  echo ">>> [Compiler Oracle] Base image changed: $OLD_BASE → $NEW_BASE (MINOR)"
+                  BUMP=$(promote_bump "$BUMP" "MINOR")
+              fi
+
+              # --- 5. System Packages (MINOR if changed) ---
+              OLD_SYSPKG=$(echo "$OLD_MANIFEST" | jq -cS '.system_packages // []')
+              NEW_SYSPKG=$(jq -cS '.system_packages' compiler/compiler_manifest.json)
+              if [ "$OLD_SYSPKG" != "$NEW_SYSPKG" ]; then
+                  echo ">>> [Compiler Oracle] System packages changed (MINOR)"
+                  BUMP=$(promote_bump "$BUMP" "MINOR")
+              fi
+
+              # --- 6. Python Packages (MINOR if changed) ---
+              OLD_PYPKG=$(echo "$OLD_MANIFEST" | jq -cS '.python_packages // []')
+              NEW_PYPKG=$(jq -cS '.python_packages' compiler/compiler_manifest.json)
+              if [ "$OLD_PYPKG" != "$NEW_PYPKG" ]; then
+                  echo ">>> [Compiler Oracle] Python packages changed (MINOR)"
+                  BUMP=$(promote_bump "$BUMP" "MINOR")
+              fi
+
+              # --- 7. Registry Ref (MINOR if changed — new chips/toolchains) ---
+              OLD_REG_REF=$(echo "$OLD_MANIFEST" | jq -r '.registry.source.ref // ""')
+              NEW_REG_REF=$(jq -r '.registry.source.ref' compiler/compiler_manifest.json)
+              if [ "$OLD_REG_REF" != "$NEW_REG_REF" ]; then
+                  echo ">>> [Compiler Oracle] Registry ref changed: $OLD_REG_REF → $NEW_REG_REF (MINOR)"
+                  BUMP=$(promote_bump "$BUMP" "MINOR")
               fi
           fi
 
-          echo ">>> [Compiler Oracle] Bump type: $BUMP"
+          echo ">>> [Compiler Oracle] Final bump type: $BUMP"
 
+          # --- Apply version bump ---
           if [ "$BUMP" = "MAJOR" ]; then
               MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
           elif [ "$BUMP" = "MINOR" ]; then
@@ -371,13 +497,19 @@ jobs:
           git push origin HEAD:main "$NEW_TAG" || echo ">>> Push failed (concurrent run?)"
           echo ">>> [Compiler Oracle] Tag $NEW_TAG pushed!"
 
-          # Create draft release as manual approval gate
+          # --- Create draft release with dependency summary ---
           CLI_VER=$(jq -r '.cli.version' compiler/compiler_manifest.json)
+          CORE_VER=$(jq -r '.core_sdk.version' compiler/compiler_manifest.json)
           PROTO_VER=$(jq -r '.protocol_version' compiler/compiler_manifest.json)
+          BASE_IMG=$(jq -r '.base_image.image' compiler/compiler_manifest.json)
+
           BODY="## Compiler v${NEW_VERSION}\n\n"
           BODY+="| Property | Value |\n|---|---|\n"
           BODY+="| CLI | v${CLI_VER} |\n"
-          BODY+="| Protocol | v${PROTO_VER} |\n\n"
+          BODY+="| Core SDK | v${CORE_VER} |\n"
+          BODY+="| Protocol | v${PROTO_VER} |\n"
+          BODY+="| Base Image | ${BASE_IMG} |\n"
+          BODY+="| Bump Reason | ${BUMP} |\n\n"
           BODY+="**Publish this release to trigger the Docker image build on the CI server.**"
 
           curl -sf -X POST \
@@ -392,3 +524,4 @@ jobs:
               \"prerelease\": false
             }" && echo ">>> [Compiler Oracle] Draft release created for ${NEW_TAG}" \
                || echo ">>> [Compiler Oracle] Draft creation failed (non-critical)"
+
