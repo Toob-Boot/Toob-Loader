@@ -1,9 +1,8 @@
 name: CLI Publisher Pipeline
 
 on:
-  push:
-    tags:
-      - "cli/v*" # Trigger ONLY on CLI version tags
+  workflow_dispatch: # Disabled: replaced by the database-driven release pipeline (release.md)
+
 
 permissions:
   contents: read
