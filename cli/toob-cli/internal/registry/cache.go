@@ -107,11 +107,19 @@ type DriverInfo struct {
 	Category    string `json:"category,omitempty"`
 }
 
+// EcosystemVersions lists available versions of external tools.
+type EcosystemVersions struct {
+	CLI      []string `json:"cli"`
+	CoreSDK  []string `json:"core_sdk"`
+	Compiler []string `json:"compiler"`
+}
+
 // Index is the parsed content of registry.json.
 type Index struct {
 	FormatVersion    int                        `json:"format_version"`
 	RegistryVersion  string                     `json:"registry_version"`
 	CliCompatibility string                     `json:"cli_compatibility"`
+	Ecosystem        *EcosystemVersions         `json:"ecosystem,omitempty"`
 	Chips            map[string]ChipInfo        `json:"chips"`
 	Archs            map[string]ArchInfo        `json:"archs"`
 	Toolchains       map[string]ToolchainInfo   `json:"toolchains"`

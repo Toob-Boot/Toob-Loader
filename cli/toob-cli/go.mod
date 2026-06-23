@@ -3,7 +3,6 @@ module github.com/toob-boot/toob
 go 1.26.3
 
 require (
-	aead.dev/minisign v0.3.0
 	github.com/BurntSushi/toml v1.6.0
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/minio/selfupdate v0.6.0
@@ -11,6 +10,8 @@ require (
 	github.com/ulikunitz/xz v0.5.15
 	golang.org/x/mod v0.35.0
 )
+
+require aead.dev/minisign v0.3.0 // indirect
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

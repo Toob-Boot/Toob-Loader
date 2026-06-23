@@ -137,7 +137,7 @@ Das Playbook läuft als root über das Privatnetz (Inventar enthält nur private
 7. **CA-Verteilung (api+workers):** Ubicloud-CA und Vault-CA nach `/etc/ssl/certs/` + System-Truststore (`update-ca-certificates`).
 8. **API-Härtung (api):** `toob-api-hardening.service` (iptables-Block des Metadata-Endpoints 169.254.169.254 für Nicht-root → SSRF-Schutz), Cloudflare-Origin-Cert/-Key aus Vault holen und für Caddy ablegen, `Caddyfile.j2` (Details in 1.6), Caddy-Service (stark systemd-gehärtet, nur `CAP_NET_BIND_SERVICE`), `toob-autoscaler`-User + lokal gebautes Binary `../../build/autoscaler` nach `/opt/toob-autoscaler/bin/` (harter Fail wenn nicht vorhanden), Seccomp-Profil nach `/opt/toob-registry/seccomp-api.json`.
 9. **DB-Firewall-Pruner (unseal_vault):** Python-Skript + Timer (alle 15 min): vergleicht alle Ubicloud-/32-Regeln mit den aktuell aktiven Hetzner-Server-IPs (paginiert) und löscht Regeln recycelter IPs; `STATIC_WHITELIST_IPS` schützt manuelle Regeln; schreibt Erfolgs-Timestamp als Prometheus-Metrik.
-10. **Nomad (api+workers):** AppRole-Credentials je Knotentyp (`api-node-agent` bzw. `nomad-node-pki`) von fsn1 generieren und verteilen; `vault-agent-nomad` rendert ein **TLS-Bundle als einzelnes JSON** (Template `nomad-tls.json.tpl` — eine PKI-Issuance, damit Cert/Key garantiert zusammenpassen) und entpackt es via `unpack-nomad-tls.sh` atomar nach `/opt/nomad/tls/` + `systemctl reload nomad`; auf API-Knoten rendert der Agent zusätzlich `docker-auth.json` (Docker-Hub-Pull-Credentials). Dann: `server.hcl` (fsn1) bzw. `client.hcl` (Rest), Gossip-Key/Pool/Datacenter-Anpassung per regex, `raw_exec` überall aktivieren, Nomad als root starten, Leader abwarten, **ACL-Bootstrap** (Token nach `/root/nomad-bootstrap-token.txt`), Policies `prometheus` (read) und `autoscaler` (write) + scoped Tokens (Prometheus-Token in den Monitoring-Ordner, Autoscaler-Token nach `secret/nomad`), Jobs `registry-worker` und `registry-autoscaler` deployen, abschließend **Root-Token revoken und `/root/vault-keys.json` shredden**.
+10. **Nomad (api+workers):** AppRole-Credentials je Knotentyp (`api-node-agent` bzw. `nomad-node-pki`) von fsn1 generieren und verteilen; `vault-agent-nomad` rendert ein **TLS-Bundle als einzelnes JSON** (Template `nomad-tls.json.tpl` — eine PKI-Issuance, damit Cert/Key garantiert zusammenpassen) und entpackt es via `unpack-nomad-tls.sh` atomar nach `/opt/nomad/tls/` + `systemctl reload nomad`; auf API-Knoten rendert der Agent zusätzlich `docker-auth.json` (Docker-Hub-Pull-Credentials nach `/etc/docker-auth.json`). Dann: `server.hcl` (fsn1) bzw. `client.hcl` (Rest), Gossip-Key/Pool/Datacenter-Anpassung per regex, `raw_exec` überall aktivieren, Nomad als root starten, Leader abwarten, **ACL-Bootstrap** (Token nach `/root/nomad-bootstrap-token.txt`), Policies `prometheus` (read) und `autoscaler` (write) + scoped Tokens (Prometheus-Token in den Monitoring-Ordner, Autoscaler-Token nach `secret/nomad`), Jobs `registry-worker` und `registry-autoscaler` deployen, abschließend **Root-Token revoken und `/root/vault-keys.json` shredden**.
 
 #### 1.4.4 Nomad — Cluster und Jobs (`deploy/nomad/`)
 
@@ -161,7 +161,7 @@ Topologie: Single-Server (`bootstrap_expect = 1`) auf fsn1, alle Knoten zugleich
 
 #### 1.4.6 Compiler-/Rootfs-Builds (`deploy/compiler/`, `deploy/worker/`)
 
-- `build-compiler.sh` erzeugt aus **einem** Dockerfile zwei Release-Artefakte: das Docker-Hub-Image `toob-compiler` (Cross-Compile-Umgebung; Pakete ausschließlich aus `compiler_manifest.json`, Toolchains SHA256-verifiziert via `install_toolchains.py`, Registry-Snapshot und Core-SDK vorgeseedet) und ein daraus exportiertes `rootfs-vX.ext4` für Firecracker (vm-runner als `/sbin/init`, BusyBox-Applets, Mount-Points), inkl. Checksummen; `--push` lädt nach Docker Hub + S3. `:latest`/`latest.txt` werden bewusst erst post-complete vom Daemon promotet.
+- `build-compiler.sh` erzeugt aus **einem** Dockerfile zwei Release-Artefakte: das Docker-Hub-Image `toob-compiler` (Cross-Compile-Umgebung; Pakete ausschließlich aus `compiler_manifest.json`, Toolchains SHA256-verifiziert via `install_toolchains.py`, Registry-Snapshot und Core-SDK vorgeseedet) und ein daraus exportiertes `rootfs-vX.ext4` für Firecracker (vm-runner als `/sbin/init`, BusyBox-Applets, Mount-Points), inkl. Checksummen; `--push` lädt den versionierten Tag nach Docker Hub und rootfs + Checksums nach S3.
 - `build-rootfs.sh` ist ein Minimal-Rootfs **nur für lokale Entwicklung**.
 - `setup-host.sh` ist die manuelle Alternative zur cloud-init-Provisionierung eines Worker-Hosts (heute weitgehend von Terraform/cloud-init abgelöst, Nomad übernimmt die Supervision).
 - `Makefile`: `make worker`, `make autoscaler`, `make rootfs`, `make compiler-release`, `make deploy HOST=…`.
@@ -424,7 +424,7 @@ export NOMAD_TOKEN=$(ssh root@10.0.1.10 cat /root/nomad-bootstrap-token.txt)
 nomad job status registry-api
 ```
 
-Die API-Knoten ziehen das Image digest-gepinnt mit den Docker-Hub-Credentials, die der Vault-Agent nach `/etc/nomad.d/docker-auth.json` rendert.
+Die API-Knoten ziehen das Image digest-gepinnt mit den Docker-Hub-Credentials, die der Vault-Agent nach `/etc/docker-auth.json` rendert.
 
 ### Phase 7 — Worker provisionieren
 
@@ -550,7 +550,7 @@ curl -sSI https://ci.the-toob.com/health                 # 200 über Cloudflare
 | `/etc/vault.d/role-id`, `/etc/vault.d/secret-id` | alle Nomad-Knoten | AppRole-Credentials des Host-Vault-Agents |
 | `/opt/nomad/tls/{ca,cert,key}.pem` | alle Nomad-Knoten | täglich rotierte Nomad-mTLS-Zertifikate |
 | `/etc/nomad.d/nomad.env` | fsn1 | Nomad-Server-Vault-Token (72h-Period) |
-| `/etc/nomad.d/docker-auth.json` | API-Knoten | Docker-Hub-Pull-Credentials (Vault-Agent-Template) |
+| `/etc/docker-auth.json` | API-Knoten | Docker-Hub-Pull-Credentials (Vault-Agent-Template) |
 | `/opt/toob-monitoring/` | fsn1 | Monitoring-Compose-Stack inkl. rotierter Tokens/Certs |
 | `/opt/vault/config/backup-{role,secret}-id` | fsn1 | Backup-AppRole-Credentials |
 | `/etc/caddy/certs/origin.{pem,key}` | API-Knoten | Cloudflare-Origin-CA-Material |

@@ -15,7 +15,6 @@ import (
 	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/toolchain"
-	"github.com/toob-boot/toob/internal/updater"
 )
 
 // TestPortFieldCounts verifies that port contract types have the same
@@ -60,6 +59,8 @@ func TestPortFieldCounts(t *testing.T) {
 		// Registry
 		{"RegistryIndex ↔ registry.Index",
 			reflect.TypeFor[RegistryIndex](), reflect.TypeFor[registry.Index]()},
+		{"RegistryEcosystem ↔ registry.EcosystemVersions",
+			reflect.TypeFor[RegistryEcosystem](), reflect.TypeFor[registry.EcosystemVersions]()},
 		{"RegistryChip ↔ registry.ChipInfo",
 			reflect.TypeFor[RegistryChip](), reflect.TypeFor[registry.ChipInfo]()},
 		{"ChipSources ↔ registry.ChipSources",
@@ -77,11 +78,6 @@ func TestPortFieldCounts(t *testing.T) {
 		{"HardwareFlashRegion ↔ manifest.FlashRegion",
 			reflect.TypeFor[HardwareFlashRegion](), reflect.TypeFor[manifest.FlashRegion]()},
 
-		// GitHub / Updater
-		{"UpdateCheckResponse ↔ updater.ReleaseInfo",
-			reflect.TypeFor[UpdateCheckResponse](), reflect.TypeFor[updater.ReleaseInfo]()},
-		{"UpdateCheckAsset ↔ updater.Asset",
-			reflect.TypeFor[UpdateCheckAsset](), reflect.TypeFor[updater.Asset]()},
 
 		// Compatibility Matrix
 		{"MatrixDependencies ↔ registry.MatrixDependencies",
@@ -150,6 +146,8 @@ func TestPortFieldTypes(t *testing.T) {
 
 		// RegistryIndex is excluded: its map-value types (RegistryChip vs ChipInfo etc.)
 		// are cross-package mirrors. Each inner type has its own entry below.
+		{"RegistryEcosystem ↔ registry.EcosystemVersions",
+			reflect.TypeFor[RegistryEcosystem](), reflect.TypeFor[registry.EcosystemVersions]()},
 		{"RegistryChip ↔ registry.ChipInfo",
 			reflect.TypeFor[RegistryChip](), reflect.TypeFor[registry.ChipInfo]()},
 		{"ChipSources ↔ registry.ChipSources",
@@ -162,8 +160,6 @@ func TestPortFieldTypes(t *testing.T) {
 			reflect.TypeFor[ToolchainDownload](), reflect.TypeFor[toolchain.RegistryToolchain]()},
 		{"HardwareFlashRegion ↔ manifest.FlashRegion",
 			reflect.TypeFor[HardwareFlashRegion](), reflect.TypeFor[manifest.FlashRegion]()},
-		{"UpdateCheckAsset ↔ updater.Asset",
-			reflect.TypeFor[UpdateCheckAsset](), reflect.TypeFor[updater.Asset]()},
 		{"MatrixDependencies ↔ registry.MatrixDependencies",
 			reflect.TypeFor[MatrixDependencies](), reflect.TypeFor[registry.MatrixDependencies]()},
 		{"MatrixVerifiedCli ↔ registry.MatrixVerifiedCli",

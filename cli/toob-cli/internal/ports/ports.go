@@ -185,18 +185,6 @@ type AckSyncResponse struct {
 // Boundary: CLI → GitHub API
 // =============================================================================
 
-// UpdateCheckResponse represents the GitHub Releases API response
-// consumed by the CLI updater.
-type UpdateCheckResponse struct {
-	TagName string             `json:"tag_name" port:"required"`
-	Assets  []UpdateCheckAsset `json:"assets"   port:"required"`
-}
-
-// UpdateCheckAsset is a single release asset from GitHub.
-type UpdateCheckAsset struct {
-	Name               string `json:"name"                 port:"required"`
-	BrowserDownloadURL string `json:"browser_download_url" port:"required"`
-}
 
 // CoreSDKCloneInput defines the git clone parameters for fetching the Core SDK.
 type CoreSDKCloneInput struct {
@@ -210,11 +198,19 @@ type CoreSDKCloneInput struct {
 // Boundary: CLI → Registry Files (local disk)
 // =============================================================================
 
+// RegistryEcosystem lists available versions of external tools.
+type RegistryEcosystem struct {
+	CLI      []string `json:"cli"      port:"required"`
+	CoreSDK  []string `json:"core_sdk" port:"required"`
+	Compiler []string `json:"compiler" port:"required"`
+}
+
 // RegistryIndex is the parsed content of registry.json.
 type RegistryIndex struct {
 	FormatVersion    int                            `json:"format_version"    port:"required"`
 	RegistryVersion  string                         `json:"registry_version"  port:"required"`
-	CLICompatibility string                         `json:"cli_compatibility" port:"required"`
+	CliCompatibility string                         `json:"cli_compatibility" port:"required"`
+	Ecosystem        *RegistryEcosystem             `json:"ecosystem,omitempty" port:"optional"`
 	Chips            map[string]RegistryChip        `json:"chips"             port:"required"`
 	Archs            map[string]RegistryArch        `json:"archs"             port:"required"`
 	Toolchains       map[string]RegistryToolchain   `json:"toolchains"        port:"required"`

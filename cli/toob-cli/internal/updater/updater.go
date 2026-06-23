@@ -1,54 +1,42 @@
-// BOUNDARY TYPES: ReleaseInfo and Asset are mirrored in internal/ports/ports.go.
-// If you modify these structs, you MUST update ports.go and assertions.go.
 package updater
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/paths"
+	"github.com/toob-boot/toob/internal/registry"
 	"golang.org/x/mod/semver"
 )
 
 const (
-	repoURL       = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/latest"
-	repoTagURL    = "https://api.github.com/repos/Toob-Boot/Toob-CLI-Release/releases/tags/%s"
 	cacheFileName = "update_check.json"
 	checkInterval = 24 * time.Hour
-	cooldownLimit = 2 * time.Hour // Cooldown if HTTP 403 (Rate Limit) occurs
 )
 
 var ErrUnsupportedArch = errors.New("unsupported architecture for this release")
-
-type ReleaseInfo struct {
-	TagName string  `json:"tag_name"`
-	Assets  []Asset `json:"assets"`
-}
-
-type Asset struct {
-	Name               string `json:"name"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-}
 
 type CacheData struct {
 	LastCheck   time.Time `json:"last_check"`
 	LatestVer   string    `json:"latest_ver"`
 	DownloadURL string    `json:"download_url"`
+	SigURL      string    `json:"sig_url"`
 }
 
 type CheckResult struct {
 	Available   bool
 	Version     string
 	DownloadURL string
-	MinisigURL  string
+	SigURL      string
 }
 
 func getCachePath() (string, error) {
@@ -102,18 +90,20 @@ func CheckForUpdate(currentVersion string, forceNetwork bool, insecure bool) (*C
 
 	if cacheValid && !forceNetwork {
 		if semver.Compare(cache.LatestVer, currentVersion) > 0 {
-			return &CheckResult{Available: true, Version: cache.LatestVer, DownloadURL: cache.DownloadURL}, nil
+			return &CheckResult{Available: true, Version: cache.LatestVer, DownloadURL: cache.DownloadURL, SigURL: cache.SigURL}, nil
 		}
 		return &CheckResult{Available: false}, nil
 	}
 
 	if !forceNetwork {
-		go fetchUpdateFromGitHub(currentVersion, repoURL, insecure)
+		go func() {
+			_, _ = fetchUpdateFromRegistry(currentVersion, insecure)
+		}()
 		return nil, nil
 	}
 
 	// Manual force check
-	return fetchUpdateFromGitHub(currentVersion, repoURL, insecure)
+	return fetchUpdateFromRegistry(currentVersion, insecure)
 }
 
 // FetchReleaseByTag ignores cache and forcefully fetches a specific version for rollback/targeted update.
@@ -121,100 +111,110 @@ func FetchReleaseByTag(tag string, insecure bool) (*CheckResult, error) {
 	if !strings.HasPrefix(tag, "v") {
 		tag = "v" + tag
 	}
-	url := fmt.Sprintf(repoTagURL, tag)
-	// We pass empty string for currentVersion so semver comparison always returns true
-	return fetchUpdateFromGitHub("", url, insecure)
+
+	// Validate GOOS/GOARCH is supported
+	supported := false
+	for _, t := range []struct{ goos, goarch string }{
+		{"windows", "amd64"},
+		{"linux", "amd64"},
+		{"darwin", "arm64"},
+	} {
+		if runtime.GOOS == t.goos && runtime.GOARCH == t.goarch {
+			supported = true
+			break
+		}
+	}
+	if !supported {
+		return nil, ErrUnsupportedArch
+	}
+
+	client := apiclient.New()
+	var archiveName string
+	if runtime.GOOS == "windows" {
+		archiveName = fmt.Sprintf("toob-windows-%s.zip", runtime.GOARCH)
+	} else {
+		archiveName = fmt.Sprintf("toob-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
+	}
+
+	downloadURL := fmt.Sprintf("%s/api/v1/releases/cli/%s/download/%s", client.BaseURL, strings.TrimPrefix(tag, "v"), archiveName)
+	sigURL := downloadURL + ".sig"
+
+	return &CheckResult{
+		Available:   true,
+		Version:     tag,
+		DownloadURL: downloadURL,
+		SigURL:      sigURL,
+	}, nil
 }
 
-func fetchUpdateFromGitHub(currentVersion, url string, insecure bool) (*CheckResult, error) {
-	// Gap 6: Proxy/MITM support via ProxyFromEnvironment and InsecureSkipVerify
-	transport := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+func fetchUpdateFromRegistry(currentVersion string, insecure bool) (*CheckResult, error) {
+	// Validate GOOS/GOARCH is supported
+	supported := false
+	for _, t := range []struct{ goos, goarch string }{
+		{"windows", "amd64"},
+		{"linux", "amd64"},
+		{"darwin", "arm64"},
+	} {
+		if runtime.GOOS == t.goos && runtime.GOARCH == t.goarch {
+			supported = true
+			break
+		}
 	}
+	if !supported {
+		return nil, ErrUnsupportedArch
+	}
+
+	client := apiclient.New()
 	if insecure {
+		transport := apiclient.BuildTransport()
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		client.HTTPClient.Transport = transport
 	}
 
-	client := &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: transport,
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
+	indexData, err := client.GetIndex(context.Background())
 	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-			writeCache(CacheData{LastCheck: time.Now().Add(-checkInterval + cooldownLimit)}) // Retry in 2 hours
-		}
-		if resp.StatusCode == http.StatusNotFound && url != repoURL {
-			return nil, fmt.Errorf("release not found (HTTP 404)")
-		}
-		return nil, fmt.Errorf("github api returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("failed to fetch registry index: %w", err)
 	}
 
-	var release ReleaseInfo
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, err
+	var idx registry.Index
+	if err := json.Unmarshal(indexData, &idx); err != nil {
+		return nil, fmt.Errorf("failed to parse registry index: %w", err)
 	}
 
-	osArchPart := fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH)
-	ext := ""
-	if runtime.GOOS == "windows" {
-		ext = ".exe"
-	}
-
-	var downloadURL, minisigURL string
-	for _, a := range release.Assets {
-		lowerName := strings.ToLower(a.Name)
-		if strings.Contains(lowerName, osArchPart) && strings.HasSuffix(lowerName, ext) {
-			downloadURL = a.BrowserDownloadURL
-		}
-		if strings.Contains(lowerName, osArchPart) && strings.HasSuffix(lowerName, ext+".minisig") {
-			minisigURL = a.BrowserDownloadURL
-		}
-	}
-
-	if downloadURL == "" {
-		if len(release.Assets) > 0 {
-			// Gap 5: Fallback warning if release exists but arch is missing
-			return nil, ErrUnsupportedArch
-		}
-		writeCache(CacheData{LastCheck: time.Now(), LatestVer: currentVersion})
+	if idx.Ecosystem == nil || len(idx.Ecosystem.CLI) == 0 {
 		return &CheckResult{Available: false}, nil
 	}
 
-	latestVer := release.TagName
-	// GitHub tags for the CLI are prefixed with "cli/" (e.g. "cli/v0.4.2")
-	if after, ok := strings.CutPrefix(latestVer, "cli/"); ok {
-		latestVer = after
-	}
+	latestVer := idx.Ecosystem.CLI[0]
 	if !strings.HasPrefix(latestVer, "v") {
 		latestVer = "v" + latestVer
 	}
 
-	// Only update cache if we are fetching the latest release
-	if url == repoURL {
-		writeCache(CacheData{
-			LastCheck:   time.Now(),
-			LatestVer:   latestVer,
-			DownloadURL: downloadURL,
-		})
+	var archiveName string
+	if runtime.GOOS == "windows" {
+		archiveName = fmt.Sprintf("toob-windows-%s.zip", runtime.GOARCH)
+	} else {
+		archiveName = fmt.Sprintf("toob-%s-%s.tar.gz", runtime.GOOS, runtime.GOARCH)
 	}
 
-	// If currentVersion is empty (FetchReleaseByTag), always return Available: true
-	if currentVersion == "" || semver.Compare(latestVer, currentVersion) > 0 {
-		return &CheckResult{Available: true, Version: latestVer, DownloadURL: downloadURL, MinisigURL: minisigURL}, nil
+	downloadURL := fmt.Sprintf("%s/api/v1/releases/cli/%s/download/%s", client.BaseURL, strings.TrimPrefix(latestVer, "v"), archiveName)
+	sigURL := downloadURL + ".sig"
+
+	isNewer := semver.Compare(latestVer, currentVersion) > 0
+
+	result := &CheckResult{
+		Available:   isNewer,
+		Version:     latestVer,
+		DownloadURL: downloadURL,
+		SigURL:      sigURL,
 	}
 
-	return &CheckResult{Available: false}, nil
+	writeCache(CacheData{
+		LastCheck:   time.Now(),
+		LatestVer:   latestVer,
+		DownloadURL: downloadURL,
+		SigURL:      sigURL,
+	})
+
+	return result, nil
 }

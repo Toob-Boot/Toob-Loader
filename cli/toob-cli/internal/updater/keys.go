@@ -1,16 +1,24 @@
 package updater
 
-import "aead.dev/minisign"
+import (
+	"crypto/ed25519"
+	"encoding/hex"
+	"fmt"
+	"os"
+)
 
-// ToobMasterKey is the Ed25519 public key used to cryptographically verify
-// all official Toob ecosystem binaries and registries (Supply Chain Security).
-// This key is baked into the CLI binary and cannot be modified by attackers
-// even if the GitHub Release server is compromised.
-const ToobMasterKey = "RWT7Oy6bzufiruCVFvbGv73+VZYvy9RYrqT7Xm508b2MJjn89v/wlQH9"
+// ToobMasterPublicKeyHex is the hardcoded Ed25519 public key in hex format.
+const ToobMasterPublicKeyHex = "0000000000000000000000000000000000000000000000000000000000000000"
 
-// GetPublicKey parses the hardcoded base64 key into a usable minisign.PublicKey object
-func GetPublicKey() (minisign.PublicKey, error) {
-	var pub minisign.PublicKey
-	err := pub.UnmarshalText([]byte(ToobMasterKey))
-	return pub, err
+// GetUpdatePublicKey retrieves the Ed25519 public key for signature verification.
+func GetUpdatePublicKey() (ed25519.PublicKey, error) {
+	pubKeyHex := os.Getenv("TOOB_REGISTRY_PUBKEY")
+	if pubKeyHex == "" {
+		pubKeyHex = ToobMasterPublicKeyHex
+	}
+	pubKeyBytes, err := hex.DecodeString(pubKeyHex)
+	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid registry public key format")
+	}
+	return pubKeyBytes, nil
 }

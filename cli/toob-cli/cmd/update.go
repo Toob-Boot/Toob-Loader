@@ -1,15 +1,21 @@
 package cmd
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"compress/gzip"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"aead.dev/minisign"
 	"github.com/minio/selfupdate"
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/ui"
@@ -43,7 +49,7 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 	return
 }
 
-func fetchMinisig(url string, insecure bool) (string, error) {
+func fetchSignature(url string, insecure bool) (string, error) {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
 	if insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
@@ -65,6 +71,47 @@ func fetchMinisig(url string, insecure bool) (string, error) {
 	return string(body), nil
 }
 
+func decompressArchive(archiveBytes []byte, filename string) ([]byte, error) {
+	if strings.HasSuffix(filename, ".zip") {
+		r, err := zip.NewReader(bytes.NewReader(archiveBytes), int64(len(archiveBytes)))
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range r.File {
+			if f.Name == "toob" || f.Name == "toob.exe" {
+				rc, err := f.Open()
+				if err != nil {
+					return nil, err
+				}
+				defer rc.Close()
+				return io.ReadAll(rc)
+			}
+		}
+		return nil, fmt.Errorf("toob executable not found in zip archive")
+	} else if strings.HasSuffix(filename, ".tar.gz") || strings.HasSuffix(filename, ".tgz") {
+		gr, err := gzip.NewReader(bytes.NewReader(archiveBytes))
+		if err != nil {
+			return nil, err
+		}
+		defer gr.Close()
+		tr := tar.NewReader(gr)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, err
+			}
+			if hdr.Name == "toob" || hdr.Name == "toob.exe" {
+				return io.ReadAll(tr)
+			}
+		}
+		return nil, fmt.Errorf("toob executable not found in tar.gz archive")
+	}
+	return archiveBytes, nil
+}
+
 var updateCmd = &cobra.Command{
 	Use:   "update",
 	Short: "Update Toob CLI to the latest version",
@@ -82,7 +129,7 @@ var updateCmd = &cobra.Command{
 
 		if err != nil {
 			if err == updater.ErrUnsupportedArch {
-				return fmt.Errorf("an update exists on GitHub, but no compiled binary was found for your architecture (%s)", err.Error())
+				return fmt.Errorf("an update exists on Registry, but no compiled binary was found for your architecture (%s)", err.Error())
 			}
 			return fmt.Errorf("failed to check for updates: %w", err)
 		}
@@ -121,24 +168,30 @@ var updateCmd = &cobra.Command{
 		}
 		fmt.Fprintln(os.Stderr)
 
-		if res.MinisigURL != "" {
-			ui.Step("Verifying Minisign signature (Supply Chain Security)")
-			sigStr, err := fetchMinisig(res.MinisigURL, insecure)
+		if res.SigURL != "" {
+			ui.Step("Verifying Ed25519 signature (Supply Chain Security)")
+			sigStr, err := fetchSignature(res.SigURL, insecure)
 			if err != nil {
-				return fmt.Errorf("failed to fetch minisign signature: %w", err)
+				return fmt.Errorf("failed to fetch release signature: %w", err)
 			}
 
-			pubKey, err := updater.GetPublicKey()
+			pubKey, err := updater.GetUpdatePublicKey()
 			if err != nil {
 				return fmt.Errorf("FATAL: Hardcoded public key is corrupted: %w", err)
 			}
 
-			if !minisign.Verify(pubKey, buf.Bytes(), []byte(sigStr)) {
-				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Minisign signature invalid or binary was tampered with!")
+			sigBytes, err := hex.DecodeString(strings.TrimSpace(sigStr))
+			if err != nil {
+				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Signature hex decoding failed: %w", err)
+			}
+
+			hash := sha256.Sum256(buf.Bytes())
+			if !ed25519.Verify(pubKey, hash[:], sigBytes) {
+				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Ed25519 signature invalid or binary was tampered with!")
 			}
 			ui.Success("Signature OK. Binary is authentic.")
 		} else {
-			return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: No .minisig signature found in release. Downgrade attack prevented.")
+			return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: No signature found in release. Downgrade attack prevented.")
 		}
 
 		// Downgrade guard: reject signed-but-older binaries unless user explicitly
@@ -159,8 +212,15 @@ var updateCmd = &cobra.Command{
 			}
 		}
 
+		ui.Step("Decompressing update archive...")
+		filename := filepath.Base(res.DownloadURL)
+		decompressedBytes, err := decompressArchive(buf.Bytes(), filename)
+		if err != nil {
+			return fmt.Errorf("failed to decompress update: %w", err)
+		}
+
 		ui.Step("Applying update...")
-		err = selfupdate.Apply(bytes.NewReader(buf.Bytes()), selfupdate.Options{})
+		err = selfupdate.Apply(bytes.NewReader(decompressedBytes), selfupdate.Options{})
 		if err != nil {
 			return fmt.Errorf("failed to apply update: %w", err)
 		}

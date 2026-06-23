@@ -18,7 +18,6 @@ import (
 	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/toolchain"
-	"github.com/toob-boot/toob/internal/updater"
 )
 
 // --- apiclient ↔ ports ---
@@ -211,23 +210,53 @@ func assertAckSyncResponseFromPort() {
 	_ = apiclient.AckSyncResponse{Status: p.Status, Advisories: p.Advisories}
 }
 
+// --- RegistryEcosystem ↔ registry.EcosystemVersions ---
+
+func assertRegistryEcosystemToPort() {
+	var r registry.EcosystemVersions
+	_ = RegistryEcosystem{
+		CLI: r.CLI, CoreSDK: r.CoreSDK, Compiler: r.Compiler,
+	}
+}
+
+func assertRegistryEcosystemFromPort() {
+	var p RegistryEcosystem
+	_ = registry.EcosystemVersions{
+		CLI: p.CLI, CoreSDK: p.CoreSDK, Compiler: p.Compiler,
+	}
+}
+
 // --- RegistryIndex ↔ registry.Index ---
 
 func assertRegistryIndexToPort() {
 	var r registry.Index
+	var eco *RegistryEcosystem
+	if r.Ecosystem != nil {
+		eco = &RegistryEcosystem{
+			CLI: r.Ecosystem.CLI, CoreSDK: r.Ecosystem.CoreSDK, Compiler: r.Ecosystem.Compiler,
+		}
+	}
 	_ = RegistryIndex{
 		FormatVersion:    r.FormatVersion,
 		RegistryVersion:  r.RegistryVersion,
-		CLICompatibility: r.CliCompatibility,
+		CliCompatibility: r.CliCompatibility,
+		Ecosystem:        eco,
 	}
 }
 
 func assertRegistryIndexFromPort() {
 	var p RegistryIndex
+	var eco *registry.EcosystemVersions
+	if p.Ecosystem != nil {
+		eco = &registry.EcosystemVersions{
+			CLI: p.Ecosystem.CLI, CoreSDK: p.Ecosystem.CoreSDK, Compiler: p.Ecosystem.Compiler,
+		}
+	}
 	_ = registry.Index{
 		FormatVersion:    p.FormatVersion,
 		RegistryVersion:  p.RegistryVersion,
-		CliCompatibility: p.CLICompatibility,
+		CliCompatibility: p.CliCompatibility,
+		Ecosystem:        eco,
 	}
 }
 
@@ -389,37 +418,7 @@ func assertFlashRegionFromPort() {
 	}
 }
 
-// --- updater.ReleaseInfo ↔ UpdateCheckResponse ---
 
-func assertReleaseInfoToPort() {
-	var r updater.ReleaseInfo
-	_ = UpdateCheckResponse{
-		TagName: r.TagName,
-	}
-}
-
-func assertReleaseInfoFromPort() {
-	var p UpdateCheckResponse
-	_ = updater.ReleaseInfo{
-		TagName: p.TagName,
-	}
-}
-
-// --- updater.Asset ↔ UpdateCheckAsset ---
-
-func assertAssetToPort() {
-	var r updater.Asset
-	_ = UpdateCheckAsset{
-		Name: r.Name, BrowserDownloadURL: r.BrowserDownloadURL,
-	}
-}
-
-func assertAssetFromPort() {
-	var p UpdateCheckAsset
-	_ = updater.Asset{
-		Name: p.Name, BrowserDownloadURL: p.BrowserDownloadURL,
-	}
-}
 
 // --- registry.MatrixDependencies ↔ MatrixDependencies ---
 
