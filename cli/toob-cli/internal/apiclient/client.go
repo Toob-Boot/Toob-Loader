@@ -25,10 +25,12 @@ import (
 	"github.com/toob-boot/toob/internal/paths"
 )
 
-const (
+var (
 	// DefaultBaseURL is the production API endpoint served via Cloudflare.
 	DefaultBaseURL = "https://registry.the-toob.com"
+)
 
+const (
 	// defaultTimeout is the standard timeout for read operations (GET, list, etc.).
 	defaultTimeout = 60 * time.Second
 

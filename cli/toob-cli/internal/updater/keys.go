@@ -8,7 +8,7 @@ import (
 )
 
 // ToobMasterPublicKeyHex is the hardcoded Ed25519 public key in hex format.
-const ToobMasterPublicKeyHex = "0000000000000000000000000000000000000000000000000000000000000000"
+var ToobMasterPublicKeyHex = "0000000000000000000000000000000000000000000000000000000000000000"
 
 // GetUpdatePublicKey retrieves the Ed25519 public key for signature verification.
 func GetUpdatePublicKey() (ed25519.PublicKey, error) {
