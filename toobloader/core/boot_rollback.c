@@ -25,6 +25,7 @@
  */
 
 #include "boot_rollback.h"
+#include "boot_fih.h"
 #include "generated_boot_config.h"
 
 #include "boot_crc32.h"
@@ -44,7 +45,7 @@ _Static_assert(
     BOOT_CRYPTO_ARENA_SIZE >= 512,
     "Crypto Arena must be at least 512 bytes for Zero-Allocation stream copy");
 
-extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
+/* P5: Arena is now passed explicitly by the orchestrator */
 
 /* P10 CFI Token Slots (Randomized per boot via TRNG) */
 #define RB_CFI_SLOT_INIT     0
@@ -60,7 +61,8 @@ extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
  */
 static boot_status_t
 rollback_compute_flash_crc32(const boot_platform_t *platform, uint32_t addr,
-                             size_t len, uint32_t *out_crc) {
+                             size_t len, uint32_t *out_crc,
+                             uint8_t *arena, size_t arena_len) {
   uint32_t crc = 0xFFFFFFFF;
   size_t offset = 0;
 
@@ -68,18 +70,18 @@ rollback_compute_flash_crc32(const boot_platform_t *platform, uint32_t addr,
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
 
-    size_t step = (len - offset > BOOT_CRYPTO_ARENA_SIZE)
-                      ? BOOT_CRYPTO_ARENA_SIZE
+    size_t step = (len - offset > arena_len)
+                      ? arena_len
                       : (len - offset);
 
-    boot_status_t st = platform->flash->read(addr + (uint32_t)offset, crypto_arena, (uint32_t)step);
+    boot_status_t st = platform->flash->read(addr + (uint32_t)offset, arena, (uint32_t)step);
     if (st != BOOT_OK) {
-      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      boot_secure_zeroize(arena, arena_len);
       return st;
     }
 
     for (size_t i = 0; i < step; i++) {
-      crc ^= crypto_arena[i];
+      crc ^= arena[i];
       for (uint8_t j = 0; j < 8; j++) {
         crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
       }
@@ -87,7 +89,7 @@ rollback_compute_flash_crc32(const boot_platform_t *platform, uint32_t addr,
     offset += step;
   }
 
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  boot_secure_zeroize(arena, arena_len);
   *out_crc = ~crc;
   return BOOT_OK;
 }
@@ -99,7 +101,7 @@ rollback_compute_flash_crc32(const boot_platform_t *platform, uint32_t addr,
  */
 boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
                                        uint32_t manifest_svn,
-                                       bool is_recovery_os) {
+                                       rollback_target_t target) {
   if (!platform || !platform->crypto || !platform->wdt) {
     return BOOT_ERR_INVALID_ARG;
   }
@@ -109,12 +111,11 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&svn_cfi_seed, sizeof(svn_cfi_seed));
   }
-  uint32_t svn_tok[RB_CFI_NUM_TOKENS];
-  for (uint8_t i = 0; i < RB_CFI_NUM_TOKENS; i++) {
-    svn_tok[i] = cfi_derive(svn_cfi_seed, i);
-  }
-
-  volatile uint32_t cfi_tracker = svn_tok[0];
+  boot_cfi_ctx_t svn_cfi_ctx;
+  boot_cfi_init(svn_cfi_ctx, svn_cfi_seed);
+  boot_cfi_add_expected(svn_cfi_ctx, 1);
+  boot_cfi_add_expected(svn_cfi_ctx, 2);
+  boot_cfi_add_expected(svn_cfi_ctx, 3);
 
   /* 1. Lese persistierte SVN Werte sicher aus WAL TMR Payload */
   wal_tmr_payload_t tmr __attribute__((aligned(8)));
@@ -130,11 +131,19 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
     return status; /* Hardware Fehler sofort propagieren */
   }
 
-  uint32_t persisted_wal_svn =
-      is_recovery_os ? tmr.svn_recovery_counter : tmr.app_svn;
+  /* P7a: 3-way SVN selection per target */
+  uint32_t persisted_wal_svn;
+  switch (target) {
+    case ROLLBACK_TARGET_APP:      persisted_wal_svn = tmr.app_svn; break;
+    case ROLLBACK_TARGET_RECOVERY: persisted_wal_svn = tmr.svn_recovery_counter; break;
+    case ROLLBACK_TARGET_STAGE1:   persisted_wal_svn = tmr.stage1_svn; break;
+    default:
+      boot_secure_zeroize(&tmr, sizeof(tmr));
+      return BOOT_ERR_INVALID_ARG;
+  }
   boot_secure_zeroize(&tmr, sizeof(tmr)); /* Sensible Daten umgehend abräumen */
 
-  cfi_tracker ^= svn_tok[1];
+  boot_cfi_step(svn_cfi_ctx, 1);
 
   /* 2. Hardware-Root-of-Trust (eFuse Epoch) abrufen (Glitch-Shielded) */
   uint32_t efuse_epoch = 0;
@@ -145,24 +154,15 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
     platform->wdt->kick();
 
   /* EMFI Instruction Skip Protection für das eFuse Resultat */
-  volatile uint32_t eshield_1 = 0, eshield_2 = 0;
-  if (efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED)
-    eshield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (eshield_1 == BOOT_OK &&
-      (efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED))
-    eshield_2 = BOOT_OK;
-
-  if (eshield_1 != BOOT_OK || eshield_2 != BOOT_OK ||
-      eshield_1 != eshield_2) {
+  BOOT_SECURE_REQUIRE(efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED, {
     return BOOT_ERR_VERIFY; /* Trapped Hardware Glitch */
-  }
+  });
 
   if (efuse_status != BOOT_OK && efuse_status != BOOT_ERR_NOT_SUPPORTED) {
     return efuse_status;
   }
 
-  cfi_tracker ^= svn_tok[2];
+  boot_cfi_step(svn_cfi_ctx, 2);
 
   /* 3. MATHEMATISCHER GLITCH-BEWEIS (Voltage Skip Protection)
    * Verweigert Downgrades rigoros. Identische Versionen (Re-Flashes) sind für
@@ -171,43 +171,16 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
   bool valid_wal = (manifest_svn >= persisted_wal_svn);
   bool valid_efuse = (manifest_svn >= efuse_epoch);
 
-  volatile uint32_t downgrade_shield_1 = 0;
-  volatile uint32_t downgrade_shield_2 = 0;
-
-  if (valid_wal && valid_efuse) {
-    downgrade_shield_1 = BOOT_OK; /* 0x55AA55AA */
-  }
-
-  /* Timing/Branch Delay Injection gegen EMFI / Instruction-Skips */
-  BOOT_GLITCH_DELAY();
-
-  if (downgrade_shield_1 == BOOT_OK && valid_wal && valid_efuse) {
-    downgrade_shield_2 = BOOT_OK;
-  }
-
-  /* Finale Akkumulation der Sicherheits-Checks (schließt asynchrone
-   * Manipulationen aus) */
-  if (downgrade_shield_1 != BOOT_OK || downgrade_shield_2 != BOOT_OK ||
-      downgrade_shield_1 != downgrade_shield_2) {
+  BOOT_SECURE_REQUIRE(valid_wal && valid_efuse, {
     return BOOT_ERR_DOWNGRADE;
-  }
+  });
 
-  cfi_tracker ^= svn_tok[3];
+  boot_cfi_step(svn_cfi_ctx, 3);
 
-  uint32_t expected_cfi = svn_tok[0] ^ svn_tok[1] ^ svn_tok[2] ^ svn_tok[3];
-  volatile uint32_t proof_1 = 0, proof_2 = 0;
-
-  if (cfi_tracker == expected_cfi)
-    proof_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (proof_1 == BOOT_OK && cfi_tracker == expected_cfi)
-    proof_2 = BOOT_OK;
-
-  if (proof_1 == BOOT_OK && proof_2 == BOOT_OK && proof_1 == proof_2) {
-    return BOOT_OK;
-  }
-
-  return BOOT_ERR_VERIFY; /* PC-Jump Glitch detektiert! */
+  boot_cfi_require(svn_cfi_ctx, {
+    return BOOT_ERR_VERIFY; /* PC-Jump Glitch detektiert! */
+  });
+  return BOOT_OK;
 }
 
 /*
@@ -238,50 +211,25 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
     limit_rec = UINT32_MAX;
   }
 
-  /* Control Flow Integrity (CFI) Kaskaden-Auswertung
-   * 0x11111111 = Boot App (Normal)
-   * 0x22222222 = Boot Recovery OS
-   * 0x44444444 = Terminal State (Panic / Deep Sleep) */
-  volatile uint32_t path_flag_1 = 0;
-  volatile uint32_t path_flag_2 = 0;
-
+  /* Control Flow Integrity (CFI) Kaskaden-Auswertung */
   if (counter <= limit_normal) {
-    path_flag_1 = 0x11111111;
-  } else if (counter <= limit_rec) {
-    path_flag_1 = 0x22222222;
-  } else {
-    path_flag_1 = 0x44444444;
-  }
-
-  BOOT_GLITCH_DELAY();
-
-  if (path_flag_1 == 0x11111111 && counter <= limit_normal) {
-    path_flag_2 = 0x11111111;
-  } else if (path_flag_1 == 0x22222222 && counter > limit_normal &&
-             counter <= limit_rec) {
-    path_flag_2 = 0x22222222;
-  } else if (path_flag_1 == 0x44444444 && counter > limit_rec) {
-    path_flag_2 = 0x44444444;
-  }
-
-  /* P10 Defense: Wenn die CPU physikalisch manipuliert wurde (State Confusion
-   * Attack), halte an! */
-  if (path_flag_1 != path_flag_2 || path_flag_1 == 0) {
-    boot_panic(platform, BOOT_ERR_INVALID_STATE);
-  }
-
-  /* O(1) Zuweisung der bewiesenen CFI Flags */
-  if (path_flag_1 == 0x11111111) {
+    BOOT_SECURE_REQUIRE(counter <= limit_normal, {
+      boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
+    });
     *boot_recovery_os_out = false;
     return BOOT_OK;
-  }
-
-  if (path_flag_1 == 0x22222222) {
+  } else if (counter <= limit_rec) {
+    BOOT_SECURE_REQUIRE(counter > limit_normal && counter <= limit_rec, {
+      boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
+    });
     *boot_recovery_os_out = true;
     return BOOT_OK;
-  }
+  } else {
+    BOOT_SECURE_REQUIRE(counter > limit_rec, {
+      boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
+    });
 
-  /* CASE 3 (0x44444444): Zero-Day Brick / Double Failure Terminal State */
+  /* CASE 3: Zero-Day Brick / Double Failure Terminal State */
 #if BOOT_CONFIG_EDGE_UNATTENDED_MODE
   if (!platform->soc || !platform->soc->enter_low_power) {
     /* Fallback Hardware-Limit: Panic / Serial Rescue falls SoC-Feature fehlt */
@@ -330,16 +278,9 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
    * HAL-Config */
   platform->soc->enter_low_power(wakeup_s);
 
-  /* Halt-Guard (WDT Starvation): Wenn die Hardware aufwacht oder
-   * enter_low_power fehlschlägt, erzwingen wir einen echten Hardware-Reset
-   * durch ABSICHTLICHES NICHT-Kickens des WDT! */
-  if (platform->console && platform->console->flush)
-    platform->console->flush();
-  if (platform->clock && platform->clock->deinit)
-    platform->clock->deinit();
-  while (1) {
-    BOOT_GLITCH_DELAY(); /* Starve the WDT to force Cold Boot! */
-  }
+  /* Halt-Guard: Wenn die Hardware aufwacht oder enter_low_power fehlschlägt,
+   * erzwingen wir einen echten Reset via terminal halt. */
+  boot_terminal_halt(platform, BOOT_ERR_WAL_FULL, SITE_ROLLBACK_CONFUSION);
 #else
   /* Attended Mode (FALSE): Bootloader blockiert. Springe in die Schicht 4a
    * Serial Rescue */
@@ -354,7 +295,10 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
  * BLOCK 3: Reverse Copy Orchestration (Zero-Allocation & Zero-Wear)
  * ============================================================================
  */
-boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
+boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
+                                           uint8_t *arena, size_t arena_len) {
+  if (!arena || arena_len < 512)
+    return BOOT_ERR_INVALID_ARG;
   if (!platform || !platform->flash || !platform->wdt ||
       !platform->flash->read) {
     return BOOT_ERR_INVALID_ARG;
@@ -365,14 +309,14 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&rv_cfi_seed, sizeof(rv_cfi_seed));
   }
-  uint32_t rv_tok[RB_CFI_NUM_TOKENS];
-  for (uint8_t i = 0; i < RB_CFI_NUM_TOKENS; i++) {
-    rv_tok[i] = cfi_derive(rv_cfi_seed, i);
-  }
+  boot_cfi_ctx_t revert_cfi_ctx;
+  boot_cfi_init(revert_cfi_ctx, rv_cfi_seed);
+  boot_cfi_add_expected(revert_cfi_ctx, 1);
+  boot_cfi_add_expected(revert_cfi_ctx, 2);
+  boot_cfi_add_expected(revert_cfi_ctx, 3);
 
   boot_status_t status = BOOT_OK;
   uint32_t physical_app_erases = 0;
-  volatile uint32_t revert_cfi = rv_tok[0];
 
   /* P10 Pre-Declaration Rule: Alle Intents und Buffer am Scope-Anfang
    * deklarieren, damit der Single-Exit Cleanup niemals über uninitialisierte
@@ -405,32 +349,17 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
   memcpy(&backup_header, hdr_buf, sizeof(toob_image_header_t));
   boot_secure_zeroize(hdr_buf, sizeof(hdr_buf)); /* Leakage Defense */
 
-  revert_cfi ^= rv_tok[1];
+  boot_cfi_step(revert_cfi_ctx, 1);
 
   /* 2. P10 Glitch-Proof Bounds Check (Verhindert Flash-Exploits durch
    * Header-Fakes) */
-  volatile uint32_t hdr_shield_1 = 0;
-  volatile uint32_t hdr_shield_2 = 0;
-
   bool size_valid =
       (backup_header.image_size > 0 && backup_header.image_size != 0xFFFFFFFF);
 
-  if (backup_header.magic == TOOB_MAGIC_HEADER && size_valid) {
-    hdr_shield_1 = BOOT_OK;
-  }
-
-  BOOT_GLITCH_DELAY();
-
-  if (hdr_shield_1 == BOOT_OK && backup_header.magic == TOOB_MAGIC_HEADER &&
-      size_valid) {
-    hdr_shield_2 = BOOT_OK;
-  }
-
-  if (hdr_shield_1 != BOOT_OK || hdr_shield_2 != BOOT_OK ||
-      hdr_shield_1 != hdr_shield_2) {
+  BOOT_SECURE_REQUIRE(backup_header.magic == TOOB_MAGIC_HEADER && size_valid, {
     status = BOOT_ERR_NOT_FOUND;
     goto revert_cleanup;
-  }
+  });
 
   if (backup_header.image_size > CHIP_APP_SLOT_SIZE) {
     status = BOOT_ERR_FLASH_BOUNDS;
@@ -444,7 +373,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     goto revert_cleanup;
   }
 
-  revert_cfi ^= rv_tok[2];
+  boot_cfi_step(revert_cfi_ctx, 2);
 
   /* 3. Resume-Logik (Brownout-Recovery) & Intent-Checkpointing */
   uint32_t dummy_accum = 0;
@@ -479,8 +408,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
   const uint32_t MAX_LOOP_GUARD = (CHIP_FLASH_TOTAL_SIZE / 64) + 100;
   uint32_t loop_iter = 0;
 
-  /* 4. ZERO-ALLOCATION 1-Way Copy-Schleife (Nutzt die ohnehin freie
-   * crypto_arena) */
+  /* 4. ZERO-ALLOCATION 1-Way Copy */
   while (current_offset < backup_header.image_size) {
     if (++loop_iter > MAX_LOOP_GUARD) {
       status = BOOT_ERR_FLASH_HW; /* Anti-Endless-Loop Guard Trap */
@@ -532,11 +460,11 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
      * Schützt das Dateisystem vor Burnout. CRC-Abgleich im RAM.
      * ==================================================================== */
     uint32_t crc_src = 0, crc_dest = 0;
-    status = rollback_compute_flash_crc32(platform, src, block_size, &crc_src);
+    status = rollback_compute_flash_crc32(platform, src, block_size, &crc_src, arena, arena_len);
     if (status != BOOT_OK)
       goto revert_cleanup;
 
-    status = rollback_compute_flash_crc32(platform, dst, block_size, &crc_dest);
+    status = rollback_compute_flash_crc32(platform, dst, block_size, &crc_dest, arena, arena_len);
     if (status != BOOT_OK)
       goto revert_cleanup;
 
@@ -546,20 +474,20 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
 
       /* P10 ALIGNMENT FIX: Maskiert die Division auf exakt 8 Bytes,
        * um Unaligned UsageFaults in den Hardware-SPI-DMAs auszuschließen! */
-      size_t half_arena = (BOOT_CRYPTO_ARENA_SIZE / 2) & ~7ULL;
+      size_t half_arena = (arena_len / 2) & ~7ULL;
 
       while (chk_off < block_size) {
         if (platform->wdt && platform->wdt->kick)
           platform->wdt->kick();
 
-        /* Splitten der crypto_arena in zwei alignte Hälften für Source/Dest
+        /* Splitten der Arena in zwei alignte Hälften für Source/Dest
          * Check */
         size_t step = (block_size - chk_off > half_arena)
                           ? half_arena
                           : (block_size - chk_off);
 
-        uint8_t *buf_dst = crypto_arena;
-        uint8_t *buf_src = crypto_arena + half_arena;
+        uint8_t *buf_dst = arena;
+        uint8_t *buf_src = arena + half_arena;
 
         if (platform->flash->read(dst + chk_off, buf_dst, step) != BOOT_OK ||
             platform->flash->read(src + chk_off, buf_src, step) != BOOT_OK) {
@@ -579,7 +507,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
 
       /* Radikal nullifizieren, damit keine Krypto-Residuen den nachfolgenden
        * SPI Read verfälschen! */
-      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      boot_secure_zeroize(arena, arena_len);
 
       if (is_identical) {
         /* Identisch: Fast-Forward zum nächsten Sektor ohne Erase/Write Last! */
@@ -612,20 +540,20 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     while (wr_off < block_size) {
       if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
-      size_t step = (block_size - wr_off > BOOT_CRYPTO_ARENA_SIZE)
-                        ? BOOT_CRYPTO_ARENA_SIZE
+      size_t step = (block_size - wr_off > arena_len)
+                        ? arena_len
                         : (block_size - wr_off);
 
       /* Lese Source in gesamte Arena */
-      status = platform->flash->read(src + wr_off, crypto_arena, step);
+      status = platform->flash->read(src + wr_off, arena, step);
       if (status != BOOT_OK)
         goto revert_cleanup;
 
       /* Phase-Bound CRC der Source für diesen Step */
-      uint32_t step_src_crc = compute_boot_crc32(crypto_arena, step);
+      uint32_t step_src_crc = compute_boot_crc32(arena, step);
 
       /* Schreibe Target */
-      status = platform->flash->write(dst + wr_off, crypto_arena, step);
+      status = platform->flash->write(dst + wr_off, arena, step);
       if (status != BOOT_OK)
         goto revert_cleanup;
 
@@ -633,28 +561,19 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
        * Zwingendes Nullen der Arena *vor* dem Read-Back beweist physikalisch,
        * dass der Vendor-Treiber uns nicht einfach den RAM Cache validiert,
        * sondern tatsächlich mit dem SPI-Flash gesprochen hat! */
-      boot_secure_zeroize(crypto_arena, step);
+      boot_secure_zeroize(arena, step);
 
       /* Lese Dest zurück und prüfe ECC-Integrität! */
-      status = platform->flash->read(dst + wr_off, crypto_arena, step);
+      status = platform->flash->read(dst + wr_off, arena, step);
       if (status != BOOT_OK)
         goto revert_cleanup;
 
-      uint32_t step_dst_crc = compute_boot_crc32(crypto_arena, step);
+      uint32_t step_dst_crc = compute_boot_crc32(arena, step);
 
-      volatile uint32_t ecc_shield_1 = 0, ecc_shield_2 = 0;
-      if (step_src_crc == step_dst_crc)
-        ecc_shield_1 = BOOT_OK;
-      BOOT_GLITCH_DELAY();
-      if (ecc_shield_1 == BOOT_OK && step_src_crc == step_dst_crc)
-        ecc_shield_2 = BOOT_OK;
-
-      if (ecc_shield_1 != BOOT_OK || ecc_shield_2 != BOOT_OK ||
-          ecc_shield_1 != ecc_shield_2) {
-        status = BOOT_ERR_FLASH_HW; /* FATAL: Bit-Rot bei Hardware Write
-                                       detektiert! */
+      BOOT_SECURE_REQUIRE(step_src_crc == step_dst_crc, {
+        status = BOOT_ERR_FLASH_HW; /* FATAL: Bit-Rot bei Hardware Write detektiert! */
         goto revert_cleanup;
-      }
+      });
 
       wr_off += (uint32_t)step;
     }
@@ -662,24 +581,13 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform) {
     current_offset += (uint32_t)block_size;
   }
 
-  revert_cfi ^= rv_tok[3];
+  boot_cfi_step(revert_cfi_ctx, 3);
 
   /* CFI Final Resolution */
-  uint32_t expected_cfi = rv_tok[0] ^ rv_tok[1] ^ rv_tok[2] ^ rv_tok[3];
-  volatile uint32_t cfi_shield_1 = 0, cfi_shield_2 = 0;
-
-  if (revert_cfi == expected_cfi)
-    cfi_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (cfi_shield_1 == BOOT_OK && revert_cfi == expected_cfi)
-    cfi_shield_2 = BOOT_OK;
-
-  if (cfi_shield_1 != BOOT_OK || cfi_shield_2 != BOOT_OK ||
-      cfi_shield_1 != cfi_shield_2) {
-    status = BOOT_ERR_INVALID_STATE; /* Revert-Prozess wurde durch Glitch
-                                        unterbrochen! */
+  boot_cfi_require(revert_cfi_ctx, {
+    status = BOOT_ERR_INVALID_STATE; /* Revert-Prozess wurde durch Glitch unterbrochen! */
     goto revert_cleanup;
-  }
+  });
 
   /* 5. Telemetrie & Isolierter Rollback-Intent Abschluss
    * Signalisiert dem nächsten Reset, dass das Rescue-Image verankert ist und
@@ -706,7 +614,7 @@ revert_cleanup:
    * Header und unverschlüsselte Firmware-Deltas in der RAM-Arena werden
    * unwiderruflich zerstört.
    */
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  boot_secure_zeroize(arena, arena_len);
   boot_secure_zeroize(&pending_intent, sizeof(pending_intent));
   boot_secure_zeroize(&revert_intent, sizeof(revert_intent));
   boot_secure_zeroize(&backup_header, sizeof(backup_header));

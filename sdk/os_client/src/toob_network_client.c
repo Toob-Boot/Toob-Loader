@@ -72,8 +72,13 @@ static toob_status_t _manifest_chunk_cb(const uint8_t* chunk, uint32_t len, void
 
 /* Parsed ein Meta-CBOR Map mit den Keys 1=svn, 2=size, 3=sha256, 4=image_type */
 static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_info_t* out) {
+    if (!data || len == 0 || !out) {
+        return false;
+    }
+
     zcbor_state_t state[2];
-    /* GAP-N01: Korrekte zcbor_new_decode_state Signatur (7 Parameter) */
+    /* GAP-N01: Korrekte zcbor_new_decode_state Signatur (7 Parameter).
+     * State array size 2 limits nesting depth to 1 level (DoS protection). */
     zcbor_new_decode_state(state, 2, data, len, 1, NULL, 0);
     
     if (!zcbor_map_start_decode(state)) return false;
@@ -83,6 +88,11 @@ static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_in
     bool has_sha256 = false;
     bool has_svn = false;
 
+    bool parsed_svn = false;
+    bool parsed_size = false;
+    bool parsed_sha256 = false;
+    bool parsed_image_type = false;
+
     /* GAP-N02: zcbor_array_at_end existiert, list_or_map_end nicht */
     while (ok && !zcbor_array_at_end(state)) {
         uint32_t key;
@@ -90,20 +100,26 @@ static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_in
         
         switch (key) {
             case 1: /* SVN */
+                if (parsed_svn) { ok = false; break; }
                 ok = zcbor_uint32_decode(state, &out->remote_svn);
                 has_svn = ok;
+                parsed_svn = ok;
                 break;
             case 2: /* Size */
+                if (parsed_size) { ok = false; break; }
                 ok = zcbor_uint32_decode(state, &out->total_size);
                 has_size = ok && (out->total_size > 0);
+                parsed_size = ok;
                 break;
             case 3: /* SHA256 */
             {
+                if (parsed_sha256) { ok = false; break; }
                 struct zcbor_string str;
                 ok = zcbor_bstr_decode(state, &str);
                 if (ok && str.len == 32) {
                     memcpy(out->sha256, str.value, 32);
                     has_sha256 = true;
+                    parsed_sha256 = true;
                 } else {
                     ok = false; /* Strikt: Muss exakt 32 Byte sein */
                 }
@@ -111,18 +127,33 @@ static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_in
             }
             case 4: /* Image Type */
             {
+                if (parsed_image_type) { ok = false; break; }
                 uint32_t itype;
                 ok = zcbor_uint32_decode(state, &itype);
-                out->image_type = (uint8_t)itype;
+                if (ok && itype <= 255) {
+                    out->image_type = (uint8_t)itype;
+                    parsed_image_type = true;
+                } else {
+                    ok = false;
+                }
                 break;
             }
             default:
+                /* zcbor_any_skip fails if nesting > 1, preventing DoS stack exhaustion */
                 ok = zcbor_any_skip(state, NULL);
                 break;
         }
     }
     
     ok = ok && zcbor_map_end_decode(state);
+    
+    /* Verify that the entire buffer was consumed (detect trailing garbage bytes) */
+    if (ok) {
+        size_t consumed = (size_t)(state[0].payload - data);
+        if (consumed != len) {
+            ok = false;
+        }
+    }
     
     /* Mathematische Perfektion: Pflichtfelder MÜSSEN vorhanden und valide sein */
     return ok && has_size && has_sha256 && has_svn;
@@ -132,11 +163,11 @@ static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_in
  * Phase 2: Payload Streaming
  * ============================================================================ */
 
-static toob_status_t _payload_chunk_cb(const uint8_t* chunk, uint32_t len, void* ctx) {
-    (void)ctx;
-    toob_status_t stat = toob_ota_process_chunk(chunk, len);
+static toob_status_t _payload_chunk_cb(const uint8_t* chunk, uint32_t len, void* user_ctx) {
+    toob_ota_ctx_t *ota = (toob_ota_ctx_t *)user_ctx;
+    toob_status_t stat = toob_ota_process_chunk(ota, chunk, len);
     if (stat != TOOB_OK) {
-        TOOB_LOGE(TAG, "Failed to process OTA chunk: 0x%08X", stat);
+        TOOB_LOGE(TAG, "Failed to process OTA chunk: 0x%08X", (unsigned)stat);
     }
     return stat;
 }
@@ -144,6 +175,9 @@ static toob_status_t _payload_chunk_cb(const uint8_t* chunk, uint32_t len, void*
 /* ============================================================================
  * Main OTA Flow
  * ============================================================================ */
+
+/* OTA session context (static: survives across resume cycles) */
+static toob_ota_ctx_t s_ota_ctx;
 
 toob_status_t toob_network_trigger_ota(const char* server_url) {
     if (!server_url) server_url = CONFIG_TOOB_SERVER_URL;
@@ -158,6 +192,7 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
         }
         TOOB_LOGI(TAG, "L1 Smoke Test passed");
         s_net_init = true;
+        toob_ota_ctx_init(&s_ota_ctx);
     }
     
     toob_status_t stat = TOOB_OK;
@@ -209,12 +244,13 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
 
     /* Phase 2: Resume / Begin */
     uint32_t resume_offset = 0;
-    if (toob_ota_resume(&resume_offset) == TOOB_OK && resume_offset > 0) {
-        TOOB_LOGI(TAG, "Resuming download from offset %u", resume_offset);
+    stat = toob_ota_resume_verified(&s_ota_ctx, info.total_size, info.sha256, &resume_offset);
+    if (stat == TOOB_OK && resume_offset > 0) {
+        TOOB_LOGI(TAG, "Resuming verified download from offset %u", resume_offset);
     } else {
-        stat = toob_ota_begin_verified(info.total_size, info.image_type, info.sha256);
+        stat = toob_ota_begin_verified(&s_ota_ctx, info.total_size, info.sha256);
         if (stat != TOOB_OK) {
-            TOOB_LOGE(TAG, "OTA begin failed: 0x%08X", stat);
+            TOOB_LOGE(TAG, "OTA begin failed: 0x%08X", (unsigned)stat);
             return stat;
         }
         resume_offset = 0;
@@ -226,23 +262,27 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
     written = snprintf(download_url, sizeof(download_url), "%s/download", server_url);
     if (written < 0 || (size_t)written >= sizeof(download_url)) {
         TOOB_LOGE(TAG, "Download URL truncated");
-        toob_ota_abort();
+        toob_ota_abort(&s_ota_ctx);
         return TOOB_ERR_INVALID_ARG;
     }
     
-    stat = rtos_http_get(download_url, resume_offset, _payload_chunk_cb, NULL);
+    stat = rtos_http_get(download_url, resume_offset, _payload_chunk_cb, &s_ota_ctx);
     if (stat != TOOB_OK) {
-        TOOB_LOGE(TAG, "Download failed: 0x%08X", stat);
-        toob_ota_abort();
+        TOOB_LOGE(TAG, "Download failed: 0x%08X", (unsigned)stat);
+        toob_ota_abort(&s_ota_ctx);
         return stat;
     }
 
     /* Phase 4: Finalize */
-    stat = toob_ota_finalize();
-    if (stat != TOOB_OK) {
-        TOOB_LOGE(TAG, "Finalize failed (hash mismatch?): 0x%08X", stat);
-        return stat;
+    stat = toob_ota_finalize(&s_ota_ctx);
+    if (stat == TOOB_ERR_WAL_LOCKED) {
+        TOOB_LOGW(TAG, "WAL locked: previous update pending, reboot to consume");
+    } else if (stat == TOOB_ERR_VERIFY) {
+        TOOB_LOGE(TAG, "Finalize failed: SHA-256 mismatch (stream corrupted)");
+    } else if (stat != TOOB_OK) {
+        TOOB_LOGE(TAG, "Finalize failed: 0x%08X", (unsigned)stat);
     }
+    if (stat != TOOB_OK) return stat;
 
     TOOB_LOGI(TAG, "OTA update staged successfully. Rebooting...");
     

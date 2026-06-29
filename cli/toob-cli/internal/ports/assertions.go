@@ -38,15 +38,6 @@ func assertRegistryRevisionResponseFromPort() {
 	}
 }
 
-func assertRegistryVersionResponseToPort() {
-	var r apiclient.RegistryVersionResponse
-	_ = RegistryVersionResponse{Version: r.Version}
-}
-
-func assertRegistryVersionResponseFromPort() {
-	var p RegistryVersionResponse
-	_ = apiclient.RegistryVersionResponse{Version: p.Version}
-}
 
 func assertChipResolveResponseToPort() {
 	var r apiclient.ChipResolveResponse
@@ -64,12 +55,18 @@ func assertChipResolveResponseFromPort() {
 
 func assertIntegrationItemToPort() {
 	var r apiclient.IntegrationItem
-	_ = IntegrationItem{Name: r.Name, Version: r.Version}
+	_ = IntegrationItem{
+		Name: r.Name, Version: r.Version,
+		Description: r.Description, Path: r.Path,
+	}
 }
 
 func assertIntegrationItemFromPort() {
 	var p IntegrationItem
-	_ = apiclient.IntegrationItem{Name: p.Name, Version: p.Version}
+	_ = apiclient.IntegrationItem{
+		Name: p.Name, Version: p.Version,
+		Description: p.Description, Path: p.Path,
+	}
 }
 
 func assertMatrixEntryToPort() {
@@ -190,26 +187,6 @@ func assertPublishResponseFromPort() {
 	}
 }
 
-func assertSyncDeltaResponseToPort() {
-	var r apiclient.SyncDeltaResponse
-	_ = SyncDeltaResponse{Since: r.Since, Count: r.Count, Revisions: r.Revisions}
-}
-
-func assertSyncDeltaResponseFromPort() {
-	var p SyncDeltaResponse
-	_ = apiclient.SyncDeltaResponse{Since: p.Since, Count: p.Count, Revisions: p.Revisions}
-}
-
-func assertAckSyncResponseToPort() {
-	var r apiclient.AckSyncResponse
-	_ = AckSyncResponse{Status: r.Status, Advisories: r.Advisories}
-}
-
-func assertAckSyncResponseFromPort() {
-	var p AckSyncResponse
-	_ = apiclient.AckSyncResponse{Status: p.Status, Advisories: p.Advisories}
-}
-
 // --- RegistryEcosystem ↔ registry.EcosystemVersions ---
 
 func assertRegistryEcosystemToPort() {
@@ -226,8 +203,6 @@ func assertRegistryEcosystemFromPort() {
 	}
 }
 
-// --- RegistryIndex ↔ registry.Index ---
-
 func assertRegistryIndexToPort() {
 	var r registry.Index
 	var eco *RegistryEcosystem
@@ -237,10 +212,9 @@ func assertRegistryIndexToPort() {
 		}
 	}
 	_ = RegistryIndex{
-		FormatVersion:    r.FormatVersion,
-		RegistryVersion:  r.RegistryVersion,
-		CliCompatibility: r.CliCompatibility,
-		Ecosystem:        eco,
+		FormatVersion:   r.FormatVersion,
+		RegistryVersion: r.RegistryVersion,
+		Ecosystem:       eco,
 	}
 }
 
@@ -253,10 +227,9 @@ func assertRegistryIndexFromPort() {
 		}
 	}
 	_ = registry.Index{
-		FormatVersion:    p.FormatVersion,
-		RegistryVersion:  p.RegistryVersion,
-		CliCompatibility: p.CliCompatibility,
-		Ecosystem:        eco,
+		FormatVersion:   p.FormatVersion,
+		RegistryVersion: p.RegistryVersion,
+		Ecosystem:       eco,
 	}
 }
 
@@ -359,6 +332,44 @@ func assertArchToPort() {
 func assertArchFromPort() {
 	var p RegistryArch
 	_ = registry.ArchInfo{
+		Name: p.Name, Path: p.Path,
+		Version: p.Version, Description: p.Description,
+	}
+}
+
+// --- SoCInfo ↔ RegistrySoC ---
+
+func assertSoCToPort() {
+	var r registry.SoCInfo
+	_ = RegistrySoC{
+		Name: r.Name, Path: r.Path,
+		Version: r.Version, Description: r.Description,
+		Chips: r.Chips,
+	}
+}
+
+func assertSoCFromPort() {
+	var p RegistrySoC
+	_ = registry.SoCInfo{
+		Name: p.Name, Path: p.Path,
+		Version: p.Version, Description: p.Description,
+		Chips: p.Chips,
+	}
+}
+
+// --- IntegrationInfo ↔ RegistryIntegration ---
+
+func assertIntegrationToPort() {
+	var r registry.IntegrationInfo
+	_ = RegistryIntegration{
+		Name: r.Name, Path: r.Path,
+		Version: r.Version, Description: r.Description,
+	}
+}
+
+func assertIntegrationFromPort() {
+	var p RegistryIntegration
+	_ = registry.IntegrationInfo{
 		Name: p.Name, Path: p.Path,
 		Version: p.Version, Description: p.Description,
 	}

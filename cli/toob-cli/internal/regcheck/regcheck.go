@@ -7,6 +7,7 @@ package regcheck
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,20 +127,13 @@ func fetchRegistryStatus(lockedVersion string, chipNames []string) *Result {
 	client := apiclient.New()
 	client.HTTPClient.Timeout = 3 * time.Second
 
-	latestVersion, err := client.GetRegistryVersion(context.Background())
-	if err != nil || latestVersion == "" {
+	revResp, err := client.GetRevision(context.Background())
+	if err != nil || revResp == nil {
 		return nil
 	}
+	latestVersion := fmt.Sprintf("%d", revResp.Revision)
 
-	// If the API returned a branch name (e.g. "main") instead of a semver,
-	// try to resolve the actual version from the locally cached registry.json.
-	if !strings.Contains(latestVersion, ".") {
-		if resolved := resolveLocalVersion(latestVersion); resolved != "" {
-			latestVersion = resolved
-		} else {
-			return nil
-		}
-	}
+
 
 	writeCache(cacheData{
 		LastCheck:     time.Now(),
@@ -178,22 +172,3 @@ func normalizeVersion(v string) string {
 	return strings.TrimPrefix(v, "v")
 }
 
-// resolveLocalVersion reads registry_version from a locally cached version directory.
-func resolveLocalVersion(branchName string) string {
-	home, err := paths.ToobHome()
-	if err != nil {
-		return ""
-	}
-	regPath := filepath.Join(home, "registry", "versions", branchName, "registry.json")
-	data, err := os.ReadFile(regPath)
-	if err != nil {
-		return ""
-	}
-	var idx struct {
-		RegistryVersion string `json:"registry_version"`
-	}
-	if json.Unmarshal(data, &idx) != nil || idx.RegistryVersion == "" {
-		return ""
-	}
-	return idx.RegistryVersion
-}

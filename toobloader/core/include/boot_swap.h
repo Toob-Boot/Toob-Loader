@@ -39,7 +39,13 @@ typedef enum {
  */
 #include "boot_journal.h"
 
-boot_status_t boot_swap_apply(const boot_platform_t *platform, uint32_t src_base, uint32_t dest_base, uint32_t length, boot_dest_slot_t dest_slot, wal_entry_payload_t *open_txn);
-boot_status_t boot_swap_erase_safe(const boot_platform_t *platform, uint32_t addr, size_t len);
+boot_status_t boot_swap_apply(const boot_platform_t *platform,
+                              uint32_t src_base, uint32_t dest_base,
+                              uint32_t length, boot_dest_slot_t dest_slot,
+                              wal_entry_payload_t *open_txn,
+                              uint8_t *arena, size_t arena_len);
+boot_status_t boot_swap_erase_safe(const boot_platform_t *platform,
+                                   uint32_t addr, size_t len,
+                                   uint8_t *arena, size_t arena_len);
 
 #endif /* BOOT_SWAP_H */

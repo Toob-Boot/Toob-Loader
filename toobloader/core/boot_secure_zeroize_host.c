@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * @brief Host-Sandbox Mock für die Assembler-Zeroize Funktion.
@@ -18,3 +19,16 @@ __attribute__((noinline)) void boot_secure_zeroize(void* ptr, size_t len) {
     }
     __asm__ volatile("" : : "g"(ptr) : "memory");
 }
+
+#ifdef TOOB_MOCK_TEST
+volatile int g_fault_trigger_count = 0;
+volatile int g_fault_target_index = -1;
+
+bool should_inject_fault(void) {
+    int current = g_fault_trigger_count++;
+    if (g_fault_target_index >= 0 && current == g_fault_target_index) {
+        return true;
+    }
+    return false;
+}
+#endif

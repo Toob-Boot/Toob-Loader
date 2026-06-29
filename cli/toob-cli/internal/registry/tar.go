@@ -213,7 +213,13 @@ func downloadAndExtractTarball(client *http.Client, url string, targetDir string
 		return fmt.Errorf("bad status %d from %s", resp.StatusCode, url)
 	}
 
-	gzr, err := gzip.NewReader(resp.Body)
+	return extractTarball(resp.Body, targetDir)
+}
+
+// extractTarball decompresses a gzipped tar stream into targetDir,
+// stripping the top-level directory from archive paths.
+func extractTarball(r io.Reader, targetDir string) error {
+	gzr, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
@@ -238,7 +244,7 @@ func downloadAndExtractTarball(client *http.Client, url string, targetDir string
 			continue
 		}
 
-		// Strip the top-level directory (like the ZIP extractor did)
+		// Strip the top-level directory
 		parts := strings.SplitN(filepath.ToSlash(header.Name), "/", 2)
 		if len(parts) < 2 || parts[1] == "" {
 			continue
@@ -247,7 +253,7 @@ func downloadAndExtractTarball(client *http.Client, url string, targetDir string
 		relPath := filepath.FromSlash(parts[1])
 		destPath := filepath.Join(targetDir, relPath)
 
-		// Zip-Slip protection
+		// Tar-Slip protection
 		cleanDest := filepath.Clean(destPath)
 		cleanTarget := filepath.Clean(targetDir) + string(os.PathSeparator)
 		if !strings.HasPrefix(cleanDest, cleanTarget) {

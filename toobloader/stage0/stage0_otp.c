@@ -19,5 +19,6 @@ uint8_t stage0_get_active_otp_key_index(const boot_platform_t *platform) {
       return 255;
     return (uint8_t)epoch;
   }
-  return 0;
+  /* P7 Fail-Fast: Ohne Epoch kein sicherer Key-Index. Dead-Halt erzwingen. */
+  while (1) { BOOT_GLITCH_DELAY(); }
 }

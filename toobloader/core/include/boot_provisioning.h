@@ -27,6 +27,7 @@
  *
  * @param platform Fully initialized platform (provisioning + console HAL required).
  */
-_Noreturn void boot_provisioning_run(const boot_platform_t *platform);
+_Noreturn void boot_provisioning_run(const boot_platform_t *platform,
+                                     uint8_t *arena, size_t arena_len);
 
 #endif /* BOOT_PROVISIONING_H */

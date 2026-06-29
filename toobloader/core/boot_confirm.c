@@ -8,6 +8,7 @@
 #include "boot_types.h"
 #include "boot_hal.h"
 #include "boot_confirm.h"
+#include "boot_fih.h"
 
 boot_status_t boot_confirm_evaluate(const boot_platform_t* platform, uint64_t expected_nonce) {
     if (platform == NULL || platform->clock == NULL || platform->confirm == NULL || platform->wdt == NULL) {
@@ -29,34 +30,15 @@ boot_status_t boot_confirm_evaluate(const boot_platform_t* platform, uint64_t ex
     bool is_ok = platform->confirm->check_ok(expected_nonce);
     platform->wdt->kick();
 
-    /* 3. Whitelist Abwehr: Nur absolut unschädliche externe Resets dürfen als "Sicher" gelten.
-     * ACHTUNG (BROWNOUT): Verliert der Akku Monate nach dem Update seine Spannung, löst dies
-     * einen BROWNOUT-Reset aus. Dies indiziert KEINESFALLS ein crashendes OS! Passierte der
-     * Brownout WÄHREND dem OS-Handoff, liefert check_ok() ohnehin false. Daher MUSS der
-     * Brownout auf der Whitelist stehen, sonst rollt jedes entladene Gerät fälschlich zurück! */
-    if (reason != RESET_REASON_POWER_ON && 
-        reason != RESET_REASON_PIN_RESET && 
-        reason != RESET_REASON_BROWNOUT) {
-        is_ok = false;
-    }
+    /* P7b: Die Nonce-Prüfung (check_ok) ist das primäre Gate.
+     * Eine valide Nonce beweist, dass das OS bis zum Confirm-Punkt lief.
+     * Reset-Reason ist nur korroborierende Information:
+     * - Nonce gültig → Confirm gilt, unabhängig vom Reset-Reason.
+     *   Ein BROWNOUT/WDT *nach* erfolgreichem Confirm darf nicht rückgängig machen.
+     * - Nonce ungültig + WDT/FAULT → definitiv kein Confirm (OS hat nie confirmed). */
 
     /* 4. Glitch-Defense Double-Check Pattern (wie in boot_verify.c) */
-    volatile uint32_t secure_flag_1 = 0;
-    volatile uint32_t secure_flag_2 = 0;
-
-    if (is_ok) {
-        secure_flag_1 = BOOT_OK; 
-    }
-
-    /* Branch Delay Injection gegen Voltage Faults (Instruction Skips) */
-    BOOT_GLITCH_DELAY();
-
-    if (secure_flag_1 == BOOT_OK && is_ok) {
-        secure_flag_2 = BOOT_OK;
-    }
-
-    /* Wenn das Update fehlschlägt (Glitch entdeckt oder regulär false) -> Lösche Flag + Rollback */
-    if (secure_flag_1 != secure_flag_2 || secure_flag_2 != BOOT_OK) {
+    BOOT_SECURE_REQUIRE(is_ok, {
         platform->wdt->kick();
         boot_status_t clear_stat = platform->confirm->clear();
         platform->wdt->kick();
@@ -65,7 +47,7 @@ boot_status_t boot_confirm_evaluate(const boot_platform_t* platform, uint64_t ex
             return clear_stat; /* Hardware Failure durchschleifen */
         }
         return BOOT_ERR_VERIFY;
-    }
+    });
 
     return BOOT_OK;
 }

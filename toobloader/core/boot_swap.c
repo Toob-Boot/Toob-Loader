@@ -28,10 +28,10 @@
 #include "boot_journal.h"
 #include "boot_secure_zeroize.h"
 #include "boot_ct_utils.h"
+#include "boot_fih.h"
 #include <string.h>
 
-/* Zero-Allocation: Exklusive Übernahme der Arena für den Swap-Vorgang */
-extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
+/* P5: Arena is now passed explicitly by the orchestrator */
 
 _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 512,
                "Crypto Arena is too small for chunked flash operations!");
@@ -49,7 +49,8 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
  */
 static boot_status_t compute_flash_crc32(const boot_platform_t *platform,
                                          uint32_t addr, size_t len,
-                                         uint32_t *out_crc) {
+                                         uint32_t *out_crc,
+                                         uint8_t *arena, size_t arena_len) {
   uint32_t crc = 0xFFFFFFFF;
   size_t offset = 0;
 
@@ -57,18 +58,18 @@ static boot_status_t compute_flash_crc32(const boot_platform_t *platform,
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
 
-    size_t step = (len - offset > BOOT_CRYPTO_ARENA_SIZE)
-                      ? BOOT_CRYPTO_ARENA_SIZE
+    size_t step = (len - offset > arena_len)
+                      ? arena_len
                       : (len - offset);
 
-    boot_status_t st = platform->flash->read(addr + (uint32_t)offset, crypto_arena, (uint32_t)step);
+    boot_status_t st = platform->flash->read(addr + (uint32_t)offset, arena, (uint32_t)step);
     if (st != BOOT_OK) {
-      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      boot_secure_zeroize(arena, arena_len);
       return st;
     }
 
     for (size_t i = 0; i < step; i++) {
-      crc ^= crypto_arena[i];
+      crc ^= arena[i];
       for (uint8_t j = 0; j < 8; j++) {
         crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
       }
@@ -77,7 +78,7 @@ static boot_status_t compute_flash_crc32(const boot_platform_t *platform,
   }
 
   /* P10 Leakage Prevention */
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  boot_secure_zeroize(arena, arena_len);
   *out_crc = ~crc;
   return BOOT_OK;
 }
@@ -86,65 +87,59 @@ static boot_status_t compute_flash_crc32(const boot_platform_t *platform,
 
 /**
  * @brief Kopiert Daten iterativ zwischen Flash-Sektoren mit simultanem
- * ECC Read-Back Verify. Nutzt die dynamische crypto_arena.
+ * ECC Read-Back Verify.
  */
 static boot_status_t
 stream_flash_copy_and_verify(const boot_platform_t *platform, uint32_t src,
-                             uint32_t dest, size_t len, uint32_t expected_crc) {
+                             uint32_t dest, size_t len, uint32_t expected_crc,
+                             uint8_t *arena, size_t arena_len) {
   size_t offset = 0;
 
   while (offset < len) {
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
-    size_t step = (len - offset > BOOT_CRYPTO_ARENA_SIZE)
-                      ? BOOT_CRYPTO_ARENA_SIZE
+    size_t step = (len - offset > arena_len)
+                      ? arena_len
                       : (len - offset);
 
-    boot_status_t st = platform->flash->read(src + (uint32_t)offset, crypto_arena, (uint32_t)step);
+    boot_status_t st = platform->flash->read(src + (uint32_t)offset, arena, (uint32_t)step);
     if (st != BOOT_OK) {
-      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      boot_secure_zeroize(arena, arena_len);
       return st;
     }
 
-    st = platform->flash->write(dest + (uint32_t)offset, crypto_arena, (uint32_t)step);
+    st = platform->flash->write(dest + (uint32_t)offset, arena, (uint32_t)step);
     if (st != BOOT_OK) {
-      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      boot_secure_zeroize(arena, arena_len);
       return st;
     }
 
     offset += step;
   }
 
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  boot_secure_zeroize(arena, arena_len);
 
   /* Phase-Bound ECC Readback Verification */
   uint32_t verify_crc = 0;
-  boot_status_t st = compute_flash_crc32(platform, dest, len, &verify_crc);
+  boot_status_t st = compute_flash_crc32(platform, dest, len, &verify_crc, arena, arena_len);
   if (st != BOOT_OK)
     return st;
 
-  volatile uint32_t crc_shield_1 = 0, crc_shield_2 = 0;
-  if (verify_crc == expected_crc)
-    crc_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (crc_shield_1 == BOOT_OK && verify_crc == expected_crc)
-    crc_shield_2 = BOOT_OK;
-
-  if (crc_shield_1 != BOOT_OK || crc_shield_2 != BOOT_OK) {
+  BOOT_SECURE_REQUIRE(verify_crc == expected_crc, {
     return BOOT_ERR_FLASH_HW; /* Bit-Rot / Tearing / Voltage Fault detektiert */
-  }
+  });
 
   return BOOT_OK;
 }
 
 /**
  * @brief Internal Tracker für physikalische Flash-Erases.
- * Smart-Erase nutzt die crypto_arena iterativ, um unnötige Hardware-Erases zu
- * blockieren.
+ * Smart-Erase scans sectors to avoid unnecessary hardware erases.
  */
 static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
                                               uint32_t addr, size_t length,
-                                              uint32_t *erases_out) {
+                                              uint32_t *erases_out,
+                                              uint8_t *arena, size_t arena_len) {
   if (!platform || !platform->flash || !platform->flash->erase_sector ||
       !platform->flash->get_sector_size) {
     return BOOT_ERR_INVALID_ARG;
@@ -178,24 +173,24 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
     while (chk_off < sec_size) {
       if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
-      size_t read_len = (sec_size - chk_off > BOOT_CRYPTO_ARENA_SIZE)
-                            ? BOOT_CRYPTO_ARENA_SIZE
+      size_t read_len = (sec_size - chk_off > arena_len)
+                            ? arena_len
                             : (sec_size - chk_off);
 
       status =
-          platform->flash->read(current_addr + chk_off, crypto_arena, read_len);
+          platform->flash->read(current_addr + chk_off, arena, read_len);
       if (status != BOOT_OK) {
         needs_erase = true;
       }
 
       /* P10 Timing-Oracle Defense: Full-scan accumulator, no early exit */
-      if (!is_fully_erased_constant_time(crypto_arena, read_len, erased_val)) {
+      if (!is_fully_erased_constant_time(arena, read_len, erased_val)) {
         needs_erase = true;
       }
       chk_off += (uint32_t)read_len;
     }
 
-    boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+    boot_secure_zeroize(arena, arena_len);
 
     if (needs_erase) {
       if (sec_size >= CHIP_FLASH_MAX_SECTOR_SIZE) {
@@ -227,8 +222,9 @@ static boot_status_t _boot_swap_erase_tracked(const boot_platform_t *platform,
 }
 
 boot_status_t boot_swap_erase_safe(const boot_platform_t *platform,
-                                   uint32_t addr, size_t len) {
-  return _boot_swap_erase_tracked(platform, addr, len, NULL);
+                                   uint32_t addr, size_t len,
+                                   uint8_t *arena, size_t arena_len) {
+  return _boot_swap_erase_tracked(platform, addr, len, NULL, arena, arena_len);
 }
 
 typedef enum { SWAP_STATE_NORMAL = 0, SWAP_STATE_READ_ONLY = 1 } swap_state_t;
@@ -263,7 +259,10 @@ boot_swap_check_eol_survival(const boot_platform_t *platform) {
 boot_status_t boot_swap_apply(const boot_platform_t *platform,
                               uint32_t src_base, uint32_t dest_base,
                               uint32_t length, boot_dest_slot_t dest_slot,
-                              wal_entry_payload_t *open_txn) {
+                              wal_entry_payload_t *open_txn,
+                              uint8_t *arena, size_t arena_len) {
+  if (!arena || arena_len < 512)
+    return BOOT_ERR_INVALID_ARG;
   if (!platform || !platform->flash || !platform->flash->read ||
       !platform->flash->write || !platform->flash->get_sector_size) {
     return BOOT_ERR_INVALID_ARG;
@@ -373,19 +372,19 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
       /* ====================================================================
        * 1. O(1) ZERO-WEAR IDENTITY CHECK (Flash Life Extender)
        * ==================================================================== */
-      status = compute_flash_crc32(platform, current_src, block_size, &crc_src);
+      status = compute_flash_crc32(platform, current_src, block_size, &crc_src, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
 
       status =
-          compute_flash_crc32(platform, current_dest, block_size, &crc_dest);
+          compute_flash_crc32(platform, current_dest, block_size, &crc_dest, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
 
       if (crc_src == crc_dest) {
         bool is_identical = true;
         uint32_t chk_off = 0;
-        size_t half_arena = BOOT_CRYPTO_ARENA_SIZE / 2;
+        size_t half_arena = arena_len / 2;
 
         while (chk_off < block_size) {
           if (platform->wdt && platform->wdt->kick)
@@ -394,8 +393,8 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
                             ? half_arena
                             : (block_size - chk_off);
 
-          uint8_t *buf_dst = crypto_arena;
-          uint8_t *buf_src = crypto_arena + half_arena;
+          uint8_t *buf_dst = arena;
+          uint8_t *buf_src = arena + half_arena;
 
           if (platform->flash->read(current_dest + chk_off, buf_dst, step) !=
                   BOOT_OK ||
@@ -412,7 +411,7 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
           chk_off += (uint32_t)step;
         }
 
-        boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+        boot_secure_zeroize(arena, arena_len);
 
         if (is_identical) {
           /* Überspringen! Fast-Forward spart WAL Writes und radikale Mengen an
@@ -446,17 +445,17 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
      * ==================================================================== */
     uint32_t phys_src = 0, phys_dest = 0, phys_scratch = 0;
 
-    status = compute_flash_crc32(platform, current_src, block_size, &phys_src);
+    status = compute_flash_crc32(platform, current_src, block_size, &phys_src, arena, arena_len);
     if (status != BOOT_OK)
       goto swap_cleanup;
 
     status =
-        compute_flash_crc32(platform, current_dest, block_size, &phys_dest);
+        compute_flash_crc32(platform, current_dest, block_size, &phys_dest, arena, arena_len);
     if (status != BOOT_OK)
       goto swap_cleanup;
 
     status = compute_flash_crc32(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
-                                 block_size, &phys_scratch);
+                                 block_size, &phys_scratch, arena, arena_len);
     if (status != BOOT_OK)
       goto swap_cleanup;
 
@@ -512,13 +511,13 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     /* PHASE A: Backup Dest -> Scratch */
     if (run_phase_a) {
       status = _boot_swap_erase_tracked(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
-                                        block_size, &physical_scratch_erases);
+                                        block_size, &physical_scratch_erases, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
 
       status = stream_flash_copy_and_verify(platform, current_dest,
                                             CHIP_SCRATCH_SLOT_ABS_ADDR,
-                                            block_size, crc_dest);
+                                            block_size, crc_dest, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
     }
@@ -526,12 +525,12 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     /* PHASE B: Copy Src -> Dest */
     if (run_phase_b) {
       status = _boot_swap_erase_tracked(platform, current_dest, block_size,
-                                        &physical_dest_erases);
+                                        &physical_dest_erases, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
 
       status = stream_flash_copy_and_verify(platform, current_src, current_dest,
-                                            block_size, crc_src);
+                                            block_size, crc_src, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
     }
@@ -539,13 +538,13 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     /* PHASE C: Copy Scratch -> Src */
     if (run_phase_c) {
       status = _boot_swap_erase_tracked(platform, current_src, block_size,
-                                        &physical_src_erases);
+                                        &physical_src_erases, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
 
       status =
           stream_flash_copy_and_verify(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
-                                       current_src, block_size, crc_dest);
+                                       current_src, block_size, crc_dest, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
     }
@@ -575,6 +574,6 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
 swap_cleanup:
   /* P10 Single Exit: Zerstöre unverschlüsselte Firmware-Residuen aus der Arena
    */
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  boot_secure_zeroize(arena, arena_len);
   return status;
 }

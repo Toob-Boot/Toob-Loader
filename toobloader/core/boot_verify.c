@@ -23,6 +23,7 @@
  */
 
 #include "boot_verify.h"
+#include "boot_fih.h"
 #include "boot_ct_utils.h"
 #include "boot_secure_zeroize.h"
 #include "boot_types.h"
@@ -89,21 +90,8 @@ static inline boot_status_t verify_not_all_zeros_glitch_safe(const uint8_t *buf,
     and_acc &= buf[i];
   }
 
-  volatile uint32_t zero_shield_1 = 0;
-  volatile uint32_t zero_shield_2 = 0;
-
-  if (or_acc != 0x00 && and_acc != 0xFF)
-    zero_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (zero_shield_1 == BOOT_OK && or_acc != 0x00 && and_acc != 0xFF)
-    zero_shield_2 = BOOT_OK;
-
-  if (zero_shield_1 == BOOT_OK && zero_shield_2 == BOOT_OK &&
-      zero_shield_1 == zero_shield_2) {
-    return BOOT_OK;
-  }
-
-  return BOOT_ERR_VERIFY; /* All-Zero / All-xFF Key detected -> Abort! */
+  BOOT_SECURE_REQUIRE(or_acc != 0x00 && and_acc != 0xFF, { return BOOT_ERR_VERIFY; });
+  return BOOT_OK;
 }
 
 boot_status_t
@@ -122,14 +110,12 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&verify_cfi_seed, sizeof(verify_cfi_seed));
   }
-  uint32_t cfi_tok[VERIFY_CFI_NUM_TOKENS];
-  for (uint8_t i = 0; i < VERIFY_CFI_NUM_TOKENS; i++) {
-    cfi_tok[i] = cfi_derive(verify_cfi_seed, i);
-  }
-
-  /* CFI-Akkumulator: Beweist den physischen Durchlauf der Verifikationsblöcke
-   */
-  volatile uint32_t execution_path = cfi_tok[VERIFY_CFI_SLOT_INIT];
+  boot_cfi_ctx_t verify_cfi_ctx;
+  boot_cfi_init(verify_cfi_ctx, verify_cfi_seed);
+  boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_1);
+  boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_2);
+  boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_3);
+  boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_4);
 
   /* P10 Stack Allocation: 8-Byte Alignment zwingend für HW-Crypto-Cores */
   uint8_t root_pubkey[32] __attribute__((aligned(8)));
@@ -189,7 +175,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_1]; /* Schritt 1 erfolgreich bewiesen */
+  boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_1); /* Schritt 1 erfolgreich bewiesen */
 
   /* ====================================================================
    * 3. CONSTANT-TIME eFUSE DOWNGRADE CHECK (Side-Channel Closure)
@@ -217,30 +203,15 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
 
   /* Wenn der angefragte Index < 255 ist und der nächste Slot gültig ist,
      handelt es sich um einen revozierten Key -> Downgrade-Versuch! */
-  volatile uint32_t downgrade_shield_1 = 0;
-  volatile uint32_t downgrade_shield_2 = 0;
-
   bool is_max_key = (local_env.key_index == 255);
   bool next_key_absent = (next_key_stat == BOOT_ERR_NOT_FOUND);
 
-  if (is_max_key || next_key_absent) {
-    downgrade_shield_1 = BOOT_OK;
-  }
-
-  BOOT_GLITCH_DELAY(); /* Glitch Delay Injection */
-
-  if (downgrade_shield_1 == BOOT_OK && (is_max_key || next_key_absent)) {
-    downgrade_shield_2 = BOOT_OK;
-  }
-
-  if (downgrade_shield_1 != BOOT_OK || downgrade_shield_2 != BOOT_OK ||
-      downgrade_shield_1 != downgrade_shield_2) {
-    final_status =
-        BOOT_ERR_DOWNGRADE; /* Downgrade Attack physikalisch identifiziert! */
+  BOOT_SECURE_REQUIRE(is_max_key || next_key_absent, {
+    final_status = BOOT_ERR_DOWNGRADE;
     goto cleanup;
-  }
+  });
 
-  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_2]; /* Schritt 2 erfolgreich bewiesen */
+  boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_2); /* Schritt 2 erfolgreich bewiesen */
 
   /* ====================================================================
    * 4. HARDWARE ROOT-OF-TRUST EXTRACTION (Glitch-Hardened)
@@ -256,21 +227,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();
 
-  volatile uint32_t key_shield_1 = 0;
-  volatile uint32_t key_shield_2 = 0;
-
-  if (key_stat == BOOT_OK) {
-    key_shield_1 = BOOT_OK;
-  }
-
-  BOOT_GLITCH_DELAY(); /* EMFI Instruction Skip Protection */
-
-  if (key_shield_1 == BOOT_OK && key_stat == BOOT_OK) {
-    key_shield_2 = BOOT_OK;
-  }
-
-  if (key_shield_1 != BOOT_OK || key_shield_2 != BOOT_OK ||
-      key_shield_1 != key_shield_2) {
+  if (boot_secure_confirm(key_stat) != BOOT_OK) {
     final_status = (key_stat != BOOT_OK) ? key_stat : BOOT_ERR_VERIFY;
     goto cleanup;
   }
@@ -283,14 +240,11 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_3]; /* Schritt 3 erfolgreich bewiesen */
+  boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_3); /* Schritt 3 erfolgreich bewiesen */
 
   /* ====================================================================
    * 5. ENVELOPE-FIRST ED25519 VERIFICATION (Glitch Hardened)
    * ==================================================================== */
-  volatile uint32_t ed_secure_flag_1 = 0;
-  volatile uint32_t ed_secure_flag_2 = 0;
-
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();
   boot_status_t verify_stat = platform->crypto->verify_ed25519(
@@ -313,65 +267,39 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
 
   boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
 
-  if (verify_stat != verify_stat_2 || verify_stat_2 != BOOT_OK) {
+  BOOT_SECURE_REQUIRE(verify_stat == BOOT_OK && verify_stat_2 == BOOT_OK, {
     final_status = BOOT_ERR_VERIFY;
     goto cleanup;
-  }
+  });
 #else
   /* DPA MINIMIZATION: Root Key wird SOFORT nach dem Signatur-Check geschreddert.
    * Er darf keine Makrosekunde länger als zwingend nötig im RAM verweilen. */
   boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
 #endif
 
-  if (verify_stat == BOOT_OK) {
-    ed_secure_flag_1 = BOOT_OK;
-  }
-
-  BOOT_GLITCH_DELAY(); /* Branch-Skip Mitigation */
-
-  if (ed_secure_flag_1 == BOOT_OK && verify_stat == BOOT_OK) {
-    ed_secure_flag_2 = BOOT_OK;
-  }
-
-  if (ed_secure_flag_1 != BOOT_OK || ed_secure_flag_2 != BOOT_OK ||
-      ed_secure_flag_1 != ed_secure_flag_2) {
+  if (boot_secure_confirm(verify_stat) != BOOT_OK) {
     final_status = BOOT_ERR_VERIFY;
     goto cleanup;
   }
 
-  execution_path ^= cfi_tok[VERIFY_CFI_SLOT_4]; /* Schritt 4 erfolgreich bewiesen */
+  boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_4); /* Schritt 4 erfolgreich bewiesen */
 
   /* ====================================================================
    * 6. POST-QUANTUM HYBRID ENFORCEMENT (Bypass Shielded)
    * ==================================================================== */
-  volatile uint32_t pqc_req_shield_1 = 0;
-  volatile uint32_t pqc_req_shield_2 = 0;
-
+#if TOOB_PQC_ENABLED
   bool pqc_enforced = false;
   if (platform->crypto->is_pqc_enforced) {
     pqc_enforced = platform->crypto->is_pqc_enforced();
   }
 
+  bool pqc_required_proven = false;
   if (pqc_enforced || local_env.pqc_hybrid_active) {
-    pqc_req_shield_1 = BOOT_OK;
-  }
-
-  BOOT_GLITCH_DELAY();
-
-  if (pqc_req_shield_1 == BOOT_OK &&
-      (pqc_enforced || local_env.pqc_hybrid_active)) {
-    pqc_req_shield_2 = BOOT_OK;
-  }
-
-  bool pqc_required_proven =
-      (pqc_req_shield_1 == BOOT_OK && pqc_req_shield_2 == BOOT_OK &&
-       pqc_req_shield_1 == pqc_req_shield_2);
-
-  /* Anti-Glitch: Wenn die HW PQC erzwingt, aber die Schilde korrumpiert wurden
-   * -> Halt! */
-  if (pqc_enforced && !pqc_required_proven) {
-    final_status = BOOT_ERR_VERIFY;
-    goto cleanup;
+    BOOT_SECURE_REQUIRE(pqc_enforced || local_env.pqc_hybrid_active, {
+      final_status = BOOT_ERR_VERIFY;
+      goto cleanup;
+    });
+    pqc_required_proven = true;
   }
 
   if (pqc_required_proven) {
@@ -397,18 +325,10 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
         is_buffer_within(local_env.signature_pqc, local_env.signature_pqc_len,
                          work_buffer, local_env.manifest_size);
 
-    volatile uint32_t pqc_b_shield_1 = 0, pqc_b_shield_2 = 0;
-    if (pqc_pub_ok && pqc_sig_ok)
-      pqc_b_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (pqc_b_shield_1 == BOOT_OK && pqc_pub_ok && pqc_sig_ok)
-      pqc_b_shield_2 = BOOT_OK;
-
-    if (pqc_b_shield_1 != BOOT_OK || pqc_b_shield_2 != BOOT_OK ||
-        pqc_b_shield_1 != pqc_b_shield_2) {
+    BOOT_SECURE_REQUIRE(pqc_pub_ok && pqc_sig_ok, {
       final_status = BOOT_ERR_INVALID_ARG;
       goto cleanup;
-    }
+    });
 
     /* ZERO-KEY FORGERY DEFENSE für PQC Algorithmen */
     if (verify_not_all_zeros_glitch_safe(local_env.pubkey_pqc,
@@ -416,9 +336,6 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
       final_status = BOOT_ERR_VERIFY;
       goto cleanup;
     }
-
-    volatile uint32_t pqc_secure_flag_1 = 0;
-    volatile uint32_t pqc_secure_flag_2 = 0;
 
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
@@ -429,80 +346,38 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
 
-    if (pqc_stat == BOOT_OK) {
-      pqc_secure_flag_1 = BOOT_OK;
-    }
-
-    BOOT_GLITCH_DELAY();
-
-    if (pqc_secure_flag_1 == BOOT_OK && pqc_stat == BOOT_OK) {
-      pqc_secure_flag_2 = BOOT_OK;
-    }
-
-    if (pqc_secure_flag_1 != BOOT_OK || pqc_secure_flag_2 != BOOT_OK ||
-        pqc_secure_flag_1 != pqc_secure_flag_2) {
+    if (boot_secure_confirm(pqc_stat) != BOOT_OK) {
       final_status = BOOT_ERR_VERIFY;
       goto cleanup;
     }
 
-    execution_path ^=
-        cfi_tok[VERIFY_CFI_SLOT_5]; /* Schritt 5 (PQC) erfolgreich bewiesen */
+    boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_5);
+    boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_5); /* Schritt 5 (PQC) erfolgreich bewiesen */
   } else {
     /* NEGATIVE CFI ROUTING: Beweist physikalisch, dass PQC legitimerweise
      * übersprungen wurde! */
-    volatile uint32_t skip_shield_1 = 0;
-    volatile uint32_t skip_shield_2 = 0;
-
-    if (!pqc_enforced && !local_env.pqc_hybrid_active)
-      skip_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (skip_shield_1 == BOOT_OK && !pqc_enforced &&
-        !local_env.pqc_hybrid_active)
-      skip_shield_2 = BOOT_OK;
-
-    if (skip_shield_1 != BOOT_OK || skip_shield_2 != BOOT_OK ||
-        skip_shield_1 != skip_shield_2) {
+    BOOT_SECURE_REQUIRE(!pqc_enforced && !local_env.pqc_hybrid_active, {
       final_status = BOOT_ERR_VERIFY; /* Trapped Glitch trying to skip PQC! */
       goto cleanup;
-    }
-    execution_path ^=
-        cfi_tok[VERIFY_CFI_SLOT_5_SKIP]; /* Negativer Pfad (Kein PQC) bewiesen */
+    });
+    boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_5_SKIP);
+    boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_5_SKIP); /* Negativer Pfad (Kein PQC) bewiesen */
   }
+#else
+  /* P7d: PQC nicht konfiguriert — statischer SKIP-Pfad.
+   * CFI: Negativer Pfad beweisen, damit der Akkumulator konsistent bleibt. */
+  boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_5_SKIP);
+  boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_5_SKIP);
+#endif
 
   /* ====================================================================
    * 7. CONTROL FLOW INTEGRITY (CFI) RESOLUTION
    * ==================================================================== */
-  /* Berechne das erwartete kryptografische Hamming-Weight, das die CPU
-   * am Ende des Durchlaufs im CFI-Akkumulator aufweisen muss. */
-  uint32_t expected_path =
-      cfi_tok[VERIFY_CFI_SLOT_INIT] ^ cfi_tok[VERIFY_CFI_SLOT_1] ^
-      cfi_tok[VERIFY_CFI_SLOT_2] ^ cfi_tok[VERIFY_CFI_SLOT_3] ^
-      cfi_tok[VERIFY_CFI_SLOT_4] ^
-      (pqc_required_proven ? cfi_tok[VERIFY_CFI_SLOT_5]
-                           : cfi_tok[VERIFY_CFI_SLOT_5_SKIP]);
-
-  volatile uint32_t path_check_1 = 0;
-  volatile uint32_t path_check_2 = 0;
-
-  if (execution_path == expected_path) {
-    path_check_1 = BOOT_OK;
-  }
-
-  BOOT_GLITCH_DELAY();
-
-  if (path_check_1 == BOOT_OK && execution_path == expected_path) {
-    path_check_2 = BOOT_OK;
-  }
-
-  /* Nur wenn der Control Flow lückenlos physisch bewiesen ist UND wir
-   * nicht durch ein Goto-Cleanup mit Fehlern hier landeten, entsperren
-   * wir den finalen BOOT_OK Status! */
-  if (path_check_1 == BOOT_OK && path_check_2 == BOOT_OK &&
-      path_check_1 == path_check_2) {
-    final_status = BOOT_OK;
-  } else {
+  boot_cfi_require(verify_cfi_ctx, {
     final_status = BOOT_ERR_VERIFY;
-  }
+    goto cleanup;
+  });
+  final_status = BOOT_OK;
 
 cleanup:
   /* ====================================================================

@@ -64,10 +64,6 @@ type RegistryRevisionResponse struct {
 	CreatedAt     string `json:"created_at"     port:"required"`
 }
 
-// RegistryVersionResponse is the backward-compat JSON body for GET /api/v1/resolve/registry.
-type RegistryVersionResponse struct {
-	Version string `json:"version" port:"required"`
-}
 
 // ChipResolveResponse is the JSON body for GET /api/v1/resolve/chip.
 type ChipResolveResponse struct {
@@ -79,8 +75,10 @@ type ChipResolveResponse struct {
 
 // IntegrationItem is a single entry in GET /api/v1/resolve/integrations.
 type IntegrationItem struct {
-	Name    string `json:"name"    port:"required"`
-	Version string `json:"version" port:"required"`
+	Name        string `json:"name"        port:"required"`
+	Version     string `json:"version"     port:"required"`
+	Description string `json:"description" port:"optional"`
+	Path        string `json:"path"        port:"optional"`
 }
 
 // MatrixEntry represents a single verified (or pending) build combination
@@ -167,20 +165,6 @@ type UnpublishResponse struct {
 	Version string `json:"version" port:"required"`
 }
 
-// SyncDeltaResponse is the JSON body for GET /api/v1/registry/sync.
-type SyncDeltaResponse struct {
-	Since     int64             `json:"since"     port:"required"`
-	Count     int               `json:"count"     port:"required"`
-	Revisions []json.RawMessage `json:"revisions" port:"required"`
-	HasMore   bool              `json:"has_more"  port:"optional"`
-}
-
-// AckSyncResponse is the JSON body for POST /api/v1/registry/ack.
-type AckSyncResponse struct {
-	Status     string            `json:"status"     port:"required"`
-	Advisories []json.RawMessage `json:"advisories" port:"required"`
-}
-
 // =============================================================================
 // Boundary: CLI → GitHub API
 // =============================================================================
@@ -207,16 +191,16 @@ type RegistryEcosystem struct {
 
 // RegistryIndex is the parsed content of registry.json.
 type RegistryIndex struct {
-	FormatVersion    int                            `json:"format_version"    port:"required"`
-	RegistryVersion  string                         `json:"registry_version"  port:"required"`
-	CliCompatibility string                         `json:"cli_compatibility" port:"required"`
-	Ecosystem        *RegistryEcosystem             `json:"ecosystem,omitempty" port:"optional"`
-	Chips            map[string]RegistryChip        `json:"chips"             port:"required"`
-	Archs            map[string]RegistryArch        `json:"archs"             port:"required"`
-	Toolchains       map[string]RegistryToolchain   `json:"toolchains"        port:"required"`
-	Integrations     map[string]RegistryIntegration `json:"integrations"      port:"required"`
-	Drivers          map[string]RegistryDriver      `json:"drivers"           port:"optional"`
-	Crypto           map[string]RegistryCrypto      `json:"crypto"            port:"optional"`
+	FormatVersion   int                            `json:"format_version"   port:"required"`
+	RegistryVersion string                         `json:"registry_version" port:"required"`
+	Ecosystem       *RegistryEcosystem             `json:"ecosystem,omitempty" port:"optional"`
+	Chips           map[string]RegistryChip        `json:"chips"            port:"required"`
+	Archs           map[string]RegistryArch        `json:"archs"            port:"required"`
+	Toolchains      map[string]RegistryToolchain   `json:"toolchains"       port:"required"`
+	Integrations    map[string]RegistryIntegration `json:"integrations"     port:"required"`
+	Drivers         map[string]RegistryDriver      `json:"drivers"          port:"optional"`
+	Crypto          map[string]RegistryCrypto      `json:"crypto"           port:"optional"`
+	SoCs            map[string]RegistrySoC         `json:"socs,omitempty"   port:"optional"`
 }
 
 // RegistryChip is a single chip entry in registry.json.
@@ -282,6 +266,15 @@ type RegistryIntegration struct {
 	Path        string `json:"path"        port:"required"`
 	Version     string `json:"version"     port:"required"`
 	Description string `json:"description" port:"optional"`
+}
+
+// RegistrySoC is a SoC entry in registry.json.
+type RegistrySoC struct {
+	Name        string   `json:"name"        port:"required"`
+	Path        string   `json:"path"        port:"required"`
+	Version     string   `json:"version"     port:"required"`
+	Description string   `json:"description" port:"optional"`
+	Chips       []string `json:"chips"       port:"optional"`
 }
 
 // RegistryToolchain defines toolchain metadata in registry.json.

@@ -27,6 +27,7 @@
  */
 
 #include "boot_delay.h"
+#include "boot_fih.h"
 #include "boot_types.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -118,46 +119,24 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
      * Die CPU darf die Schleife NUR verlassen, wenn Hardware-Zeit UND
      * Software-Akkumulator das Ziel legitim erreicht haben!
      */
-    volatile uint32_t time_reached_1 = 0;
-    volatile uint32_t time_reached_2 = 0;
-
     bool hw_ok = (elapsed_hw >= target_ms);
     bool sw_ok = (sw_accum >= target_ms);
 
-    if (hw_ok && sw_ok)
-      time_reached_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (time_reached_1 == BOOT_OK && hw_ok && sw_ok)
-      time_reached_2 = BOOT_OK;
+    BOOT_SECURE_REQUIRE(hw_ok && sw_ok, {
+      goto check_deadlock;
+    });
+    break; /* Successfully and legally delayed! */
 
-    if (time_reached_1 == BOOT_OK && time_reached_2 == BOOT_OK &&
-        time_reached_1 == time_reached_2) {
-      break; /* Successfully and legally delayed! */
-    }
+check_deadlock:
 
     /* ====================================================================
      * EXIT CONDITION 2: Hardware Deadlock / Instruction Skip Trap
      * ==================================================================== */
-    if (sw_accum > max_sw_limit) {
+    BOOT_SECURE_REQUIRE(sw_accum <= max_sw_limit, {
       /* FATAL TRAP: Der Software-Zähler ist explodiert, aber der Hardware-Timer
-       * hat das Ziel nicht erreicht. Dies bedeutet:
-       * 1. Die Hardware-Uhr (Oszillator) ist defekt/eingefroren.
-       * 2. Ein Angreifer überspringt 'delay_ms()' via Laser-Glitch!
-       * Da wir uns im Penalty-Sleep befinden, ist ein Timeout-Return
-       * (Fail-Open) streng verboten. Wir hungern den Watchdog aus, um einen
-       * Hard Reset zu erzwingen! */
-      if (platform->clock->deinit)
-        platform->clock->deinit();
-
-      /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts
-       * (z.B. RTOS/ROM Cache) */
-      if (platform->soc && platform->soc->disable_interrupts)
-        platform->soc->disable_interrupts();
-
-      while (1) {
-        BOOT_GLITCH_DELAY();
-      }
-    }
+       * hat das Ziel nicht erreicht. */
+      boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_DELAY_WARP);
+    });
 
     /* Größere Steps zur Reduktion des Bus-Overheads.
      * 50ms ist absolut sicher für jeden Hardware-WDT (typ. min 500ms). */
@@ -178,23 +157,10 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
     volatile uint32_t eval_1 = sw_accum;
     volatile uint32_t eval_2 = ~sw_accum_inv;
 
-    if (eval_1 != eval_2) {
-      /* FATAL ALU GLITCH DETECTED!
-       * Ein Angreifer versucht aktiv, den Prozessor mit Voltage-Faults zu
-       * verwirren, um die Sperrzeit zu bypassen.
-       * WDT Starvation: Wir hängen die MCU ohne WDT-Kicks auf. */
-      if (platform->clock->deinit)
-        platform->clock->deinit();
-
-      /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts
-       * (z.B. RTOS/ROM Cache) */
-      if (platform->soc && platform->soc->disable_interrupts)
-        platform->soc->disable_interrupts();
-
-      while (1) {
-        BOOT_GLITCH_DELAY();
-      }
-    }
+    BOOT_SECURE_REQUIRE(eval_1 == eval_2, {
+      /* FATAL ALU GLITCH DETECTED! */
+      boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_DELAY_GLITCH);
+    });
   }
 
   /* ====================================================================
@@ -204,33 +170,12 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
    * physikalisch dazu, die gesamte 'while' Schleife zu überspringen.
    * Wenn er hier ankommt, beweisen die Akkumulatoren, dass er betrogen hat!
    */
-  volatile uint32_t proof_1 = 0;
-  volatile uint32_t proof_2 = 0;
-
   bool final_hw_ok = (elapsed_hw >= target_ms);
   bool final_sw_ok = (sw_accum >= target_ms);
 
-  if (final_hw_ok && final_sw_ok)
-    proof_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (proof_1 == BOOT_OK && final_hw_ok && final_sw_ok)
-    proof_2 = BOOT_OK;
-
-  if (proof_1 != BOOT_OK || proof_2 != BOOT_OK || proof_1 != proof_2) {
-    /* GLITCH TRAPPED! Der Angreifer hat die Schleife manipuliert.
-     * Wir frieren das System absichtlich ein, um den WDT zu starven. */
-    if (platform->clock->deinit)
-      platform->clock->deinit();
-
-    /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts
-     * (z.B. RTOS/ROM Cache) */
-    if (platform->soc && platform->soc->disable_interrupts)
-      platform->soc->disable_interrupts();
-
-    while (1) {
-      BOOT_GLITCH_DELAY();
-    }
-  }
+  BOOT_SECURE_REQUIRE(final_hw_ok && final_sw_ok, {
+    boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_DELAY_GLITCH);
+  });
 
   return BOOT_OK;
 }

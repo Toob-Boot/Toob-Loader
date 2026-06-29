@@ -127,4 +127,7 @@ uint32_t toob_lib_crc32(const uint8_t *data, size_t length);
  */
 toob_status_t toob_wal_naive_append(const toob_wal_entry_payload_t *intent);
 
+/* Private SDK Linkage: Hidden from public API to prevent unvalidated memory access */
+extern TOOB_NOINIT toob_handoff_t toob_handoff_state;
+
 #endif /* TOOB_INTERNAL_H */

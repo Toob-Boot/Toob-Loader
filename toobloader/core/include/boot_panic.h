@@ -34,4 +34,46 @@ _Static_assert(sizeof(stage15_auth_payload_t) == 104, "Stage 1.5 Auth Payload mu
  */
 _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason);
 
+/**
+ * @brief Diagnostic forensic record structure stored in flash/RTC backup registers.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;             /* 0x464F524E ("FORN") */
+    uint32_t reason;            /* boot_status_t */
+    uint32_t site_id;           /* unique identifier where the freeze was triggered */
+    uint32_t monotonic_counter; /* monotonic sequence ID */
+    uint32_t crc32;             /* CRC-32 verification checksum of the record fields */
+} boot_forensic_record_t;
+
+_Static_assert(sizeof(boot_forensic_record_t) == 20, "Forensic record must be exactly 20 bytes");
+
+typedef enum {
+  SITE_DELAY_WARP = 1,
+  SITE_DELAY_GLITCH,
+  SITE_ROLLBACK_CONFUSION,
+  SITE_PROVISIONING_GLITCH,
+  SITE_CLOUD_CMD_GLITCH,
+  SITE_MAIN_CFI_MISMATCH,
+  SITE_MAIN_WIPE_FAIL,
+  SITE_STATE_CFI_MISMATCH,
+  SITE_STATE_LOCK_FAIL,
+  SITE_ENERGY_CFI_MISMATCH,
+  SITE_ENERGY_BROWNOUT,
+  SITE_VERIFY_SHIELD_FAIL,
+  SITE_SWAP_SHIELD_FAIL,
+  SITE_JOURNAL_SHIELD_FAIL,
+  SITE_DELTA_SHIELD_FAIL,
+  SITE_COBS_SHIELD_FAIL,
+  SITE_MULTIIMAGE_SHIELD_FAIL,
+  SITE_CONFIRM_SHIELD_FAIL,
+  SITE_TMR_FUTURE,
+  SITE_RSTORE_SHIELD_FAIL
+} boot_site_id_t;
+
+/**
+ * @brief Unified terminal halt function. Records forensic diagnostics and freezes.
+ */
+_Noreturn void boot_terminal_halt(const boot_platform_t *platform,
+                                  boot_status_t reason, uint16_t site_id);
+
 #endif /* BOOT_PANIC_H */

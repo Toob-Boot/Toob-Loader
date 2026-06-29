@@ -45,6 +45,7 @@ type DeviceToml struct {
 		EdgeUnattendedMode bool   `toml:"edge_unattended_mode"`
 		BackoffBaseS       uint32 `toml:"backoff_base_s"`
 		WdtTimeoutMs       uint32 `toml:"wdt_timeout_ms"`
+		Stage1Svn          uint32 `toml:"stage1_svn"`
 	} `toml:"boot_config"`
 }
 

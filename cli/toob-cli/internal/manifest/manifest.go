@@ -121,6 +121,27 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 		walAddr = walAddrs[0]
 	}
 
+	// Allocate KDM Quorum (3 sectors)
+	kdmSize := 3 * alloc.maxSectorSize
+	kdmAddr, kdmBudget, err := alloc.Allocate(kdmSize, 0, "KDM Quorum")
+	if err != nil {
+		return err
+	}
+
+	// Allocate Cloud Command (1 sector)
+	cloudCmdSize := alloc.maxSectorSize
+	cloudCmdAddr, cloudCmdBudget, err := alloc.Allocate(cloudCmdSize, 0, "Cloud Command")
+	if err != nil {
+		return err
+	}
+
+	// Allocate Forensic Slot (1 sector)
+	forensicSize := alloc.maxSectorSize
+	forensicAddr, forensicBudget, err := alloc.Allocate(forensicSize, 0, "Forensic Slot")
+	if err != nil {
+		return err
+	}
+
 	if alloc.offset > hj.Flash.Size {
 		return fmt.Errorf("FATAL [FLASH_003]: Partitions exceed physical flash size! Required: %d bytes, Available: %d bytes", alloc.offset, hj.Flash.Size)
 	}
@@ -135,7 +156,7 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 	err = GenerateHeadersAndScripts(dt, hj, alloc, outDir,
 		s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget,
 		recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize,
-		walAddrs, walSizes)
+		walAddrs, walSizes, kdmAddr, kdmBudget, cloudCmdAddr, cloudCmdBudget, forensicAddr, forensicBudget)
 	if err != nil {
 		return fmt.Errorf("failed to generate outputs: %w", err)
 	}

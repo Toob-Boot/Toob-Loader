@@ -15,6 +15,7 @@
 #include "boot_journal.h"
 #include "boot_secure_zeroize.h"
 #include "stage0_crypto.h"
+#include "boot_fih.h"
 
 
 
@@ -32,30 +33,40 @@ uint32_t stage0_get_active_slot(const boot_platform_t *platform) {
 
     if (platform->flash->read(wal_addrs[i], (uint8_t *)&hdr, sizeof(hdr)) ==
         BOOT_OK) {
-      size_t crc_len = offsetof(wal_sector_header_t, header_crc32);
-      uint32_t calc_crc =
-          compute_boot_crc32((const uint8_t *)&hdr.data, crc_len);
+      uint32_t magic = hdr.data.sector_magic;
+      uint32_t seq_id = 0;
+      uint32_t bank = 0;
+      bool valid = false;
 
-      volatile uint32_t shield_1 = 0, shield_2 = 0;
-      if (hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC &&
-          calc_crc == hdr.data.header_crc32)
-        shield_1 = BOOT_OK;
-      BOOT_GLITCH_DELAY();
-      if (shield_1 == BOOT_OK &&
-          hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC &&
-          calc_crc == hdr.data.header_crc32)
-        shield_2 = BOOT_OK;
+      if (magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+        const wal_sector_header_v1_t *legacy_hdr = (const wal_sector_header_v1_t *)&hdr.data;
+        uint32_t calc_crc = compute_boot_crc32((const uint8_t *)legacy_hdr, offsetof(wal_sector_header_v1_t, header_crc32));
+        BOOT_SECURE_REQUIRE(calc_crc == legacy_hdr->header_crc32, {
+          goto next_sector;
+        });
+        seq_id = legacy_hdr->sequence_id;
+        bank = legacy_hdr->tmr_data.active_stage1_bank;
+        valid = true;
+      } else if (magic == WAL_ABI_VERSION_MAGIC_CURRENT) {
+        uint32_t calc_crc = compute_boot_crc32((const uint8_t *)&hdr.data, offsetof(wal_sector_header_t, header_crc32));
+        BOOT_SECURE_REQUIRE(calc_crc == hdr.data.header_crc32, {
+          goto next_sector;
+        });
+        seq_id = hdr.data.sequence_id;
+        bank = hdr.data.tmr_data.active_stage1_bank;
+        valid = true;
+      }
 
-      if (shield_1 == BOOT_OK && shield_2 == BOOT_OK) {
-        if (hdr.data.sequence_id > highest_seq) {
-          highest_seq = hdr.data.sequence_id;
-          /* FIX: Stage 0 wählt die Bootloader-Bank, NICHT das Feature-OS! */
-          active_slot = (hdr.data.tmr_data.active_stage1_bank == 0)
-                            ? CHIP_STAGE1A_ABS_ADDR
-                            : CHIP_STAGE1B_ABS_ADDR;
-        }
+      if (valid && seq_id > highest_seq) {
+        highest_seq = seq_id;
+        /* FIX: Stage 0 wählt die Bootloader-Bank, NICHT das Feature-OS! */
+        active_slot = (bank == 0)
+                          ? CHIP_STAGE1A_ABS_ADDR
+                          : CHIP_STAGE1B_ABS_ADDR;
       }
     }
+next_sector:
+    boot_secure_zeroize(&hdr, sizeof(hdr));
   }
   return active_slot;
 }

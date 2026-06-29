@@ -265,19 +265,6 @@ func (c *Client) GetIndex(ctx context.Context) ([]byte, error) {
 	return c.getRaw(ctx, "/api/v1/registry/index")
 }
 
-// RegistryVersionResponse is the backward-compat shape of /resolve/registry.
-type RegistryVersionResponse struct {
-	Version string `json:"version"`
-}
-
-// GetRegistryVersion calls the backward-compatible /resolve/registry endpoint.
-func (c *Client) GetRegistryVersion(ctx context.Context) (string, error) {
-	var resp RegistryVersionResponse
-	if err := c.getJSON(ctx, "/api/v1/resolve/registry?version=latest", &resp); err != nil {
-		return "", err
-	}
-	return resp.Version, nil
-}
 
 // ChipResolveResponse is the shape of GET /api/v1/resolve/chip.
 type ChipResolveResponse struct {
@@ -299,8 +286,10 @@ func (c *Client) ResolveChip(ctx context.Context, name string) (*ChipResolveResp
 
 // IntegrationItem is one entry from /resolve/integrations.
 type IntegrationItem struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+	Path        string `json:"path"`
 }
 
 // ListIntegrations returns all available integration frameworks.
@@ -542,58 +531,26 @@ func (c *Client) Unpublish(ctx context.Context, name, version string) (*Unpublis
 	return &result, nil
 }
 
-// SyncDeltaResponse is the shape of GET /api/v1/registry/sync.
-type SyncDeltaResponse struct {
-	Since     int64             `json:"since"`
-	Count     int               `json:"count"`
-	Revisions []json.RawMessage `json:"revisions"`
-	HasMore   bool              `json:"has_more"`
-}
-
-// GetSyncDelta fetches registry changes since a given revision.
-func (c *Client) GetSyncDelta(ctx context.Context, since int64) (*SyncDeltaResponse, error) {
-	var resp SyncDeltaResponse
-	path := fmt.Sprintf("/api/v1/registry/sync?since=%d", since)
-	if err := c.getJSON(ctx, path, &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-// AckSyncResponse is the shape of POST /api/v1/registry/ack.
-type AckSyncResponse struct {
-	Status     string            `json:"status"`
-	Advisories []json.RawMessage `json:"advisories"`
-}
-
-// AckSync acknowledges a registry sync to receive pending security advisories.
-func (c *Client) AckSync(ctx context.Context, revisionID int64, clientInfo string) (*AckSyncResponse, error) {
-	payload, _ := json.Marshal(map[string]any{
-		"revision_id": revisionID,
-		"client_info": clientInfo,
-	})
-
-	req, err := c.newRequest(ctx, "POST", "/api/v1/registry/ack", bytes.NewReader(payload))
+// DownloadPackage follows the /download redirect and returns the tarball body.
+// The caller is responsible for closing the returned ReadCloser.
+func (c *Client) DownloadPackage(ctx context.Context, name, version string) (io.ReadCloser, error) {
+	path := fmt.Sprintf("/api/v1/package/%s/%s/download", name, version)
+	req, err := c.newRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("download request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		return nil, extractError(resp)
 	}
 
-	var result AckSyncResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	return resp.Body, nil
 }
 
 // RotateKey rotates the publisher's API key.

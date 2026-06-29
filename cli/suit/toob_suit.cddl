@@ -40,6 +40,7 @@ suit_conditions = {
     203: uint .size 4,              ; svn (Minor-Version für Anti-Rollback State-Check)
     204: uint .size 2,              ; max_resume_attempts (Physischer WAL-Error-Counter statt RTC UNIX-Time Illusion)
     205: uint .size 2,              ; min_parser_version (Wehrt veraltete Bootloader ab, erzwingt Erkennung neuer Felder)
+    ? 206: uint .size 4,            ; stage1_svn (P7a: Anti-Rollback für Bootloader-Selbst-Updates, nur bei image_type==3 pflicht)
 }
 
 suit_payload = {

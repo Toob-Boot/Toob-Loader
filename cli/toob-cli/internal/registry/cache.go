@@ -12,7 +12,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,18 +113,27 @@ type EcosystemVersions struct {
 	Compiler []string `json:"compiler"`
 }
 
+// SoCInfo holds metadata for a SoC package from registry.json.
+type SoCInfo struct {
+	Name        string   `json:"name"`
+	Path        string   `json:"path"`
+	Version     string   `json:"version"`
+	Description string   `json:"description,omitempty"`
+	Chips       []string `json:"chips,omitempty"`
+}
+
 // Index is the parsed content of registry.json.
 type Index struct {
-	FormatVersion    int                        `json:"format_version"`
-	RegistryVersion  string                     `json:"registry_version"`
-	CliCompatibility string                     `json:"cli_compatibility"`
-	Ecosystem        *EcosystemVersions         `json:"ecosystem,omitempty"`
-	Chips            map[string]ChipInfo        `json:"chips"`
-	Archs            map[string]ArchInfo        `json:"archs"`
-	Toolchains       map[string]ToolchainInfo   `json:"toolchains"`
-	Integrations     map[string]IntegrationInfo `json:"integrations"`
-	Drivers          map[string]DriverInfo      `json:"drivers"`
-	Crypto           map[string]CryptoInfo      `json:"crypto"`
+	FormatVersion   int                        `json:"format_version"`
+	RegistryVersion string                     `json:"registry_version"`
+	Ecosystem       *EcosystemVersions         `json:"ecosystem,omitempty"`
+	Chips           map[string]ChipInfo        `json:"chips"`
+	Archs           map[string]ArchInfo        `json:"archs"`
+	Toolchains      map[string]ToolchainInfo   `json:"toolchains"`
+	Integrations    map[string]IntegrationInfo `json:"integrations"`
+	Drivers         map[string]DriverInfo      `json:"drivers"`
+	Crypto          map[string]CryptoInfo      `json:"crypto"`
+	SoCs            map[string]SoCInfo         `json:"socs,omitempty"`
 }
 
 type MatrixDependencies struct {
@@ -536,19 +544,19 @@ func (c *Cache) fetchPackage(name, version, path string) error {
 
 	ui.Step("Downloading package %s@%s...", name, version)
 
-	// Ensure parent directory exists before extraction
 	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return err
 	}
 
-	httpClient := &http.Client{
-		Timeout:   downloadTimeout,
-		Transport: apiclient.BuildTransport(),
-	}
-
-	url := fmt.Sprintf("%s/api/v1/package/%s/%s/download", c.remote, name, version)
-	if err := downloadAndExtractTarball(httpClient, url, destPath); err != nil {
+	client := apiclient.NewWithTimeout(downloadTimeout)
+	body, err := client.DownloadPackage(context.Background(), name, version)
+	if err != nil {
 		return fmt.Errorf("failed to fetch package %s: %w", name, err)
+	}
+	defer body.Close()
+
+	if err := extractTarball(body, destPath); err != nil {
+		return fmt.Errorf("failed to extract package %s: %w", name, err)
 	}
 
 	return nil
@@ -592,7 +600,7 @@ func (c *Cache) ArchSourcePath(arch string) (string, error) {
 	}
 	info, ok := idx.Archs[arch]
 	if !ok || info.Path == "" {
-		return filepath.Join(c.dir, "arch", arch), nil // fallback for backwards compatibility
+		return "", fmt.Errorf("architecture '%s' not found in registry index", arch)
 	}
 	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
 		return "", err
@@ -601,32 +609,26 @@ func (c *Cache) ArchSourcePath(arch string) (string, error) {
 }
 
 // DriverSourcePath returns the absolute path to a driver directory in the cache.
-// The driverDir should be a relative path like "drivers/uart/esp_uart_v1".
 func (c *Cache) DriverSourcePath(driverDir string) (string, error) {
 	destPath := filepath.Join(c.dir, filepath.FromSlash(driverDir))
 	if _, err := os.Stat(destPath); err == nil {
 		return destPath, nil
 	}
 
-	// Derive package name from the directory path (e.g. "drivers/uart/esp_uart_v1" -> "esp_uart_v1")
 	pkgName := filepath.Base(driverDir)
 	idx, err := c.LoadIndex()
 	if err != nil {
 		return "", err
 	}
 
-	if info, ok := idx.Drivers[pkgName]; ok {
-		if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
-			return "", err
-		}
-		return filepath.Join(c.dir, filepath.FromSlash(info.Path)), nil
+	info, ok := idx.Drivers[pkgName]
+	if !ok {
+		return "", fmt.Errorf("driver '%s' not found in registry index", pkgName)
 	}
-
-	// Fallback: try fetching with the directory path as-is
-	if err := c.fetchPackage(pkgName, "latest", driverDir); err != nil {
-		return "", fmt.Errorf("driver '%s' not found in registry and download failed: %w", driverDir, err)
+	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
+		return "", err
 	}
-	return destPath, nil
+	return filepath.Join(c.dir, filepath.FromSlash(info.Path)), nil
 }
 
 // CryptoSourcePath returns the absolute path to a crypto package in the cache.
@@ -650,7 +652,7 @@ func (c *Cache) ToolchainConfigPath(toolchainName string) (string, error) {
 	}
 	info, ok := idx.Toolchains[toolchainName]
 	if !ok || info.Path == "" {
-		return filepath.Join(c.dir, "toolchains", toolchainName), nil
+		return "", fmt.Errorf("toolchain '%s' not found in registry index", toolchainName)
 	}
 	if err := c.fetchPackage(toolchainName, info.Version, info.Path); err != nil {
 		return "", err
@@ -658,19 +660,25 @@ func (c *Cache) ToolchainConfigPath(toolchainName string) (string, error) {
 	return filepath.Join(c.dir, info.Path), nil
 }
 
-// SoCSourcePath returns the absolute path to a SoC include directory in the cache.
-// The socDir should be a relative path like "soc" or "soc/esp32c6".
+// SoCSourcePath returns the absolute path to a SoC package directory in the cache.
 func (c *Cache) SoCSourcePath(socDir string) (string, error) {
-	destPath := filepath.Join(c.dir, filepath.FromSlash(socDir))
-	if _, err := os.Stat(destPath); err == nil {
-		return destPath, nil
+	idx, err := c.LoadIndex()
+	if err != nil {
+		return "", err
 	}
 
 	pkgName := filepath.Base(socDir)
-	if err := c.fetchPackage(pkgName, "latest", socDir); err != nil {
-		return "", fmt.Errorf("SoC package '%s' not available: %w", socDir, err)
+	if idx.SoCs == nil {
+		return "", fmt.Errorf("SoC package '%s' not found in registry index (no SoC section)", pkgName)
 	}
-	return destPath, nil
+	info, ok := idx.SoCs[pkgName]
+	if !ok {
+		return "", fmt.Errorf("SoC package '%s' not found in registry index", pkgName)
+	}
+	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
+		return "", err
+	}
+	return filepath.Join(c.dir, filepath.FromSlash(info.Path)), nil
 }
 
 // IntegrationSourcePath returns the absolute path to an integration framework
@@ -682,7 +690,7 @@ func (c *Cache) IntegrationSourcePath(framework string) (string, error) {
 	}
 	info, ok := idx.Integrations[framework]
 	if !ok || info.Path == "" {
-		return filepath.Join(c.dir, "integrations", framework), nil
+		return "", fmt.Errorf("integration '%s' not found in registry index", framework)
 	}
 	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
 		return "", err

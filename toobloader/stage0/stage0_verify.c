@@ -12,6 +12,7 @@
 #include "../../crypto/monocypher/monocypher-ed25519.h"
 #include "boot_types.h"
 #include "stage0_crypto.h"
+#include "boot_fih.h"
 
 int stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig, const uint8_t *pubkey,
                             const uint8_t *msg_digest) {
@@ -35,16 +36,8 @@ int stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig,
 #endif
 
   /* P10 Glitch-Defense Double-Check Pattern */
-  volatile uint32_t s1 = 0, s2 = 0;
-  if (status == 0)
-    s1 = BOOT_OK;
-
-  BOOT_GLITCH_DELAY();
-
-  if (s1 == BOOT_OK && status == 0)
-    s2 = BOOT_OK;
-
-  if (s1 == BOOT_OK && s2 == BOOT_OK && s1 == s2) {
+  boot_status_t stat_to_confirm = (status == 0) ? BOOT_OK : BOOT_ERR_VERIFY;
+  if (boot_secure_confirm(stat_to_confirm) == BOOT_OK) {
     return 0; /* OK */
   }
   return -1; /* FAIL */

@@ -18,6 +18,7 @@
  */
 
 #include "boot_cobs.h"
+#include "boot_fih.h"
 #include "boot_secure_zeroize.h"
 #include <stddef.h>
 
@@ -80,22 +81,11 @@ boot_status_t boot_cobs_decode_in_place(uint8_t *__restrict data, size_t len,
 
     uint8_t copy_len = code - 1;
 
-    /* MATHEMATICAL GLITCH-SHIELD (Verhindert RCE via Pufferüberlauf)
-     * Schützt `read_idx + copy_len > len` vor 32-bit Wraparound und Voltage
-     * Faults! */
-    volatile uint32_t bounds_shield_1 = 0;
-    volatile uint32_t bounds_shield_2 = 0;
     bool is_within_bounds = (len - read_idx >= copy_len);
 
-    if (is_within_bounds)
-      bounds_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (bounds_shield_1 == BOOT_OK && is_within_bounds)
-      bounds_shield_2 = BOOT_OK;
-
-    if (bounds_shield_1 != BOOT_OK || bounds_shield_2 != BOOT_OK) {
+    BOOT_SECURE_REQUIRE(is_within_bounds, {
       return BOOT_ERR_INVALID_ARG; /* Exploit Trap */
-    }
+    });
 
     /* O(1) in-place shift. Funktioniert sicher, da write_idx <= read_idx
      * garantiert ist */

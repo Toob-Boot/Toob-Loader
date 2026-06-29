@@ -14,10 +14,20 @@
 #include "boot_journal.h"
 
 /**
+ * @brief Target selection for SVN anti-rollback verification.
+ */
+typedef enum {
+    ROLLBACK_TARGET_APP      = 0,
+    ROLLBACK_TARGET_RECOVERY = 1,
+    ROLLBACK_TARGET_STAGE1   = 2
+} rollback_target_t;
+
+/**
  * @brief Hybrid SVN Verification.
  *        Evaluates if the requested manifest SVN respects the persistent limits.
+ *        Dual-layer: WAL TMR (soft floor, A1 defense) AND eFuse Epoch (hard floor, A2 defense).
  */
-boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform, uint32_t manifest_svn, bool is_recovery_os);
+boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform, uint32_t manifest_svn, rollback_target_t target);
 
 /**
  * @brief Evaluates the Crash-Cascade state based on M-JOURNAL Boot Failure Counter.
@@ -29,6 +39,7 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform, const w
  * @brief Executes the physical reverse in-place overwrite.
  *        Used when an update immediately crashes after a TXN_COMMIT. Orchestrates `boot_swap_apply()` backwards.
  */
-boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform);
+boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
+                                           uint8_t *arena, size_t arena_len);
 
 #endif /* BOOT_ROLLBACK_H */

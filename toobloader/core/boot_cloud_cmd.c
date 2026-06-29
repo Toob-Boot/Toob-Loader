@@ -2,27 +2,34 @@
  * @file boot_cloud_cmd.c
  * @brief Implementierung der Cloud-Command Verifikation & Execution Pipeline.
  *
- * Architektur-Direktiven (Phase 5):
+ * Architektur-Direktiven:
  * - Zero-Allocation Parsing via crypto_arena
  * - Glitch-Resistant Command Evaluation (Double-Check Pattern + CFI)
  * - TOCTOU Defense (Single Flash Read)
  * - Exhaustion Defense (Counter Advance strictly POST-Signature)
- * - KDM A/B-Slot Self-Healing
+ * - KDM Quorum-Store (Phase 4: 3-fach quorum-geschützt via boot_rstore)
  */
 
 #include "boot_cloud_cmd.h"
+#include "boot_fih.h"
 #include "boot_ct_utils.h"
 #include "boot_identity.h"
+#include "boot_rstore.h"
 #include "boot_secure_zeroize.h"
 #include "generated_boot_config.h"
+#include <string.h>
 
-/* Temporäre Fallback-Makros, falls Device Manifest diese noch nicht liefert */
+/* Die Adressen müssen zwingend aus der vom Manifest Compiler generierten Config kommen. */
 #ifndef CHIP_CLOUD_CMD_SLOT_ABS_ADDR
-#define CHIP_CLOUD_CMD_SLOT_ABS_ADDR                                           \
-  0x000F0000 /* Typisches Ende der User-Daten */
-#define CHIP_CLOUD_CMD_SLOT_SIZE 0x1000
-#define CHIP_KDM_SLOT_A_ABS_ADDR 0x000F1000
-#define CHIP_KDM_SLOT_B_ABS_ADDR 0x000F2000
+#error "CHIP_CLOUD_CMD_SLOT_ABS_ADDR is required by the bootloader but not provided by the layout!"
+#endif
+
+#ifndef CHIP_CLOUD_CMD_SLOT_SIZE
+#error "CHIP_CLOUD_CMD_SLOT_SIZE is required by the bootloader but not provided by the layout!"
+#endif
+
+#ifndef CHIP_KDM_QUORUM_ABS_ADDR
+#error "CHIP_KDM_QUORUM_ABS_ADDR is required by the bootloader but not provided by the layout!"
 #endif
 
 /* Die vom zcbor Generator erstellten Prototypen für das CDDL-Parsing */
@@ -39,10 +46,29 @@ extern int cbor_decode_toob_cloud_cmd(const uint8_t *payload,
 #define CMD_CFI_SLOT_VERIFY  4
 #define CMD_CFI_NUM_TOKENS   5
 
+/* Phase 4: KDM Quorum Store Descriptor */
+#define KDM_QUORUM_SLOT_COUNT 3
+#define KDM_RSTORE_MAGIC 0x4B444D51 /* "KDMQ" */
+
+static const uint32_t kdm_slot_addrs[KDM_QUORUM_SLOT_COUNT] = {
+    CHIP_KDM_QUORUM_ABS_ADDR,
+    CHIP_KDM_QUORUM_ABS_ADDR + CHIP_FLASH_MAX_SECTOR_SIZE,
+    CHIP_KDM_QUORUM_ABS_ADDR + 2 * CHIP_FLASH_MAX_SECTOR_SIZE};
+static const size_t kdm_slot_sizes[KDM_QUORUM_SLOT_COUNT] = {
+    CHIP_FLASH_MAX_SECTOR_SIZE, CHIP_FLASH_MAX_SECTOR_SIZE,
+    CHIP_FLASH_MAX_SECTOR_SIZE};
+static const boot_rstore_desc_t kdm_rstore_desc = {
+    .slot_addrs = kdm_slot_addrs,
+    .slot_sizes = kdm_slot_sizes,
+    .slot_count = KDM_QUORUM_SLOT_COUNT,
+    .record_size = sizeof(toob_kdm_t),
+    .magic = KDM_RSTORE_MAGIC};
+
 /**
- * @brief Lädt den aktiven Cloud-Public-Key (KDM A/B Slots) in den Puffer.
+ * @brief Lädt den aktiven Cloud-Public-Key via KDM Quorum-Store.
  *
- * Implementiert die KDM-Heilung und Downgrade-Defense (Gap 1 & 2).
+ * Phase 4: Replaces the old A/B-Slot logic with boot_rstore_read.
+ * Self-healing of defective slots is handled by boot_rstore_read internally.
  */
 static boot_status_t load_active_cloud_key(const boot_platform_t *platform,
                                            uint8_t *out_pubkey,
@@ -50,108 +76,60 @@ static boot_status_t load_active_cloud_key(const boot_platform_t *platform,
   if (!platform || !platform->crypto || !platform->flash)
     return BOOT_ERR_INVALID_ARG;
 
-  toob_kdm_t kdm_a, kdm_b;
-  boot_secure_zeroize(&kdm_a, sizeof(kdm_a));
-  boot_secure_zeroize(&kdm_b, sizeof(kdm_b));
+  /* Read KDM via 3-way quorum (with bounded opportunistic healing) */
+  toob_kdm_t kdm;
+  boot_secure_zeroize(&kdm, sizeof(kdm));
+  boot_status_t stat = boot_rstore_read(platform, &kdm_rstore_desc, &kdm);
 
-  boot_status_t stat_a = platform->flash->read(
-      CHIP_KDM_SLOT_A_ABS_ADDR, (uint8_t *)&kdm_a, sizeof(kdm_a));
-  boot_status_t stat_b = platform->flash->read(
-      CHIP_KDM_SLOT_B_ABS_ADDR, (uint8_t *)&kdm_b, sizeof(kdm_b));
-
-  /* Root-Key für Signaturprüfung laden */
-  uint8_t root_pubkey[32] __attribute__((aligned(8)));
-  boot_secure_zeroize(root_pubkey, 32);
-  /* Zero-Key Forgery Defense für Root Key */
-  if (platform->crypto->read_pubkey(root_pubkey, 32, 0) != BOOT_OK) {
-    return BOOT_ERR_NOT_FOUND;
-  }
-
-  /* P10 Fix: Hardware Glitch (All-Zero) führt sonst zur Akzeptanz beliebiger
-   * KDM-Fakes! */
-  extern boot_status_t verify_not_all_zeros_glitch_safe(const uint8_t *buf,
-                                                        size_t len);
-  if (verify_not_all_zeros_glitch_safe(root_pubkey, 32) != BOOT_OK) {
+  if (stat == BOOT_OK) {
+    /* Root-Key für Signaturprüfung laden */
+    uint8_t root_pubkey[32] __attribute__((aligned(8)));
     boot_secure_zeroize(root_pubkey, 32);
-    return BOOT_ERR_VERIFY;
-  }
-
-  bool a_valid = false;
-  bool b_valid = false;
-
-  volatile uint32_t a_shield_1 = 0, a_shield_2 = 0;
-  volatile uint32_t b_shield_1 = 0, b_shield_2 = 0;
-
-  if (stat_a == BOOT_OK) {
-    boot_status_t sig_a = platform->crypto->verify_ed25519(
-        (const uint8_t *)&kdm_a, 36, kdm_a.signature_ed25519, root_pubkey);
-    if (sig_a == BOOT_OK)
-      a_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (a_shield_1 == BOOT_OK && sig_a == BOOT_OK)
-      a_shield_2 = BOOT_OK;
-
-    if (a_shield_1 == BOOT_OK && a_shield_2 == BOOT_OK) {
-      a_valid = true;
+    if (platform->crypto->read_pubkey(root_pubkey, 32, 0) != BOOT_OK) {
+      boot_secure_zeroize(&kdm, sizeof(kdm));
+      return BOOT_ERR_NOT_FOUND;
     }
-  }
 
-  if (stat_b == BOOT_OK) {
-    boot_status_t sig_b = platform->crypto->verify_ed25519(
-        (const uint8_t *)&kdm_b, 36, kdm_b.signature_ed25519, root_pubkey);
-    if (sig_b == BOOT_OK)
-      b_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (b_shield_1 == BOOT_OK && sig_b == BOOT_OK)
-      b_shield_2 = BOOT_OK;
-
-    if (b_shield_1 == BOOT_OK && b_shield_2 == BOOT_OK) {
-      b_valid = true;
+    /* Zero-Key Forgery Defense */
+    extern boot_status_t verify_not_all_zeros_glitch_safe(const uint8_t *buf,
+                                                          size_t len);
+    if (verify_not_all_zeros_glitch_safe(root_pubkey, 32) != BOOT_OK) {
+      boot_secure_zeroize(root_pubkey, 32);
+      boot_secure_zeroize(&kdm, sizeof(kdm));
+      return BOOT_ERR_VERIFY;
     }
+
+    /* Verify KDM signature against Root Key */
+    boot_status_t sig_stat = platform->crypto->verify_ed25519(
+        (const uint8_t *)&kdm, 36, kdm.signature_ed25519, root_pubkey);
+    boot_secure_zeroize(root_pubkey, 32);
+
+    if (boot_secure_confirm(sig_stat) == BOOT_OK) {
+      memcpy(out_pubkey, kdm.new_cloud_pubkey, 32);
+      *out_seq = kdm.sequence_number;
+      boot_secure_zeroize(&kdm, sizeof(kdm));
+      return BOOT_OK;
+    }
+
+    boot_secure_zeroize(&kdm, sizeof(kdm));
   }
 
-  boot_secure_zeroize(root_pubkey, 32);
-
-  /* Majority / Fallback Logic */
-  toob_kdm_t *active = NULL;
-  if (a_valid && b_valid) {
-    active = (kdm_a.sequence_number >= kdm_b.sequence_number) ? &kdm_a : &kdm_b;
-  } else if (a_valid) {
-    active = &kdm_a;
-    /* P10 ARCHITECTURE REQUIREMENT:
-     * KDM Healing (Reparatur von Slot B) ist strikt Aufgabe des
-     * OS-Background-Tasks. Der Bootloader führt in der Lese-Phase keine
-     * Flash-Schreiboperationen aus, um die O(1)-Garantie und
-     * Watchdog-Sicherheit zu wahren. */
-  } else if (b_valid) {
-    active = &kdm_b;
-  } else {
-    /* Fallback auf eFuse-Slot 1 NUR erlaubt im Initial Provisioning State.
-     * P10 SECURITY FIX: Verhindert Downgrade-Attacken durch absichtliches
-     * Zerstören der Flash-Slots A/B. Wenn das Gerät provisioniert ist (DSLC >
-     * 0), ist der Fallback verboten! */
-    uint8_t dslc_val = 0;
-    size_t dslc_len = 1;
-    if (platform->crypto->read_dslc &&
-        platform->crypto->read_dslc(&dslc_val, &dslc_len) == BOOT_OK) {
-      if (dslc_val == 0x00) {
-        if (platform->crypto->read_pubkey(out_pubkey, 32, 1) == BOOT_OK) {
-          *out_seq = 0;
-          return BOOT_OK;
-        }
+  /* Fallback auf eFuse-Slot 1 NUR erlaubt im Initial Provisioning State.
+   * P10 SECURITY FIX: Verhindert Downgrade-Attacken durch absichtliches
+   * Zerstören der Flash-Slots. Wenn das Gerät provisioniert ist (DSLC >
+   * 0), ist der Fallback verboten! */
+  uint8_t dslc_val = 0;
+  size_t dslc_len = 1;
+  if (platform->crypto->read_dslc &&
+      platform->crypto->read_dslc(&dslc_val, &dslc_len) == BOOT_OK) {
+    if (dslc_val == 0x00) {
+      if (platform->crypto->read_pubkey(out_pubkey, 32, 1) == BOOT_OK) {
+        *out_seq = 0;
+        return BOOT_OK;
       }
     }
-    return BOOT_ERR_NOT_FOUND;
   }
-
-  /* KDM gefunden und verifiziert */
-  memcpy(out_pubkey, active->new_cloud_pubkey, 32);
-  *out_seq = active->sequence_number;
-
-  boot_secure_zeroize(&kdm_a, sizeof(kdm_a));
-  boot_secure_zeroize(&kdm_b, sizeof(kdm_b));
-
-  return BOOT_OK;
+  return BOOT_ERR_NOT_FOUND;
 }
 
 boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
@@ -166,11 +144,12 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
   if (platform && platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&cmd_cfi_seed, sizeof(cmd_cfi_seed));
   }
-  uint32_t cfi_tok[CMD_CFI_NUM_TOKENS];
-  for (uint8_t i = 0; i < CMD_CFI_NUM_TOKENS; i++) {
-    cfi_tok[i] = cfi_derive(cmd_cfi_seed, i);
-  }
-  volatile uint32_t execution_path = cfi_tok[CMD_CFI_SLOT_INIT];
+  boot_cfi_ctx_t cmd_cfi_ctx;
+  boot_cfi_init(cmd_cfi_ctx, cmd_cfi_seed);
+  boot_cfi_add_expected(cmd_cfi_ctx, CMD_CFI_SLOT_PARSE);
+  boot_cfi_add_expected(cmd_cfi_ctx, CMD_CFI_SLOT_ID);
+  boot_cfi_add_expected(cmd_cfi_ctx, CMD_CFI_SLOT_COUNTER);
+  boot_cfi_add_expected(cmd_cfi_ctx, CMD_CFI_SLOT_VERIFY);
 
   if (!platform || !platform->crypto || !envelope_buf || !crypto_arena ||
       !out_cmd) {
@@ -187,7 +166,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     final_status = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
-  execution_path ^= cfi_tok[CMD_CFI_SLOT_PARSE];
+  boot_cfi_step(cmd_cfi_ctx, CMD_CFI_SLOT_PARSE);
 
   /* 2. Device-ID Match (Glitch-Safe) */
   uint8_t local_id[32];
@@ -201,18 +180,11 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
       constant_time_memcmp_glitch_safe(decoded.device_id, local_id, 32);
   boot_secure_zeroize(local_id, 32);
 
-  volatile uint32_t id_shield_1 = 0, id_shield_2 = 0;
-  if (id_match == BOOT_OK)
-    id_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (id_shield_1 == BOOT_OK && id_match == BOOT_OK)
-    id_shield_2 = BOOT_OK;
-
-  if (id_shield_1 != BOOT_OK || id_shield_2 != BOOT_OK) {
+  if (boot_secure_confirm(id_match) != BOOT_OK) {
     final_status = BOOT_ERR_VERIFY;
     goto cleanup;
   }
-  execution_path ^= cfi_tok[CMD_CFI_SLOT_ID];
+  boot_cfi_step(cmd_cfi_ctx, CMD_CFI_SLOT_ID);
 
   /* 3. Anti-Replay Counter Check */
   if (!platform->crypto->advance_monotonic_counter) {
@@ -226,18 +198,11 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
       goto cleanup;
   }
 
-  volatile uint32_t c_shield_1 = 0, c_shield_2 = 0;
-  if (decoded.counter_min > current_counter)
-    c_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (c_shield_1 == BOOT_OK && decoded.counter_min > current_counter)
-    c_shield_2 = BOOT_OK;
-
-  if (c_shield_1 != BOOT_OK || c_shield_2 != BOOT_OK) {
+  BOOT_SECURE_REQUIRE(decoded.counter_min > current_counter, {
     final_status = BOOT_ERR_DOWNGRADE;
     goto cleanup;
-  }
-  execution_path ^= cfi_tok[CMD_CFI_SLOT_COUNTER];
+  });
+  boot_cfi_step(cmd_cfi_ctx, CMD_CFI_SLOT_COUNTER);
 
   /* 4. Signature Verification */
   uint8_t cloud_pubkey[32] __attribute__((aligned(8)));
@@ -250,22 +215,17 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  /* P10 Fix: Architectural Slop -> Signatur ist in CDDL definiert, wir
-   * übergeben das restliche CBOR ohne Signatur als Payload. Da zcbor kein
-   * natives "raw bytes until this field" gibt, wird der übergebene CBOR-Map
-   * Block bis zur Signatur vom Generator berechnet. Für diese Umsetzung: Wir
-   * verifizieren das gesamte CBOR-Feld als Map, wobei wir hier annehmen, dass
-   * die Payload-Länge vom Generator übergeben werden könnte. Da dies hier
-   * low-level ist, nutzen wir den Standard-Weg: envelope_len abzgl. der
-   * Signatur. (Eigentlich würde zcbor uns den Offset der Payload zurückgeben.
-   * Für dieses Audit belassen wir den Length-Check robust) */
-  if (envelope_len <= 64) {
+  /* P6 FIX: Signierte Region basiert auf dem CBOR-dekodierten Ergebnis, nicht
+   * auf dem Pufferrand. Key 101 (2B) + bstr .size 64 Header (2B) + 64B
+   * Signatur = 68 Bytes fixer CBOR-Overhead für das Signaturfeld. Die zu
+   * verifizierende Region ist alles VOR diesem Feld im dekodierten Stream. */
+#define CLOUD_CMD_SIG_CBOR_SIZE (2 + 2 + 64) /* key(101) + bstr_hdr(.size 64) + payload */
+  if (decoded_len <= CLOUD_CMD_SIG_CBOR_SIZE) {
     boot_secure_zeroize(cloud_pubkey, 32);
     final_status = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
-  size_t sig_payload_len =
-      envelope_len - 64; /* Der CDDL Parser füllte decoded.signature_ed25519 */
+  size_t sig_payload_len = decoded_len - CLOUD_CMD_SIG_CBOR_SIZE;
 
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();
@@ -276,18 +236,11 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
 
   boot_secure_zeroize(cloud_pubkey, 32); /* Wipe key immediately */
 
-  volatile uint32_t s_shield_1 = 0, s_shield_2 = 0;
-  if (sig_stat == BOOT_OK)
-    s_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (s_shield_1 == BOOT_OK && sig_stat == BOOT_OK)
-    s_shield_2 = BOOT_OK;
-
-  if (s_shield_1 != BOOT_OK || s_shield_2 != BOOT_OK) {
+  if (boot_secure_confirm(sig_stat) != BOOT_OK) {
     final_status = BOOT_ERR_VERIFY;
     goto cleanup;
   }
-  execution_path ^= cfi_tok[CMD_CFI_SLOT_VERIFY];
+  boot_cfi_step(cmd_cfi_ctx, CMD_CFI_SLOT_VERIFY);
 
   /* 5. Exhaustion Defense: Advance Counter ONLY after successful verify */
   /* Burn the exact difference */
@@ -296,14 +249,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     /* P10 Fix: eFuse Burning ist riskant! Spannungseinbruch = Replay-Risk. */
     boot_status_t burn_stat = platform->crypto->advance_monotonic_counter();
 
-    volatile uint32_t b_shield_1 = 0, b_shield_2 = 0;
-    if (burn_stat == BOOT_OK)
-      b_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (b_shield_1 == BOOT_OK && burn_stat == BOOT_OK)
-      b_shield_2 = BOOT_OK;
-
-    if (b_shield_1 != BOOT_OK || b_shield_2 != BOOT_OK) {
+    if (boot_secure_confirm(burn_stat) != BOOT_OK) {
       /* Fatale Hardware-Fehlfunktion! Wir dürfen den Command Dispatch
        * unter keinen Umständen fortsetzen, da sonst ein Replay möglich ist!
        */
@@ -313,21 +259,76 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
   }
 
   /* 6. CFI Resolution & Dispatch */
-  uint32_t expected_path = cfi_tok[CMD_CFI_SLOT_INIT];
-  for (uint8_t i = 1; i < CMD_CFI_NUM_TOKENS; i++) {
-    expected_path ^= cfi_tok[i];
-  }
-  volatile uint32_t path_check_1 = 0, path_check_2 = 0;
-  if (execution_path == expected_path)
-    path_check_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (path_check_1 == BOOT_OK && execution_path == expected_path)
-    path_check_2 = BOOT_OK;
+  boot_cfi_require(cmd_cfi_ctx, {
+    final_status = BOOT_ERR_VERIFY;
+    goto cleanup;
+  });
 
-  if (path_check_1 == BOOT_OK && path_check_2 == BOOT_OK) {
-    *out_cmd = (toob_cloud_cmd_t)decoded.command;
-    final_status = BOOT_OK;
+  /* 7. ROTATE_KEY: Atomic KDM Write (Module-Owner Principle)
+   * The new KDM is in decoded.params, signed by the Root Key.
+   * We verify + write it here BEFORE returning to the dispatcher,
+   * because the decoded struct is about to be zeroized. */
+  if ((toob_cloud_cmd_t)decoded.command == TOOB_CMD_ROTATE_KEY) {
+    if (decoded.params == NULL || decoded.params_len != sizeof(toob_kdm_t)) {
+      final_status = BOOT_ERR_INVALID_ARG;
+      goto cleanup;
+    }
+
+    /* The KDM's internal signature is verified against the Root Key
+     * by boot_rstore_read on next boot. Here we only verify the
+     * params are structurally valid before persisting. */
+    toob_kdm_t new_kdm;
+    boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
+    memcpy(&new_kdm, decoded.params, sizeof(toob_kdm_t));
+
+    /* Root-Key Verification of the new KDM */
+    uint8_t rotate_root_key[32] __attribute__((aligned(8)));
+    boot_secure_zeroize(rotate_root_key, 32);
+    if (platform->crypto->read_pubkey(rotate_root_key, 32, 0) != BOOT_OK) {
+      boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
+      final_status = BOOT_ERR_NOT_FOUND;
+      goto cleanup;
+    }
+
+    boot_status_t kdm_sig = platform->crypto->verify_ed25519(
+        (const uint8_t *)&new_kdm, 36, new_kdm.signature_ed25519,
+        rotate_root_key);
+    boot_secure_zeroize(rotate_root_key, 32);
+
+    if (boot_secure_confirm(kdm_sig) != BOOT_OK) {
+      boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
+      final_status = BOOT_ERR_VERIFY;
+      goto cleanup;
+    }
+
+    /* Anti-Replay: New KDM sequence must be > current */
+    uint32_t current_kdm_seq = 0;
+    toob_kdm_t current_kdm;
+    boot_secure_zeroize(&current_kdm, sizeof(current_kdm));
+    if (boot_rstore_read(platform, &kdm_rstore_desc, &current_kdm) == BOOT_OK) {
+      current_kdm_seq = current_kdm.sequence_number;
+    }
+    boot_secure_zeroize(&current_kdm, sizeof(current_kdm));
+
+    if (new_kdm.sequence_number <= current_kdm_seq) {
+      boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
+      final_status = BOOT_ERR_DOWNGRADE;
+      goto cleanup;
+    }
+
+    /* Atomic Quorum Write */
+    boot_status_t write_stat =
+        boot_rstore_write(platform, &kdm_rstore_desc, &new_kdm);
+    boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
+
+    if (write_stat != BOOT_OK) {
+      final_status = write_stat;
+      goto cleanup;
+    }
   }
+
+  *out_cmd = (toob_cloud_cmd_t)decoded.command;
+  final_status = BOOT_OK;
 
 cleanup:
   boot_secure_zeroize(&decoded, sizeof(decoded));

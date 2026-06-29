@@ -27,7 +27,6 @@
 #include "libtoob_config_sandbox.h"
 #include "toob_internal.h"
 #include <stddef.h>
-#include <string.h>
 
 #if TOOB_MOCK_CONFIRM_BACKEND == TOOB_MOCK_CONFIRM_BACKEND_RTC
 /* Instanziiert den x86 Dummy-Pointer zur Laufzeit, um Segfaults auf dem OS-Host
@@ -97,6 +96,19 @@ toob_status_t toob_confirm_boot(void) {
 
   if (rtc_shield_1 == TOOB_OK && verified_nonce == handoff.boot_nonce) {
     rtc_shield_2 = TOOB_OK;
+  }
+
+  /* Fire-and-forget WAL append to ensure transaction log coherence (P7b alignment) */
+  {
+    toob_wal_entry_payload_t intent __attribute__((aligned(8)));
+    toob_secure_zeroize(&intent, sizeof(intent));
+
+    intent.magic = TOOB_WAL_ENTRY_MAGIC;
+    intent.intent = TOOB_WAL_INTENT_CONFIRM_COMMIT;
+    intent.expected_nonce = handoff.boot_nonce;
+
+    (void)toob_wal_naive_append(&intent);
+    toob_secure_zeroize(&intent, sizeof(intent));
   }
 
   /* Data-Privacy: Nonce sofort vernichten, bevor wir returnen! */

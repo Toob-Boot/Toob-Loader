@@ -83,6 +83,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
                                uint32_t delta_addr, size_t delta_max_size,
                                uint32_t dest_addr, size_t dest_max_size,
                                uint32_t base_addr, size_t base_max_size,
-                               wal_entry_payload_t *open_txn);
+                               wal_entry_payload_t *open_txn,
+                               uint8_t *arena, size_t arena_len);
 
 #endif /* TOOB_BOOT_DELTA_H */

@@ -14,8 +14,9 @@
 #include "boot_hal.h"
 #include "boot_types.h"
 
-/* Magic Header für Vorwärtskompatibilität (P10) */
-#define WAL_ABI_VERSION_MAGIC 0x57414C02 /* "WAL\x02" */
+#define WAL_ABI_VERSION_MAGIC_LEGACY 0x57414C02  /* "WAL\x02" */
+#define WAL_ABI_VERSION_MAGIC_CURRENT 0x57414C03 /* "WAL\x03" */
+#define WAL_ABI_VERSION_MAGIC WAL_ABI_VERSION_MAGIC_CURRENT
 #define WAL_ENTRY_MAGIC 0xB007BEEF
 
 /**
@@ -43,11 +44,45 @@ typedef enum {
   WAL_INTENT_DEVICE_LOCKED = 13
 } wal_intent_t;
 
+#define TMR_PAYLOAD_SLOT_BYTES 112
+#define WAL_TMR_VERSION_1 1
+#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_1
+
+/**
+ * @brief Legacy v1 structure layout for backward compatibility and migration mapping.
+ */
+typedef struct {
+  uint32_t primary_slot_id;
+  uint32_t active_stage1_bank;
+  uint32_t app_svn;
+  uint32_t boot_failure_counter;
+  uint32_t svn_recovery_counter;
+  uint32_t app_slot_erase_counter;
+  uint32_t staging_slot_erase_counter;
+  uint32_t swap_buffer_erase_counter;
+  uint32_t active_nonce_lo;
+  uint32_t active_nonce_hi;
+  uint32_t kdm_sequence;
+  uint32_t active_kdm_slot;
+} wal_tmr_payload_v1_t;
+
+typedef struct {
+  uint32_t sector_magic;
+  uint32_t sequence_id;
+  uint32_t erase_count;
+  wal_tmr_payload_v1_t tmr_data;
+  uint32_t header_crc32;
+} wal_sector_header_v1_t;
+
 /**
  * @brief GAP-C01: TMR Payload (Langlebige Status-Werte)
  * Diese Struktur wird durch Majority-Vote über 3 Sektoren geschützt.
  */
 typedef struct {
+  uint16_t struct_version;   /* Bumped on each new field addition */
+  uint16_t populated_size;   /* Actual written bytes of this version */
+
+  /* --- v1-Felder (heutiger Bestand) --- */
   uint32_t primary_slot_id;
   uint32_t active_stage1_bank;
   uint32_t app_svn;
@@ -63,9 +98,15 @@ typedef struct {
   uint32_t active_nonce_lo;
   uint32_t active_nonce_hi;
 
-  /* Cloud-Command Key Delegation Manifest (KDM) State */
-  uint32_t kdm_sequence;
-  uint32_t active_kdm_slot;
+  /* P4 Deprecated: KDM is now quorum-stored via boot_rstore */
+  uint32_t _deprecated_kdm_sequence;
+  uint32_t _deprecated_active_kdm_slot;
+
+  /* --- v2-Felder (Phase 7a: Self-Anti-Rollback) --- */
+  uint32_t stage1_svn;  /* Last-confirmed Stage 1 SVN (defense-in-depth, A1 protection) */
+
+  /* --- reserved tail (for future versions) --- */
+  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52];
 } wal_tmr_payload_t;
 
 /**
@@ -86,17 +127,19 @@ typedef struct {
  */
 typedef union {
   wal_sector_header_t data;
-  /* Festes 64-Byte Padding für Hardware-Alignment */
-  uint8_t padding[64];
+  /* Festes 128-Byte Padding für Hardware-Alignment */
+  uint8_t padding[128];
 } wal_sector_header_aligned_t;
 
 _Static_assert(
     sizeof(wal_sector_header_aligned_t) % 8 == 0,
     "GAP-C03: WAL Sector Header padding violates hardware alignment!");
-_Static_assert(sizeof(wal_tmr_payload_t) == 48,
-               "ABI Drift: TMR payload must be exactly 48 bytes!");
-_Static_assert(sizeof(wal_sector_header_t) == 64,
-               "ABI Drift: WAL Header must be exactly 64 bytes!");
+_Static_assert(sizeof(wal_tmr_payload_t) <= TMR_PAYLOAD_SLOT_BYTES,
+               "ABI Drift: TMR payload exceeds slot size!");
+_Static_assert(sizeof(wal_sector_header_t) <= 128,
+               "ABI Drift: WAL Header exceeds slot size!");
+_Static_assert(sizeof(wal_sector_header_aligned_t) == 128,
+               "ABI Drift: Aligned WAL Header must be exactly 128 bytes!");
 
 /**
  * @brief Der Payload eines einzelnen angehängten WAL-Eintrags.

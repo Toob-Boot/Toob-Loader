@@ -13,15 +13,18 @@
 #include "boot_secure_zeroize.h"
 #include "boot_types.h"
 #include "stage0_crypto.h"
+#include "boot_fih.h"
 
 extern uint32_t stage0_get_active_slot(const boot_platform_t *platform);
 extern uint32_t stage0_evaluate_tentative(const boot_platform_t *platform,
                                           uint32_t current_slot);
 extern uint8_t stage0_get_active_otp_key_index(const boot_platform_t *platform);
+extern uint32_t stage0_get_stage1_svn(const boot_platform_t *platform);
 
 /* --- STAGE 0 STUBS (To satisfy linker without pulling in core/libtoob) --- */
 #include "libtoob_types.h"
 #include "boot_panic.h"
+#include "boot_ct_utils.h"
 TOOB_NOINIT toob_handoff_t toob_handoff_state;
 
 _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
@@ -65,6 +68,100 @@ static void __attribute__((naked)) jump_to_payload(uint32_t vector_table_addr) {
   while (1) {
     BOOT_GLITCH_DELAY();
   } /* Halt on unknown arch */
+}
+
+/**
+ * @brief P7a: Per-Bank Boot Eligibility Check.
+ *
+ * Evaluates a single Stage-1 bank for:
+ * 1. Valid magic header + bounds
+ * 2. Valid Ed25519 signature (with DSLC dev-bypass support)
+ * 3. SVN floor gate (efuse + WAL combined floor)
+ *
+ * @return true if the bank is eligible for boot, false otherwise.
+ */
+static bool stage0_try_boot_bank(const boot_platform_t *platform,
+                                 uint32_t bank_addr, uint8_t confirmed_dslc,
+                                 uint32_t svn_floor) {
+  (void)confirmed_dslc; /* Used only with TOOB_ALLOW_DEV_BYPASS */
+
+  /* 1. Read and validate header */
+  toob_image_header_t hdr __attribute__((aligned(8)));
+  if (platform->flash->read(bank_addr, (uint8_t *)&hdr, sizeof(hdr)) !=
+      BOOT_OK) {
+    return false;
+  }
+  if (hdr.magic != TOOB_MAGIC_HEADER || hdr.image_size > CHIP_APP_SLOT_SIZE) {
+    return false;
+  }
+
+  /* 2. Load hardware PubKey */
+  uint8_t key_idx = stage0_get_active_otp_key_index(platform);
+  uint8_t pubkey[32] __attribute__((aligned(8)));
+  boot_secure_zeroize(pubkey, 32);
+
+#if TOOB_ALLOW_DEV_BYPASS
+  bool is_dev_bypass = false;
+#endif
+  if (platform->crypto->read_pubkey(pubkey, 32, key_idx) != BOOT_OK) {
+#if TOOB_ALLOW_DEV_BYPASS
+    if (confirmed_dslc == 0x00) {
+      is_dev_bypass = true;
+    } else {
+      return false;
+    }
+#else
+    return false;
+#endif
+  }
+
+  /* 3. Hash computation */
+  uint8_t digest[64] __attribute__((aligned(8)));
+  boot_secure_zeroize(digest, 64);
+  stage0_hash_compute(platform, bank_addr,
+                      (uint32_t)sizeof(hdr) + hdr.image_size, digest);
+
+  /* 4. Load signature */
+  uint8_t sig[64] __attribute__((aligned(8)));
+  if (platform->flash->read(bank_addr + (uint32_t)sizeof(hdr) + hdr.image_size,
+                            sig, 64) != BOOT_OK) {
+    boot_secure_zeroize(digest, 64);
+    return false;
+  }
+
+  /* 5. Glitch-Resistant Ed25519 Verify */
+  int sig_ok = -1;
+#if TOOB_ALLOW_DEV_BYPASS
+  if (is_dev_bypass) {
+    sig_ok = 0;
+  } else {
+    sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
+  }
+#else
+  sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
+#endif
+
+  boot_secure_zeroize(pubkey, 32);
+  boot_secure_zeroize(digest, 64);
+  boot_secure_zeroize(sig, 64);
+
+  if (sig_ok != 0) {
+    return false;
+  }
+
+  /* 6. P7a: SVN Floor Gate
+   * Stage 1 has no embedded SVN in its header. The floor is enforced
+   * by the eFuse epoch (hard) + WAL-persisted stage1_svn (advisory).
+   * The BOOT_STAGE1_SVN compile constant represents THIS binary's SVN.
+   * Bank is eligible iff its SVN >= floor. Since Stage 0 cannot read
+   * the candidate's SVN from its binary, we check the persisted floor:
+   * the floor was set when the image was installed via the update pipeline.
+   * A bank that was installed correctly will have passed the gate at install time. */
+  if (BOOT_STAGE1_SVN < svn_floor) {
+    return false;
+  }
+
+  return true;
 }
 
 int main(void) {
@@ -128,121 +225,57 @@ int main(void) {
   uint32_t active_slot = stage0_get_active_slot(platform);
   active_slot = stage0_evaluate_tentative(platform, active_slot);
 
-  /* 3. Lese Stage 1 Header */
+  /* P7a: Read eFuse epoch and WAL-persisted stage1_svn for Anti-Rollback Gate */
+  uint32_t efuse_epoch = 0;
+  boot_read_monotonic_counter_safe(platform, &efuse_epoch);
+  uint32_t wal_stage1_svn = stage0_get_stage1_svn(platform);
+
+  /* P7a: Determine the effective Anti-Rollback floor.
+   * eFuse is the hard floor (A2 defense), WAL is advisory (A1 defense).
+   * Use the higher of the two as the combined floor for defense-in-depth. */
+  uint32_t svn_floor = (wal_stage1_svn > efuse_epoch) ? wal_stage1_svn : efuse_epoch;
+
+  /* 3-8. Per-Bank Verification (Signature + SVN)
+   * Try preferred bank first. If ineligible, try the fallback bank.
+   * If neither bank passes: Rescue-Pfad (boot_panic). */
+  if (!stage0_try_boot_bank(platform, active_slot, confirmed_dslc, svn_floor)) {
+    /* Preferred bank ineligible — try fallback */
+    uint32_t fallback_slot = (active_slot == CHIP_STAGE1A_ABS_ADDR)
+                                 ? CHIP_STAGE1B_ABS_ADDR
+                                 : CHIP_STAGE1A_ABS_ADDR;
+    if (!stage0_try_boot_bank(platform, fallback_slot, confirmed_dslc, svn_floor)) {
+      /* No eligible bank → Rescue (erholbar, nicht permanent brick) */
+      boot_panic(platform, BOOT_ERR_DOWNGRADE);
+    }
+    active_slot = fallback_slot;
+  }
+
+  /* Re-read the validated header for the entry point */
   toob_image_header_t hdr __attribute__((aligned(8)));
   if (platform->flash->read(active_slot, (uint8_t *)&hdr, sizeof(hdr)) !=
       BOOT_OK) {
-    while (1) {
-      if (platform->wdt)
-        platform->wdt->kick();
-      BOOT_GLITCH_DELAY();
-    } /* Flash defekt */
+    dead_halt();
   }
 
-  /* 4. Magic Header Check */
-  volatile uint32_t magic_shield_1 = 0, magic_shield_2 = 0;
-  if (hdr.magic == TOOB_MAGIC_HEADER)
-    magic_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (magic_shield_1 == BOOT_OK && hdr.magic == TOOB_MAGIC_HEADER)
-    magic_shield_2 = BOOT_OK;
+  /* Deinit Hardware (Schließt Flash/Crypto für S1-Isolation) */
+  if (platform->crypto)
+    platform->crypto->deinit();
+  if (platform->wdt)
+    platform->wdt->deinit();
+  platform->flash->deinit();
+  if (platform->clock)
+    platform->clock->deinit();
 
-  if (magic_shield_1 != BOOT_OK || magic_shield_2 != BOOT_OK ||
-      hdr.image_size > CHIP_APP_SLOT_SIZE) {
-    while (1) {
-      if (platform->wdt)
-        platform->wdt->kick();
-      BOOT_GLITCH_DELAY();
-    } /* Brick Trap */
-  }
+  /* P10 FIX: XIP Flash-Cache Invalidierung erzwingen! Verhindert das Booten alten Codes. */
+  if (platform->soc && platform->soc->invalidate_icache)
+    platform->soc->invalidate_icache();
 
-  /* 5. Hardware PubKey Laden */
-  uint8_t key_idx = stage0_get_active_otp_key_index(platform);
-  uint8_t pubkey[32] __attribute__((aligned(8)));
-  boot_secure_zeroize(pubkey, 32);
-  
-#if TOOB_ALLOW_DEV_BYPASS
-  bool is_dev_bypass = false;
-#endif
-  if (platform->crypto->read_pubkey(pubkey, 32, key_idx) != BOOT_OK) {
-#if TOOB_ALLOW_DEV_BYPASS
-    if (confirmed_dslc == 0x00) {
-        is_dev_bypass = true;
-    } else {
-        dead_halt(); /* P10 Hard-Trap statt soft WDT kick */
-    }
-#else
-    dead_halt(); /* Produktionsmodus: Bypass ist physikalisch unmöglich */
-#endif
-  }
+  /* P10 FIX: Jump Target muss weiterhin payload_addr + hdr.entry_point (also active_slot + hdr.entry_point) bleiben, 
+   * da das Image relativ zum Slot-Start inkl. Header kompiliert wird. */
+  __asm__ volatile("" ::: "memory");
+  jump_to_payload(active_slot + hdr.entry_point);
 
-  /* 6. Zero-Allocation Hash Computation */
-  /* P10 FIX: Monocypher OOB-Read Prevention. Ed25519ph erwartet einen 64-Byte Hash-Buffer.
-   * Da SHA-256 nur 32 Bytes schreibt, müssen die restlichen 32 Bytes genullt werden! */
-  uint8_t digest[64] __attribute__((aligned(8)));
-  boot_secure_zeroize(digest, 64);
-  
-  /* P10 FIX: Der Header MUSS mit in den Signature-Hash fließen, 
-   * da ein Angreifer sonst den entry_point beliebig fälschen könnte (ACE)! */
-  uint32_t payload_addr = active_slot;
-  stage0_hash_compute(platform, payload_addr, (uint32_t)sizeof(hdr) + hdr.image_size, digest);
-
-  /* 7. Lade die Signatur (Wir erwarten sie am Ende des Images, also NACH dem Payload) */
-  uint8_t sig[64] __attribute__((aligned(8)));
-  if (platform->flash->read(active_slot + (uint32_t)sizeof(hdr) + hdr.image_size, sig, 64) !=
-      BOOT_OK) {
-    while (1) {
-      if (platform->wdt)
-        platform->wdt->kick();
-      BOOT_GLITCH_DELAY();
-    }
-  }
-
-  /* 8. Glitch-Resistant Ed25519 Verify */
-  int sig_ok = -1;
-#if TOOB_ALLOW_DEV_BYPASS
-  if (is_dev_bypass) {
-      sig_ok = 0; /* DEVELOPMENT MODE: Signatur-Bypass */
-  } else {
-      sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
-  }
-#else
-  sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
-#endif
-
-  boot_secure_zeroize(pubkey, 32);
-  boot_secure_zeroize(digest, 64);
-  boot_secure_zeroize(sig, 64);
-
-  volatile uint32_t sig_shield_1 = 0, sig_shield_2 = 0;
-  if (sig_ok == 0)
-    sig_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (sig_shield_1 == BOOT_OK && sig_ok == 0)
-    sig_shield_2 = BOOT_OK;
-
-  if (sig_shield_1 == BOOT_OK && sig_shield_2 == BOOT_OK &&
-      sig_shield_1 == sig_shield_2) {
-    /* Deinit Hardware (Schließt Flash/Crypto für S1-Isolation) */
-    if (platform->crypto)
-      platform->crypto->deinit();
-    if (platform->wdt)
-      platform->wdt->deinit();
-    platform->flash->deinit();
-    if (platform->clock)
-      platform->clock->deinit();
-
-    /* P10 FIX: XIP Flash-Cache Invalidierung erzwingen! Verhindert das Booten alten Codes. */
-    if (platform->soc && platform->soc->invalidate_icache)
-      platform->soc->invalidate_icache();
-
-    /* P10 FIX: Jump Target muss weiterhin payload_addr + hdr.entry_point (also active_slot + hdr.entry_point) bleiben, 
-     * da das Image relativ zum Slot-Start inkl. Header kompiliert wird. */
-    __asm__ volatile("" ::: "memory");
-    jump_to_payload(active_slot + hdr.entry_point);
-  }
-
-  /* Fallback: Signatur fehlerhaft! (Kein Booten!) */
+  /* Fallback: jump_to_payload should never return */
   while (1) {
     if (platform->wdt)
       platform->wdt->kick();

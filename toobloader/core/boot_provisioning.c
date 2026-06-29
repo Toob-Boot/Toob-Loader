@@ -23,6 +23,7 @@
  */
 
 #include "boot_provisioning.h"
+#include "boot_fih.h"
 #include "boot_cobs.h"
 #include "boot_crc32.h"
 #include "boot_secure_zeroize.h"
@@ -30,7 +31,7 @@
 #include <stddef.h>
 #include <string.h>
 
-extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
+/* P5: Arena is now passed explicitly by the caller */
 
 _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 512,
                "Crypto Arena muss mindestens 512B für Provisioning-Puffer");
@@ -86,20 +87,18 @@ static void send_status(const boot_platform_t *platform, uint8_t *tx_buf,
  * ==============================================================================
  */
 
-_Noreturn void boot_provisioning_run(const boot_platform_t *platform) {
+_Noreturn void boot_provisioning_run(const boot_platform_t *platform,
+                                     uint8_t *arena, size_t arena_len) {
   /* P10 Defensive: Verify prerequisites before entering the loop */
   if (!platform || !platform->provisioning || !platform->console ||
       !platform->console->getchar || !platform->console->putchar) {
     /* Terminal halt — no provisioning HAL, no UART */
-    while (1) {
-      if (platform && platform->wdt && platform->wdt->kick)
-        platform->wdt->kick();
-    }
+    boot_terminal_halt(platform, BOOT_ERR_INVALID_ARG, SITE_PROVISIONING_GLITCH);
   }
 
   /* Arena Partitioning */
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
-  uint8_t *rx_buf = crypto_arena;
+  boot_secure_zeroize(arena, arena_len);
+  uint8_t *rx_buf = arena;
   uint8_t *tx_buf = rx_buf + PROV_RX_MAX_SIZE;
   uint8_t *key_buf = tx_buf + PROV_TX_MAX_SIZE;
 
@@ -138,19 +137,10 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform) {
 
     uint32_t computed_crc = compute_boot_crc32(rx_buf, payload_len);
 
-    volatile uint32_t crc_shield_1 = 0, crc_shield_2 = 0;
-    bool crc_ok = (received_crc == computed_crc);
-    if (crc_ok)
-      crc_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (crc_shield_1 == BOOT_OK && crc_ok)
-      crc_shield_2 = BOOT_OK;
-
-    if (crc_shield_1 != BOOT_OK || crc_shield_2 != BOOT_OK ||
-        crc_shield_1 != crc_shield_2) {
+    BOOT_SECURE_REQUIRE(received_crc == computed_crc, {
       send_status(platform, tx_buf, BOOT_ERR_VERIFY);
       continue;
-    }
+    });
 
     /* Command Dispatch */
     uint8_t cmd = rx_buf[0];
@@ -244,12 +234,10 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform) {
       send_status(platform, tx_buf, BOOT_OK);
 
       /* Zeroize the arena before reset */
-      boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      boot_secure_zeroize(arena, arena_len);
 
       /* Starve the WDT to trigger a hardware reset */
-      while (1) {
-        /* Intentional infinite loop without WDT kicks */
-      }
+      boot_terminal_halt(platform, BOOT_OK, SITE_PROVISIONING_GLITCH);
     }
 
     default:

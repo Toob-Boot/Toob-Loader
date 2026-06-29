@@ -63,6 +63,20 @@ static inline bool is_fully_erased(const uint8_t *buf, size_t len,
  * ==============================================================================
  */
 
+/**
+ * @brief O(1) WAL Append without sector rotation or TMR healing.
+ *
+ * Scans the active WAL sector sequentially to find an erased slot and write the intent.
+ *
+ * @param intent Payload of the intent to append to the log.
+ * @return TOOB_OK on successful write and read-back verification.
+ *         - TOOB_ERR_INVALID_ARG: Null pointer passed.
+ *         - TOOB_ERR_NOT_FOUND: No active WAL sector discovered.
+ *         - TOOB_ERR_WAL_FULL: No free slot in the active sector (Stage 1 must rotate).
+ *         - TOOB_ERR_WAL_LOCKED: Duplicate UPDATE_PENDING intent when one is active.
+ *         - TOOB_ERR_REQUIRES_RESET: Torn write / sector corruption found (Stage 1 must repair).
+ *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash write/read hardware errors.
+ */
 toob_status_t toob_wal_naive_append(const toob_wal_entry_payload_t *intent) {
   toob_status_t final_status = TOOB_OK;
 

@@ -326,7 +326,7 @@ func printMatrixCompatibility(matrix *registry.Matrix, chipName, chipVersion str
 				var verifiedClis []string
 				for cliVer, info := range verEntry.VerifiedCliVersions {
 					status := strings.ToUpper(info.Status)
-					if status == "SUCCESS" || status == "VERIFIED" {
+					if status == "VERIFIED" {
 						verifiedClis = append(verifiedClis, cliVer)
 					}
 				}

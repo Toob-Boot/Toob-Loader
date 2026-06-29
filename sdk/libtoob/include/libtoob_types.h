@@ -19,9 +19,23 @@
 #include <stddef.h>
 
 /* ========================================================
- * 1. Status & Boot States
+ * 0. Cross-Compiler Utilities
  * ======================================================== */
 
+/* Forces callers to check toob_status_t returns at compile time. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define TOOB_MUST_CHECK __attribute__((warn_unused_result))
+#elif defined(__ICCARM__)
+#  define TOOB_MUST_CHECK _Pragma("diag_error=Pe940")
+#elif defined(__CC_ARM) || defined(__ARMCC_VERSION)
+#  define TOOB_MUST_CHECK __attribute__((warn_unused_result))
+#else
+#  define TOOB_MUST_CHECK
+#endif
+
+/* ========================================================
+ * 1. Status & Boot States
+ * ======================================================== */
 /* GAP-06: Spezifische libtoob Fehlercodes für sauberes OS-Handling */
 typedef enum {
     TOOB_OK             = 0x55AA55AA,
@@ -85,6 +99,22 @@ typedef struct __attribute__((aligned(8))) {
 _Static_assert(sizeof(toob_handoff_t) == 80, "toob_handoff_t size breach - must be exactly 80 bytes");
 _Static_assert(sizeof(toob_handoff_t) % 8 == 0, "toob_handoff_t alignment breach - must be 8-byte aligned");
 _Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 76, "crc32_trailer ABI offset drift detected");
+
+/* ========================================================
+ * Handoff ABI Layout Static Asserts (P10)
+ * ======================================================== */
+_Static_assert(offsetof(toob_handoff_t, magic) == 0, "magic offset drift");
+_Static_assert(offsetof(toob_handoff_t, struct_version) == 4, "struct_version offset drift");
+_Static_assert(offsetof(toob_handoff_t, boot_nonce) == 8, "boot_nonce offset drift");
+_Static_assert(offsetof(toob_handoff_t, booted_partition) == 16, "booted_partition offset drift");
+_Static_assert(offsetof(toob_handoff_t, reset_reason) == 20, "reset_reason offset drift");
+_Static_assert(offsetof(toob_handoff_t, boot_failure_count) == 24, "boot_failure_count offset drift");
+_Static_assert(offsetof(toob_handoff_t, net_search_accum_ms) == 28, "net_search_accum_ms offset drift");
+_Static_assert(offsetof(toob_handoff_t, resume_offset) == 32, "resume_offset offset drift");
+_Static_assert(offsetof(toob_handoff_t, device_id) == 36, "device_id offset drift");
+_Static_assert(offsetof(toob_handoff_t, wipe_requested) == 68, "wipe_requested offset drift");
+_Static_assert(offsetof(toob_handoff_t, _padding) == 69, "_padding offset drift");
+_Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 76, "crc32_trailer offset drift");
 
 /* Konstante für struct_version des Handoff-Headers zur Vermeidung von ABI-Drift */
 #define TOOB_HANDOFF_STRUCT_VERSION 0x02000000
@@ -160,6 +190,27 @@ _Static_assert(sizeof(toob_boot_diag_t) == 88, "toob_boot_diag_t size breach - m
 _Static_assert(offsetof(toob_boot_diag_t, ext_health) % 4 == 0, "toob_ext_health_t alignment is broken in diag struct");
 _Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) > offsetof(toob_boot_diag_t, ext_health), "CRC32 trailer must be last field");
 
+/* ========================================================
+ * Diag ABI Layout Static Asserts (P10)
+ * ======================================================== */
+_Static_assert(offsetof(toob_boot_diag_t, struct_version) == 0, "struct_version offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, boot_duration_ms) == 4, "boot_duration_ms offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, verify_time_ms) == 8, "verify_time_ms offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, last_error_code) == 12, "last_error_code offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, vendor_error) == 16, "vendor_error offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, active_key_index) == 20, "active_key_index offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, current_svn) == 24, "current_svn offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, edge_recovery_events) == 28, "edge_recovery_events offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, sbom_digest) == 32, "sbom_digest offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health_present) == 64, "ext_health_present offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, _padding) == 65, "_padding offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health) == 68, "ext_health offset drift");
+_Static_assert(offsetof(toob_ext_health_t, wal_erase_count) == 0, "wal_erase_count offset drift");
+_Static_assert(offsetof(toob_ext_health_t, app_slot_erase_count) == 4, "app_slot_erase_count offset drift");
+_Static_assert(offsetof(toob_ext_health_t, staging_slot_erase_count) == 8, "staging_slot_erase_count offset drift");
+_Static_assert(offsetof(toob_ext_health_t, swap_buffer_erase_count) == 12, "swap_buffer_erase_count offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 84, "crc32_trailer offset drift");
+
 /* Konstante für struct_version des Diag-Headers zur Vermeidung von ABI-Drift */
 #define TOOB_DIAG_STRUCT_VERSION 0x01000000
 
@@ -169,8 +220,10 @@ _Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) > offsetof(toob_boot_di
 
 /* GAP-C03: Zero-Dependency WAL Payload Declaration für OS Hooks */
 #define TOOB_WAL_ENTRY_MAGIC  0xB007BEEF
-#define TOOB_WAL_SECTOR_MAGIC 0x57414C02
-#define TOOB_WAL_HEADER_SIZE  64
+#define TOOB_WAL_SECTOR_MAGIC_LEGACY 0x57414C02
+#define TOOB_WAL_SECTOR_MAGIC_CURRENT 0x57414C03
+#define TOOB_WAL_SECTOR_MAGIC TOOB_WAL_SECTOR_MAGIC_CURRENT
+#define TOOB_WAL_HEADER_SIZE  128
 
 /* OTA Network Failsafe Timeout (Default: 5 Minutes) */
 #ifndef TOOB_SMOKE_TEST_TIMEOUT_MS
@@ -227,10 +280,10 @@ _Static_assert(sizeof(toob_wal_entry_payload_t) == 64, "GAP-C03: toob_wal_entry_
  * Sektor Header Boundary Definition
  * ======================================================== */
 typedef struct {
-    uint32_t sector_magic;    /**< Immer TOOB_WAL_SECTOR_MAGIC (0x57414C02) */
+    uint32_t sector_magic;    /**< Immer TOOB_WAL_SECTOR_MAGIC */
     uint32_t sequence_id;     /**< Fortlaufende ID für O(1) Sliding-Window Discovery */
     uint32_t erase_count;     /**< Tracks sector wear leveling */
-    uint8_t  _reserved_tmr_space[48]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
+    uint8_t  _reserved_tmr_space[112]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
     uint32_t header_crc32;    /**< Sichert den Sector-Header */
 } toob_wal_sector_header_t;
 
@@ -240,10 +293,9 @@ typedef union {
 } toob_wal_sector_header_aligned_t;
 
 _Static_assert(sizeof(toob_wal_sector_header_aligned_t) == TOOB_WAL_HEADER_SIZE, "WAL Header Boundary breach!");
-_Static_assert(offsetof(toob_wal_sector_header_t, header_crc32) == 60, "Sector Header Layout Drift: CRC32 must be at offset 60");
+_Static_assert(offsetof(toob_wal_sector_header_t, header_crc32) == 124, "Sector Header Layout Drift: CRC32 must be at offset 124");
 
 /* Extern Definitions (After structs are fully typed!) */
-extern TOOB_NOINIT toob_handoff_t toob_handoff_state;
 extern TOOB_NOINIT toob_boot_diag_t toob_diag_state;
 
 #endif /* LIBTOOB_TYPES_H */

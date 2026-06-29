@@ -30,6 +30,7 @@
 #include "boot_delay.h"
 #include "boot_diag.h"
 #include "boot_panic.h"
+#include "boot_fih.h"
 #include "boot_provisioning.h"
 #include "boot_secure_zeroize.h"
 #include "boot_state.h"
@@ -101,8 +102,7 @@ boot_status_t boot_main(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Seed wird später nach crypto->init gezogen */
   uint32_t main_cfi_seed = 0;
-  uint32_t cfi_tok[MAIN_CFI_NUM_TOKENS] = {0};
-  volatile uint32_t main_cfi = 0; /* Initialisiert nach TRNG-Seed */
+  boot_cfi_ctx_t main_cfi_ctx;
 
   /* P10 Leakage Prevention: Zeroize the output immediately (Zero-Day Fallback)
    */
@@ -205,6 +205,58 @@ boot_status_t boot_main(const boot_platform_t *platform,
     goto init_cleanup;
   init_mask |= INIT_MASK_FLASH;
 
+  /* Read forensic slot if present and mirror to telemetry */
+  {
+    boot_forensic_record_t forensic_record;
+    boot_secure_zeroize(&forensic_record, sizeof(forensic_record));
+    bool forensic_valid = false;
+
+    /* Try RTC backup registers first */
+    if (platform->soc && platform->soc->read_rtc_backup) {
+      uint32_t *words = (uint32_t *)&forensic_record;
+      boot_status_t rtc_stat = BOOT_OK;
+      for (uint8_t slot = 1; slot <= 5; slot++) {
+        boot_status_t s = platform->soc->read_rtc_backup(slot, &words[slot - 1]);
+        if (s != BOOT_OK) {
+          rtc_stat = s;
+        }
+      }
+      if (rtc_stat == BOOT_OK && forensic_record.magic == 0x464F524E) {
+        uint32_t calculated_crc = compute_boot_crc32((const uint8_t *)&forensic_record, 16);
+        if (forensic_record.crc32 == calculated_crc) {
+          forensic_valid = true;
+        }
+      }
+    }
+
+    /* Fallback to flash if not found in RTC */
+    if (!forensic_valid && platform->flash && platform->flash->read) {
+      boot_status_t f_read = platform->flash->read(CHIP_FORENSIC_SLOT_ABS_ADDR, &forensic_record, sizeof(forensic_record));
+      if (f_read == BOOT_OK && forensic_record.magic == 0x464F524E) {
+        uint32_t calculated_crc = compute_boot_crc32((const uint8_t *)&forensic_record, 16);
+        if (forensic_record.crc32 == calculated_crc) {
+          forensic_valid = true;
+        }
+      }
+    }
+
+    if (forensic_valid) {
+      /* Mirror to toob_diag_state */
+      boot_diag_init();
+      boot_diag_set_error((boot_status_t)forensic_record.reason, forensic_record.site_id);
+      
+      /* Invalidate the slot to prevent reading the same crash on next reboot */
+      if (platform->soc && platform->soc->write_rtc_backup) {
+        for (uint8_t slot = 1; slot <= 5; slot++) {
+          (void)platform->soc->write_rtc_backup(slot, 0);
+        }
+      }
+      if (platform->flash && platform->flash->erase_sector) {
+        (void)platform->flash->erase_sector(CHIP_FORENSIC_SLOT_ABS_ADDR);
+      }
+    }
+  }
+
   if (platform->flash->set_otfdec_mode != NULL) {
     status = platform->flash->set_otfdec_mode(false);
     if (status != BOOT_OK)
@@ -245,12 +297,12 @@ boot_status_t boot_main(const boot_platform_t *platform,
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&main_cfi_seed, sizeof(main_cfi_seed));
   }
-  for (uint8_t i = 0; i < MAIN_CFI_NUM_TOKENS; i++) {
-    cfi_tok[i] = cfi_derive(main_cfi_seed, i);
+  boot_cfi_init(main_cfi_ctx, main_cfi_seed);
+  for (uint8_t i = 1; i < MAIN_CFI_NUM_TOKENS; i++) {
+    boot_cfi_add_expected(main_cfi_ctx, i);
   }
-  main_cfi = cfi_tok[MAIN_CFI_SLOT_INIT];
 
-  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HW_UP];
+  boot_cfi_step(main_cfi_ctx, MAIN_CFI_SLOT_HW_UP);
   goto init_success;
 
 init_cleanup:
@@ -287,18 +339,11 @@ init_success:
       /* Debounce Wait: 500ms mit WDT Kicks (P10) */
       boot_delay_with_wdt(platform, 500);
 
-      /* Glitch-Resistenter Double Check: Ist der Pin immer noch High? */
-      volatile uint32_t pin_shield_1 = 0, pin_shield_2 = 0;
       bool pin_active = platform->soc->get_recovery_pin_state();
+      bool pin_failed = false;
+      BOOT_SECURE_REQUIRE(pin_active, { pin_failed = true; });
 
-      if (pin_active)
-        pin_shield_1 = BOOT_OK;
-      BOOT_GLITCH_DELAY();
-      if (pin_shield_1 == BOOT_OK && pin_active)
-        pin_shield_2 = BOOT_OK;
-
-      if (pin_shield_1 == BOOT_OK && pin_shield_2 == BOOT_OK &&
-          pin_shield_1 == pin_shield_2) {
+      if (!pin_failed) {
         /* Trap atomar in das Serial-Rescue, ohne Return! */
         boot_panic(platform, BOOT_RECOVERY_REQUESTED);
         return BOOT_RECOVERY_REQUESTED; /* Unreachable P10 Safety */
@@ -321,7 +366,7 @@ init_success:
     if (platform->crypto->read_dslc(&dslc_val, &dslc_len) == BOOT_OK &&
         dslc_len > 0 && dslc_val == 0x00) {
       if (platform->provisioning) {
-        boot_provisioning_run(platform);
+        boot_provisioning_run(platform, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
         return BOOT_ERR_NOT_SUPPORTED; /* Unreachable P10 Safety */
       }
     }
@@ -335,7 +380,7 @@ init_success:
   uint32_t boot_start_time_ms = platform->clock->get_tick_ms();
 
   /* Betritt den Lebenszyklus des Bootloaders (WAL, Merkle, Swap, Confirm) */
-  status = boot_state_run(platform, target_out);
+  status = boot_state_run(platform, target_out, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
   /* P10 O(1) Zeitmessung beenden und Wrap-around safe ablegen */
   uint32_t boot_end_time_ms = platform->clock->get_tick_ms();
@@ -346,28 +391,15 @@ init_success:
     boot_duration_ms = (UINT32_MAX - boot_start_time_ms) + boot_end_time_ms + 1;
   }
 
-  /* GLITCH-SHIELDED STATE EVALUATION
-   * Verhindert das Ignorieren eines invaliden Boot-States durch EMFI Jumps! */
-  volatile uint32_t sm_shield_1 = 0, sm_shield_2 = 0;
-  if (status == BOOT_OK)
-    sm_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (sm_shield_1 == BOOT_OK && status == BOOT_OK)
-    sm_shield_2 = BOOT_OK;
+  BOOT_SECURE_REQUIRE(status == BOOT_OK, { goto panic_fallthrough; });
 
-  if (sm_shield_1 != BOOT_OK || sm_shield_2 != BOOT_OK ||
-      sm_shield_1 != sm_shield_2) {
-    goto panic_fallthrough;
-  }
-
-  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_EXEC];
+  boot_cfi_step(main_cfi_ctx, MAIN_CFI_SLOT_EXEC);
 
   /*
    * ==============================================================================
    * BLOCK 4 - Bounds Validation & XIP Safety
    * ==============================================================================
    */
-  volatile uint32_t bounds_shield_1 = 0, bounds_shield_2 = 0;
   bool bounds_ok = false;
 
   /* Subtraktiver Check umgeht `uint32_t` Wrapping wenn OOB! */
@@ -392,19 +424,9 @@ init_success:
     }
   }
 
-  if (bounds_ok)
-    bounds_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (bounds_shield_1 == BOOT_OK && bounds_ok)
-    bounds_shield_2 = BOOT_OK;
+  BOOT_SECURE_REQUIRE(bounds_ok, { status = BOOT_ERR_FLASH_BOUNDS; goto panic_fallthrough; });
 
-  if (bounds_shield_1 != BOOT_OK || bounds_shield_2 != BOOT_OK ||
-      bounds_shield_1 != bounds_shield_2) {
-    status = BOOT_ERR_FLASH_BOUNDS;
-    goto panic_fallthrough;
-  }
-
-  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_BOUNDS];
+  boot_cfi_step(main_cfi_ctx, MAIN_CFI_SLOT_BOUNDS);
 
   /*
    * ==============================================================================
@@ -463,21 +485,13 @@ init_success:
 
   uint32_t ram_crc_handoff = compute_boot_crc32((const uint8_t *)&toob_handoff_state, handoff_hash_len);
 
-  volatile uint32_t ram_shield_1 = 0, ram_shield_2 = 0;
   bool ram_ok = (ram_crc_handoff == local_handoff.crc32_trailer);
-
-  if (ram_ok) ram_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (ram_shield_1 == BOOT_OK && ram_ok) ram_shield_2 = BOOT_OK;
 
   boot_secure_zeroize(&local_handoff, sizeof(local_handoff));
 
-  if (ram_shield_1 != BOOT_OK || ram_shield_2 != BOOT_OK || ram_shield_1 != ram_shield_2) {
-    status = BOOT_ERR_VERIFY;
-    goto panic_fallthrough;
-  }
+  BOOT_SECURE_REQUIRE(ram_ok, { status = BOOT_ERR_VERIFY; goto panic_fallthrough; });
 
-  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HANDOFF];
+  boot_cfi_step(main_cfi_ctx, MAIN_CFI_SLOT_HANDOFF);
 
   /*
    * ==============================================================================
@@ -496,7 +510,6 @@ init_success:
 
   /* P10 GLITCH SHIELD: Beweise physikalisch, dass die Arena aus 0x00 besteht!
    * Verhindert Memory-Extraction via Fault-Injection. */
-  volatile uint32_t wipe_shield_1 = 0, wipe_shield_2 = 0;
   uint32_t wipe_acc = 0;
 
   /* Wir scannen stichprobenartig (O(1) begrenzt auf 32 Bytes) den Arena-Anfang,
@@ -505,22 +518,10 @@ init_success:
     wipe_acc |= crypto_arena[i];
   }
 
-  if (wipe_acc == 0)
-    wipe_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (wipe_shield_1 == BOOT_OK && wipe_acc == 0)
-    wipe_shield_2 = BOOT_OK;
-
-  if (wipe_shield_1 != BOOT_OK || wipe_shield_2 != BOOT_OK ||
-      wipe_shield_1 != wipe_shield_2) {
-    /* FATAL: RAM-Wipe wurde glitched! System für immer einfrieren! */
+  BOOT_SECURE_REQUIRE(wipe_acc == 0, {
     boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
-    if (platform->clock && platform->clock->deinit)
-      platform->clock->deinit();
-    while (1) {
-      BOOT_GLITCH_DELAY();
-    } /* Starve WDT for reset */
-  }
+    boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_MAIN_WIPE_FAIL);
+  });
 
   platform->crypto->deinit();
   platform->confirm->deinit();
@@ -540,40 +541,16 @@ init_success:
   /* Zeitbasis abwerfen */
   platform->clock->deinit();
 
-  main_cfi ^= cfi_tok[MAIN_CFI_SLOT_HW_DOWN];
+  boot_cfi_step(main_cfi_ctx, MAIN_CFI_SLOT_HW_DOWN);
 
   /* ==============================================================================
    * FINAL GLITCH-DEFENSE GATE (CFI VALIDATION)
    * ==============================================================================
-   * Beweist mathematisch, dass die gesamte Architektur fehler- und lückenlos
-   * durchlaufen wurde. Ein PC-Glitch wird hier in der finalen Taktstufe
-   * abgefangen!
    */
-  uint32_t expected_cfi = cfi_tok[MAIN_CFI_SLOT_INIT];
-  for (uint8_t i = 1; i < MAIN_CFI_NUM_TOKENS; i++) {
-    expected_cfi ^= cfi_tok[i];
-  }
-
-  volatile uint32_t final_shield_1 = 0, final_shield_2 = 0;
-
-  if (main_cfi == expected_cfi)
-    final_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (final_shield_1 == BOOT_OK && main_cfi == expected_cfi)
-    final_shield_2 = BOOT_OK;
-
-  if (final_shield_1 != BOOT_OK || final_shield_2 != BOOT_OK ||
-      final_shield_1 != final_shield_2) {
-    /* FATAL GLITCH TRAP:
-     * Wir können hier NICHT mehr `boot_panic` rufen, da Flash, Console und SoC
-     * bereits de-initialisiert wurden! Der einzige physisch sichere Ausweg ist
-     * "Watchdog Starvation" - Endlosschleife, bis die Hardware den Strom
-     * trennt. */
+  boot_cfi_require(main_cfi_ctx, {
     boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
-    while (1) {
-      BOOT_GLITCH_DELAY();
-    }
-  }
+    boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_MAIN_CFI_MISMATCH);
+  });
 
   /* Watchdog stirbt in der letzten Nanosekunde vor dem Assembler-Jump */
   platform->wdt->deinit();

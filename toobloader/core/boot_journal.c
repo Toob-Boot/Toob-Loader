@@ -22,6 +22,7 @@
  */
 
 #include "boot_journal.h"
+#include "boot_fih.h"
 #include "generated_boot_config.h"
 
 #include "boot_crc32.h"
@@ -49,15 +50,7 @@ static uint32_t cached_write_offset = 0;
  * ==============================================================================
  */
 
-/**
- * @brief RFC 1982 Serial Number Arithmetic (100% Wrap-Around Safe)
- */
-static bool is_newer_sequence(uint32_t new_seq, uint32_t old_seq) {
-  if (new_seq == old_seq)
-    return false;
-  return ((new_seq > old_seq) && (new_seq - old_seq <= (1U << 31))) ||
-         ((new_seq < old_seq) && (old_seq - new_seq > (1U << 31)));
-}
+/* is_newer_sequence is now in boot_ct_utils.h (shared with boot_rstore) */
 
 #include "boot_ct_utils.h"
 
@@ -67,24 +60,24 @@ static bool is_newer_sequence(uint32_t new_seq, uint32_t old_seq) {
  */
 static bool verify_header_crc_glitch_safe(
     const wal_sector_header_aligned_t *aligned_header) {
-  volatile uint32_t shield_1 = 0;
-  volatile uint32_t shield_2 = 0;
-
-  /* Strict offsetof to prevent ABI Padding Drift */
-  size_t crc_len = offsetof(wal_sector_header_t, header_crc32);
-  uint32_t calc_crc =
-      compute_boot_crc32((const uint8_t *)&aligned_header->data, crc_len);
-
-  bool magic_ok = (aligned_header->data.sector_magic == WAL_ABI_VERSION_MAGIC);
-  bool crc_ok = (calc_crc == aligned_header->data.header_crc32);
-
-  if (magic_ok && crc_ok)
-    shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY(); /* Branch Delay Injection gegen EMFI */
-  if (shield_1 == BOOT_OK && magic_ok && crc_ok)
-    shield_2 = BOOT_OK;
-
-  return (shield_1 == BOOT_OK && shield_2 == BOOT_OK && shield_1 == shield_2);
+  uint32_t magic = aligned_header->data.sector_magic;
+  if (magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+    const wal_sector_header_v1_t *legacy_hdr = (const wal_sector_header_v1_t *)&aligned_header->data;
+    uint32_t calc_crc = compute_boot_crc32((const uint8_t *)legacy_hdr, offsetof(wal_sector_header_v1_t, header_crc32));
+    bool crc_ok = (calc_crc == legacy_hdr->header_crc32);
+    BOOT_SECURE_REQUIRE(crc_ok, {
+      return false;
+    });
+    return true;
+  } else if (magic == WAL_ABI_VERSION_MAGIC_CURRENT) {
+    uint32_t calc_crc = compute_boot_crc32((const uint8_t *)&aligned_header->data, offsetof(wal_sector_header_t, header_crc32));
+    bool crc_ok = (calc_crc == aligned_header->data.header_crc32);
+    BOOT_SECURE_REQUIRE(crc_ok, {
+      return false;
+    });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -235,8 +228,6 @@ static uint32_t scan_for_frontier_linear(const boot_platform_t *platform,
     }
 
     /* 2. Validation: Glitch-Resistant Double Check */
-    volatile uint32_t shield_1 = 0, shield_2 = 0;
-
     size_t crc_len = offsetof(wal_entry_payload_t, crc32_trailer);
     uint32_t calc_crc =
         compute_boot_crc32((const uint8_t *)&entry.data, crc_len);
@@ -244,16 +235,10 @@ static uint32_t scan_for_frontier_linear(const boot_platform_t *platform,
     bool magic_ok = (entry.data.magic == WAL_ENTRY_MAGIC);
     bool crc_ok = (calc_crc == entry.data.crc32_trailer);
 
-    if (magic_ok && crc_ok)
-      shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (shield_1 == BOOT_OK && magic_ok && crc_ok)
-      shield_2 = BOOT_OK;
-
-    if (shield_1 != BOOT_OK || shield_2 != BOOT_OK || shield_1 != shield_2) {
+    BOOT_SECURE_REQUIRE(magic_ok && crc_ok, {
       boot_secure_zeroize(&entry, sizeof(entry));
       break; /* Garbage/Torn Write (Brownout). Stop frontier here! */
-    }
+    });
 
     offset += sizeof(wal_entry_aligned_t);
     frontier = offset;
@@ -294,6 +279,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
   /* 2. Scan all sectors for highest sequence */
   uint32_t highest_seq = 0;
   int32_t highest_idx = -1;
+  bool migration_required = false;
 
   for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
     wal_sector_header_aligned_t hdr __attribute__((aligned(8)));
@@ -319,6 +305,8 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     current_active_header.sector_magic = WAL_ABI_VERSION_MAGIC;
     current_active_header.sequence_id = 1;
     current_active_header.erase_count = 1;
+    current_active_header.tmr_data.struct_version = WAL_TMR_VERSION_CURRENT;
+    current_active_header.tmr_data.populated_size = 52;
 
     boot_status_t er_stat = smart_erase_sector(platform, 0);
     if (er_stat != BOOT_OK)
@@ -348,8 +336,47 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     if (platform->flash->read(wal_sector_addrs[highest_idx], (uint8_t *)&hdr,
                               sizeof(hdr)) != BOOT_OK)
       return BOOT_ERR_FLASH;
-    current_active_header = hdr.data;
+
+    migration_required = false;
+    if (hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+      const wal_sector_header_v1_t *legacy_hdr = (const wal_sector_header_v1_t *)&hdr.data;
+      
+      current_active_header.sector_magic = WAL_ABI_VERSION_MAGIC_CURRENT;
+      current_active_header.sequence_id = legacy_hdr->sequence_id;
+      current_active_header.erase_count = legacy_hdr->erase_count;
+      
+      boot_secure_zeroize(&current_active_header.tmr_data, sizeof(wal_tmr_payload_t));
+      current_active_header.tmr_data.struct_version = WAL_TMR_VERSION_CURRENT;
+      current_active_header.tmr_data.populated_size = 56;
+      
+      current_active_header.tmr_data.primary_slot_id = legacy_hdr->tmr_data.primary_slot_id;
+      current_active_header.tmr_data.active_stage1_bank = legacy_hdr->tmr_data.active_stage1_bank;
+      current_active_header.tmr_data.app_svn = legacy_hdr->tmr_data.app_svn;
+      current_active_header.tmr_data.boot_failure_counter = legacy_hdr->tmr_data.boot_failure_counter;
+      current_active_header.tmr_data.svn_recovery_counter = legacy_hdr->tmr_data.svn_recovery_counter;
+      current_active_header.tmr_data.app_slot_erase_counter = legacy_hdr->tmr_data.app_slot_erase_counter;
+      current_active_header.tmr_data.staging_slot_erase_counter = legacy_hdr->tmr_data.staging_slot_erase_counter;
+      current_active_header.tmr_data.swap_buffer_erase_counter = legacy_hdr->tmr_data.swap_buffer_erase_counter;
+      current_active_header.tmr_data.active_nonce_lo = legacy_hdr->tmr_data.active_nonce_lo;
+      current_active_header.tmr_data.active_nonce_hi = legacy_hdr->tmr_data.active_nonce_hi;
+      current_active_header.tmr_data._deprecated_kdm_sequence = legacy_hdr->tmr_data.kdm_sequence;
+      current_active_header.tmr_data._deprecated_active_kdm_slot = legacy_hdr->tmr_data.active_kdm_slot;
+      /* P7a: Seed stage1_svn from compile-time constant. The running bootloader IS confirmed. */
+      current_active_header.tmr_data.stage1_svn = BOOT_STAGE1_SVN;
+      
+      current_active_header.header_crc32 = compute_boot_crc32(
+          (const uint8_t *)&current_active_header,
+          offsetof(wal_sector_header_t, header_crc32));
+      
+      migration_required = true;
+    } else {
+      current_active_header = hdr.data;
+    }
     boot_secure_zeroize(&hdr, sizeof(hdr));
+
+    if (current_active_header.tmr_data.struct_version > WAL_TMR_VERSION_CURRENT) {
+      boot_terminal_halt(platform, BOOT_ERR_ABI_MISMATCH, SITE_TMR_FUTURE);
+    }
 
     /* GAP-C01: Strict Whole-Struct Majority Vote TMR (No Frankenstein Voting!)
      */
@@ -375,7 +402,31 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
                                   sizeof(s_hdr)) == BOOT_OK) {
           if (verify_header_crc_glitch_safe(&s_hdr) &&
               s_hdr.data.sequence_id == target_seq) {
-            tmr_candidates[num_candidates++] = s_hdr.data.tmr_data;
+            if (s_hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+              const wal_sector_header_v1_t *legacy_shdr = (const wal_sector_header_v1_t *)&s_hdr.data;
+              wal_tmr_payload_t converted_tmr;
+              boot_secure_zeroize(&converted_tmr, sizeof(wal_tmr_payload_t));
+              converted_tmr.struct_version = WAL_TMR_VERSION_CURRENT;
+              converted_tmr.populated_size = 56;
+              converted_tmr.primary_slot_id = legacy_shdr->tmr_data.primary_slot_id;
+              converted_tmr.active_stage1_bank = legacy_shdr->tmr_data.active_stage1_bank;
+              converted_tmr.app_svn = legacy_shdr->tmr_data.app_svn;
+              converted_tmr.boot_failure_counter = legacy_shdr->tmr_data.boot_failure_counter;
+              converted_tmr.svn_recovery_counter = legacy_shdr->tmr_data.svn_recovery_counter;
+              converted_tmr.app_slot_erase_counter = legacy_shdr->tmr_data.app_slot_erase_counter;
+              converted_tmr.staging_slot_erase_counter = legacy_shdr->tmr_data.staging_slot_erase_counter;
+              converted_tmr.swap_buffer_erase_counter = legacy_shdr->tmr_data.swap_buffer_erase_counter;
+              converted_tmr.active_nonce_lo = legacy_shdr->tmr_data.active_nonce_lo;
+              converted_tmr.active_nonce_hi = legacy_shdr->tmr_data.active_nonce_hi;
+              converted_tmr._deprecated_kdm_sequence = legacy_shdr->tmr_data.kdm_sequence;
+              converted_tmr._deprecated_active_kdm_slot = legacy_shdr->tmr_data.active_kdm_slot;
+              /* P7a: Seed stage1_svn from compile-time constant */
+              converted_tmr.stage1_svn = BOOT_STAGE1_SVN;
+              
+              tmr_candidates[num_candidates++] = converted_tmr;
+            } else {
+              tmr_candidates[num_candidates++] = s_hdr.data.tmr_data;
+            }
             found_contiguous = true;
             break;
           }
@@ -419,6 +470,14 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
       wal_sector_sizes[active_wal_index], platform->flash->erased_value);
 
   wal_initialized = true;
+
+  if (migration_required) {
+    boot_status_t mig_stat = boot_journal_update_tmr(platform, &current_active_header.tmr_data);
+    if (mig_stat != BOOT_OK) {
+      return mig_stat;
+    }
+  }
+
   return BOOT_OK;
 }
 
@@ -512,7 +571,6 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
         continue;
       }
 
-      volatile uint32_t shield_1 = 0, shield_2 = 0;
       size_t crc_len = offsetof(wal_entry_payload_t, crc32_trailer);
       uint32_t calc_crc =
           compute_boot_crc32((const uint8_t *)&entry.data, crc_len);
@@ -520,16 +578,10 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
       bool magic_ok = (entry.data.magic == WAL_ENTRY_MAGIC);
       bool crc_ok = (calc_crc == entry.data.crc32_trailer);
 
-      if (magic_ok && crc_ok)
-        shield_1 = BOOT_OK;
-      BOOT_GLITCH_DELAY();
-      if (shield_1 == BOOT_OK && magic_ok && crc_ok)
-        shield_2 = BOOT_OK;
-
-      if (shield_1 != BOOT_OK || shield_2 != BOOT_OK || shield_1 != shield_2) {
+      BOOT_SECURE_REQUIRE(magic_ok && crc_ok, {
         boot_secure_zeroize(&entry, sizeof(entry));
         continue;
-      }
+      });
 
       uint32_t intent = entry.data.intent;
 
@@ -735,8 +787,19 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
   /* O(1) ZERO-WEAR OPTIMIZATION:
    * Überspringt das radikale 3-Sektor Majority-Vote Erase, wenn der TMR-Payload
    * bit-identisch ist. Nutzt zwingend Constant-Time Vergleich, um Side-Channel
-   * Leakage und EMFI Instruction-Skips zu blockieren. */
-  if (constant_time_memcmp_glitch_safe(
+   * Leakage und EMFI Instruction-Skips zu blockieren.
+   * Ausnahme: Der Sektor auf Flash hat noch die Legacy-Magic -> Erzeige Migration. */
+  bool magic_legacy = false;
+  wal_sector_header_aligned_t tg_hdr __attribute__((aligned(8)));
+  boot_secure_zeroize(&tg_hdr, sizeof(tg_hdr));
+  if (platform->flash->read(wal_sector_addrs[active_wal_index], (uint8_t *)&tg_hdr, sizeof(tg_hdr)) == BOOT_OK) {
+    if (tg_hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+      magic_legacy = true;
+    }
+  }
+  boot_secure_zeroize(&tg_hdr, sizeof(tg_hdr));
+
+  if (!magic_legacy && constant_time_memcmp_glitch_safe(
           (const uint8_t *)&current_active_header.tmr_data,
           (const uint8_t *)new_tmr, sizeof(wal_tmr_payload_t)) == BOOT_OK) {
     return BOOT_OK;

@@ -20,6 +20,7 @@
  */
 
 #include "boot_delta.h"
+#include "boot_fih.h"
 #include "generated_boot_config.h"
 
 #include "boot_crc32.h"
@@ -30,8 +31,7 @@
 #include <string.h>
 
 
-/* Zero-Allocation: Exklusive Übernahme der Arena für den Patch-Vorgang */
-extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
+/* P5: Arena is now passed explicitly by the orchestrator */
 
 _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 1024,
                "Crypto Arena must be at least 1KB for SDVM");
@@ -162,15 +162,9 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
       diff |= (rb_buf[i] ^ write_buf[rb_off + i]);
     }
 
-    volatile uint32_t s1 = 0, s2 = 0;
-    if (diff == 0)
-      s1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (s1 == BOOT_OK && diff == 0)
-      s2 = BOOT_OK;
-
-    if (s1 != BOOT_OK || s2 != BOOT_OK)
+    BOOT_SECURE_REQUIRE(diff == 0, {
       return BOOT_ERR_FLASH_HW; /* SPI-Rauschen oder Bit-Rot! */
+    });
     rb_off += (uint32_t)step;
   }
   boot_secure_zeroize(rb_buf, sizeof(rb_buf));
@@ -199,7 +193,11 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
                                uint32_t delta_addr, size_t delta_max_size,
                                uint32_t dest_addr, size_t dest_max_size,
                                uint32_t base_addr, size_t base_max_size,
-                               wal_entry_payload_t *open_txn) {
+                               wal_entry_payload_t *open_txn,
+                               uint8_t *arena, size_t arena_len) {
+
+  if (!arena || arena_len < 1024)
+    return BOOT_ERR_INVALID_ARG;
 
   if (!platform || !platform->flash || !platform->crypto || !platform->wdt ||
       !open_txn) {
@@ -215,26 +213,24 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&delta_cfi_seed, sizeof(delta_cfi_seed));
   }
-  uint32_t cfi_tok[4];
-  cfi_tok[0] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_INIT);
-  cfi_tok[1] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_HDR);
-  cfi_tok[2] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_BASE);
-  cfi_tok[3] = cfi_derive(delta_cfi_seed, DELTA_CFI_SLOT_EOF);
-
-  volatile uint32_t delta_cfi = cfi_tok[0];
+  boot_cfi_ctx_t delta_cfi_ctx;
+  boot_cfi_init(delta_cfi_ctx, delta_cfi_seed);
+  boot_cfi_add_expected(delta_cfi_ctx, DELTA_CFI_SLOT_HDR);
+  boot_cfi_add_expected(delta_cfi_ctx, DELTA_CFI_SLOT_BASE);
+  boot_cfi_add_expected(delta_cfi_ctx, DELTA_CFI_SLOT_EOF);
   boot_status_t status = BOOT_OK;
 
   /* P10 Alignment Guard: Padding des Struct-Offsets für DMA-Sicherheit */
   size_t hsd_size = (sizeof(heatshrink_decoder) + 7) & ~((size_t)7);
-  if (hsd_size >= BOOT_CRYPTO_ARENA_SIZE) return BOOT_ERR_INVALID_STATE;
+  if (hsd_size >= arena_len) return BOOT_ERR_INVALID_STATE;
 
-  heatshrink_decoder *hsd = (heatshrink_decoder *)crypto_arena;
-  size_t remaining_arena = BOOT_CRYPTO_ARENA_SIZE - hsd_size;
+  heatshrink_decoder *hsd = (heatshrink_decoder *)arena;
+  size_t remaining_arena = arena_len - hsd_size;
   size_t half_arena = (remaining_arena / 2) & ~((size_t)7); /* 8-Byte Aligned für SPI-DMA */
-  uint8_t *write_buf = crypto_arena + hsd_size;
-  uint8_t *read_buf = crypto_arena + hsd_size + half_arena;
+  uint8_t *write_buf = arena + hsd_size;
+  uint8_t *read_buf = arena + hsd_size + half_arena;
 
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  boot_secure_zeroize(arena, arena_len);
   heatshrink_decoder_reset(hsd);
 
   /* ====================================================================
@@ -253,21 +249,13 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
   uint32_t calc_hdr_crc =
       compute_boot_crc32((const uint8_t *)&hdr, hdr_crc_len);
 
-  volatile uint32_t hdr_shield_1 = 0, hdr_shield_2 = 0;
   bool hdr_ok =
       (hdr.magic == TOOB_TDS_MAGIC && calc_hdr_crc == hdr.header_crc32);
 
-  if (hdr_ok)
-    hdr_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (hdr_shield_1 == BOOT_OK && hdr_ok)
-    hdr_shield_2 = BOOT_OK;
-
-  if (hdr_shield_1 != BOOT_OK || hdr_shield_2 != BOOT_OK ||
-      hdr_shield_1 != hdr_shield_2) {
+  BOOT_SECURE_REQUIRE(hdr_ok, {
     status = BOOT_ERR_VERIFY;
     goto cleanup; /* Fake or Corrupt Delta */
-  }
+  });
 
   if (hdr.expected_target_size > dest_max_size ||
       hdr.expected_target_size == 0 || hdr.base_size > base_max_size) {
@@ -293,7 +281,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  delta_cfi ^= cfi_tok[1];
+  boot_cfi_step(delta_cfi_ctx, DELTA_CFI_SLOT_HDR);
 
   /* ====================================================================
    * STEP 2: PRE-FLIGHT "GHOST-BASE" VERIFICATION
@@ -324,23 +312,23 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     while (hashed < hdr.base_size) {
       if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
-      size_t step = (hdr.base_size - hashed > BOOT_CRYPTO_ARENA_SIZE)
-                        ? BOOT_CRYPTO_ARENA_SIZE
+      size_t step = (hdr.base_size - hashed > arena_len)
+                        ? arena_len
                         : (hdr.base_size - hashed);
 
-      if (platform->flash->read(base_addr + hashed, crypto_arena, step) !=
+      if (platform->flash->read(base_addr + hashed, arena, step) !=
           BOOT_OK) {
         status = BOOT_ERR_FLASH_HW;
         goto cleanup;
       }
-      if (platform->crypto->hash_update(hash_ctx, crypto_arena, step) !=
+      if (platform->crypto->hash_update(hash_ctx, arena, step) !=
           BOOT_OK) {
         status = BOOT_ERR_CRYPTO;
         goto cleanup;
       }
       hashed += (uint32_t)step;
     }
-    boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+    boot_secure_zeroize(arena, arena_len);
 
     size_t dlen = 32;
     if (platform->crypto->hash_finish(hash_ctx, computed_hash, &dlen) !=
@@ -356,7 +344,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
     }
   }
 
-  delta_cfi ^= cfi_tok[2];
+  boot_cfi_step(delta_cfi_ctx, DELTA_CFI_SLOT_BASE);
 
   /* ====================================================================
    * STEP 3: ZERO-ALLOCATION SDVM SETUP
@@ -439,17 +427,10 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
       uint32_t calc_icrc = compute_boot_crc32(
           (const uint8_t *)&inst, offsetof(toob_tds_instr_t, crc32));
 
-      volatile uint32_t i_shield_1 = 0, i_shield_2 = 0;
-      if (calc_icrc == inst.crc32)
-        i_shield_1 = BOOT_OK;
-      BOOT_GLITCH_DELAY();
-      if (i_shield_1 == BOOT_OK && calc_icrc == inst.crc32)
-        i_shield_2 = BOOT_OK;
-
-      if (i_shield_1 != BOOT_OK || i_shield_2 != BOOT_OK) {
+      BOOT_SECURE_REQUIRE(calc_icrc == inst.crc32, {
         status = BOOT_ERR_VERIFY;
         goto cleanup; /* Instruction Corrupted by Noise! */
-      }
+      });
 
       inst_opcode = inst.opcode;
       inst_rem = inst.length;
@@ -650,42 +631,25 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
   /* ====================================================================
    * STEP 5: FINAL INTEGRITY RESOLUTION (Anti Truncation)
    * ==================================================================== */
-  volatile uint32_t final_1 = 0, final_2 = 0;
-  bool flow_ok =
-      (eof_reached && target_logical_offset == hdr.expected_target_size);
-
-  if (flow_ok)
-    final_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (final_1 == BOOT_OK && flow_ok)
-    final_2 = BOOT_OK;
-
-  if (final_1 != BOOT_OK || final_2 != BOOT_OK || final_1 != final_2) {
+  BOOT_SECURE_REQUIRE(eof_reached && target_logical_offset == hdr.expected_target_size, {
     status = BOOT_ERR_VERIFY;
     goto cleanup;
-  }
+  });
 
-  delta_cfi ^= cfi_tok[3];
+  boot_cfi_step(delta_cfi_ctx, DELTA_CFI_SLOT_EOF);
 
-  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[1] ^ cfi_tok[2] ^ cfi_tok[3];
-  volatile uint32_t cfi_1 = 0, cfi_2 = 0;
-  if (delta_cfi == expected_cfi)
-    cfi_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (cfi_1 == BOOT_OK && delta_cfi == expected_cfi)
-    cfi_2 = BOOT_OK;
-
-  if (cfi_1 == BOOT_OK && cfi_2 == BOOT_OK && cfi_1 == cfi_2) {
-    /* Success! Patching done, prep the WAL for the next state (SWAP or RUN). */
-    open_txn->delta_chunk_id = target_logical_offset;
-    status = BOOT_OK;
-  } else {
+  boot_cfi_require(delta_cfi_ctx, {
     status = BOOT_ERR_INVALID_STATE; /* CFI Control-Flow Loop Trap! */
-  }
+    goto cleanup;
+  });
+
+  /* Success! Patching done, prep the WAL for the next state (SWAP or RUN). */
+  open_txn->delta_chunk_id = target_logical_offset;
+  status = BOOT_OK;
 
 cleanup:
   /* P10 Single Exit: Zerstöre jegliche Firmware-Fragmente und Krypto-Keys aus
    * der Arena */
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  boot_secure_zeroize(arena, arena_len);
   return status;
 }

@@ -168,18 +168,32 @@ toob_status_t toob_get_boot_diag_cbor(uint8_t *out_buf, size_t max_len, size_t *
   tel.toob_telemetry_uint1uint = diag.boot_duration_ms;
   tel.toob_telemetry_uint2uint = diag.edge_recovery_events;
 
-  /* C-Struct hat kein separates hardware_fault_record, belege vendor_error in beiden Feldern */
+  /* CDDL uint3 = vendor_error, uint4 = hardware_fault_record.
+   * TODO(TELEMETRY-SPEC): C-Struct hat kein separates hardware_fault_record.
+   * Beide Felder werden identisch mit vendor_error befüllt, bis das
+   * Telemetrie-Schema ein eigenes Feld definiert. */
   tel.toob_telemetry_uint3uint = diag.vendor_error;
   tel.toob_telemetry_uint4uint = diag.vendor_error;
-  tel.toob_telemetry_uint5uint = 0; /* Nicht in diag_t gemappt */
+
+  /* CDDL uint5 = reserved_counter (unused).
+   * TODO(TELEMETRY-SPEC): Feld existiert im CDDL-Schema, aber nicht in
+   * toob_boot_diag_t. Genullt bis Schema-Alignment stattfindet. */
+  tel.toob_telemetry_uint5uint = 0;
 
   tel.toob_telemetry_uint6uint = diag.current_svn;
   tel.toob_telemetry_uint7uint = (uint8_t)diag.active_key_index;
-  tel.toob_telemetry_uint8bool = false; /* Nicht in diag_t gemappt */
+
+  /* CDDL uint8 = provisioning_complete (bool).
+   * TODO(TELEMETRY-SPEC): Bootloader setzt diesen Wert nicht in diag_t.
+   * Hardcoded false bis Provisioning-Status ins Handoff integriert wird. */
+  tel.toob_telemetry_uint8bool = false;
 
   tel.toob_telemetry_uint9bstr.value = diag.sbom_digest;
   tel.toob_telemetry_uint9bstr.len = sizeof(diag.sbom_digest);
 
+  /* CDDL uint11 = firmware_bank_index.
+   * TODO(TELEMETRY-SPEC): A/B-Bank-Tracking ist noch nicht im diag_t.
+   * Genullt bis Multi-Bank-Support implementiert ist. */
   tel.toob_telemetry_uint11uint = 0;
 
   /* P10 Fix: Akkurates C-Struct Mapping auf das CDDL Element */

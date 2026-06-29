@@ -21,7 +21,7 @@ type MapEntry struct {
 func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocator, outDir string,
 	s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget,
 	recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize uint32,
-	walAddrs []uint32, walSizes []uint32) error {
+	walAddrs []uint32, walSizes []uint32, kdmAddr, kdmBudget, cloudCmdAddr, cloudCmdBudget, forensicAddr, forensicBudget uint32) error {
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
@@ -51,6 +51,9 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		{"Staging Slot", stagingAddr, appBudget, "APP"},
 		{"Scratch / Delta Safe", scratchAddr, scratchSize, "SYSTEM"},
 		{fmt.Sprintf("WAL Journal (%d sec)", dt.Partitions.WalSectors), walAddr, walSize, "SYSTEM"},
+		{"KDM Quorum", kdmAddr, kdmBudget, "SYSTEM"},
+		{"Cloud Command", cloudCmdAddr, cloudCmdBudget, "SYSTEM"},
+		{"Forensic Slot", forensicAddr, forensicBudget, "SYSTEM"},
 	}
 	if recBudget > 0 {
 		entries = append(entries, MapEntry{"Recovery OS", recAddr, recBudget, "SYSTEM"})
@@ -100,29 +103,11 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	}
 	b.WriteString(fmt.Sprintf("#define CHIP_FLASH_BASE_ADDR        %sU\n\n", flashBase))
 
-	b.WriteString(fmt.Sprintf("#define CHIP_STAGE1A_ABS_ADDR       0x%08XU\n", s1aAddr))
-	b.WriteString(fmt.Sprintf("#define CHIP_STAGE1A_SIZE           0x%08XU\n", s1Budget))
-	b.WriteString(fmt.Sprintf("#define CHIP_STAGE1B_ABS_ADDR       0x%08XU\n", s1bAddr))
-	b.WriteString(fmt.Sprintf("#define CHIP_STAGE1B_SIZE           0x%08XU\n\n", s1Budget))
-
-	b.WriteString(fmt.Sprintf("#define CHIP_APP_SLOT_ABS_ADDR      0x%08XU\n", appAddr))
-	b.WriteString(fmt.Sprintf("#define CHIP_APP_SLOT_SIZE          0x%08XU\n", appBudget))
-	b.WriteString(fmt.Sprintf("#define CHIP_STAGING_SLOT_ABS_ADDR  0x%08XU\n", stagingAddr))
-	b.WriteString(fmt.Sprintf("#define CHIP_STAGING_SLOT_SIZE      0x%08XU\n", appBudget))
-
 	stagingSlotID := dt.Partitions.StagingSlotID
 	if stagingSlotID == 0 {
 		stagingSlotID = 2
 	}
 	b.WriteString(fmt.Sprintf("#define CHIP_STAGING_SLOT_ID        %dU\n\n", stagingSlotID))
-
-	b.WriteString(fmt.Sprintf("#define CHIP_RECOVERY_OS_ABS_ADDR   0x%08XU\n", recAddr))
-	b.WriteString(fmt.Sprintf("#define CHIP_RECOVERY_OS_SIZE       0x%08XU\n", recBudget))
-	b.WriteString(fmt.Sprintf("#define CHIP_NETCORE_SLOT_ABS_ADDR  0x%08XU\n", netAddr))
-	b.WriteString(fmt.Sprintf("#define CHIP_NETCORE_SLOT_SIZE      0x%08XU\n\n", netBudget))
-
-	b.WriteString("/* CRITICAL: Must be >= CHIP_APP_SLOT_SIZE for boot_delta_apply output */\n")
-	b.WriteString(fmt.Sprintf("#define CHIP_SCRATCH_SLOT_ABS_ADDR  0x%08XU\n\n", scratchAddr))
 
 	walSectors := dt.Partitions.WalSectors
 	if walSectors == 0 {
@@ -174,27 +159,42 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		edgeMode = "1"
 	}
 	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_EDGE_UNATTENDED_MODE %s\n", edgeMode))
-	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_BACKOFF_BASE_S  %dU\n\n", dt.BootConfig.BackoffBaseS))
+	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_BACKOFF_BASE_S  %dU\n", dt.BootConfig.BackoffBaseS))
+	b.WriteString(fmt.Sprintf("#define BOOT_STAGE1_SVN             %dU\n", dt.BootConfig.Stage1Svn))
 
-	b.WriteString("/* ========================================================================\n")
-	b.WriteString(" * HARDWARE REGISTERS (Dynamic from hardware.json)\n")
-	b.WriteString(" * ======================================================================== */\n")
-	var regKeys []string
-	for k := range hj.Registers {
-		regKeys = append(regKeys, k)
+	// P7d: Crypto-Backend Compile-Time Gating
+	pqcEnabled := "0"
+	if dt.Crypto.Pqc != "" {
+		pqcEnabled = "1"
 	}
-	sort.Strings(regKeys)
-	for _, k := range regKeys {
-		macroName := "CHIP_REG_" + strings.ToUpper(k)
-		v := hj.Registers[k]
-		switch val := v.(type) {
-		case string:
-			b.WriteString(fmt.Sprintf("#define %-30s %sU\n", macroName, val))
-		case float64:
-			b.WriteString(fmt.Sprintf("#define %-30s %dU\n", macroName, uint32(val)))
-		}
+	b.WriteString(fmt.Sprintf("#define TOOB_PQC_ENABLED            %s\n", pqcEnabled))
+	if dt.Crypto.Backend != "" {
+		b.WriteString(fmt.Sprintf("#define TOOB_CRYPTO_BACKEND         \"%s\"\n", dt.Crypto.Backend))
 	}
 	b.WriteString("\n")
+
+	// Write fields that dynamic drivers use from Toml/Json
+	if len(hj.Registers) > 0 {
+		b.WriteString("/* ========================================================================\n")
+		b.WriteString(" * HARDWARE REGISTERS (Dynamic from hardware.json)\n")
+		b.WriteString(" * ======================================================================== */\n")
+		var regKeys []string
+		for k := range hj.Registers {
+			regKeys = append(regKeys, k)
+		}
+		sort.Strings(regKeys)
+		for _, k := range regKeys {
+			macroName := "CHIP_REG_" + strings.ToUpper(k)
+			v := hj.Registers[k]
+			switch val := v.(type) {
+			case string:
+				b.WriteString(fmt.Sprintf("#define %-30s %sU\n", macroName, val))
+			case float64:
+				b.WriteString(fmt.Sprintf("#define %-30s %dU\n", macroName, uint32(val)))
+			}
+		}
+		b.WriteString("\n")
+	}
 
 	if len(hj.Constants) > 0 {
 		b.WriteString("/* ========================================================================\n")
@@ -248,9 +248,139 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		b.WriteString("\n")
 	}
 
+	b.WriteString("#include \"boot_layout.h\"\n")
+	b.WriteString("#include \"boot_layout_assert.h\"\n\n")
+
 	b.WriteString("#endif /* GENERATED_BOOT_CONFIG_H */\n")
 
 	if err := os.WriteFile(headerPath, []byte(b.String()), 0o644); err != nil {
+		return err
+	}
+
+	// Generate boot_layout.h
+	layoutPath := filepath.Join(outDir, "boot_layout.h")
+	var lob strings.Builder
+	lob.WriteString("/* AUTO-GENERATED BY TOOB MANIFEST COMPILER — DO NOT EDIT */\n")
+	lob.WriteString("#ifndef BOOT_LAYOUT_H\n")
+	lob.WriteString("#define BOOT_LAYOUT_H\n\n")
+
+	lob.WriteString(fmt.Sprintf("#define CHIP_STAGE0_ABS_ADDR         0x%08XU\n", s0Addr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_STAGE0_SIZE             0x%08XU\n", s0Budget))
+	lob.WriteString(fmt.Sprintf("#define CHIP_STAGE1A_ABS_ADDR        0x%08XU\n", s1aAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_STAGE1A_SIZE            0x%08XU\n", s1Budget))
+	lob.WriteString(fmt.Sprintf("#define CHIP_STAGE1B_ABS_ADDR        0x%08XU\n", s1bAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_STAGE1B_SIZE            0x%08XU\n\n", s1Budget))
+
+	lob.WriteString(fmt.Sprintf("#define CHIP_APP_SLOT_ABS_ADDR       0x%08XU\n", appAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_APP_SLOT_SIZE           0x%08XU\n", appBudget))
+	lob.WriteString(fmt.Sprintf("#define CHIP_STAGING_SLOT_ABS_ADDR   0x%08XU\n", stagingAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_STAGING_SLOT_SIZE       0x%08XU\n\n", appBudget))
+
+	lob.WriteString(fmt.Sprintf("#define CHIP_SCRATCH_SLOT_ABS_ADDR   0x%08XU\n", scratchAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_SCRATCH_SLOT_SIZE       0x%08XU\n\n", scratchSize))
+
+	lob.WriteString(fmt.Sprintf("#define CHIP_WAL_ABS_ADDR            0x%08XU\n", walAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_WAL_SIZE                0x%08XU\n\n", walSize))
+
+	for i, a := range walAddrs {
+		lob.WriteString(fmt.Sprintf("#define CHIP_WAL_SECTOR_%d_ADDR       0x%08XU\n", i, a))
+		lob.WriteString(fmt.Sprintf("#define CHIP_WAL_SECTOR_%d_SIZE       0x%08XU\n", i, walSizes[i]))
+	}
+	lob.WriteString("\n")
+
+	lob.WriteString(fmt.Sprintf("#define CHIP_RECOVERY_OS_ABS_ADDR    0x%08XU\n", recAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_RECOVERY_OS_SIZE        0x%08XU\n", recBudget))
+	lob.WriteString(fmt.Sprintf("#define CHIP_NETCORE_SLOT_ABS_ADDR   0x%08XU\n", netAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_NETCORE_SLOT_SIZE       0x%08XU\n\n", netBudget))
+
+	lob.WriteString(fmt.Sprintf("#define CHIP_KDM_QUORUM_ABS_ADDR     0x%08XU\n", kdmAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_KDM_QUORUM_SIZE         0x%08XU\n", kdmBudget))
+	lob.WriteString(fmt.Sprintf("#define CHIP_CLOUD_CMD_SLOT_ABS_ADDR 0x%08XU\n", cloudCmdAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_CLOUD_CMD_SLOT_SIZE     0x%08XU\n", cloudCmdBudget))
+	lob.WriteString(fmt.Sprintf("#define CHIP_FORENSIC_SLOT_ABS_ADDR  0x%08XU\n", forensicAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_FORENSIC_SLOT_SIZE      0x%08XU\n\n", forensicBudget))
+
+
+
+	lob.WriteString("#endif /* BOOT_LAYOUT_H */\n")
+
+	if err := os.WriteFile(layoutPath, []byte(lob.String()), 0o644); err != nil {
+		return err
+	}
+
+	// Generate boot_layout_assert.h
+	assertPath := filepath.Join(outDir, "boot_layout_assert.h")
+	var aob strings.Builder
+	aob.WriteString("/* AUTO-GENERATED BY TOOB MANIFEST COMPILER — DO NOT EDIT */\n")
+	aob.WriteString("#ifndef BOOT_LAYOUT_ASSERT_H\n")
+	aob.WriteString("#define BOOT_LAYOUT_ASSERT_H\n\n")
+	aob.WriteString("#include \"boot_layout.h\"\n\n")
+
+	aob.WriteString("/* Helper macro to assert two regions do not overlap (if size > 0) */\n")
+	aob.WriteString("#define BOOT_CHECK_DISJOINT(a_base, a_size, b_base, b_size) \\\n")
+	aob.WriteString("    ( ((a_size) == 0) || ((b_size) == 0) || \\\n")
+	aob.WriteString("      ((a_base) + (a_size) <= (b_base)) || ((b_base) + (b_size) <= (a_base)) )\n\n")
+
+	type RegMeta struct {
+		Name string
+		Base string
+		Size string
+	}
+	regMetas := []RegMeta{
+		{"Stage 0", "CHIP_STAGE0_ABS_ADDR", "CHIP_STAGE0_SIZE"},
+		{"Stage 1 Bank A", "CHIP_STAGE1A_ABS_ADDR", "CHIP_STAGE1A_SIZE"},
+		{"Stage 1 Bank B", "CHIP_STAGE1B_ABS_ADDR", "CHIP_STAGE1B_SIZE"},
+		{"App Slot", "CHIP_APP_SLOT_ABS_ADDR", "CHIP_APP_SLOT_SIZE"},
+		{"Staging Slot", "CHIP_STAGING_SLOT_ABS_ADDR", "CHIP_STAGING_SLOT_SIZE"},
+		{"Scratch Slot", "CHIP_SCRATCH_SLOT_ABS_ADDR", "CHIP_SCRATCH_SLOT_SIZE"},
+		{"WAL Journal", "CHIP_WAL_ABS_ADDR", "CHIP_WAL_SIZE"},
+		{"Recovery OS", "CHIP_RECOVERY_OS_ABS_ADDR", "CHIP_RECOVERY_OS_SIZE"},
+		{"NetCore Slot", "CHIP_NETCORE_SLOT_ABS_ADDR", "CHIP_NETCORE_SLOT_SIZE"},
+		{"KDM Quorum", "CHIP_KDM_QUORUM_ABS_ADDR", "CHIP_KDM_QUORUM_SIZE"},
+		{"Cloud Command", "CHIP_CLOUD_CMD_SLOT_ABS_ADDR", "CHIP_CLOUD_CMD_SLOT_SIZE"},
+		{"Forensic Slot", "CHIP_FORENSIC_SLOT_ABS_ADDR", "CHIP_FORENSIC_SLOT_SIZE"},
+	}
+
+	aob.WriteString("/* 1. Pairwise Disjointness (Overlap-Free) Assertions */\n")
+	for i := 0; i < len(regMetas); i++ {
+		for j := i + 1; j < len(regMetas); j++ {
+			aob.WriteString(fmt.Sprintf("_Static_assert(BOOT_CHECK_DISJOINT(%s, %s, %s, %s),\n",
+				regMetas[i].Base, regMetas[i].Size, regMetas[j].Base, regMetas[j].Size))
+			aob.WriteString(fmt.Sprintf("               \"Layout Overlap: %s and %s overlap!\");\n",
+				regMetas[i].Name, regMetas[j].Name))
+		}
+	}
+	aob.WriteString("\n")
+
+	aob.WriteString("/* 2. Sector Alignment Assertions (Base address must be a multiple of sector size) */\n")
+	for _, r := range regMetas {
+		aob.WriteString(fmt.Sprintf("_Static_assert(%s == 0 || (%s %% CHIP_FLASH_MAX_SECTOR_SIZE) == 0,\n", r.Size, r.Base))
+		aob.WriteString(fmt.Sprintf("               \"Layout Alignment: %s is not aligned to CHIP_FLASH_MAX_SECTOR_SIZE!\");\n", r.Name))
+	}
+	aob.WriteString("\n")
+
+	aob.WriteString("/* 3. Minimum Size Assertions */\n")
+	aob.WriteString("_Static_assert(TOOB_WAL_SECTORS >= 4,\n")
+	aob.WriteString("               \"WAL minimum size: TOOB_WAL_SECTORS must be >= 4!\");\n")
+	for i := range walAddrs {
+		aob.WriteString(fmt.Sprintf("_Static_assert(CHIP_WAL_SECTOR_%d_SIZE >= 128,\n", i))
+		aob.WriteString(fmt.Sprintf("               \"WAL sector %d minimum size: must be >= 128 bytes (Header+Entry)!\");\n", i))
+	}
+	aob.WriteString("_Static_assert(CHIP_SCRATCH_SLOT_SIZE >= CHIP_FLASH_MAX_SECTOR_SIZE,\n")
+	aob.WriteString("               \"Scratch Slot minimum size: must be >= CHIP_FLASH_MAX_SECTOR_SIZE!\");\n")
+	aob.WriteString("_Static_assert(CHIP_KDM_QUORUM_SIZE >= 3 * CHIP_FLASH_MAX_SECTOR_SIZE,\n")
+	aob.WriteString("               \"KDM Quorum minimum size: must be >= 3 sectors for Phase 4 quorum!\");\n\n")
+
+	aob.WriteString("/* 4. Wrap-Around / Overflow Protection */\n")
+	for _, r := range regMetas {
+		aob.WriteString(fmt.Sprintf("_Static_assert(%s + %s >= %s,\n", r.Base, r.Size, r.Base))
+		aob.WriteString(fmt.Sprintf("               \"Layout Overflow: %s address range wraps around!\");\n", r.Name))
+	}
+	aob.WriteString("\n")
+
+	aob.WriteString("#endif /* BOOT_LAYOUT_ASSERT_H */\n")
+
+	if err := os.WriteFile(assertPath, []byte(aob.String()), 0o644); err != nil {
 		return err
 	}
 

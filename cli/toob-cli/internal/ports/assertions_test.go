@@ -31,8 +31,6 @@ func TestPortFieldCounts(t *testing.T) {
 		// API Client
 		{"RegistryRevisionResponse ↔ apiclient.RevisionResponse",
 			reflect.TypeFor[RegistryRevisionResponse](), reflect.TypeFor[apiclient.RevisionResponse]()},
-		{"RegistryVersionResponse ↔ apiclient.RegistryVersionResponse",
-			reflect.TypeFor[RegistryVersionResponse](), reflect.TypeFor[apiclient.RegistryVersionResponse]()},
 		{"ChipResolveResponse ↔ apiclient.ChipResolveResponse",
 			reflect.TypeFor[ChipResolveResponse](), reflect.TypeFor[apiclient.ChipResolveResponse]()},
 		{"IntegrationItem ↔ apiclient.IntegrationItem",
@@ -51,10 +49,6 @@ func TestPortFieldCounts(t *testing.T) {
 			reflect.TypeFor[MyPackageSummary](), reflect.TypeFor[apiclient.MyPackageSummary]()},
 		{"PublishResponse ↔ apiclient.PublishResponse",
 			reflect.TypeFor[PublishResponse](), reflect.TypeFor[apiclient.PublishResponse]()},
-		{"SyncDeltaResponse ↔ apiclient.SyncDeltaResponse",
-			reflect.TypeFor[SyncDeltaResponse](), reflect.TypeFor[apiclient.SyncDeltaResponse]()},
-		{"AckSyncResponse ↔ apiclient.AckSyncResponse",
-			reflect.TypeFor[AckSyncResponse](), reflect.TypeFor[apiclient.AckSyncResponse]()},
 
 		// Registry
 		{"RegistryIndex ↔ registry.Index",
@@ -69,6 +63,10 @@ func TestPortFieldCounts(t *testing.T) {
 			reflect.TypeFor[RegistryArch](), reflect.TypeFor[registry.ArchInfo]()},
 		{"RegistryToolchain ↔ registry.ToolchainInfo",
 			reflect.TypeFor[RegistryToolchain](), reflect.TypeFor[registry.ToolchainInfo]()},
+		{"RegistryIntegration ↔ registry.IntegrationInfo",
+			reflect.TypeFor[RegistryIntegration](), reflect.TypeFor[registry.IntegrationInfo]()},
+		{"RegistrySoC ↔ registry.SoCInfo",
+			reflect.TypeFor[RegistrySoC](), reflect.TypeFor[registry.SoCInfo]()},
 
 		// Toolchain download (extended registry entry)
 		{"ToolchainDownload ↔ toolchain.RegistryToolchain",
@@ -121,8 +119,6 @@ func TestPortFieldTypes(t *testing.T) {
 		// API Client
 		{"RegistryRevisionResponse ↔ apiclient.RevisionResponse",
 			reflect.TypeFor[RegistryRevisionResponse](), reflect.TypeFor[apiclient.RevisionResponse]()},
-		{"RegistryVersionResponse ↔ apiclient.RegistryVersionResponse",
-			reflect.TypeFor[RegistryVersionResponse](), reflect.TypeFor[apiclient.RegistryVersionResponse]()},
 		{"ChipResolveResponse ↔ apiclient.ChipResolveResponse",
 			reflect.TypeFor[ChipResolveResponse](), reflect.TypeFor[apiclient.ChipResolveResponse]()},
 		{"IntegrationItem ↔ apiclient.IntegrationItem",
@@ -139,10 +135,6 @@ func TestPortFieldTypes(t *testing.T) {
 			reflect.TypeFor[MyPackageSummary](), reflect.TypeFor[apiclient.MyPackageSummary]()},
 		{"PublishResponse ↔ apiclient.PublishResponse",
 			reflect.TypeFor[PublishResponse](), reflect.TypeFor[apiclient.PublishResponse]()},
-		{"SyncDeltaResponse ↔ apiclient.SyncDeltaResponse",
-			reflect.TypeFor[SyncDeltaResponse](), reflect.TypeFor[apiclient.SyncDeltaResponse]()},
-		{"AckSyncResponse ↔ apiclient.AckSyncResponse",
-			reflect.TypeFor[AckSyncResponse](), reflect.TypeFor[apiclient.AckSyncResponse]()},
 
 		// RegistryIndex is excluded: its map-value types (RegistryChip vs ChipInfo etc.)
 		// are cross-package mirrors. Each inner type has its own entry below.
@@ -156,6 +148,10 @@ func TestPortFieldTypes(t *testing.T) {
 			reflect.TypeFor[RegistryArch](), reflect.TypeFor[registry.ArchInfo]()},
 		{"RegistryToolchain ↔ registry.ToolchainInfo",
 			reflect.TypeFor[RegistryToolchain](), reflect.TypeFor[registry.ToolchainInfo]()},
+		{"RegistryIntegration ↔ registry.IntegrationInfo",
+			reflect.TypeFor[RegistryIntegration](), reflect.TypeFor[registry.IntegrationInfo]()},
+		{"RegistrySoC ↔ registry.SoCInfo",
+			reflect.TypeFor[RegistrySoC](), reflect.TypeFor[registry.SoCInfo]()},
 		{"ToolchainDownload ↔ toolchain.RegistryToolchain",
 			reflect.TypeFor[ToolchainDownload](), reflect.TypeFor[toolchain.RegistryToolchain]()},
 		{"HardwareFlashRegion ↔ manifest.FlashRegion",

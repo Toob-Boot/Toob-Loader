@@ -14,6 +14,7 @@
 #define TOOB_BOOT_VERIFY_H
 
 #include "boot_hal.h"
+#include "generated_boot_config.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -24,15 +25,18 @@
  */
 typedef struct {
     uint32_t manifest_flash_addr;     /* Absoluter physikalischer SPI Pointer */
-    size_t   manifest_size;           /* Gesamtgröße des voll geformten SUIT-Manifests */
+    size_t   manifest_size;           /* Exakte ZCBOR-dekodierte Größe des signierten Bereichs.
+                                       * MUSS vom Decoder kommen, NIEMALS aus dem Pufferrand inferiert. */
     const uint8_t* signature_ed25519; /* Pointer auf die Ed25519 Signatur */
     uint8_t  key_index;               /* eFuse OTP Key-Index (0..) für Key-Revocation Check */
-    
+
+#if TOOB_PQC_ENABLED
     bool     pqc_hybrid_active;       /* Ist PQC-Migration (ML-DSA) durch das Manifest verlangt? */
     const uint8_t* signature_pqc;     /* Signatur-Block für PQC */
     size_t   signature_pqc_len;       /* Länge des PQC Blocks */
     const uint8_t* pubkey_pqc;        /* Der PQC-Public-Key (Anchored in Payload) */
     size_t   pubkey_pqc_len;          /* Länge des PQC Keys */
+#endif
 } boot_verify_envelope_t;
 
 /**

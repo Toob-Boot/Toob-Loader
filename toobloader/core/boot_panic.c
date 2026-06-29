@@ -25,6 +25,7 @@
  */
 
 #include "boot_panic.h"
+#include "boot_fih.h"
 #include "boot_cloud_cmd.h"
 #include "boot_cobs.h"
 #include "boot_ct_utils.h"
@@ -36,7 +37,9 @@
 #include <string.h>
 
 
-/* Terminal State besitzt die Arena nun exklusiv */
+/* P5 Exception: _Noreturn terminal state — arena grab is safe.
+ * boot_terminal_halt never returns, so no subsequent arena user can be affected.
+ * Keeping extern avoids cascading signature changes through 13+ call sites. */
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
 
 _Static_assert(
@@ -70,16 +73,80 @@ _Static_assert(
 /* COBS encode/decode/recv extracted to boot_cobs.c (DRY with
  * boot_provisioning.c) */
 
-/**
- * @brief Terminal Halt State.
- * Friert das System im Watchdog-Safe Blink-Modus ein.
- */
-_Noreturn static void enter_sos_loop(const boot_platform_t *platform) {
+_Noreturn void boot_terminal_halt(const boot_platform_t *platform,
+                                  boot_status_t reason, uint16_t site_id) {
+  /* Zero-initialize local forensic record */
+  boot_forensic_record_t record;
+  boot_secure_zeroize(&record, sizeof(record));
+
+  record.magic = 0x464F524E; /* "FORN" */
+  record.reason = (uint32_t)reason;
+  record.site_id = (uint32_t)site_id;
+
+  uint32_t current_monotonic = 0;
+  if (platform && platform->crypto && platform->crypto->read_monotonic_counter) {
+    (void)platform->crypto->read_monotonic_counter(&current_monotonic);
+  }
+  record.monotonic_counter = current_monotonic;
+
+  /* CRC of fields before crc32 field (4 * 4 = 16 bytes) */
+  record.crc32 = compute_boot_crc32((const uint8_t *)&record, 16);
+
+  /* Writes-then-freezes: write never gates the security decision; if it fails, still freeze. */
+  if (platform) {
+    bool written = false;
+    /* RTC-Backup-Register bevorzugt */
+    if (platform->soc && platform->soc->write_rtc_backup) {
+      /* Write the 20-byte record across slots 1 to 5 */
+      uint32_t *words = (uint32_t *)&record;
+      boot_status_t rtc_stat = BOOT_OK;
+      for (uint8_t slot = 1; slot <= 5; slot++) {
+        boot_status_t s = platform->soc->write_rtc_backup(slot, words[slot - 1]);
+        if (s != BOOT_OK) {
+          rtc_stat = s;
+        }
+      }
+      if (rtc_stat == BOOT_OK) {
+        written = true;
+      }
+    }
+
+    /* Fallback on flash Forensic Slot if RTC not written/available */
+    if (!written && platform->flash && platform->flash->write && platform->flash->erase_sector) {
+      /* Erase first, then write */
+      if (platform->flash->erase_sector(CHIP_FORENSIC_SLOT_ABS_ADDR) == BOOT_OK) {
+        (void)platform->flash->write(CHIP_FORENSIC_SLOT_ABS_ADDR, &record, sizeof(record));
+      }
+    }
+
+    /* Deinit Cascade (Systematisch absteigend, Zeitgeber und Watchdog als Letztes) */
+    if (platform->flash && platform->flash->deinit) {
+      platform->flash->deinit();
+    }
+    if (platform->crypto && platform->crypto->deinit) {
+      platform->crypto->deinit();
+    }
+    if (platform->confirm && platform->confirm->deinit) {
+      platform->confirm->deinit();
+    }
+    if (platform->console && platform->console->deinit) {
+      platform->console->deinit();
+    }
+    if (platform->soc && platform->soc->deinit) {
+      platform->soc->deinit();
+    }
+    if (platform->clock && platform->clock->deinit) {
+      platform->clock->deinit();
+    }
+    /* P10: Interrupts deaktivieren */
+    if (platform->soc && platform->soc->disable_interrupts) {
+      platform->soc->disable_interrupts();
+    }
+  }
+
+  /* Starvation-Loop: Keine Watchdog Kicks, so dass der Watchdog bei Bedarf zubeißen kann */
   while (1) {
-    if (platform && platform->wdt && platform->wdt->kick)
-      platform->wdt->kick();
-    if (platform && platform->clock && platform->clock->delay_ms)
-      boot_delay_with_wdt(platform, 500);
+    BOOT_GLITCH_DELAY();
   }
 }
 
@@ -95,7 +162,7 @@ _Noreturn void boot_panic(const boot_platform_t *platform,
       !platform->crypto->random || !platform->flash || !platform->flash->read ||
       !platform->flash->write || !platform->flash->erase_sector ||
       !platform->flash->get_sector_size) {
-    enter_sos_loop(platform);
+    boot_terminal_halt(platform, reason, SITE_COBS_SHIELD_FAIL);
   }
 
   uint32_t failed_auth_attempts = 0;
@@ -138,11 +205,9 @@ session_reset:
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed));
   }
-  uint32_t cfi_tok[2];
-  cfi_tok[0] = cfi_derive(panic_cfi_seed, PANIC_CFI_SLOT_INIT);
-  cfi_tok[1] = cfi_derive(panic_cfi_seed, PANIC_CFI_SLOT_AUTH);
-
-  volatile uint32_t panic_cfi = cfi_tok[0];
+  boot_cfi_ctx_t panic_cfi_ctx;
+  boot_cfi_init(panic_cfi_ctx, panic_cfi_seed);
+  boot_cfi_add_expected(panic_cfi_ctx, PANIC_CFI_SLOT_AUTH);
 
   /* ============================================================================
    * BLOCK 1: Challenge Generation (2FA)
@@ -188,6 +253,13 @@ session_reset:
 
   memcpy(challenge_buf + challenge_len, &reason, sizeof(reason));
   challenge_len += sizeof(reason);
+
+  /* P7e: eFuse-Epoch-Floor an Challenge anfügen, damit das Host-Tool
+   * (toob rescue) den Techniker warnen kann, BEVOR ein Image gestreamt wird,
+   * dessen SVN unterhalb des Floors liegt. Kein Gate — nur Advisory.
+   * Hinweis: Der Monotonic Counter IST der eFuse-Epoch — kein zweiter Read nötig. */
+  memcpy(challenge_buf + challenge_len, &current_monotonic, sizeof(current_monotonic));
+  challenge_len += sizeof(current_monotonic);
 
   /* Sende Challenge via COBS an den Techniker */
   boot_cobs_send_frame(platform, challenge_buf, challenge_len);
@@ -259,15 +331,10 @@ session_reset:
         boot_status_t nonce_stat =
             constant_time_memcmp_glitch_safe(auth_nonce, challenge_buf, 32);
 
-        /* P10 Glitch-Resistant Auth-Shield */
-        volatile uint32_t shield_1 = 0, shield_2 = 0;
-        if (time_ok && slot_ok && nonce_stat == BOOT_OK)
-          shield_1 = BOOT_OK;
-        BOOT_GLITCH_DELAY();
-        if (shield_1 == BOOT_OK && time_ok && slot_ok && nonce_stat == BOOT_OK)
-          shield_2 = BOOT_OK;
+        bool auth_failed = false;
+        BOOT_SECURE_REQUIRE(time_ok && slot_ok && nonce_stat == BOOT_OK, { auth_failed = true; });
 
-        if (shield_1 == BOOT_OK && shield_2 == BOOT_OK) {
+        if (!auth_failed) {
           /* Assemble Ed25519 Message exakt nach Spec (72 Bytes):
            * [Nonce(32)] | [Padded DSLC(32)] | [Slot ID(4)] | [Sequence ID(4)]
            */
@@ -285,9 +352,6 @@ session_reset:
           if (platform->crypto->read_pubkey &&
               platform->crypto->read_pubkey(root_pubkey, 32, 0) == BOOT_OK) {
 
-            volatile uint32_t auth_shield_1 = 0;
-            volatile uint32_t auth_shield_2 = 0;
-
             if (platform->wdt && platform->wdt->kick)
               platform->wdt->kick();
             boot_status_t sig_stat = platform->crypto->verify_ed25519(
@@ -295,13 +359,7 @@ session_reset:
             if (platform->wdt && platform->wdt->kick)
               platform->wdt->kick();
 
-            if (sig_stat == BOOT_OK)
-              auth_shield_1 = BOOT_OK;
-            BOOT_GLITCH_DELAY(); /* EMFI Protection */
-            if (auth_shield_1 == BOOT_OK && sig_stat == BOOT_OK)
-              auth_shield_2 = BOOT_OK;
-
-            if (auth_shield_1 == BOOT_OK && auth_shield_2 == BOOT_OK) {
+            if (boot_secure_confirm(sig_stat) == BOOT_OK) {
               auth_eval = BOOT_OK;
 
               /* OTP Burn: Nach erfolgreicher Autorisierung Token entwerten */
@@ -309,7 +367,7 @@ session_reset:
                 platform->crypto->advance_monotonic_counter();
                 current_monotonic = safe_sequence_id;
               }
-              panic_cfi ^= cfi_tok[1];
+              boot_cfi_step(panic_cfi_ctx, PANIC_CFI_SLOT_AUTH);
             }
           }
           boot_secure_zeroize(root_pubkey, 32);
@@ -347,18 +405,10 @@ session_reset:
 
   /* MATHEMATISCHER CFI-BEWEIS: Wir blockieren State-Confusion-Glitches, die uns
    * ohne Authentication direkt hier reinspringen lassen würden! */
-  volatile uint32_t cfi_proof_1 = 0, cfi_proof_2 = 0;
-  uint32_t expected_panic_cfi = cfi_tok[0] ^ cfi_tok[1];
-  if (panic_cfi == expected_panic_cfi)
-    cfi_proof_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (cfi_proof_1 == BOOT_OK && panic_cfi == expected_panic_cfi)
-    cfi_proof_2 = BOOT_OK;
-
-  if (cfi_proof_1 != BOOT_OK || cfi_proof_2 != BOOT_OK) {
+  boot_cfi_require(panic_cfi_ctx, {
     boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
-    enter_sos_loop(platform);
-  }
+    boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_COBS_SHIELD_FAIL);
+  });
 
   uint32_t flash_offset = 0;
   uint32_t current_sector_end = CHIP_STAGING_SLOT_ABS_ADDR;
@@ -441,6 +491,13 @@ session_reset:
   /* ============================================================================
    * BLOCK 3B: Normal Firmware Stream Pathway
    * ============================================================================
+   * P7e: Kein SVN-Gate im Rescue-Flasher.
+   * Das Anti-Rollback-Gate greift post-reboot in stage_conditions()
+   * (component_id == 3, boot_rollback_verify_svn). Der Rescue-Flasher
+   * streamt blind in den Staging Slot — das ist architektonisch korrekt:
+   * 1. Der SUIT-Parser (zcbor) ist hier nicht verfügbar (Binary-Footprint)
+   * 2. Das Image wird nach dem Reboot vollständig verifiziert + SVN-geprüft
+   * 3. Der eFuse-Floor wurde in der Challenge an den Host kommuniziert
    */
   while (1) {
     boot_cobs_send_frame(platform, (const uint8_t *)"RDY", 3);
@@ -480,15 +537,11 @@ session_reset:
             BOOT_OK &&
         payload_len > 0) {
 
-      volatile uint32_t eof_shield_1 = 0, eof_shield_2 = 0;
-      if (payload_len == 3 && memcmp(chunk_buf, "EOF", 3) == 0)
-        eof_shield_1 = BOOT_OK;
-      BOOT_GLITCH_DELAY();
-      if (eof_shield_1 == BOOT_OK && payload_len == 3 &&
-          memcmp(chunk_buf, "EOF", 3) == 0)
-        eof_shield_2 = BOOT_OK;
-
-      if (eof_shield_1 == BOOT_OK && eof_shield_2 == BOOT_OK) {
+      bool is_eof = (payload_len == 3 && memcmp(chunk_buf, "EOF", 3) == 0);
+      if (is_eof) {
+        BOOT_SECURE_REQUIRE(payload_len == 3 && memcmp(chunk_buf, "EOF", 3) == 0, {
+          boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_COBS_SHIELD_FAIL);
+        });
         boot_cobs_send_frame(platform, (const uint8_t *)"ACK", 3);
         boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
@@ -532,22 +585,15 @@ session_reset:
         aligned_len += padding;
       }
 
-      volatile uint32_t bounds_flag_1 = 0, bounds_flag_2 = 0;
       bool bounds_ok =
           (aligned_len <= CHIP_APP_SLOT_SIZE) &&
           (flash_offset <= (CHIP_APP_SLOT_SIZE - aligned_len)) &&
           (CHIP_STAGING_SLOT_ABS_ADDR <= (UINT32_MAX - CHIP_APP_SLOT_SIZE));
 
-      if (bounds_ok)
-        bounds_flag_1 = BOOT_OK;
-      BOOT_GLITCH_DELAY();
-      if (bounds_flag_1 == BOOT_OK && bounds_ok)
-        bounds_flag_2 = BOOT_OK;
-
-      if (bounds_flag_1 != BOOT_OK || bounds_flag_2 != BOOT_OK) {
+      BOOT_SECURE_REQUIRE(bounds_ok, {
         boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
         goto session_reset;
-      }
+      });
 
       uint32_t addr = CHIP_STAGING_SLOT_ABS_ADDR + flash_offset;
       size_t write_end = addr + aligned_len;
@@ -648,17 +694,10 @@ session_reset:
             diff |= (rb_buf[i] ^ chunk_buf[check_off + i]);
           }
 
-          volatile uint32_t v_shield_1 = 0, v_shield_2 = 0;
-          if (diff == 0)
-            v_shield_1 = BOOT_OK;
-          BOOT_GLITCH_DELAY();
-          if (v_shield_1 == BOOT_OK && diff == 0)
-            v_shield_2 = BOOT_OK;
-
-          if (v_shield_1 != BOOT_OK || v_shield_2 != BOOT_OK) {
+          BOOT_SECURE_REQUIRE(diff == 0, {
             write_ok = false;
             break;
-          }
+          });
 
           check_off += (uint32_t)step;
         }

@@ -67,6 +67,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
                                     uint32_t num_components,
                                     const boot_allowed_region_t *whitelist,
                                     uint32_t num_regions,
-                                    wal_entry_payload_t *open_txn);
+                                    wal_entry_payload_t *open_txn,
+                                    uint8_t *arena, size_t arena_len);
 
 #endif /* TOOB_BOOT_MULTIIMAGE_H */

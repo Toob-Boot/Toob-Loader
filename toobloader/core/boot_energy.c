@@ -26,6 +26,7 @@
 
 
 #include "boot_energy.h"
+#include "boot_fih.h"
 #include "boot_ct_utils.h"
 #include "boot_delay.h"
 #include "boot_hal.h"
@@ -83,13 +84,8 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&energy_cfi_seed, sizeof(energy_cfi_seed));
   }
-  uint32_t cfi_tok[4];
-  cfi_tok[0] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_INIT);
-  cfi_tok[1] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_NO_HAL);
-  cfi_tok[2] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_PMIC);
-  cfi_tok[3] = cfi_derive(energy_cfi_seed, ENERGY_CFI_SLOT_ADC);
-
-  volatile uint32_t energy_cfi = cfi_tok[0];
+  boot_cfi_ctx_t energy_cfi_ctx;
+  boot_cfi_init(energy_cfi_ctx, energy_cfi_seed);
 
   /* ====================================================================
    * 2. FAIL-OPEN FÜR NETZBETRIEB (Wall-Powered Devices)
@@ -98,23 +94,16 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
    * netzbetrieben ohne PMIC), wird das Update bedingungslos freigegeben.
    */
   if (!platform->soc) {
-    energy_cfi ^= cfi_tok[1];
-
-    uint32_t expected_no_hal = cfi_tok[0] ^ cfi_tok[1];
-    volatile uint32_t no_hal_shield_1 = 0, no_hal_shield_2 = 0;
-    if (energy_cfi == expected_no_hal)
-      no_hal_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (no_hal_shield_1 == BOOT_OK &&
-        energy_cfi == expected_no_hal)
-      no_hal_shield_2 = BOOT_OK;
-
-    if (no_hal_shield_1 == BOOT_OK && no_hal_shield_2 == BOOT_OK &&
-        no_hal_shield_1 == no_hal_shield_2) {
-      return BOOT_OK;
-    }
-    return BOOT_ERR_INVALID_STATE; /* PC-Glitch Trap */
+    boot_cfi_add_expected(energy_cfi_ctx, ENERGY_CFI_SLOT_NO_HAL);
+    boot_cfi_step(energy_cfi_ctx, ENERGY_CFI_SLOT_NO_HAL);
+    boot_cfi_require(energy_cfi_ctx, {
+      return BOOT_ERR_INVALID_STATE; /* PC-Glitch Trap */
+    });
+    return BOOT_OK;
   }
+
+  boot_cfi_add_expected(energy_cfi_ctx, ENERGY_CFI_SLOT_PMIC);
+  boot_cfi_add_expected(energy_cfi_ctx, ENERGY_CFI_SLOT_ADC);
 
   bool pmic_sustain_ok = true;
   bool adc_voltage_ok = true;
@@ -139,7 +128,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
       pmic_sustain_ok = false;
   }
 
-  energy_cfi ^= cfi_tok[2];
+  boot_cfi_step(energy_cfi_ctx, ENERGY_CFI_SLOT_PMIC);
 
   /* ====================================================================
    * 4. RAW ADC VOLTAGE EVALUATION (Median Filtered)
@@ -193,84 +182,38 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
     }
   }
 
-  energy_cfi ^= cfi_tok[3];
+  boot_cfi_step(energy_cfi_ctx, ENERGY_CFI_SLOT_ADC);
 
   /* ====================================================================
    * 5. GLITCH-RESISTANT RESOLUTION & CFI VALIDATION
    * ====================================================================
-   * Ein Angreifer versucht via EMFI, trotz leerem Akku das Update zu
-   * erzwingen (um z.B. Tearing zu provozieren und Signaturen zu schwächen).
    */
-  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[2] ^ cfi_tok[3];
-
-  volatile uint32_t cfi_shield_1 = 0, cfi_shield_2 = 0;
-  if (energy_cfi == expected_cfi)
-    cfi_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (cfi_shield_1 == BOOT_OK && energy_cfi == expected_cfi)
-    cfi_shield_2 = BOOT_OK;
-
-  if (cfi_shield_1 != BOOT_OK || cfi_shield_2 != BOOT_OK ||
-      cfi_shield_1 != cfi_shield_2) {
-    /* CFI Failure - Control Flow wurde attackiert! System einfrieren! */
-    if (platform->clock && platform->clock->deinit)
-      platform->clock->deinit();
-
-    /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts (z.B. RTOS/ROM Cache) */
-    if (platform->soc && platform->soc->disable_interrupts)
-      platform->soc->disable_interrupts();
-
-    while (1) {
-      BOOT_GLITCH_DELAY();
-    } /* Starve WDT */
-  }
+  boot_cfi_require(energy_cfi_ctx, {
+    boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ENERGY_CFI_MISMATCH);
+  });
 
   /* Logik-Akkumulator: Darf das Update geflasht werden? */
-  volatile uint32_t eval_shield_1 = 0, eval_shield_2 = 0;
+  BOOT_SECURE_REQUIRE(pmic_sustain_ok && adc_voltage_ok, {
+    goto brownout_trap;
+  });
+  return BOOT_OK;
 
-  if (pmic_sustain_ok && adc_voltage_ok)
-    eval_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (eval_shield_1 == BOOT_OK && pmic_sustain_ok && adc_voltage_ok)
-    eval_shield_2 = BOOT_OK;
-
-  if (eval_shield_1 == BOOT_OK && eval_shield_2 == BOOT_OK &&
-      eval_shield_1 == eval_shield_2) {
-    return BOOT_OK;
-  }
-
+brownout_trap:
   /* ========================================================================
    * BROWNOUT DEATH-LOOP TRAP (ACTIVE MITIGATION)
    * ========================================================================
-   * Das System hat nicht genug Energie für einen Flash Erase.
-   * Wir zwingen es in den Tiefschlaf, um Ladung zu sammeln, BEVOR das WAL
-   * angerührt wird!
    */
 #if BOOT_CONFIG_EDGE_UNATTENDED_MODE
   if (platform->soc->enter_low_power) {
-    /* Penalty Sleep: 1 Stunde (3600s) Deep-Sleep Penalty zum Akku laden
-     * erzwingen */
+    /* Penalty Sleep: 1 Stunde (3600s) Deep-Sleep Penalty zum Akku laden erzwingen */
     platform->soc->enter_low_power(BOOT_CONFIG_BACKOFF_BASE_S);
 
-    /* Halt-Guard (WDT Starvation): Falls die Vendor-HAL fälschlicherweise
-     * aus dem enter_low_power State zurückkehrt, frieren wir das System ein. */
-    if (platform->console && platform->console->flush)
-      platform->console->flush();
-    if (platform->clock && platform->clock->deinit)
-      platform->clock->deinit();
-
-    /* P10 FIX: Verhindert WDT-Starvation Bypass durch Hintergrund-Interrupts (z.B. RTOS/ROM Cache) */
-    if (platform->soc && platform->soc->disable_interrupts)
-      platform->soc->disable_interrupts();
-
-    while (1) {
-      BOOT_GLITCH_DELAY(); /* Starve WDT */
-    }
+    /* Halt-Guard: Falls enter_low_power fehlschlägt/aufwacht, frieren wir das System ein. */
+    boot_terminal_halt(platform, BOOT_ERR_POWER, SITE_ENERGY_BROWNOUT);
   }
 #endif
 
   /* Fallback: Wenn Unattended Mode deaktiviert ist oder enter_low_power fehlt.
    * Es bleibt nur der Panic-State, da das Flash-Update tödlich wäre. */
-  boot_panic(platform, BOOT_ERR_POWER);
-  return BOOT_ERR_POWER; /* Unreachable due to _Noreturn in boot_panic */
+  boot_terminal_halt(platform, BOOT_ERR_POWER, SITE_ENERGY_BROWNOUT);
 }

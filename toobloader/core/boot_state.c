@@ -20,6 +20,7 @@
  */
 
 #include "boot_state.h"
+#include "boot_fih.h"
 #include "generated_boot_config.h"
 
 #include "boot_cloud_cmd.h"
@@ -49,7 +50,7 @@
 #define STATE_CFI_SLOT_5      7
 #define STATE_CFI_NUM_TOKENS  8
 
-extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
+/* P5: Arena is now passed explicitly through the call graph */
 
 /* ==============================================================================
  * STATIC HELPERS (Single Responsibility & Glitch Shielded)
@@ -86,18 +87,19 @@ static inline bool is_buffer_within(const uint8_t *inner, size_t inner_len,
 static boot_status_t _handle_cloud_cmd(const boot_platform_t *platform,
                                        wal_entry_payload_t *open_txn,
                                        boot_target_config_t *target_out,
-                                       volatile uint32_t *cfi_acc,
-                                       uint32_t cfi_token) {
+                                       boot_cfi_ctx_t *cfi_ctx,
+                                       uint32_t slot,
+                                       uint8_t *arena, size_t arena_len) {
   toob_cloud_cmd_t cmd_intent = TOOB_CMD_NOP;
 
   boot_status_t eval_stat =
-      boot_cloud_cmd_evaluate_flash(platform, crypto_arena, &cmd_intent);
+      boot_cloud_cmd_evaluate_flash(platform, arena, &cmd_intent);
 
   if (eval_stat != BOOT_OK) {
     /* Kein gültiger Command im Slot (leerer Slot, Parse-Error, Replay, etc.).
      * Das ist der Normalfall beim Boot ohne Cloud-Interaktion.
      * Kein Seiteneffekt. Skip-Pfad. */
-    *cfi_acc ^= cfi_token;
+    boot_cfi_step(*cfi_ctx, slot);
     return BOOT_OK;
   }
 
@@ -142,9 +144,7 @@ static boot_status_t _handle_cloud_cmd(const boot_platform_t *platform,
       break;
     }
     /* eFuse gebrannt. Gerät ist permanent revoked. dead_halt. */
-    while (1) {
-      BOOT_GLITCH_DELAY();
-    }
+    boot_terminal_halt(platform, BOOT_ERR_NOT_SUPPORTED, SITE_STATE_LOCK_FAIL);
   }
   case TOOB_CMD_WIPE: {
     wal_entry_payload_t wipe_txn = *open_txn;
@@ -172,7 +172,7 @@ static boot_status_t _handle_cloud_cmd(const boot_platform_t *platform,
     (void)platform->flash->erase_sector(CHIP_CLOUD_CMD_SLOT_ABS_ADDR);
   }
 
-  *cfi_acc ^= cfi_token;
+  boot_cfi_step(*cfi_ctx, slot);
   return BOOT_OK;
 }
 
@@ -180,26 +180,26 @@ static boot_status_t _handle_rollback_flow(const boot_platform_t *platform,
                                            wal_tmr_payload_t *current_tmr,
                                            wal_entry_payload_t *open_txn,
                                            boot_target_config_t *target_out,
-                                           volatile uint32_t *cfi_acc,
-                                           uint32_t cfi_token) {
+                                           boot_cfi_ctx_t *cfi_ctx,
+                                           uint32_t slot,
+                                           uint8_t *arena, size_t arena_len) {
   boot_status_t status = BOOT_OK;
 
   /* P10 Glitch Protection: Evaluierung des Counter-Status */
-  volatile uint32_t eval_flag_1 = 0;
-  volatile uint32_t eval_flag_2 = 0;
+  bool has_failures = false;
+  if (current_tmr->boot_failure_counter > 0) {
+    BOOT_SECURE_REQUIRE(current_tmr->boot_failure_counter > 0, {
+      return BOOT_ERR_VERIFY;
+    });
+    has_failures = true;
+  }
 
-  if (current_tmr->boot_failure_counter > 0)
-    eval_flag_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (eval_flag_1 == BOOT_OK && current_tmr->boot_failure_counter > 0)
-    eval_flag_2 = BOOT_OK;
-
-  if (eval_flag_1 == BOOT_OK && eval_flag_2 == BOOT_OK) {
+  if (has_failures) {
 
     /* CASE A: Crash happened exactly after TXN_COMMIT. Revert Staging! */
     if (open_txn->intent == WAL_INTENT_TXN_COMMIT ||
         open_txn->intent == WAL_INTENT_TXN_ROLLBACK_PENDING) {
-      status = boot_rollback_trigger_revert(platform);
+      status = boot_rollback_trigger_revert(platform, arena, arena_len);
       if (status != BOOT_OK)
         return status; /* FATAL: Cannot revert Staging image */
 
@@ -230,533 +230,610 @@ static boot_status_t _handle_rollback_flow(const boot_platform_t *platform,
 
   /* Logik-Bombe gefixt: Bei erfolgreicher Ausführung wird der CFI-Token exakt
    * verrechnet */
-  *cfi_acc ^= cfi_token;
+  boot_cfi_step(*cfi_ctx, slot);
   return BOOT_OK;
 }
 
-static boot_status_t _handle_update_flow(const boot_platform_t *platform,
-                                         wal_entry_payload_t *open_txn,
-                                         uint32_t *extracted_svn,
-                                         volatile uint32_t *cfi_acc,
-                                         uint32_t cfi_token) {
-  if (open_txn->intent != WAL_INTENT_UPDATE_PENDING) {
-    /* Logik-Bombe gefixt: CFI Kaskade sicher schließen, falls kein Update
-     * läuft! */
-    *cfi_acc ^= cfi_token;
-    return BOOT_OK; /* Safe Exit: No update pending */
-  }
+/* ==============================================================================
+ * P6 UPDATE PIPELINE — Stage-Decomposition of _handle_update_flow
+ *
+ * Jede Stage hat EINE Aufgabe, nimmt update_ctx_t*, gibt boot_status_t.
+ * KEINE Function-Pointer-Tabelle — statisch inline verkettete Sequenz.
+ * CFI-Token werden vom Treiber vergeben, nicht von den Stages.
+ * ==============================================================================
+ */
 
-  boot_status_t verify_status =
-      BOOT_ERR_VERIFY; /* Grundannahme: Verifikation fehlgeschlagen
-                          (Default-Deny) */
+typedef struct {
+  const boot_platform_t *platform;
+  uint8_t *arena;
+  size_t arena_len;
+  wal_entry_payload_t *open_txn;
+
+  /* stage_parse output */
   struct toob_suit parsed_suit;
-  size_t suit_consumed_bytes = 0; /* Elevated scope für Scratchpad Allocation */
-  (void)suit_consumed_bytes;
-  uint32_t local_svn = 0; /* Sicherer Zwischenspeicher für validierte SVN */
+  size_t suit_consumed_bytes;
+  uint8_t safe_sig_ed25519[64];
 
-  boot_secure_zeroize(
-      &parsed_suit, sizeof(parsed_suit)); /* P10: Uninitialized Trap Prevent */
+  /* stage_verify_envelope output */
+  /* (implicit: verify passed) */
 
+  /* stage_check_svn output */
+  uint32_t extracted_svn;
+
+  /* stage_swap output (P7a) */
+  uint32_t extracted_stage1_svn;
+
+  /* stage_route output */
+  bool requires_swap;
+  bool is_delta;
+  uint32_t swap_src_addr;
+  toob_image_header_t staging_header;
+  struct toob_image_r *primary_image;
+  struct zcbor_string *chunk_hashes;
+  uint32_t num_chunks;
+  uint32_t chunk_size;
+} update_ctx_t;
+
+/* --------------------------------------------------------------------------
+ * Stage PARSE: Flash-Read → ZCBOR Decode → Buffer-Within-Checks → Sig Extract
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_parse(update_ctx_t *ctx) {
 #ifdef TOOB_MOCK_TEST
-  suit_consumed_bytes = 128; /* Mock Payload Size */
+  ctx->suit_consumed_bytes = 128;
   boot_verify_envelope_t mock_envelope = {
-      .manifest_flash_addr = open_txn->offset,
+      .manifest_flash_addr = ctx->open_txn->offset,
       .manifest_size = 128,
       .signature_ed25519 = (const uint8_t *)"DUMMYSIG",
       .key_index = 0,
-      .pqc_hybrid_active = false};
-  verify_status = boot_verify_manifest_envelope(
-      platform, &mock_envelope, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+#if TOOB_PQC_ENABLED
+      .pqc_hybrid_active = false
+#endif
+  };
+  (void)mock_envelope;
+  return BOOT_OK;
 #else
-  /* 1. Einlesen des Manifests ins SRAM (Sektor-Größe reicht für SUIT Parser) */
-  platform->wdt->kick();
-  boot_status_t read_stat = platform->flash->read(
-      open_txn->offset, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
-  platform->wdt->kick();
+  ctx->platform->wdt->kick();
+  boot_status_t read_stat = ctx->platform->flash->read(
+      ctx->open_txn->offset, ctx->arena, ctx->arena_len);
+  ctx->platform->wdt->kick();
 
-  if (read_stat == BOOT_OK) {
-    /* 2. ZCBOR Manifest Parsing (P10 Safe) */
-    if (cbor_decode_toob_suit(crypto_arena, BOOT_CRYPTO_ARENA_SIZE,
-                              &parsed_suit, &suit_consumed_bytes)) {
+  if (read_stat != BOOT_OK)
+    return read_stat;
 
-      /* Anti-Aliasing Fix: Extract hardware trust anchor safely to stack to
-       * survive buffer overwrite from flash */
-      uint8_t safe_sig_ed25519[64] __attribute__((aligned(8)));
-      boot_secure_zeroize(safe_sig_ed25519, sizeof(safe_sig_ed25519));
+  if (!cbor_decode_toob_suit(ctx->arena, ctx->arena_len,
+                             &ctx->parsed_suit, &ctx->suit_consumed_bytes))
+    return BOOT_ERR_INVALID_ARG;
 
-      if (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint101bstr.len !=
-              64 ||
-          !is_buffer_within(parsed_suit.toob_suit_suit_envelope_m
-                                .suit_envelope_uint101bstr.value,
-                            64, crypto_arena, BOOT_CRYPTO_ARENA_SIZE) ||
-          (parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint103bool &&
-           (!is_buffer_within((parsed_suit.toob_suit_suit_envelope_m
-                                       .suit_envelope_uint104bstr_present
-                                   ? parsed_suit.toob_suit_suit_envelope_m
-                                         .suit_envelope_uint104bstr
-                                         .suit_envelope_uint104bstr.value
-                                   : NULL),
-                              (parsed_suit.toob_suit_suit_envelope_m
-                                       .suit_envelope_uint104bstr_present
-                                   ? parsed_suit.toob_suit_suit_envelope_m
-                                         .suit_envelope_uint104bstr
-                                         .suit_envelope_uint104bstr.len
-                                   : 0),
-                              crypto_arena, BOOT_CRYPTO_ARENA_SIZE) ||
-            !is_buffer_within((parsed_suit.toob_suit_suit_envelope_m
-                                       .suit_envelope_uint105bstr_present
-                                   ? parsed_suit.toob_suit_suit_envelope_m
-                                         .suit_envelope_uint105bstr
-                                         .suit_envelope_uint105bstr.value
-                                   : NULL),
-                              (parsed_suit.toob_suit_suit_envelope_m
-                                       .suit_envelope_uint105bstr_present
-                                   ? parsed_suit.toob_suit_suit_envelope_m
-                                         .suit_envelope_uint105bstr
-                                         .suit_envelope_uint105bstr.len
-                                   : 0),
-                              crypto_arena, BOOT_CRYPTO_ARENA_SIZE))) ||
-          (parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr
-                   .len > 0 &&
-           !is_buffer_within(parsed_suit.toob_suit_suit_conditions_m
-                                 .suit_conditions_uint201bstr.value,
-                             parsed_suit.toob_suit_suit_conditions_m
-                                 .suit_conditions_uint201bstr.len,
-                             crypto_arena, BOOT_CRYPTO_ARENA_SIZE))) {
-        verify_status = BOOT_ERR_INVALID_ARG;
-      } else {
-        memcpy(safe_sig_ed25519,
-               parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint101bstr
-                   .value,
-               64);
+  /* Buffer-Within Sandboxing: Alle zcbor-Pointer gegen Arena validieren */
+  boot_secure_zeroize(ctx->safe_sig_ed25519, sizeof(ctx->safe_sig_ed25519));
 
-        boot_verify_envelope_t real_envelope = {
-            .manifest_flash_addr = open_txn->offset,
-            .manifest_size = suit_consumed_bytes,
-            .signature_ed25519 = safe_sig_ed25519,
-            .key_index = (uint8_t)parsed_suit.toob_suit_suit_envelope_m
-                             .suit_envelope_uint102uint,
-            .pqc_hybrid_active =
-                parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint103bool,
-            .signature_pqc = (parsed_suit.toob_suit_suit_envelope_m
-                                      .suit_envelope_uint104bstr_present
-                                  ? parsed_suit.toob_suit_suit_envelope_m
-                                        .suit_envelope_uint104bstr
-                                        .suit_envelope_uint104bstr.value
-                                  : NULL),
-            .signature_pqc_len = (parsed_suit.toob_suit_suit_envelope_m
-                                          .suit_envelope_uint104bstr_present
-                                      ? parsed_suit.toob_suit_suit_envelope_m
-                                            .suit_envelope_uint104bstr
-                                            .suit_envelope_uint104bstr.len
-                                      : 0),
-            .pubkey_pqc = (parsed_suit.toob_suit_suit_envelope_m
-                                   .suit_envelope_uint105bstr_present
-                               ? parsed_suit.toob_suit_suit_envelope_m
-                                     .suit_envelope_uint105bstr
-                                     .suit_envelope_uint105bstr.value
-                               : NULL),
-            .pubkey_pqc_len = (parsed_suit.toob_suit_suit_envelope_m
-                                       .suit_envelope_uint105bstr_present
-                                   ? parsed_suit.toob_suit_suit_envelope_m
-                                         .suit_envelope_uint105bstr
-                                         .suit_envelope_uint105bstr.len
-                                   : 0)};
+  if (ctx->parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint101bstr.len !=
+          64 ||
+      !is_buffer_within(ctx->parsed_suit.toob_suit_suit_envelope_m
+                            .suit_envelope_uint101bstr.value,
+                        64, ctx->arena, ctx->arena_len))
+    return BOOT_ERR_INVALID_ARG;
 
-        /* 3. Hardware-gehärtete Envelope Signatur Verifikation FIRST */
-        verify_status = boot_verify_manifest_envelope(
-            platform, &real_envelope, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  /* PQC Pointer Sandboxing (wenn hybrid aktiv) */
+  if (ctx->parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint103bool) {
+    if (!is_buffer_within(
+            (ctx->parsed_suit.toob_suit_suit_envelope_m
+                     .suit_envelope_uint104bstr_present
+                 ? ctx->parsed_suit.toob_suit_suit_envelope_m
+                       .suit_envelope_uint104bstr
+                       .suit_envelope_uint104bstr.value
+                 : NULL),
+            (ctx->parsed_suit.toob_suit_suit_envelope_m
+                     .suit_envelope_uint104bstr_present
+                 ? ctx->parsed_suit.toob_suit_suit_envelope_m
+                       .suit_envelope_uint104bstr
+                       .suit_envelope_uint104bstr.len
+                 : 0),
+            ctx->arena, ctx->arena_len))
+      return BOOT_ERR_INVALID_ARG;
 
-        /* CFI Glitch-Guard für Krypto-Resultat */
-        volatile uint32_t env_flag1 = 0, env_flag2 = 0;
-        if (verify_status == BOOT_OK)
-          env_flag1 = BOOT_OK;
-        BOOT_GLITCH_DELAY();
-        if (env_flag1 == BOOT_OK && verify_status == BOOT_OK)
-          env_flag2 = BOOT_OK;
+    if (!is_buffer_within(
+            (ctx->parsed_suit.toob_suit_suit_envelope_m
+                     .suit_envelope_uint105bstr_present
+                 ? ctx->parsed_suit.toob_suit_suit_envelope_m
+                       .suit_envelope_uint105bstr
+                       .suit_envelope_uint105bstr.value
+                 : NULL),
+            (ctx->parsed_suit.toob_suit_suit_envelope_m
+                     .suit_envelope_uint105bstr_present
+                 ? ctx->parsed_suit.toob_suit_suit_envelope_m
+                       .suit_envelope_uint105bstr
+                       .suit_envelope_uint105bstr.len
+                 : 0),
+            ctx->arena, ctx->arena_len))
+      return BOOT_ERR_INVALID_ARG;
+  }
 
-        if (env_flag1 == BOOT_OK && env_flag2 == BOOT_OK) {
-          local_svn = parsed_suit.toob_suit_suit_conditions_m
-                          .suit_conditions_uint203uint;
-          /* 4. SVN Anti-Rollback Check happens ONLY if math signature matched
-           * safely */
-          verify_status = boot_rollback_verify_svn(platform, local_svn, false);
+  /* Device-Binding Pointer Sandboxing */
+  if (ctx->parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr
+              .len > 0 &&
+      !is_buffer_within(
+          ctx->parsed_suit.toob_suit_suit_conditions_m
+              .suit_conditions_uint201bstr.value,
+          ctx->parsed_suit.toob_suit_suit_conditions_m
+              .suit_conditions_uint201bstr.len,
+          ctx->arena, ctx->arena_len))
+    return BOOT_ERR_INVALID_ARG;
 
-          /* P10 Hardware-Identitäts Check (Device Binding / Anti-Clone) */
-          if (verify_status == BOOT_OK &&
-              parsed_suit.toob_suit_suit_conditions_m
-                      .suit_conditions_uint201bstr.len > 0) {
-            uint8_t dslc_buf[32] __attribute__((aligned(8)));
-            size_t dslc_len = 32;
-            if (platform->crypto->read_dslc &&
-                platform->crypto->read_dslc(dslc_buf, &dslc_len) == BOOT_OK) {
-              if (parsed_suit.toob_suit_suit_conditions_m
-                          .suit_conditions_uint201bstr.len != 32 ||
-                  constant_time_memcmp_glitch_safe(
-                      parsed_suit.toob_suit_suit_conditions_m
-                          .suit_conditions_uint201bstr.value,
-                      dslc_buf, 32) != BOOT_OK) {
-                verify_status = BOOT_ERR_VERIFY; /* Hardware-MAC Mismatch! */
-              }
-            } else {
-              verify_status = BOOT_ERR_NOT_SUPPORTED;
-            }
+  /* Anti-Aliasing: Signatur auf Stack kopieren bevor Arena überschrieben wird */
+  memcpy(ctx->safe_sig_ed25519,
+         ctx->parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint101bstr
+             .value,
+         64);
+
+  return BOOT_OK;
+#endif
+}
+
+/* --------------------------------------------------------------------------
+ * Stage VERIFY ENVELOPE: Ed25519/PQC Signaturverifikation (Glitch-gehärtet)
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_verify_envelope(update_ctx_t *ctx) {
+#ifdef TOOB_MOCK_TEST
+  boot_verify_envelope_t mock_envelope = {
+      .manifest_flash_addr = ctx->open_txn->offset,
+      .manifest_size = 128,
+      .signature_ed25519 = (const uint8_t *)"DUMMYSIG",
+      .key_index = 0,
+#if TOOB_PQC_ENABLED
+      .pqc_hybrid_active = false
+#endif
+  };
+  return boot_verify_manifest_envelope(
+      ctx->platform, &mock_envelope, ctx->arena, ctx->arena_len);
+#else
+  boot_verify_envelope_t envelope = {
+      .manifest_flash_addr = ctx->open_txn->offset,
+      .manifest_size = ctx->suit_consumed_bytes,
+      .signature_ed25519 = ctx->safe_sig_ed25519,
+      .key_index = (uint8_t)ctx->parsed_suit.toob_suit_suit_envelope_m
+                       .suit_envelope_uint102uint,
+#if TOOB_PQC_ENABLED
+      .pqc_hybrid_active =
+          ctx->parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint103bool,
+      .signature_pqc =
+          (ctx->parsed_suit.toob_suit_suit_envelope_m
+                   .suit_envelope_uint104bstr_present
+               ? ctx->parsed_suit.toob_suit_suit_envelope_m
+                     .suit_envelope_uint104bstr
+                     .suit_envelope_uint104bstr.value
+               : NULL),
+      .signature_pqc_len =
+          (ctx->parsed_suit.toob_suit_suit_envelope_m
+                   .suit_envelope_uint104bstr_present
+               ? ctx->parsed_suit.toob_suit_suit_envelope_m
+                     .suit_envelope_uint104bstr
+                     .suit_envelope_uint104bstr.len
+               : 0),
+      .pubkey_pqc = (ctx->parsed_suit.toob_suit_suit_envelope_m
+                             .suit_envelope_uint105bstr_present
+                         ? ctx->parsed_suit.toob_suit_suit_envelope_m
+                               .suit_envelope_uint105bstr
+                               .suit_envelope_uint105bstr.value
+                         : NULL),
+      .pubkey_pqc_len =
+          (ctx->parsed_suit.toob_suit_suit_envelope_m
+                   .suit_envelope_uint105bstr_present
+               ? ctx->parsed_suit.toob_suit_suit_envelope_m
+                     .suit_envelope_uint105bstr
+                     .suit_envelope_uint105bstr.len
+               : 0)
+#endif
+  };
+
+  boot_status_t verify_status = boot_verify_manifest_envelope(
+      ctx->platform, &envelope, ctx->arena, ctx->arena_len);
+
+  /* CFI Glitch-Guard: Krypto-Resultat doppelt absichern */
+  bool envelope_ok = (verify_status == BOOT_OK);
+  if (!envelope_ok)
+    return BOOT_ERR_VERIFY;
+
+  BOOT_SECURE_REQUIRE(verify_status == BOOT_OK, {
+    boot_terminal_halt(ctx->platform, BOOT_ERR_VERIFY, SITE_STATE_CFI_MISMATCH);
+  });
+
+  return BOOT_OK;
+#endif
+}
+
+/* --------------------------------------------------------------------------
+ * Stage CHECK SVN: Anti-Rollback Verifikation gegen eFuse-Epoch
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_check_svn(update_ctx_t *ctx) {
+  ctx->extracted_svn =
+      ctx->parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint203uint;
+
+  return boot_rollback_verify_svn(ctx->platform, ctx->extracted_svn, ROLLBACK_TARGET_APP);
+}
+
+/* --------------------------------------------------------------------------
+ * Stage CHECK BINDING: Device-ID DSLC Match + EU-CRA SBOM Extraction
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_check_binding(update_ctx_t *ctx) {
+  /* Device-ID Binding (nur wenn Manifest ein Device-ID enthält) */
+  if (ctx->parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr
+          .len > 0) {
+    uint8_t dslc_buf[32] __attribute__((aligned(8)));
+    size_t dslc_len = 32;
+    if (!ctx->platform->crypto->read_dslc ||
+        ctx->platform->crypto->read_dslc(dslc_buf, &dslc_len) != BOOT_OK)
+      return BOOT_ERR_NOT_SUPPORTED;
+
+    if (ctx->parsed_suit.toob_suit_suit_conditions_m.suit_conditions_uint201bstr
+                .len != 32 ||
+        constant_time_memcmp_glitch_safe(
+            ctx->parsed_suit.toob_suit_suit_conditions_m
+                .suit_conditions_uint201bstr.value,
+            dslc_buf, 32) != BOOT_OK)
+      return BOOT_ERR_VERIFY;
+  }
+
+  /* EU-CRA SBOM Extraction (in .noinit Diagnostics Areal) */
+  if (ctx->parsed_suit.toob_suit_suit_payload_m.suit_payload_uint301bstr.len ==
+      32) {
+    boot_diag_set_security_meta(
+        ctx->extracted_svn,
+        ctx->parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint102uint,
+        ctx->parsed_suit.toob_suit_suit_payload_m.suit_payload_uint301bstr
+            .value);
+  } else {
+    boot_diag_set_security_meta(
+        ctx->extracted_svn,
+        ctx->parsed_suit.toob_suit_suit_envelope_m.suit_envelope_uint102uint,
+        NULL);
+  }
+
+  return BOOT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage ROUTE: Staging Header → Raw/Delta Branching → Chunk-Hash Extraction
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_route(update_ctx_t *ctx) {
+  ctx->requires_swap = true;
+  ctx->swap_src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+  boot_secure_zeroize(&ctx->staging_header, sizeof(ctx->staging_header));
+
+  /* Double Check Gating: Redundanter Verify-Guard */
+  boot_status_t head_status = ctx->platform->flash->read(
+      CHIP_STAGING_SLOT_ABS_ADDR, (uint8_t *)&ctx->staging_header,
+      sizeof(toob_image_header_t));
+
+  if (head_status != BOOT_OK ||
+      ctx->staging_header.magic != TOOB_MAGIC_HEADER)
+    return BOOT_ERR_INVALID_STATE;
+
+  if (ctx->staging_header.image_size > CHIP_APP_SLOT_SIZE)
+    return BOOT_ERR_FLASH_BOUNDS;
+
+#ifdef TOOB_MOCK_TEST
+  return BOOT_OK;
+#endif
+
+  if (ctx->staging_header.image_size <= sizeof(toob_image_header_t))
+    return BOOT_ERR_INVALID_ARG;
+
+  if (ctx->parsed_suit.toob_suit_suit_payload_m
+          .suit_payload_toob_image_m_l_toob_image_m_count == 0)
+    return BOOT_ERR_INVALID_ARG;
+
+  ctx->primary_image =
+      &ctx->parsed_suit.toob_suit_suit_payload_m
+           .suit_payload_toob_image_m_l_toob_image_m[0];
+
+  if (ctx->primary_image->toob_image_choice == toob_image_raw_m_c) {
+    ctx->chunk_hashes =
+        &ctx->primary_image->toob_image_raw_m.toob_image_raw_uint405bstr;
+    ctx->num_chunks =
+        ctx->primary_image->toob_image_raw_m.toob_image_raw_uint404uint;
+    ctx->chunk_size =
+        ctx->primary_image->toob_image_raw_m.toob_image_raw_uint403uint;
+    ctx->is_delta = false;
+  } else if (ctx->primary_image->toob_image_choice == toob_image_delta_m_c) {
+    ctx->chunk_hashes =
+        &ctx->primary_image->toob_image_delta_m.toob_image_delta_uint405bstr;
+    ctx->num_chunks =
+        ctx->primary_image->toob_image_delta_m.toob_image_delta_uint404uint;
+    ctx->chunk_size =
+        ctx->primary_image->toob_image_delta_m.toob_image_delta_uint403uint;
+    ctx->is_delta = true;
+  } else {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  /* Chunk-Hash Pointer Sandbox */
+  if (!ctx->chunk_hashes ||
+      !is_buffer_within(ctx->chunk_hashes->value, ctx->chunk_hashes->len,
+                        ctx->arena, ctx->arena_len))
+    return BOOT_ERR_INVALID_ARG;
+
+  return BOOT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage APPLY DELTA: Arena-Slicing + SDVM + Merkle-Verify des Outputs
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_apply_delta(update_ctx_t *ctx) {
+  size_t hash_slice_size = (ctx->chunk_hashes->len + 7) & ~((size_t)7);
+  if (hash_slice_size >= ctx->arena_len)
+    return BOOT_ERR_INVALID_ARG;
+
+  uint8_t *hash_arena = ctx->arena;
+  uint8_t *delta_arena = ctx->arena + hash_slice_size;
+  size_t delta_arena_len = ctx->arena_len - hash_slice_size;
+
+  memcpy(hash_arena, ctx->chunk_hashes->value, ctx->chunk_hashes->len);
+
+  boot_status_t delta_stat = boot_delta_apply(
+      ctx->platform, ctx->open_txn->offset + ctx->suit_consumed_bytes,
+      CHIP_STAGING_SLOT_ABS_ADDR + CHIP_APP_SLOT_SIZE -
+          (ctx->open_txn->offset + ctx->suit_consumed_bytes),
+      CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,
+      CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,
+      ctx->open_txn, delta_arena, delta_arena_len);
+
+  if (delta_stat != BOOT_OK) {
+    boot_secure_zeroize(hash_arena, hash_slice_size);
+    return delta_stat;
+  }
+
+  boot_status_t hash_stat = boot_merkle_verify_stream(
+      ctx->platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
+      ctx->primary_image->toob_image_delta_m.toob_image_delta_uint402uint,
+      ctx->primary_image->toob_image_delta_m.toob_image_delta_uint403uint,
+      hash_arena, ctx->chunk_hashes->len, ctx->num_chunks,
+      delta_arena, delta_arena_len);
+
+  boot_secure_zeroize(hash_arena, hash_slice_size);
+
+  if (hash_stat != BOOT_OK)
+    return BOOT_ERR_VERIFY;
+
+  /* Delta erfolgreich: Swap-Quelle ist Scratch, Image-Size ist Zielgröße */
+  ctx->staging_header.image_size =
+      ctx->primary_image->toob_image_delta_m.toob_image_delta_uint402uint;
+  ctx->swap_src_addr = CHIP_SCRATCH_SLOT_ABS_ADDR;
+
+  return BOOT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage APPLY RAW: Merkle-Verify des Staging-Slots
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_apply_raw(update_ctx_t *ctx) {
+  ctx->swap_src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+  size_t aligned_offset =
+      (ctx->suit_consumed_bytes + 7) & ~((size_t)7);
+
+  if (aligned_offset >= ctx->arena_len)
+    return BOOT_ERR_INVALID_ARG;
+
+  uint8_t *scratch = ctx->arena + aligned_offset;
+  size_t scratch_size = ctx->arena_len - aligned_offset;
+
+  if (scratch_size < ctx->chunk_size)
+    return BOOT_ERR_INVALID_ARG;
+
+  boot_secure_zeroize(scratch, scratch_size);
+  boot_status_t hash_stat = boot_merkle_verify_stream(
+      ctx->platform, CHIP_STAGING_SLOT_ABS_ADDR,
+      ctx->staging_header.image_size, ctx->chunk_size,
+      ctx->chunk_hashes->value, (uint32_t)ctx->chunk_hashes->len,
+      ctx->num_chunks, scratch, scratch_size);
+  boot_secure_zeroize(scratch, scratch_size);
+
+  return hash_stat;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage SWAP: boot_swap_apply + Multi-Image Deployment
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_swap(update_ctx_t *ctx) {
+  boot_status_t swap_status = BOOT_OK;
+
+  if (ctx->requires_swap) {
+    swap_status = boot_swap_apply(
+        ctx->platform, ctx->swap_src_addr, CHIP_APP_SLOT_ABS_ADDR,
+        ctx->staging_header.image_size, BOOT_DEST_SLOT_APP, ctx->open_txn,
+        ctx->arena, ctx->arena_len);
+  }
+
+  /* Multi-Image Deployment (CDDL Array > 1) */
+  if (swap_status == BOOT_OK &&
+      ctx->parsed_suit.toob_suit_suit_payload_m
+              .suit_payload_toob_image_m_l_toob_image_m_count > 1) {
+    boot_component_t components[3];
+    uint32_t comp_count = 0;
+    uint32_t current_staging_offset = ctx->staging_header.image_size;
+
+    for (size_t i = 1;
+         i < ctx->parsed_suit.toob_suit_suit_payload_m
+                 .suit_payload_toob_image_m_l_toob_image_m_count &&
+         i < 4;
+         i++) {
+      struct toob_image_r *sub_img =
+          &ctx->parsed_suit.toob_suit_suit_payload_m
+               .suit_payload_toob_image_m_l_toob_image_m[i];
+      boot_secure_zeroize(&components[comp_count], sizeof(boot_component_t));
+      components[comp_count].component_id = (uint32_t)i;
+
+      if (sub_img->toob_image_choice == toob_image_raw_m_c) {
+        components[comp_count].image_size =
+            sub_img->toob_image_raw_m.toob_image_raw_uint402uint;
+        components[comp_count].staging_offset = current_staging_offset;
+        current_staging_offset +=
+            sub_img->toob_image_raw_m.toob_image_raw_uint402uint;
+
+        if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint == 1) {
+          components[comp_count].target_addr = CHIP_NETCORE_SLOT_ABS_ADDR;
+        } else if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint == 2) {
+          components[comp_count].target_addr = CHIP_RECOVERY_OS_ABS_ADDR;
+        } else if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint == 3) {
+          /* P7a: Stage-1 Anti-Rollback Gate — enforce before any flash write */
+          if (!ctx->parsed_suit.toob_suit_suit_conditions_m
+                   .suit_conditions_uint206uint_present) {
+            return BOOT_ERR_INVALID_ARG; /* Stage-1 manifest without stage1_svn is illegal */
           }
+          uint32_t stage1_svn = ctx->parsed_suit.toob_suit_suit_conditions_m
+                                    .suit_conditions_uint206uint;
+          boot_status_t svn_st = boot_rollback_verify_svn(
+              ctx->platform, stage1_svn, ROLLBACK_TARGET_STAGE1);
+          if (svn_st != BOOT_OK) return svn_st;
+          ctx->extracted_stage1_svn = stage1_svn;
 
-          /* EU-CRA SBOM Extraction (wird später in .noinit Diagnostics Areal
-           * versiegelt) */
-          if (verify_status == BOOT_OK) {
-            if (parsed_suit.toob_suit_suit_payload_m.suit_payload_uint301bstr
-                    .len == 32) {
-              boot_diag_set_security_meta(local_svn,
-                                          parsed_suit.toob_suit_suit_envelope_m
-                                              .suit_envelope_uint102uint,
-                                          parsed_suit.toob_suit_suit_payload_m
-                                              .suit_payload_uint301bstr.value);
-            } else {
-              boot_diag_set_security_meta(local_svn,
-                                          parsed_suit.toob_suit_suit_envelope_m
-                                              .suit_envelope_uint102uint,
-                                          NULL);
-            }
+          wal_tmr_payload_t temp_tmr;
+          boot_secure_zeroize(&temp_tmr, sizeof(temp_tmr));
+          if (boot_journal_get_tmr(ctx->platform, &temp_tmr) == BOOT_OK) {
+            components[comp_count].target_addr =
+                (temp_tmr.active_stage1_bank == 0) ? CHIP_STAGE1B_ABS_ADDR
+                                                   : CHIP_STAGE1A_ABS_ADDR;
+          } else {
+            return BOOT_ERR_INVALID_ARG;
           }
         } else {
-          verify_status = BOOT_ERR_VERIFY; /* Trapped Glitch */
+          return BOOT_ERR_INVALID_ARG;
+        }
+
+        if (sub_img->toob_image_raw_m.toob_image_raw_uint405bstr.len >= 32) {
+          memcpy(components[comp_count].expected_hash,
+                 sub_img->toob_image_raw_m.toob_image_raw_uint405bstr.value,
+                 32);
+          comp_count++;
         }
       }
-      boot_secure_zeroize(safe_sig_ed25519, sizeof(safe_sig_ed25519));
-    } else {
-      verify_status =
-          BOOT_ERR_INVALID_ARG; /* Parse Error (Corrupt SUIT Manifest) */
     }
-  } else {
-    verify_status = read_stat;
-  }
-#endif
 
-  bool requires_swap = true;
-  uint32_t swap_src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
-  toob_image_header_t staging_header;
-  boot_secure_zeroize(&staging_header, sizeof(staging_header));
-
-  /* Double Check Gating VOR Auswertung des Staging Headers */
-  volatile uint32_t v_flag1 = 0, v_flag2 = 0;
-  if (verify_status == BOOT_OK)
-    v_flag1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (v_flag1 == BOOT_OK && verify_status == BOOT_OK)
-    v_flag2 = BOOT_OK;
-
-  if (v_flag1 == BOOT_OK && v_flag2 == BOOT_OK) {
-    /* M-VERIFY has cryptographically confirmed the Staging area.
-       Next, statically read the TOOB Magic Header from the Staging-Slot to
-       establish Swap bounds. */
-    boot_status_t head_status = platform->flash->read(
-        CHIP_STAGING_SLOT_ABS_ADDR, (uint8_t *)&staging_header,
-        sizeof(toob_image_header_t));
-
-    if (head_status != BOOT_OK || staging_header.magic != TOOB_MAGIC_HEADER) {
-      verify_status = BOOT_ERR_INVALID_STATE;
-    } else if (staging_header.image_size > CHIP_APP_SLOT_SIZE) {
-      verify_status =
-          BOOT_ERR_FLASH_BOUNDS; /* Bound-Check protection against overflow */
-    } else {
-      /* 5. GHOST MERKLE FIX: Stream-Hash Validation BEVOR geswappet wird!
-         Die Firmware ist noch ungetestet. Wir jagen den Payload durch den
-         Stream-Hasher. */
-
-#ifndef TOOB_MOCK_TEST
-      if (staging_header.image_size <= sizeof(toob_image_header_t)) {
-        verify_status = BOOT_ERR_INVALID_ARG; /* Integer Underflow Prevention */
-      } else {
-        /* ZCBOR Array Extraction: Find Primary App Image & Route Delta/Raw */
-        if (parsed_suit.toob_suit_suit_payload_m
-                .suit_payload_toob_image_m_l_toob_image_m_count == 0) {
-          verify_status = BOOT_ERR_INVALID_ARG;
-        } else {
-          /* Iteriere nicht blind, wir werten Image[0] als unser Target */
-          struct toob_image_r *app_img =
-              &parsed_suit.toob_suit_suit_payload_m
-                   .suit_payload_toob_image_m_l_toob_image_m[0];
-          struct zcbor_string *chunk_hashes = NULL;
-          uint32_t num_chunks = 0;
-          uint32_t chunk_sz = 0;
-          bool is_delta = false;
-
-          if (app_img->toob_image_choice == toob_image_raw_m_c) {
-            chunk_hashes =
-                &app_img->toob_image_raw_m.toob_image_raw_uint405bstr;
-            num_chunks = app_img->toob_image_raw_m.toob_image_raw_uint404uint;
-            chunk_sz = app_img->toob_image_raw_m.toob_image_raw_uint403uint;
-          } else if (app_img->toob_image_choice == toob_image_delta_m_c) {
-            chunk_hashes =
-                &app_img->toob_image_delta_m.toob_image_delta_uint405bstr;
-            num_chunks =
-                app_img->toob_image_delta_m.toob_image_delta_uint404uint;
-            chunk_sz = app_img->toob_image_delta_m.toob_image_delta_uint403uint;
-            is_delta = true;
-          } else {
-            verify_status = BOOT_ERR_INVALID_ARG;
-          }
-
-          if (verify_status == BOOT_OK) {
-            if (!chunk_hashes ||
-                !is_buffer_within(chunk_hashes->value, chunk_hashes->len,
-                                  crypto_arena, BOOT_CRYPTO_ARENA_SIZE)) {
-              verify_status = BOOT_ERR_INVALID_ARG; /* Exploit Trap */
-            } else {
-              if (is_delta) {
-                /* P10 ANTI-BRICK: Die SDVM MUSS in einen Safe-Slot schreiben!
-                 * Ein In-Place Patch in den APP_SLOT zerstört die
-                 * Base-Firmware! Wir nutzen temporär den Recovery-Slot als A/B
-                 * Safe Buffer. */
-
-                /* P10 FIX: Use-After-Overwrite Defense für die Delta
-                 * Chunk-Hashes. boot_delta_apply nutzt die crypto_arena
-                 * komplett für die SDVM und löscht sie. Da chunk_hashes in der
-                 * Arena liegt, müssen wir sie vorab sichern! */
-                _Static_assert(
-                    CHIP_APP_SLOT_SIZE / 4096 * 32 <= 2048,
-                    "Saved hash buffer too small for max chunk count");
-
-                uint8_t saved_hashes[2048] __attribute__((aligned(8)));
-                boot_secure_zeroize(saved_hashes, sizeof(saved_hashes));
-
-                if (chunk_hashes->len > sizeof(saved_hashes)) {
-                  verify_status = BOOT_ERR_INVALID_ARG;
-                } else {
-                  memcpy(saved_hashes, chunk_hashes->value, chunk_hashes->len);
-
-                  boot_status_t delta_stat = boot_delta_apply(
-                      platform, open_txn->offset + suit_consumed_bytes,
-                      CHIP_STAGING_SLOT_ABS_ADDR + CHIP_APP_SLOT_SIZE -
-                          (open_txn->offset + suit_consumed_bytes),
-                      CHIP_SCRATCH_SLOT_ABS_ADDR,
-                      CHIP_APP_SLOT_SIZE, /* Ziel: Dedicated A/B Safe Buffer
-                                             (Anti-Brick!) */
-                      CHIP_APP_SLOT_ABS_ADDR,
-                      CHIP_APP_SLOT_SIZE, /* Base: Alte Firmware */
-                      open_txn);
-
-                  if (delta_stat == BOOT_OK) {
-                    /* P10 SECURITY FIX: SDVM Output zwingend gegen den
-                     * signierten Merkle-Tree prüfen! */
-                    boot_status_t hash_stat = boot_merkle_verify_stream(
-                        platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
-                        app_img->toob_image_delta_m
-                            .toob_image_delta_uint402uint,
-                        app_img->toob_image_delta_m
-                            .toob_image_delta_uint403uint,
-                        saved_hashes, chunk_hashes->len, num_chunks,
-                        crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
-
-                    if (hash_stat == BOOT_OK) {
-                      verify_status = BOOT_OK;
-                      requires_swap = true;
-                      /* Swap zieht nun aus Scratch-Partition! */
-                      staging_header.image_size =
-                          app_img->toob_image_delta_m
-                              .toob_image_delta_uint402uint;
-                      swap_src_addr = CHIP_SCRATCH_SLOT_ABS_ADDR;
-                    } else {
-                      verify_status =
-                          BOOT_ERR_VERIFY; /* ACE Prevention! SDVM Output war
-                                              korrupt/manipuliert! */
-                    }
-                  } else {
-                    verify_status = delta_stat;
-                  }
-
-                  /* P10 Anti-Leakage: Buffer IMMER löschen, auch bei Fehler! */
-                  boot_secure_zeroize(saved_hashes, sizeof(saved_hashes));
-
-                } // Ende von `if (chunk_hashes->len > sizeof(saved_hashes))
-                  // else`
-              } else {
-                /* ======================== RAW UPDATE ROUTING
-                 * ======================== */
-                requires_swap = true;
-                swap_src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
-                size_t aligned_offset =
-                    (suit_consumed_bytes + 7) & ~((size_t)7);
-                if (aligned_offset >= BOOT_CRYPTO_ARENA_SIZE) {
-                  verify_status = BOOT_ERR_INVALID_ARG;
-                } else {
-                  uint8_t *scratch = crypto_arena + aligned_offset;
-                  size_t scratch_size = BOOT_CRYPTO_ARENA_SIZE - aligned_offset;
-                  if (scratch_size < chunk_sz) {
-                    verify_status = BOOT_ERR_INVALID_ARG;
-                  } else {
-                    boot_secure_zeroize(scratch, scratch_size);
-                    verify_status = boot_merkle_verify_stream(
-                        platform, CHIP_STAGING_SLOT_ABS_ADDR,
-                        staging_header.image_size, chunk_sz,
-                        chunk_hashes->value, (uint32_t)chunk_hashes->len,
-                        num_chunks, scratch, scratch_size);
-                    boot_secure_zeroize(scratch, scratch_size);
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-#endif
+    if (comp_count > 0) {
+      boot_allowed_region_t whitelist[4] = {
+          {CHIP_NETCORE_SLOT_ABS_ADDR, CHIP_NETCORE_SLOT_SIZE},
+          {CHIP_RECOVERY_OS_ABS_ADDR, CHIP_RECOVERY_OS_SIZE},
+          {CHIP_STAGE1A_ABS_ADDR, CHIP_STAGE1A_SIZE},
+          {CHIP_STAGE1B_ABS_ADDR, CHIP_STAGE1B_SIZE}};
+      swap_status = boot_multiimage_apply(
+          ctx->platform, CHIP_STAGING_SLOT_ABS_ADDR, components, comp_count,
+          whitelist, 4, ctx->open_txn, ctx->arena, ctx->arena_len);
     }
   }
 
-  boot_status_t flow_final_status = BOOT_OK;
+  return swap_status;
+}
 
-  volatile uint32_t swap_gate_1 = 0, swap_gate_2 = 0;
-  if (verify_status == BOOT_OK)
-    swap_gate_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (swap_gate_1 == BOOT_OK && verify_status == BOOT_OK)
-    swap_gate_2 = BOOT_OK;
+/* --------------------------------------------------------------------------
+ * Stage COMMIT: WAL TXN_COMMIT + SVN-Übergabe an den TMR
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_commit(update_ctx_t *ctx, uint32_t *extracted_svn,
+                                  uint32_t *extracted_stage1_svn) {
+  wal_entry_payload_t commit_txn = *ctx->open_txn;
+  commit_txn.intent = WAL_INTENT_TXN_COMMIT;
 
-  if (swap_gate_1 == BOOT_OK && swap_gate_2 == BOOT_OK) {
-    boot_status_t swap_status = BOOT_OK;
+  boot_status_t status = boot_journal_append(ctx->platform, &commit_txn);
+  if (status != BOOT_OK)
+    return status;
 
-    if (requires_swap) {
-      swap_status = boot_swap_apply(
-          platform, swap_src_addr, CHIP_APP_SLOT_ABS_ADDR,
-          staging_header.image_size, BOOT_DEST_SLOT_APP, open_txn);
-    }
+  ctx->open_txn->intent = WAL_INTENT_TXN_COMMIT;
 
-    /* P10 FOTA Erweiterung: Multi-Image Deployment ausführen, falls CDDL Array
-     * > 1 */
-    if (swap_status == BOOT_OK &&
-        parsed_suit.toob_suit_suit_payload_m
-                .suit_payload_toob_image_m_l_toob_image_m_count > 1) {
-      boot_component_t components[3];
-      uint32_t comp_count = 0;
-      uint32_t current_staging_offset = staging_header.image_size;
+  /* SVN erst NACH erfolgreichem Commit an den Aufrufer übergeben */
+  if (extracted_svn != NULL)
+    *extracted_svn = ctx->extracted_svn;
+  if (extracted_stage1_svn != NULL)
+    *extracted_stage1_svn = ctx->extracted_stage1_svn;
 
-      for (size_t i = 1;
-           i < parsed_suit.toob_suit_suit_payload_m
-                   .suit_payload_toob_image_m_l_toob_image_m_count &&
-           i < 4;
-           i++) {
-        struct toob_image_r *sub_img =
-            &parsed_suit.toob_suit_suit_payload_m
-                 .suit_payload_toob_image_m_l_toob_image_m[i];
-        boot_secure_zeroize(&components[comp_count], sizeof(boot_component_t));
-        components[comp_count].component_id = (uint32_t)i;
+  return BOOT_OK;
+}
 
-        if (sub_img->toob_image_choice == toob_image_raw_m_c) {
-          components[comp_count].image_size =
-              sub_img->toob_image_raw_m.toob_image_raw_uint402uint;
+/* --------------------------------------------------------------------------
+ * Error Handler: Smart Error Topology (Reject vs. Propagate)
+ * -------------------------------------------------------------------------- */
+static boot_status_t _handle_update_result(
+    const boot_platform_t *platform, wal_entry_payload_t *open_txn,
+    update_ctx_t *ctx, boot_status_t pipeline_status,
+    uint32_t *extracted_svn, boot_cfi_ctx_t *cfi_ctx, uint32_t slot) {
 
-          /* P10 FIX: Dynamisches Offset im Staging-Slot (Lückenloses
-           * aneinanderhängen) */
-          components[comp_count].staging_offset = current_staging_offset;
-          current_staging_offset +=
-              sub_img->toob_image_raw_m.toob_image_raw_uint402uint;
+  boot_status_t flow_final_status;
 
-          if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint == 1) {
-            components[comp_count].target_addr = CHIP_NETCORE_SLOT_ABS_ADDR;
-          } else if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint ==
-                     2) {
-            components[comp_count].target_addr = CHIP_RECOVERY_OS_ABS_ADDR;
-          } else if (sub_img->toob_image_raw_m.toob_image_raw_uint401uint ==
-                     3) {
-            wal_tmr_payload_t temp_tmr;
-            boot_secure_zeroize(&temp_tmr, sizeof(temp_tmr));
-            if (boot_journal_get_tmr(platform, &temp_tmr) == BOOT_OK) {
-              components[comp_count].target_addr =
-                  (temp_tmr.active_stage1_bank == 0) ? CHIP_STAGE1B_ABS_ADDR
-                                                     : CHIP_STAGE1A_ABS_ADDR;
-            } else {
-              swap_status = BOOT_ERR_INVALID_ARG;
-              break;
-            }
-          } else {
-            swap_status = BOOT_ERR_INVALID_ARG;
-            break;
-          }
+  if (pipeline_status == BOOT_OK) {
+    flow_final_status = BOOT_OK;
+  } else if (pipeline_status == BOOT_ERR_VERIFY ||
+             pipeline_status == BOOT_ERR_DOWNGRADE ||
+             pipeline_status == BOOT_ERR_INVALID_ARG ||
+             pipeline_status == BOOT_ERR_FLASH_BOUNDS ||
+             pipeline_status == BOOT_ERR_INVALID_STATE ||
+             pipeline_status == BOOT_ERR_NOT_FOUND) {
+    /* Kontrollierte Ablehnung: Update verwerfen, kein Bootloop */
+    wal_entry_payload_t reject_txn = *open_txn;
+    reject_txn.intent = WAL_INTENT_NONE;
 
-          if (sub_img->toob_image_raw_m.toob_image_raw_uint405bstr.len >= 32) {
-            memcpy(components[comp_count].expected_hash,
-                   sub_img->toob_image_raw_m.toob_image_raw_uint405bstr.value,
-                   32);
-            comp_count++;
-          }
-        }
-      }
-
-      if (swap_status == BOOT_OK && comp_count > 0) {
-        boot_allowed_region_t whitelist[4] = {
-            {CHIP_NETCORE_SLOT_ABS_ADDR, CHIP_NETCORE_SLOT_SIZE},
-            {CHIP_RECOVERY_OS_ABS_ADDR, CHIP_RECOVERY_OS_SIZE},
-            {CHIP_STAGE1A_ABS_ADDR, CHIP_STAGE1A_SIZE},
-            {CHIP_STAGE1B_ABS_ADDR, CHIP_STAGE1B_SIZE}};
-        swap_status = boot_multiimage_apply(
-            platform, CHIP_STAGING_SLOT_ABS_ADDR, components, comp_count,
-            whitelist, 4, open_txn);
-      }
-    }
-
-    if (swap_status == BOOT_OK) {
-      /* Atomically persist TXN_COMMIT. */
-      wal_entry_payload_t commit_txn = *open_txn;
-      commit_txn.intent = WAL_INTENT_TXN_COMMIT;
-
-      boot_status_t status = boot_journal_append(platform, &commit_txn);
-      if (status != BOOT_OK) {
-        flow_final_status = status; /* FATAL: Cannot persist active State */
-      } else {
-        open_txn->intent = WAL_INTENT_TXN_COMMIT; /* Normalize local state */
-        flow_final_status = BOOT_OK;
-
-        /* FIX: Extrahierte SVN ERST HIER an den TMR übergeben, wenn das Update
-         * echt installiert wurde! */
-        if (extracted_svn != NULL) {
-          *extracted_svn = local_svn;
-        }
-      }
+    boot_status_t rej_stat = boot_journal_append(platform, &reject_txn);
+    if (rej_stat != BOOT_OK) {
+      flow_final_status = rej_stat;
     } else {
-      flow_final_status = swap_status;
+      open_txn->intent = WAL_INTENT_NONE;
+      flow_final_status = BOOT_OK;
     }
   } else {
-    /*
-     * SMART ERROR TOPOLOGY: Trennt korrupte Updates von defekter Hardware.
-     * Verification Failed (Bit-Rot, MITM, Mismatched Target-SVN/Device-ID).
-     * We unequivocally reject the update and revert the intent to NONE.
-     * Appending this to WAL prevents an infinite bootloop.
-     */
-    if (verify_status == BOOT_ERR_VERIFY ||
-        verify_status == BOOT_ERR_DOWNGRADE ||
-        verify_status == BOOT_ERR_INVALID_ARG ||
-        verify_status == BOOT_ERR_FLASH_BOUNDS ||
-        verify_status == BOOT_ERR_INVALID_STATE ||
-        verify_status == BOOT_ERR_NOT_FOUND) {
-
-      wal_entry_payload_t reject_txn = *open_txn;
-      reject_txn.intent = WAL_INTENT_NONE;
-
-      boot_status_t rej_stat = boot_journal_append(platform, &reject_txn);
-      if (rej_stat != BOOT_OK) {
-        flow_final_status = rej_stat;
-      } else {
-        open_txn->intent = WAL_INTENT_NONE;
-        flow_final_status =
-            BOOT_OK; // We recovered from the bad update by dropping it!
-      }
-    } else {
-      /* Hardware Error -> Propagate for Panic */
-      flow_final_status = verify_status;
-    }
+    /* Hardware Error → Propagate for Panic */
+    flow_final_status = pipeline_status;
   }
 
 #ifndef TOOB_MOCK_TEST
-  /* Zeroize ZCBOR Pointers and SRAM Buffer to absolutely close Data-Leakage */
-  boot_secure_zeroize(&parsed_suit, sizeof(parsed_suit));
+  boot_secure_zeroize(&ctx->parsed_suit, sizeof(ctx->parsed_suit));
 #endif
+  boot_secure_zeroize(ctx->safe_sig_ed25519, sizeof(ctx->safe_sig_ed25519));
 
-  if (flow_final_status == BOOT_OK) {
-    *cfi_acc ^= cfi_token;
-  }
+  if (flow_final_status == BOOT_OK)
+    boot_cfi_step(*cfi_ctx, slot);
+
   return flow_final_status;
+}
+
+/* --------------------------------------------------------------------------
+ * Pipeline Driver: Flache Sequenz, ein Cleanup-Pfad
+ * -------------------------------------------------------------------------- */
+static boot_status_t _handle_update_flow(const boot_platform_t *platform,
+                                         wal_entry_payload_t *open_txn,
+                                         uint32_t *extracted_svn,
+                                         uint32_t *extracted_stage1_svn,
+                                         boot_cfi_ctx_t *cfi_ctx,
+                                         uint32_t slot,
+                                         uint8_t *arena, size_t arena_len) {
+  if (open_txn->intent != WAL_INTENT_UPDATE_PENDING) {
+    boot_cfi_step(*cfi_ctx, slot);
+    return BOOT_OK;
+  }
+
+  update_ctx_t ctx;
+  boot_secure_zeroize(&ctx, sizeof(ctx));
+  ctx.platform = platform;
+  ctx.arena = arena;
+  ctx.arena_len = arena_len;
+  ctx.open_txn = open_txn;
+  ctx.requires_swap = true;
+
+  boot_status_t status;
+  status = stage_parse(&ctx);             if (status) goto done;
+  status = stage_verify_envelope(&ctx);   if (status) goto done;
+  status = stage_check_svn(&ctx);         if (status) goto done;
+  status = stage_check_binding(&ctx);     if (status) goto done;
+  status = stage_route(&ctx);             if (status) goto done;
+
+  if (ctx.is_delta)
+    status = stage_apply_delta(&ctx);
+  else
+    status = stage_apply_raw(&ctx);
+  if (status) goto done;
+
+  status = stage_swap(&ctx);              if (status) goto done;
+  status = stage_commit(&ctx, extracted_svn, extracted_stage1_svn);
+
+done:
+  return _handle_update_result(platform, open_txn, &ctx, status,
+                               extracted_svn, cfi_ctx, slot);
 }
 
 /* ==============================================================================
@@ -765,7 +842,10 @@ static boot_status_t _handle_update_flow(const boot_platform_t *platform,
  */
 
 boot_status_t boot_state_run(const boot_platform_t *platform,
-                             boot_target_config_t *target_out) {
+                             boot_target_config_t *target_out,
+                             uint8_t *arena, size_t arena_len) {
+  if (!arena || arena_len < 512)
+    return BOOT_ERR_INVALID_ARG;
   /* P10 Pointer-Guard (Zero-Trust HAL Assumption) */
   if (!platform || !platform->clock || !platform->flash || !platform->crypto ||
       !platform->wdt || !target_out) {
@@ -786,13 +866,15 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&state_cfi_seed, sizeof(state_cfi_seed));
   }
-  uint32_t cfi_tok[STATE_CFI_NUM_TOKENS];
-  for (uint8_t i = 0; i < STATE_CFI_NUM_TOKENS; i++) {
-    cfi_tok[i] = cfi_derive(state_cfi_seed, i);
-  }
-
-  /* Global Control Flow Integrity (CFI) Accumulator */
-  volatile uint32_t state_cfi = cfi_tok[STATE_CFI_SLOT_INIT];
+  boot_cfi_ctx_t state_cfi_ctx;
+  boot_cfi_init(state_cfi_ctx, state_cfi_seed);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_1);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2_5);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2_7);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_3);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_4);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_5);
 
   wal_entry_payload_t open_txn;
   wal_tmr_payload_t current_tmr;
@@ -828,7 +910,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
     core_status = BOOT_OK; /* Normalize clean state */
   }
 
-  state_cfi ^= cfi_tok[STATE_CFI_SLOT_1]; /* Proof Step 1 */
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_1); /* Proof Step 1 */
   platform->wdt->kick();
 
   /*
@@ -852,44 +934,28 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
        open_txn.intent == WAL_INTENT_RECOVERY_RESOLVED || rtc_confirmed)) {
 
     /* P10 Security: Glitch-Resistente Nonce-Autorisation */
-    volatile uint32_t auth_flag_1 = 0;
-    volatile uint32_t auth_flag_2 = 0;
-
     bool intent_is_confirm = (open_txn.intent == WAL_INTENT_CONFIRM_COMMIT);
     bool intent_is_recovery = (open_txn.intent == WAL_INTENT_RECOVERY_RESOLVED);
-    reset_reason_t rst = platform->clock->get_reset_reason();
 
-    if (rtc_confirmed) {
-      auth_flag_1 = BOOT_OK;
-      if (open_txn.intent == WAL_INTENT_NONE)
-        open_txn.intent = WAL_INTENT_CONFIRM_COMMIT;
-    } else if (intent_is_confirm) {
-      /* XOR Math: 0 bedeutet exakter Match */
-      uint64_t diff = open_txn.expected_nonce ^ combined_nonce;
-      if (diff == 0)
-        auth_flag_1 = BOOT_OK;
-    } else if (intent_is_recovery && (rst == RESET_REASON_PIN_RESET ||
-                                      rst == RESET_REASON_POWER_ON)) {
-      auth_flag_1 = BOOT_OK;
-    }
+    /* P7b: WAL-Intent ist die Autorisierung, nicht der Reset-Reason.
+     * RECOVERY_RESOLVED wird nur durch das Recovery-OS selbst in den WAL
+     * geschrieben — das Vorhandensein des Intents beweist, dass Recovery lief. */
+    bool auth_ok = rtc_confirmed ||
+                   (intent_is_confirm && (open_txn.expected_nonce ^ combined_nonce) == 0) ||
+                   intent_is_recovery;
 
-    BOOT_GLITCH_DELAY();
+    volatile uint32_t auth_verdict = BOOT_OK;
+    BOOT_SECURE_REQUIRE(auth_ok, {
+      auth_verdict = BOOT_ERR_VERIFY;
+    });
 
-    if (auth_flag_1 == BOOT_OK) {
-      if (rtc_confirmed ||
-          (intent_is_confirm &&
-           (open_txn.expected_nonce ^ combined_nonce) == 0) ||
-          (intent_is_recovery &&
-           (rst == RESET_REASON_PIN_RESET || rst == RESET_REASON_POWER_ON))) {
-        auth_flag_2 = BOOT_OK;
-      }
-    }
-
-    if (auth_flag_1 != BOOT_OK || auth_flag_2 != BOOT_OK ||
-        auth_flag_1 != auth_flag_2) {
+    if (auth_verdict != BOOT_OK) {
       /* MALICIOUS OR CORRUPT AUTHORIZATION! Discard silently. */
       open_txn.intent = WAL_INTENT_NONE;
     } else {
+      if (rtc_confirmed && open_txn.intent == WAL_INTENT_NONE) {
+        open_txn.intent = WAL_INTENT_CONFIRM_COMMIT;
+      }
       /* SUCCESS: Rigorously reset the TMR boot_failure_counter back to 0. */
       if (current_tmr.boot_failure_counter > 0) {
         current_tmr.boot_failure_counter = 0;
@@ -911,11 +977,11 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
       /* P10 Fix: Wir ignorieren den Return-Code, da der Boot bereits als
          COMMITTED gilt. Ein Fehler hier darf das OS nicht bricked lassen. */
       (void)boot_swap_erase_safe(platform, CHIP_STAGING_SLOT_ABS_ADDR,
-                                 CHIP_STAGING_SLOT_SIZE);
+                                 CHIP_STAGING_SLOT_SIZE, arena, arena_len);
     }
   }
 
-  state_cfi ^= cfi_tok[STATE_CFI_SLOT_2]; /* Proof Step 2 */
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_2); /* Proof Step 2 */
 
   /*
    * ==============================================================================
@@ -924,8 +990,8 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
    * Evaluiert den CHIP_CLOUD_CMD_SLOT. Muss VOR dem Lock-Gate (Step 2.7)
    * laufen, damit ein TOOB_CMD_UNLOCK den Lock aufheben kann.
    */
-  core_status = _handle_cloud_cmd(platform, &open_txn, target_out, &state_cfi,
-                                   cfi_tok[STATE_CFI_SLOT_2_5]);
+  core_status = _handle_cloud_cmd(platform, &open_txn, target_out, &state_cfi_ctx,
+                                   STATE_CFI_SLOT_2_5, arena, arena_len);
   if (core_status != BOOT_OK)
     goto state_cleanup;
 
@@ -939,24 +1005,12 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
    * State-Machine NICHT weiterlaufen. Nur boot_panic mit BOOT_ERR_DEVICE_LOCKED
    * ist erlaubt. Dort wartet Block 3A auf ein UART-Unlock-Envelope.
    */
-  {
-    volatile uint32_t lock_shield_1 = 0, lock_shield_2 = 0;
-    bool is_locked = (open_txn.intent == WAL_INTENT_DEVICE_LOCKED);
+  BOOT_SECURE_REQUIRE(open_txn.intent != WAL_INTENT_DEVICE_LOCKED, {
+    boot_panic(platform, BOOT_ERR_DEVICE_LOCKED);
+    return BOOT_ERR_DEVICE_LOCKED;
+  });
 
-    if (is_locked)
-      lock_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (lock_shield_1 == BOOT_OK && is_locked)
-      lock_shield_2 = BOOT_OK;
-
-    if (lock_shield_1 == BOOT_OK && lock_shield_2 == BOOT_OK &&
-        lock_shield_1 == lock_shield_2) {
-      boot_panic(platform, BOOT_ERR_DEVICE_LOCKED);
-      return BOOT_ERR_DEVICE_LOCKED; /* Unreachable P10 Safety */
-    }
-  }
-
-  state_cfi ^= cfi_tok[STATE_CFI_SLOT_2_7]; /* Proof: Device is NOT locked */
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_2_7); /* Proof: Device is NOT locked */
 
   /*
    * ==============================================================================
@@ -965,33 +1019,34 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
    */
   reset_reason_t rst_reason = platform->clock->get_reset_reason();
 
-  /* Unconfirmed crash detection (excludes intent processing crashes itself) */
-  bool is_app_crash = false;
-  if ((rst_reason == RESET_REASON_WATCHDOG ||
-       rst_reason == RESET_REASON_HARD_FAULT ||
-       rst_reason == RESET_REASON_BROWNOUT) &&
-      (open_txn.intent != WAL_INTENT_UPDATE_PENDING &&
-       open_txn.intent != WAL_INTENT_TXN_BEGIN)) {
-    is_app_crash = true;
-  }
+  /* P7b: WAL-Primary Crash Detection.
+   * Ein un-aufgelöster CONFIRM_COMMIT ist das stärkste Crash-Signal:
+   * Das OS hatte die Chance zu confirmen, hat aber nicht.
+   * Reset-Reason korroboriert nur — Brownout ist kein Crash-Signal mehr,
+   * da ein leerer Akku nach Monaten kein App-Bug ist. */
+  bool wal_indicates_crash = (open_txn.intent == WAL_INTENT_CONFIRM_COMMIT);
+  bool rst_indicates_crash = (rst_reason == RESET_REASON_WATCHDOG ||
+                              rst_reason == RESET_REASON_HARD_FAULT);
 
-  volatile uint32_t crash_flag_1 = 0, crash_flag_2 = 0;
-  if (is_app_crash)
-    crash_flag_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (crash_flag_1 == BOOT_OK && is_app_crash)
-    crash_flag_2 = BOOT_OK;
+  bool is_app_crash = wal_indicates_crash ||
+                      (rst_indicates_crash &&
+                       open_txn.intent != WAL_INTENT_UPDATE_PENDING &&
+                       open_txn.intent != WAL_INTENT_TXN_BEGIN);
 
-  if (crash_flag_1 == BOOT_OK && crash_flag_2 == BOOT_OK) {
-    current_tmr.boot_failure_counter++;
-    core_status = boot_journal_update_tmr(platform, &current_tmr);
-    if (core_status != BOOT_OK)
-      goto state_cleanup;
+    if (is_app_crash) {
+      BOOT_SECURE_REQUIRE(is_app_crash, {
+        goto state_cleanup;
+      });
+      current_tmr.boot_failure_counter++;
+      core_status = boot_journal_update_tmr(platform, &current_tmr);
+      if (core_status != BOOT_OK)
+        goto state_cleanup;
+    }
   }
 
   core_status = _handle_rollback_flow(platform, &current_tmr, &open_txn,
-                                      target_out, &state_cfi,
-                                      cfi_tok[STATE_CFI_SLOT_3]);
+                                      target_out, &state_cfi_ctx,
+                                      STATE_CFI_SLOT_3, arena, arena_len);
   if (core_status != BOOT_OK)
     goto state_cleanup;
 
@@ -1003,15 +1058,21 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
    * ==============================================================================
    */
   uint32_t extracted_svn = 0;
+  uint32_t extracted_stage1_svn = 0;
 
   core_status =
-      _handle_update_flow(platform, &open_txn, &extracted_svn, &state_cfi,
-                          cfi_tok[STATE_CFI_SLOT_4]);
+      _handle_update_flow(platform, &open_txn, &extracted_svn,
+                          &extracted_stage1_svn, &state_cfi_ctx,
+                          STATE_CFI_SLOT_4, arena, arena_len);
   if (core_status != BOOT_OK)
     goto state_cleanup;
 
   if (extracted_svn > current_tmr.app_svn) {
     current_tmr.app_svn = extracted_svn;
+  }
+  /* P7a: Persist Stage-1 SVN (last-confirmed) to TMR */
+  if (extracted_stage1_svn > current_tmr.stage1_svn) {
+    current_tmr.stage1_svn = extracted_stage1_svn;
   }
 
   /*
@@ -1031,30 +1092,23 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
     goto state_cleanup;
 
   /* Glitch-Proof Magic Header Boundary */
-  volatile uint32_t magic_shield_1 = 0, magic_shield_2 = 0;
-  if (app_header.magic == TOOB_MAGIC_HEADER)
-    magic_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (magic_shield_1 == BOOT_OK && app_header.magic == TOOB_MAGIC_HEADER)
-    magic_shield_2 = BOOT_OK;
-
-  if (magic_shield_1 != BOOT_OK || magic_shield_2 != BOOT_OK) {
+  BOOT_SECURE_REQUIRE(app_header.magic == TOOB_MAGIC_HEADER, {
     core_status = BOOT_ERR_NOT_FOUND;
     goto state_cleanup;
-  }
+  });
 
   target_out->active_entry_point = app_header.entry_point;
   target_out->active_image_size = app_header.image_size;
 
   /* Glitch-Shielded Evaluation for Nonce Generation */
-  volatile uint32_t req_flag_1 = 0, req_flag_2 = 0;
-  if (open_txn.intent == WAL_INTENT_TXN_COMMIT)
-    req_flag_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (req_flag_1 == BOOT_OK && open_txn.intent == WAL_INTENT_TXN_COMMIT)
-    req_flag_2 = BOOT_OK;
-
-  bool requires_confirmation = (req_flag_1 == BOOT_OK && req_flag_2 == BOOT_OK);
+  bool requires_confirmation = false;
+  if (open_txn.intent == WAL_INTENT_TXN_COMMIT) {
+    BOOT_SECURE_REQUIRE(open_txn.intent == WAL_INTENT_TXN_COMMIT, {
+      core_status = BOOT_ERR_VERIFY;
+      goto state_cleanup;
+    });
+    requires_confirmation = true;
+  }
   target_out->is_tentative_boot = requires_confirmation;
 
   platform->wdt->kick();
@@ -1084,7 +1138,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
 
   target_out->net_search_accum_ms = active_net_accum;
   target_out->resume_offset = resume_offset;
-  state_cfi ^= cfi_tok[STATE_CFI_SLOT_5];
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_5);
 
 state_cleanup:
   /* ==============================================================================
@@ -1097,22 +1151,9 @@ state_cleanup:
    * überschrieben werden!
    */
   if (core_status == BOOT_OK) {
-    uint32_t expected_cfi = cfi_tok[STATE_CFI_SLOT_INIT];
-    for (uint8_t i = 1; i < STATE_CFI_NUM_TOKENS; i++) {
-      expected_cfi ^= cfi_tok[i];
-    }
-    volatile uint32_t cfi_shield_1 = 0;
-    volatile uint32_t cfi_shield_2 = 0;
-
-    if (state_cfi == expected_cfi)
-      cfi_shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (cfi_shield_1 == BOOT_OK && state_cfi == expected_cfi)
-      cfi_shield_2 = BOOT_OK;
-
-    if (cfi_shield_1 != BOOT_OK || cfi_shield_2 != BOOT_OK) {
+    boot_cfi_require(state_cfi_ctx, {
       core_status = BOOT_ERR_INVALID_STATE; /* CFI Failure - Attack Trapped! */
-    }
+    });
   }
 
   /* Secure Fallback: Nulle den Target Output bei Fehlern, damit niemand den PC

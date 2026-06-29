@@ -18,6 +18,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/lockfile"
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/paths"
@@ -135,16 +136,6 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	if idx, err := cache.LoadIndex(); err == nil && idx.CliCompatibility != "" {
-		constraint, err := semver.NewConstraint(idx.CliCompatibility)
-		if err != nil {
-			return fmt.Errorf("invalid cli_compatibility in registry: %w", err)
-		}
-		cliVer, err := semver.NewVersion(Version)
-		if err == nil && !constraint.Check(cliVer) {
-			return fmt.Errorf("HAL Registry requires CLI Version %s. You are using CLI v%s. Please upgrade your CLI or use an older registry version.", idx.CliCompatibility, Version)
-		}
-	}
 
 	if flagCloud {
 		return fmt.Errorf("cloud build is not supported yet; remote compilation will be available in a future release")
@@ -354,21 +345,15 @@ func runNativeBuild(root string) error {
 		flagSkipChecks = false
 	}
 
-	// Fetch Live Matrix in the background (Gap 2.4)
-	var matrixChan chan *registry.Matrix
-	var matrixErrChan chan error
+	// Pre-build compatibility check (async, resolved before compile step)
+	type combinationResult struct {
+		resp *apiclient.CheckCombinationResponse
+		err  error
+	}
+	var combChan chan combinationResult
 
 	if !flagSkipChecks {
-		matrixChan = make(chan *registry.Matrix, 1)
-		matrixErrChan = make(chan error, 1)
-		go func() {
-			m, err := cache.FetchLiveMatrix()
-			if err != nil {
-				matrixErrChan <- err
-				return
-			}
-			matrixChan <- m
-		}()
+		combChan = make(chan combinationResult, 1)
 	}
 
 	// 2. Registry Sync (Blocking)
@@ -459,6 +444,20 @@ func runNativeBuild(root string) error {
 			"Ensure the registry or local manifest defines these fields.",
 		)
 		return fmt.Errorf("invalid chip manifest")
+	}
+
+	// Fire async combination check now that chip + chipVersion are known
+	if combChan != nil {
+		go func() {
+			client := apiclient.New()
+			client.HTTPClient.Timeout = 3 * time.Second
+			cliVer := Version
+			if !strings.HasPrefix(cliVer, "v") && cliVer != "main" && cliVer != "dev" {
+				cliVer = "v" + cliVer
+			}
+			resp, err := client.CheckCombination(cmd_defaultCtx(), chip, chipVersion, cliVer)
+			combChan <- combinationResult{resp: resp, err: err}
+		}()
 	}
 
 	// 4. Core SDK Version Resolution
@@ -611,33 +610,20 @@ func runNativeBuild(root string) error {
 
 	startEnvValidation := time.Now()
 
-	// 7. CLI Blocker Logic: Check Compatibility Matrix (Wait for background fetch)
+	// 7. CLI Blocker Logic: Check Compatibility Matrix (single-combination check)
 	if !flagSkipChecks {
-		var matrix *registry.Matrix
-		var matrixErr error
-		select {
-		case matrix = <-matrixChan:
-		case matrixErr = <-matrixErrChan:
-		}
+		result := <-combChan
 
-		if matrixErr != nil {
-			ui.Warn("Could not fetch Compatibility Matrix: %v", matrixErr)
-		} else if matrix != nil {
-			if chipEntry, hasChip := (*matrix)[chip]; hasChip {
-				if versionEntry, hasVer := chipEntry.Versions[chipVersion]; hasVer {
-					cliVer := Version
-					if !strings.HasPrefix(cliVer, "v") && cliVer != "main" && cliVer != "dev" {
-						cliVer = "v" + cliVer
-					}
-
-					if cliEntry, hasCli := versionEntry.VerifiedCliVersions[cliVer]; hasCli {
-						if cliEntry.Status == "FAILED" {
-							return fmt.Errorf("FATAL: Der Chip %s (v%s) ist laut aktueller Ledger Matrix explizit inkompatibel mit deiner CLI Version (%s). Build abgebrochen!", chip, chipVersion, cliVer)
-						}
-					} else {
-						ui.Warn("The combination of Chip %s (v%s) and CLI %s has not been verified by the CI yet.", chip, chipVersion, cliVer)
-					}
-				}
+		if result.err != nil {
+			ui.Warn("Could not verify build combination: %v", result.err)
+		} else {
+			switch strings.ToUpper(result.resp.Status) {
+			case "FAILED":
+				return fmt.Errorf("FATAL: Chip %s (v%s) is explicitly incompatible with CLI %s according to the Compatibility Matrix. Build aborted", chip, chipVersion, Version)
+			case "UNKNOWN":
+				ui.Warn("The combination of Chip %s (v%s) and CLI %s has not been verified by the CI yet.", chip, chipVersion, Version)
+			case "VERIFIED":
+				// Combination verified — proceed silently
 			}
 		}
 	} else {

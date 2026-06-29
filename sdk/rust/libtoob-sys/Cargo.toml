@@ -1,0 +1,9 @@
+[package]
+name = "libtoob-sys"
+version = "0.1.0"
+edition = "2021"
+authors = ["Toob-Loader Developers"]
+description = "Raw FFI bindings for libtoob"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

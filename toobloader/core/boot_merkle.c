@@ -22,6 +22,7 @@
 #include "boot_merkle.h"
 #include "boot_secure_zeroize.h"
 #include "boot_types.h"
+#include "boot_fih.h"
 #include <string.h>
 
 
@@ -52,24 +53,9 @@ constant_time_memcmp_32_glitch_safe(const uint8_t *a, const uint8_t *b) {
   }
 
   /* P10 Glitch-Defense Pattern via Hamming-Distance Mapping */
-  volatile uint32_t flag1 = 0;
-  volatile uint32_t flag2 = 0;
-
-  if (acc_fwd == 0) {
-    flag1 = BOOT_OK; /* 0x55AA55AA */
-  }
-
-  /* Branch Delay Injection gegen Voltage Faults (Instruction Skips) */
-  BOOT_GLITCH_DELAY();
-
-  if (flag1 == BOOT_OK && acc_rev == 0) {
-    flag2 = BOOT_OK;
-  }
-
-  /* Dualer Check schließt asynchrone Manipulationen aus */
-  if (flag1 != flag2 || flag2 != BOOT_OK) {
+  BOOT_SECURE_REQUIRE(acc_fwd == 0 && acc_rev == 0, {
     return BOOT_ERR_VERIFY;
-  }
+  });
 
   return BOOT_OK;
 }
@@ -265,23 +251,10 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
   /* Mathematischer Coverage-Beweis gegen Loop-Abortion Glitches (Voltage
    * Faults) Verhindert Angriffe, bei denen die For-Schleife nach wenigen
    * validen Chunks gewaltsam zum Abbruch gezwungen wird. */
-  volatile uint32_t loop_guard_1 = 0;
-  volatile uint32_t loop_guard_2 = 0;
-
-  if (remaining_bytes == 0) {
-    loop_guard_1 = BOOT_OK;
-  }
-
-  BOOT_GLITCH_DELAY(); /* Branch Skips Mitigation */
-
-  if (loop_guard_1 == BOOT_OK && remaining_bytes == 0) {
-    loop_guard_2 = BOOT_OK;
-  }
-
-  if (loop_guard_1 != loop_guard_2 || loop_guard_2 != BOOT_OK) {
+  BOOT_SECURE_REQUIRE(remaining_bytes == 0, {
     stat = BOOT_ERR_VERIFY;
     goto cleanup;
-  }
+  });
 
   stat = BOOT_OK;
 

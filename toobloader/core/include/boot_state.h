@@ -35,7 +35,9 @@ typedef struct {
  * @param target_out Populated with the entry_point and nonce for the OS jump.
  * @return BOOT_OK on stable resolution, BOOT_ERR_* otherwise (which triggers panic/rescue).
  */
-boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config_t *target_out);
+boot_status_t boot_state_run(const boot_platform_t *platform,
+                             boot_target_config_t *target_out,
+                             uint8_t *arena, size_t arena_len);
 
 /*
  * ==============================================================================

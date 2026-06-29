@@ -21,6 +21,7 @@
  */
 
 #include "boot_multiimage.h"
+#include "boot_fih.h"
 #include "generated_boot_config.h"
 
 #include "boot_crc32.h"
@@ -28,8 +29,7 @@
 #include "boot_secure_zeroize.h"
 #include <string.h>
 
-/* Zero-Allocation: Exklusive Übernahme der Arena für das Multi-Image Routing */
-extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
+/* P5: Arena is now passed explicitly by the orchestrator */
 
 _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 1024,
                "Crypto Arena must be at least 1KB for TDM Streaming");
@@ -96,7 +96,12 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
                                     uint32_t num_components,
                                     const boot_allowed_region_t *whitelist,
                                     uint32_t num_regions,
-                                    wal_entry_payload_t *open_txn) {
+                                    wal_entry_payload_t *open_txn,
+                                    uint8_t *arena, size_t arena_len) {
+
+  /* P5: Arena bounds check */
+  if (!arena || arena_len < 1024)
+    return BOOT_ERR_INVALID_ARG;
 
   /* 1. P10 Pointer & Sanity Checks */
   if (!platform || !platform->flash || !platform->crypto || !platform->wdt ||
@@ -116,12 +121,15 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
   if (platform->crypto && platform->crypto->random) {
     platform->crypto->random((uint8_t *)&mi_cfi_seed, sizeof(mi_cfi_seed));
   }
-  uint32_t cfi_tok[3];
-  cfi_tok[0] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_INIT);
-  cfi_tok[1] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_BOUNDS);
-  cfi_tok[2] = cfi_derive(mi_cfi_seed, MI_CFI_SLOT_COMPLETE);
+  boot_cfi_ctx_t multi_cfi_ctx;
+  boot_cfi_init(multi_cfi_ctx, mi_cfi_seed);
+  boot_cfi_add_expected(multi_cfi_ctx, MI_CFI_SLOT_BOUNDS);
+  boot_cfi_add_expected(multi_cfi_ctx, MI_CFI_SLOT_COMPLETE);
 
-  volatile uint32_t multi_cfi = cfi_tok[0];
+  for (uint32_t i = 0; i < num_components; i++) {
+    multi_cfi_ctx.expected_val ^= (~components[i].component_id);
+  }
+
   boot_status_t final_status = BOOT_ERR_VERIFY;
 
   /* ====================================================================
@@ -147,38 +155,24 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
     }
   }
 
-  volatile uint32_t b_shield_1 = 0, b_shield_2 = 0;
-  if (!bounds_violation)
-    b_shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (b_shield_1 == BOOT_OK && !bounds_violation)
-    b_shield_2 = BOOT_OK;
-
-  if (b_shield_1 != BOOT_OK || b_shield_2 != BOOT_OK ||
-      b_shield_1 != b_shield_2) {
+  BOOT_SECURE_REQUIRE(!bounds_violation, {
     return BOOT_ERR_FLASH_BOUNDS; /* Exploit-Attempt Trapped! */
-  }
+  });
 
-  multi_cfi ^= cfi_tok[1];
+  boot_cfi_step(multi_cfi_ctx, MI_CFI_SLOT_BOUNDS);
 
-  /* Berechne den dynamisch erwarteten CFI Hash, der am Ende bewiesen werden
-   * muss. Verhindert, dass ein Glitch 2 Komponenten überspringt und sich das
-   * XOR aufhebt. */
-  uint32_t expected_cfi = cfi_tok[0] ^ cfi_tok[1] ^ cfi_tok[2];
-  for (uint32_t i = 0; i < num_components; i++) {
-    expected_cfi ^= (~components[i].component_id);
-  }
+  /* Expected values are dynamically registered in multi_cfi_ctx at initialization */
 
-  /* Dynamische Pufferaufteilung in der Arena für Read/Write und Hash-Ctx */
-  size_t ctx_size = platform->crypto->get_hash_ctx_size
-                        ? platform->crypto->get_hash_ctx_size()
-                        : 128;
+  /* P6 Fail-Fast: HAL ohne get_hash_ctx_size ist unvollständig */
+  if (!platform->crypto->get_hash_ctx_size)
+    return BOOT_ERR_NOT_SUPPORTED;
+  size_t ctx_size = platform->crypto->get_hash_ctx_size();
   if (ctx_size > 256)
-    return BOOT_ERR_INVALID_ARG; /* P10 Bound */
+    return BOOT_ERR_INVALID_ARG;
 
-  uint8_t *hash_ctx = crypto_arena;
-  uint8_t *stream_buf = crypto_arena + 256;
-  size_t stream_max = BOOT_CRYPTO_ARENA_SIZE - 256;
+  uint8_t *hash_ctx = arena;
+  uint8_t *stream_buf = arena + 256;
+  size_t stream_max = arena_len - 256;
   size_t half_stream = stream_max / 2; /* Für Phase-Bound Readback */
 
   /* ====================================================================
@@ -193,7 +187,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
     memcpy(&comp, &components[i], sizeof(boot_component_t));
 
     if (comp.image_size == 0) {
-      multi_cfi ^= (~comp.component_id); /* Trivial Completion */
+      multi_cfi_ctx.current_val ^= (~comp.component_id); /* Trivial Completion */
       continue;
     }
 
@@ -209,7 +203,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
 
     if ((open_txn->transfer_bitmap[bitmap_idx] & bit_mask) != 0) {
       /* Komponente ist bereits physikalisch sicher verankert -> Skip! */
-      multi_cfi ^= (~comp.component_id);
+      multi_cfi_ctx.current_val ^= (~comp.component_id);
       continue;
     }
 
@@ -323,38 +317,24 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
     if (final_status != BOOT_OK)
       goto multi_cleanup;
 
-    multi_cfi ^=
+    multi_cfi_ctx.current_val ^=
         (~comp.component_id); /* Component flashed & verified successfully */
   }
 
-  multi_cfi ^= cfi_tok[2];
+  boot_cfi_step(multi_cfi_ctx, MI_CFI_SLOT_COMPLETE);
 
   /* ====================================================================
    * STEP 4: FINAL ALGEBRAIC RESOLUTION (Glitch Trap)
    * ====================================================================
-   * Ein Angreifer versucht via Voltage-Glitch aus der For-Schleife
-   * auszubrechen, um ein modifiziertes Modem-Image stehen zu lassen.
-   * Die Mathematik beweist nun, dass exakt `num_components` Tokens addiert
-   * wurden!
    */
-  volatile uint32_t path_check_1 = 0, path_check_2 = 0;
-
-  if (multi_cfi == expected_cfi)
-    path_check_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (path_check_1 == BOOT_OK && multi_cfi == expected_cfi)
-    path_check_2 = BOOT_OK;
-
-  if (path_check_1 == BOOT_OK && path_check_2 == BOOT_OK &&
-      path_check_1 == path_check_2) {
-    final_status = BOOT_OK;
-  } else {
-    final_status =
-        BOOT_ERR_INVALID_STATE; /* EMFI PC-Jump / Skip Attack Trapped! */
-  }
+  boot_cfi_require(multi_cfi_ctx, {
+    final_status = BOOT_ERR_INVALID_STATE; /* EMFI PC-Jump / Skip Attack Trapped! */
+    goto multi_cleanup;
+  });
+  final_status = BOOT_OK;
 
 multi_cleanup:
   /* P10 Single Exit: Leakage Defense für dekryptete Sub-Images */
-  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  boot_secure_zeroize(arena, arena_len);
   return final_status;
 }

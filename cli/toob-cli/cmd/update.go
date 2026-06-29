@@ -18,6 +18,7 @@ import (
 
 	"github.com/minio/selfupdate"
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/ui"
 	"github.com/toob-boot/toob/internal/updater"
 	"golang.org/x/mod/semver"
@@ -50,7 +51,7 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 }
 
 func fetchSignature(url string, insecure bool) (string, error) {
-	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+	transport := apiclient.BuildTransport()
 	if insecure {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
@@ -141,7 +142,7 @@ var updateCmd = &cobra.Command{
 
 		ui.Step("Downloading %s ...", ui.Bold(res.Version))
 
-		transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+		transport := apiclient.BuildTransport()
 		if insecure {
 			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 		}

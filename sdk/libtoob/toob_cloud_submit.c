@@ -13,7 +13,7 @@
  * the server and writes them into the CHIP_CLOUD_CMD_SLOT via this module.
  * The Bootloader evaluates the slot autonomously at every boot (Step 2.5).
  *
- * Pipeline: Guard → Erase → Write → CRC Read-Back → WAL Signal → Zeroize.
+ * Pipeline: Guard → Erase → Write → CRC Read-Back → Zeroize.
  */
 
 #include "libtoob.h"
@@ -86,33 +86,6 @@ toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len) {
     }
 
     toob_secure_zeroize(chunk_buf, sizeof(chunk_buf));
-  }
-
-  /* Step 4: WAL Signal — Notify the Bootloader that a new Command is pending.
-   * TOOB_WAL_INTENT_CLOUD_CMD does NOT collide with the UPDATE_PENDING
-   * lock in toob_wal_naive.c (different flash slots, independent lifecycle). */
-  {
-    toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-    toob_secure_zeroize(&intent, sizeof(intent));
-
-    intent.magic = TOOB_WAL_ENTRY_MAGIC;
-    intent.intent = TOOB_WAL_INTENT_CLOUD_CMD;
-
-    toob_status_t wal_stat = toob_wal_naive_append(&intent);
-
-    volatile uint32_t wal_shield_1 = 0, wal_shield_2 = 0;
-    if (wal_stat == TOOB_OK)
-      wal_shield_1 = TOOB_OK;
-    TOOB_GLITCH_DELAY();
-    if (wal_shield_1 == TOOB_OK && wal_stat == TOOB_OK)
-      wal_shield_2 = TOOB_OK;
-
-    toob_secure_zeroize(&intent, sizeof(intent));
-
-    if (wal_shield_1 != TOOB_OK || wal_shield_2 != TOOB_OK ||
-        wal_shield_1 != wal_shield_2) {
-      return (wal_stat != TOOB_OK) ? wal_stat : TOOB_ERR_FLASH_HW;
-    }
   }
 
   return TOOB_OK;

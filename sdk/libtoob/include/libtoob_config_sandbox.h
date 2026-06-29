@@ -53,8 +53,8 @@
 #define TOOB_CLOUD_CMD_SLOT_ADDR  0x000F0000
 #define TOOB_CLOUD_CMD_SLOT_SIZE  0x1000
 
-/* KDM A/B Key Delegation Manifest Slots */
-#define TOOB_KDM_SLOT_A_ADDR     0x000F1000
-#define TOOB_KDM_SLOT_B_ADDR     0x000F2000
+/* KDM Quorum Store (Phase 4: 3 sectors for quorum-protected KDM) */
+#define TOOB_KDM_QUORUM_ADDR     0x000F1000
+#define TOOB_KDM_QUORUM_SIZE     0x3000
 
 #endif /* LIBTOOB_CONFIG_SANDBOX_H */

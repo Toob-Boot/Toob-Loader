@@ -46,16 +46,8 @@ static inline boot_status_t constant_time_memcmp_glitch_safe(const uint8_t *a,
     acc_rev |= (uint32_t)(a[len - 1 - i] ^ b[len - 1 - i]);
   }
 
-  volatile uint32_t shield_1 = 0, shield_2 = 0;
-  if (acc_fwd == 0)
-    shield_1 = BOOT_OK;
-  BOOT_GLITCH_DELAY();
-  if (shield_1 == BOOT_OK && acc_rev == 0)
-    shield_2 = BOOT_OK;
-
-  if (shield_1 == BOOT_OK && shield_2 == BOOT_OK && shield_1 == shield_2)
-    return BOOT_OK;
-  return BOOT_ERR_VERIFY;
+  BOOT_SECURE_REQUIRE(acc_fwd == 0 && acc_rev == 0, { return BOOT_ERR_VERIFY; });
+  return BOOT_OK;
 }
 
 /**
@@ -87,19 +79,11 @@ static inline boot_status_t boot_read_monotonic_counter_safe(
     BOOT_GLITCH_DELAY();
     boot_status_t s2 = platform->crypto->read_monotonic_counter(&val2);
     
-    volatile uint32_t shield_1 = 0, shield_2 = 0;
-    if (s1 == BOOT_OK && s2 == BOOT_OK && val1 == val2)
-        shield_1 = BOOT_OK;
-    BOOT_GLITCH_DELAY();
-    if (shield_1 == BOOT_OK && s1 == BOOT_OK && s2 == BOOT_OK && val1 == val2)
-        shield_2 = BOOT_OK;
-    
-    if (shield_1 != BOOT_OK || shield_2 != BOOT_OK) {
-        /* P10 Fix: Hardware-Fehler propagieren anstatt sie stumm in BOOT_ERR_VERIFY umzuwandeln */
+    BOOT_SECURE_REQUIRE(s1 == BOOT_OK && s2 == BOOT_OK && val1 == val2, {
         if (s1 != BOOT_OK) return s1;
         if (s2 != BOOT_OK) return s2;
-        return BOOT_ERR_VERIFY; /* Trapped Glitch (val1 != val2) */
-    }
+        return BOOT_ERR_VERIFY;
+    });
     
     *out_ctr = val1;
     return BOOT_OK;
@@ -135,6 +119,19 @@ static inline boot_status_t boot_random_safe(
     }
     
     return BOOT_OK;
+}
+
+/**
+ * @brief RFC 1982 Serial Number Arithmetic (100% Wrap-Around Safe).
+ *
+ * Shared utility for underflow-safe sequence comparison across
+ * boot_journal (WAL sectors) and boot_rstore (quorum stores).
+ */
+static inline bool is_newer_sequence(uint32_t new_seq, uint32_t old_seq) {
+  if (new_seq == old_seq)
+    return false;
+  return ((new_seq > old_seq) && (new_seq - old_seq <= (1U << 31))) ||
+         ((new_seq < old_seq) && (old_seq - new_seq > (1U << 31)));
 }
 
 /**
