@@ -29,7 +29,9 @@ void stage0_hash_compute(const boot_platform_t *platform, uint32_t addr,
     if (platform->flash->read((uint32_t)(addr + offset), chunk, (uint32_t)step) == BOOT_OK) {
       sha256_update(&ctx, chunk, step);
     } else {
-      /* Bei Hardware-Fehler Hash-Zustand vergiften */
+      /* Bei Hardware-Fehler Hash-Zustand vergiften.
+       * Bewusst nur 2 Bytes statt `step` — Längentreue ist nicht nötig,
+       * da jede Abweichung den finalen Digest ungültig macht. */
       chunk[0] = 0xDE;
       chunk[1] = 0xAD;
       sha256_update(&ctx, chunk, 2);

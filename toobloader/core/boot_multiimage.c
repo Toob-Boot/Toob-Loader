@@ -118,9 +118,7 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t mi_cfi_seed = 0;
-  if (platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&mi_cfi_seed, sizeof(mi_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&mi_cfi_seed, sizeof(mi_cfi_seed));
   boot_cfi_ctx_t multi_cfi_ctx;
   boot_cfi_init(multi_cfi_ctx, mi_cfi_seed);
   boot_cfi_add_expected(multi_cfi_ctx, MI_CFI_SLOT_BOUNDS);

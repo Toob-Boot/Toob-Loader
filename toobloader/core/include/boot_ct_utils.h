@@ -90,6 +90,26 @@ static inline boot_status_t boot_read_monotonic_counter_safe(
 }
 
 /**
+ * @brief O(1) mathematisch perfekter Buffer-Boundary Check (UB-frei).
+ *
+ * Prüft, ob [inner, inner+inner_len) vollständig innerhalb von
+ * [outer, outer+outer_len) liegt. Wraparound-sicher auf 32/64-bit.
+ */
+static inline bool is_buffer_within(const uint8_t *inner, size_t inner_len,
+                                    const uint8_t *outer, size_t outer_len) {
+  if (inner_len == 0 || outer_len == 0)
+    return false;
+  uintptr_t i_start = (uintptr_t)inner;
+  uintptr_t o_start = (uintptr_t)outer;
+  if (UINTPTR_MAX - i_start < inner_len)
+    return false;
+  if (UINTPTR_MAX - o_start < outer_len)
+    return false;
+  return (i_start >= o_start) &&
+         ((i_start + inner_len) <= (o_start + outer_len));
+}
+
+/**
  * @brief Sicheres O(1) Auslesen von TRNG Daten mit mathematischem Health-Check
  * 
  * Prüft, ob der TRNG (z.B. wegen fehlender Entropie oder Hardwareschaden) 

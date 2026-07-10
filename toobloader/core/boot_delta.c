@@ -210,9 +210,7 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t delta_cfi_seed = 0;
-  if (platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&delta_cfi_seed, sizeof(delta_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&delta_cfi_seed, sizeof(delta_cfi_seed));
   boot_cfi_ctx_t delta_cfi_ctx;
   boot_cfi_init(delta_cfi_ctx, delta_cfi_seed);
   boot_cfi_add_expected(delta_cfi_ctx, DELTA_CFI_SLOT_HDR);

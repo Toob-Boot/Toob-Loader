@@ -53,6 +53,8 @@ typedef struct __attribute__((packed, aligned(8))) {
 /* Mathematischer Beweis der KDM Flash-Alignment-Sicherheit */
 _Static_assert(sizeof(toob_kdm_t) == 128,
                "KDM must be exactly 128 bytes for Flash Write Alignment");
+_Static_assert(offsetof(toob_kdm_t, signature_ed25519) == 36,
+               "KDM signed-data layout changed — update signing tool!");
 
 /**
  * @brief Evaluates a Cloud Command Envelope directly from the Flash slot.

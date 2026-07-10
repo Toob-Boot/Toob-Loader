@@ -56,43 +56,7 @@ _Static_assert(
 
 #include "boot_ct_utils.h"
 
-/**
- * @brief O(1) Streaming CRC-32 Berechnung direkt aus dem Flash für Rollbacks.
- */
-static boot_status_t
-rollback_compute_flash_crc32(const boot_platform_t *platform, uint32_t addr,
-                             size_t len, uint32_t *out_crc,
-                             uint8_t *arena, size_t arena_len) {
-  uint32_t crc = 0xFFFFFFFF;
-  size_t offset = 0;
 
-  while (offset < len) {
-    if (platform->wdt && platform->wdt->kick)
-      platform->wdt->kick();
-
-    size_t step = (len - offset > arena_len)
-                      ? arena_len
-                      : (len - offset);
-
-    boot_status_t st = platform->flash->read(addr + (uint32_t)offset, arena, (uint32_t)step);
-    if (st != BOOT_OK) {
-      boot_secure_zeroize(arena, arena_len);
-      return st;
-    }
-
-    for (size_t i = 0; i < step; i++) {
-      crc ^= arena[i];
-      for (uint8_t j = 0; j < 8; j++) {
-        crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
-      }
-    }
-    offset += step;
-  }
-
-  boot_secure_zeroize(arena, arena_len);
-  *out_crc = ~crc;
-  return BOOT_OK;
-}
 
 /*
  * ============================================================================
@@ -108,9 +72,7 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t svn_cfi_seed = 0;
-  if (platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&svn_cfi_seed, sizeof(svn_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&svn_cfi_seed, sizeof(svn_cfi_seed));
   boot_cfi_ctx_t svn_cfi_ctx;
   boot_cfi_init(svn_cfi_ctx, svn_cfi_seed);
   boot_cfi_add_expected(svn_cfi_ctx, 1);
@@ -287,7 +249,8 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
   boot_panic(platform, BOOT_RECOVERY_REQUESTED);
 #endif
 
-  return BOOT_OK; /* Unreachable */
+    return BOOT_OK; /* Unreachable */
+  }
 }
 
 /*
@@ -306,9 +269,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t rv_cfi_seed = 0;
-  if (platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&rv_cfi_seed, sizeof(rv_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&rv_cfi_seed, sizeof(rv_cfi_seed));
   boot_cfi_ctx_t revert_cfi_ctx;
   boot_cfi_init(revert_cfi_ctx, rv_cfi_seed);
   boot_cfi_add_expected(revert_cfi_ctx, 1);
@@ -460,11 +421,11 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
      * Schützt das Dateisystem vor Burnout. CRC-Abgleich im RAM.
      * ==================================================================== */
     uint32_t crc_src = 0, crc_dest = 0;
-    status = rollback_compute_flash_crc32(platform, src, block_size, &crc_src, arena, arena_len);
+    status = boot_crc32_flash_stream(platform, src, block_size, &crc_src, arena, arena_len);
     if (status != BOOT_OK)
       goto revert_cleanup;
 
-    status = rollback_compute_flash_crc32(platform, dst, block_size, &crc_dest, arena, arena_len);
+    status = boot_crc32_flash_stream(platform, dst, block_size, &crc_dest, arena, arena_len);
     if (status != BOOT_OK)
       goto revert_cleanup;
 

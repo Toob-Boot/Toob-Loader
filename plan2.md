@@ -1,485 +1,756 @@
-# Backlog — `libtoob` Härtung, Resync & DX
+# Toob-Boot Core — Umsetzungs-Backlog K1–K7
 
-**Scope:** Diese Liste deckt ausschließlich `sdk/libtoob/` ab, plus eine klar markierte angrenzende Epic für `sdk/os_client/`. Der Bootloader-Core (`toobloader/`) wird **nicht** umgebaut — er ist hier die *Source of Truth*. Jeder Ticket-Auftrag bringt `libtoob` an den bereits refaktorierten Core heran, härtet die OS-Boundary und verbessert die Developer Experience für integrierende Feature-OS-Teams.
+Dieser Backlog macht die sieben Architektur-Konzepte vollständig planbar. Jedes Konzept ist ein
+Epic; jedes Epic zerfällt in Tickets mit konkreten Datei-/Funktions-Berührungspunkten,
+Code-Skizzen auf euren echten Typen, Akzeptanzkriterien, Aufwand und Risiko.
 
-**Leitprinzip:** `libtoob` trägt fast keine fault-injection-kritische Logik — es macht CRC-gated Byte-Kopien, WAL-Appends und Flash-Streaming. Die Härtung sitzt im Core. Deshalb zielen diese Tickets auf **Korrektheit an der Grenze**, **ABI-Integrität** und **Missbrauchssicherheit der API**, nicht auf neue Glitch-Shields.
-
----
-
-## Legende & Konventionen
-
-**Priorität**
-- **P0** — Korrektheits-Regression aus dem Core-Refactoring oder sicherheitsrelevant. Zuerst.
-- **P1** — Wichtig: latenter Bug, ABI-Risiko oder DX-Falle mit realer Crash-/Bypass-Konsequenz.
-- **P2** — Robustheit / DX-Verbesserung mit mittelbarem Nutzen.
-- **P3** — Code-Hygiene, Doku, Portabilität.
-
-**Typ:** `bug` · `refactor` · `dx` · `abi` · `security` · `cleanup` · `spike`
-
-**Aufwand (T-Shirt):** S (≤ ½ Tag) · M (1–2 Tage) · L (> 2 Tage / koordiniert)
-
-**Definition of Done (global, gilt für jedes Ticket):**
-1. Code-Änderung + alle bestehenden `_Static_assert`s kompilieren grün.
-2. Sandbox-/Host-Build (`host` Arch) und mindestens ein RTOS-Target-Build (Zephyr **oder** ESP-IDF) brechen nicht.
-3. Bei Verhaltensänderung: ein gezielter Test (Host-Mock oder Fuzzer-Vektor) deckt das alte Fehlverhalten ab.
-4. Betroffene Doxygen-Kommentare in `libtoob.h` / `libtoob_types.h` aktualisiert.
-5. Cross-Referenz im Core dokumentiert, falls ein Core-Folgeticket nötig ist (Core wird **nicht** in diesem Backlog umgesetzt).
+Die Code-Skizzen folgen den Hausregeln des Cores: `BOOT_OK == 0x55AA55AA`, Single-Exit mit
+`boot_secure_zeroize`, CFI-Akkumulatoren mit TRNG-Seed, und — als Konsequenz aus der Review —
+`BOOT_SECURE_REQUIRE` wird nur auf *neu auswertbaren* Bedingungen benutzt, nie auf einem bereits
+berechneten lokalen `bool`.
 
 ---
 
-## Ticket-Übersicht
+## Wie dieser Backlog zu lesen ist
 
-| ID | Titel | Prio | Typ | Aufwand |
-|---|---|---|---|---|
-| LIBTOOB-001 | `CLOUD_CMD`-WAL-Append entfernen (vestigial + Fehlattribution) | P0 | bug/security | S |
-| LIBTOOB-002 | RTC/WAL Confirm-Backend-Kohärenz (P7b) auflösen | P2 | bug/abi | M |
-| LIBTOOB-003 | `REQUIRES_RESET` / `WAL_FULL` / `WAL_LOCKED` als dokumentierte Kontrakte | P1 | dx | S |
-| LIBTOOB-010 | Single-Source `toob_handoff_t` / `toob_boot_diag_t` + Cross-Assert | P1 | abi | M |
-| LIBTOOB-011 | CRC32-Äquivalenz Core↔libtoob per CI-Test absichern | P1 | abi/security | S |
-| LIBTOOB-012 | Handoff hinter validierenden Accessor / opaken Handle | P2 | dx | M |
-| LIBTOOB-020 | Verified-Resume-Bug: SHA-Kontext beim Resume korrekt behandeln | P1 | bug/security | M |
-| LIBTOOB-021 | OTA-State aus File-Globals in übergebenen `toob_ota_ctx_t` | P2 | refactor/dx | L |
-| LIBTOOB-022 | `WAL_LOCKED` beim Finalize sauber surface-n (Doppel-Update-Schutz) | P2 | dx | S |
-| LIBTOOB-023 | Read-Back pro Flush im OTA-Schreibpfad (SRAM→Flash-Lücke) | P2 | bug/security | S |
-| LIBTOOB-030 | `warn_unused_result` auf alle `toob_status_t`-Funktionen | P1 | dx/security | S |
-| LIBTOOB-031 | Phantom-Parameter `image_type` klären/entfernen | P2 | dx | S |
-| LIBTOOB-032 | `TOOB_OS_INIT_OR_PANIC()` Hänge-Semantik dokumentieren/absichern | P2 | dx | S |
-| LIBTOOB-033 | Status-Logging-Format portabel machen | P3 | cleanup | S |
-| LIBTOOB-040 | Dedup: `toob_ota_secure_zeroize` / `TOOB_OTA_GLITCH_DELAY` | P3 | cleanup | S |
-| LIBTOOB-041 | Doppelte `toob_get_boot_diag`-Deklaration in `libtoob.h` bereinigen | P3 | cleanup | S |
-| LIBTOOB-042 | CBOR-Telemetrie-Mapping-Hacks dokumentieren/auflösen | P3 | cleanup | S |
-| LIBTOOB-050 | `os_client` CBOR-Manifest-Parser auditieren/härten (Rust-Kandidat) | P2 | security/spike | M |
-| LIBTOOB-051 | Optionale Rust-Wrapper-Crate über C-`libtoob` (DX-Layer) | P3 | spike | L |
+**Ticket-Schema**
+
+```
+### <ID> — <Titel>                                        [Aufwand · Risiko]
+Ziel        Was am Ende gilt.
+Berührt     Dateien/Funktionen.
+Skizze      Code oder Struktur.
+Fertig wenn Akzeptanzkriterien (prüfbar).
+Hängt an    Vorbedingungen.
+```
+
+**Aufwand** S = ≤0,5 Tag · M = 1–2 Tage · L = 3–5 Tage · XL = >1 Woche.
+**Risiko** 🟢 mechanisch · 🟡 berührt Sicherheitspfad · 🔴 ABI-/Format-/Schlüssel-Entscheidung.
 
 ---
 
-# EPIC A — Core-Resync
+## Abhängigkeitsgraph & Wellenplan
 
-> Diese Tickets schließen die Lücken, die entstanden sind, weil der Core refaktoriert wurde, `libtoob` aber nicht nachgezogen hat.
+```
+E0  Foundations ───────────────┬──────────────┬─────────────┬───────────┐
+                               │              │             │           │
+Welle 1   E-K5 Record/Replay + Enumerator (Sicherheitsnetz — zuerst)     │
+                               │                                          │
+Welle 2   E-K6 Tabellen-Pipeline (verkleinert Fläche für K3)             │
+                               │                                          │
+Welle 3   E-K3 Effekt-Executor ──────────► E-K7 Energie-Zulassung (Anhängsel)
+                                                                          │
+Welle 4   E-K1 Beweis-Handles (parallel, berührt nur Schnittstellen) ────┘
+Welle 5   E-K4 Journal-Kette (zusammen mit DICE/KDM-Schlüsselarbeit)
+Welle 6   E-K2 Festformat-Manifest (größte Koordination — zuletzt)
+```
 
----
-
-### LIBTOOB-001 — `CLOUD_CMD`-WAL-Append entfernen
-**Prio:** P0 · **Typ:** bug/security · **Aufwand:** S
-**Datei:** `sdk/libtoob/toob_cloud_submit.c`
-
-**Problem**
-`toob_submit_cloud_command()` schreibt nach dem erfolgreichen Envelope-Write einen `TOOB_WAL_INTENT_CLOUD_CMD` (Wert 12) ins WAL, um „den Bootloader zu benachrichtigen". Der refaktorierte Core liest den Cloud-Slot aber **bei jedem Boot bedingungslos** (`boot_state.c`, Step 2.5, `_handle_cloud_cmd` ist *slot-getrieben*, nicht *intent-getrieben*). Das Signal wird also nie konsumiert.
-
-**Root Cause**
-Step 2.5 wurde im Core auf „slot-driven" umgestellt; das Intent-Signal in `libtoob` blieb stehen. Schlimmer als nur tot: In `boot_journal_reconstruct_txn` fällt Intent 12 in **keinen** der Side-Band-Zweige (`NET_SEARCH_ACCUM`, `DOWNLOAD_CHECKPOINT`, `SLEEP_BACKOFF`, `DEPRECATED_NONCE`, `TXN_ROLLBACK_PENDING`) und landet im `else` → wird als **Haupt-Intent** (`open_txn`) selektiert. Bleibt dieser Intent nach einem `NOP`- oder `ROTATE_KEY`-Cloud-Command liegen (beide appenden im Core keinen Folge-Intent) und folgt ein WDT-/HardFault-Reset, wird in `boot_state.c` Step 3 `is_app_crash == true` (Intent ≠ `UPDATE_PENDING`, ≠ `TXN_BEGIN`) → `boot_failure_counter++`. Konsequenz: spurious Failure-Counting, das Richtung Recovery-OS-Boot oder (auf Edge-Geräten) 1-Stunden-Penalty-Sleep schiebt.
-
-**Lösung**
-1. Den kompletten „Step 4: WAL Signal"-Block aus `toob_submit_cloud_command()` entfernen (Erase → Write → CRC-Read-Back bleiben; das WAL-Signal entfällt ersatzlos).
-2. Den Enum-Wert `TOOB_WAL_INTENT_CLOUD_CMD` in `libtoob_types.h` **behalten** (ABI-Konstante, der `_Static_assert` in `boot_journal.h` referenziert ihn) — nur die *Emission* entfällt.
-3. Funktions-Doxygen anpassen: Sequenz ist jetzt „Guard → Erase → Write → CRC-Read-Back → Zeroize".
-
-**Cross-Referenz (Core, separates Ticket, hier nur dokumentiert):** Defensiv sollte der Core `WAL_INTENT_CLOUD_CMD` zusätzlich in die Side-Band-Liste von `boot_journal_reconstruct_txn` aufnehmen — als Belt-and-Suspenders gegen Alt-Geräte, deren Flash noch einen 12er-Intent aus früheren `libtoob`-Versionen trägt.
-
-**Akzeptanzkriterien**
-- [ ] `toob_submit_cloud_command()` schreibt keinen WAL-Intent mehr.
-- [ ] Host-Test: nach `submit_cloud_command` + simuliertem WDT-Reset bleibt `boot_failure_counter` unverändert (vorher: +1).
-- [ ] Enum-Wert 12 bleibt definiert; `boot_journal.h`-Cross-Assert kompiliert.
+Regel für jeden Merge: Nach dem Umbau muss ein Auditor **weniger** Code lesen, um **mehr**
+Garantien zu verstehen. Wird ein Ticket dieser Regel nicht gerecht, ist es falsch geschnitten.
 
 ---
 
-### LIBTOOB-002 — RTC/WAL Confirm-Backend-Kohärenz (P7b)
-**Prio:** P2 · **Typ:** bug/abi · **Aufwand:** M
-**Datei:** `sdk/libtoob/toob_confirm.c`
+# E0 — Foundations
 
-**Problem**
-Der Core hat die Crash-Detection auf „WAL-primary" umgestellt (Kommentar P7b: „WAL-Intent ist die Autorisierung, nicht der Reset-Reason"; ein un-aufgelöster `CONFIRM_COMMIT` ist das stärkste Crash-Signal, Brownout zählt nicht mehr als Crash). Im **RTC-Backend** (`#ifdef ADDR_CONFIRM_RTC_RAM`) schreibt `toob_confirm_boot()` jedoch **keinen** `CONFIRM_COMMIT`-Intent — nur die Nonce ins RTC-RAM. Die beiden Backends erzeugen damit unterschiedliche WAL-Historien.
+Querschnittsarbeit, die mehrere Epics voraussetzen. Klein, aber blockierend.
 
-**Root Cause**
-Die P7b-Logik im Core ist um den WAL-Pfad herum geschrieben. Beim RTC-Pfad hängt die Bestätigung allein an `platform->confirm->check_ok(nonce)` (Step 2), während der WAL-Pfad zusätzlich am `CONFIRM_COMMIT`-Intent hängt. Happy Path funktioniert in beiden Fällen, aber ein OS-Integrator, der das Backend wechselt, ändert *implizit* das Crash-Detection-Verhalten des Bootloaders. Das ist eine versteckte Kopplung, kein eindeutiger Bug — aber ein Fußangel für Integratoren.
+### E0-T1 — Shared-Header-Hausputz aus der Review nachziehen                 [S · 🟢]
+Ziel        `is_buffer_within`, Streaming-Flash-CRC und die v1→v2-TMR-Migration existieren je
+            genau einmal. Diese Dedup ist Voraussetzung, damit K2/K3 nicht auf Kopien aufsetzen.
+Berührt     `boot_ct_utils.h` (neu: `is_buffer_within`), `boot_crc32.[ch]` (neu:
+            `boot_crc32_flash_stream`), `boot_journal.c` (neu: `migrate_v1_tmr`), Entfernen der
+            Kopien in `boot_state.c`, `boot_verify.c`, `boot_swap.c`, `boot_rollback.c`.
+Skizze
+```c
+/* boot_crc32.h */
+boot_status_t boot_crc32_flash_stream(const boot_platform_t *p,
+                                      uint32_t addr, size_t len,
+                                      uint8_t *arena, size_t arena_len,
+                                      uint32_t *out_crc);
+```
+Fertig wenn `grep -rc "0xEDB88320 & (-(crc & 1))" toobloader/` == 1; Build grün; HIL-Regression
+            unverändert.
+Hängt an    —
 
-**Lösung (Variante A bevorzugt)**
-- **A (Vereinheitlichung):** RTC-Pfad zusätzlich einen `CONFIRM_COMMIT`-Intent ins WAL appenden (idempotent, Fire-and-Forget), sodass beide Backends dieselbe WAL-Signatur erzeugen. Damit ist die Core-Crash-Detection backend-unabhängig.
-- **B (Dokumentation, falls A zu invasiv):** Den Verhaltensunterschied explizit in `libtoob.h` über `toob_confirm_boot()` dokumentieren: „Bei RTC-Backend hängt die Bestätigung an der Confirm-HAL; bei WAL-Backend am `CONFIRM_COMMIT`-Intent. Beide sind äquivalent für den Standard-Lifecycle, divergieren aber im Crash-Attribution-Detail."
+### E0-T2 — HAL-Fassade für Test-Einspeisung (Record/Replay-Naht)           [M · 🟡]
+Ziel        Der Core spricht Hardware ausschließlich über einen Funktionszeiger-Satz an (ist
+            bereits so) — E0-T2 fixiert das als *Vertrag* und ergänzt einen dünnen Shim-Punkt,
+            an dem K5 später Record/Replay einklinkt, ohne Core-Code zu ändern.
+Berührt     `boot_platform_t` (Doku-Kommentar „einziger Hardwarezugang"), neuer Host-Build-Target
+            `sandbox-replay`.
+Skizze      Kein Core-Code ändert sich; nur ein `_Static_assert`-Audit, dass keine
+            `.c`-Datei im `core/` direkt auf Register/`volatile`-Adressen zugreift.
+```bash
+# CI-Gate: verbietet direkten MMIO-Zugriff im Core
+! grep -rnE '\(\s*volatile\s+uint32_t\s*\*\s*\)\s*0x' toobloader/core/
+```
+Fertig wenn CI-Gate grün; dokumentierter „HAL ist die einzige Außenwelt"-Vertrag in
+            `security_model.md`.
+Hängt an    —
 
-**Akzeptanzkriterien**
-- [ ] Variante A: Host-Test zeigt, dass RTC- und WAL-Backend nach einem bestätigten Boot dieselbe WAL-Intent-Sequenz hinterlassen.
-- [ ] Oder Variante B: Doku-PR mit explizitem Hinweis + Verweis auf P7b im Core.
-
----
-
-### LIBTOOB-003 — `REQUIRES_RESET` / `WAL_FULL` / `WAL_LOCKED` als dokumentierte Kontrakte
-**Prio:** P1 · **Typ:** dx · **Aufwand:** S
-**Dateien:** `sdk/libtoob/include/libtoob.h`, `sdk/libtoob/toob_wal_naive.c`
-
-**Problem**
-`toob_wal_naive_append()` kann `TOOB_ERR_REQUIRES_RESET` (torn write entdeckt), `TOOB_ERR_WAL_FULL` (aktiver Sektor voll, keine Rotation OS-seitig) und `TOOB_ERR_WAL_LOCKED` (zweites `UPDATE_PENDING` blockiert) zurückgeben. Diese propagieren bis in `toob_confirm_boot()`, `toob_recovery_resolved()`, `toob_set_next_update()` etc. — Funktionen, deren Doxygen nur `TOOB_OK` / `TOOB_ERR_FLASH` als Rückgabe nennt. Ein OS-Entwickler behandelt diese Pfade fast garantiert nicht und gerät in stillen Lockout.
-
-**Root Cause**
-Bewusste Asymmetrie (OS darf nicht rotieren/heilen → muss rebooten, damit Stage 1 repariert), aber der „du musst rebooten"-Kontrakt ist nirgends an der API sichtbar.
-
-**Lösung**
-1. Doxygen jeder `toob_status_t`-Funktion, die `toob_wal_naive_append` aufruft, um die vollständige Liste möglicher Rückgaben + empfohlenes OS-Handling ergänzen: „`TOOB_ERR_REQUIRES_RESET` / `TOOB_ERR_WAL_FULL` ⇒ Reboot anstoßen, Stage 1 heilt/rotiert beim nächsten Boot."
-2. Eine kompakte „Error-Handling-Matrix" als Abschnitt in `libtoob.h` (welcher Fehler ⇒ welche OS-Reaktion: retry / reboot / abort).
-3. Optional: Convenience-Makro/-Helper `TOOB_IS_REBOOT_REQUIRED(status)`.
-
-**Akzeptanzkriterien**
-- [ ] Jede betroffene Funktion listet ihre realen Rückgabewerte im Doxygen.
-- [ ] Error-Handling-Matrix im Header vorhanden.
-
----
-
-# EPIC B — ABI-Integrität
-
-> Die Grenze lebt von bit-exakten Typ-Layouts und CRC-Gleichheit zwischen zwei unabhängig kompilierten Binaries. Diese Tickets machen die stillschweigenden Annahmen compiler- bzw. CI-prüfbar.
-
----
-
-### LIBTOOB-010 — Single-Source `toob_handoff_t` / `toob_boot_diag_t` + Cross-Assert
-**Prio:** P1 · **Typ:** abi · **Aufwand:** M
-**Dateien:** `sdk/libtoob/include/libtoob_types.h`, Core `boot_types.h` (Koordination), ggf. neues Test-TU
-
-**Problem**
-Für die WAL-Typen existieren in `boot_journal.h` Cross-Asserts (`_Static_assert(sizeof(wal_entry_payload_t) == sizeof(toob_wal_entry_payload_t), ...)` u.v.m.). Für `toob_handoff_t` und `toob_boot_diag_t` ist **kein** analoger Cross-Check sichtbar. `stage0` inkludiert `libtoob_types.h` direkt (gleiche Definition), aber Stage 1 (`boot_main.c`) schreibt den Handoff über die Core-eigene Definition. Driften beide (z.B. Feld eingefügt, Padding verschoben), bricht jede Handoff-Validierung **stillschweigend** — das Gefährlichste, was an dieser Grenze passieren kann.
-
-**Root Cause**
-Beide Binaries kompilieren nie zusammen, also kann ein klassischer `_Static_assert` die Definitionen nicht gegeneinander prüfen.
-
-**Lösung (Variante 1 bevorzugt)**
-- **1 (Single-Source):** Der Core inkludiert für den Handoff- und Diag-Typ `libtoob_types.h` als kanonische Quelle — exakt so, wie `boot_journal.h` es für die WAL-Typen bereits tut. Damit gibt es nur **eine** Definition; Drift wird strukturell unmöglich.
-- **2 (Golden-Layout-Test, falls 1 nicht gewollt):** Dedizierte Test-TU, die beide Header über Namespacing/Makro-Renaming einbindet und `offsetof`/`sizeof` aller Felder vergleicht. Läuft in CI.
-
-**Akzeptanzkriterien**
-- [ ] Es existiert ein Mechanismus, der `sizeof` und alle relevanten `offsetof` von `toob_handoff_t` (80 B, `crc32_trailer`@76) und `toob_boot_diag_t` (88 B) Core↔libtoob garantiert.
-- [ ] Ein absichtlich eingefügtes Test-Feld lässt den Build/CI rot werden.
+### E0-T3 — Zentrale Fehlerklassen-Taxonomie                                 [S · 🟢]
+Ziel        Die in `_handle_update_result` verstreute Reject-vs-Propagate-Liste wird eine
+            benannte Menge — Voraussetzung für die K6-Fehlertabelle.
+Berührt     `boot_types.h` (neu: `boot_error_is_rejectable(boot_status_t)`).
+Skizze
+```c
+static inline bool boot_error_is_rejectable(boot_status_t s) {
+  switch (s) {
+    case BOOT_ERR_VERIFY: case BOOT_ERR_DOWNGRADE:
+    case BOOT_ERR_INVALID_ARG: case BOOT_ERR_FLASH_BOUNDS:
+    case BOOT_ERR_INVALID_STATE: case BOOT_ERR_NOT_FOUND:
+      return true;
+    default: return false; /* Hardware → propagate/panic */
+  }
+}
+```
+Fertig wenn `_handle_update_result` nutzt die Funktion; Verhalten identisch.
+Hängt an    —
 
 ---
 
-### LIBTOOB-011 — CRC32-Äquivalenz Core↔libtoob per CI-Test
-**Prio:** P1 · **Typ:** abi/security · **Aufwand:** S
-**Dateien:** `sdk/libtoob/toob_crc32.c`, `toobloader/core/boot_crc32.c`, neuer CI-Test
+# E-K5 — Boot als reine Funktion (Record/Replay + Unterbrechungs-Enumerator)
 
-**Problem**
-Core nutzt eine table-less CRC32 (`compute_boot_crc32`), `libtoob` eine table-based (`toob_lib_crc32`). Beide **müssen** bit-identisch sein, sonst scheitert jede Handoff-/Diag-/WAL-Validierung über die Grenze. Garantiert wird das aktuell nur durch einen Testvektor im Kommentar (`"IEEE_802.3" -> 0xE0DFD6DA`), nicht durch einen ausgeführten Cross-Check.
+**Warum zuerst.** Jede folgende Änderung wird gegen aufgezeichnete Referenzläufe und den
+Enumerator verifiziert statt gegen Hoffnung. Ohne dieses Netz sind K3 und K6 riskante Blindflüge.
 
-**Root Cause**
-„Zero-Dependency"-Philosophie verbietet das Teilen der Implementierung — aber die mathematische Äquivalenz wird nie maschinell verifiziert.
+**Definition of Done (Epic).** Ein Host-Build spielt einen aufgezeichneten Boot bit-exakt ab
+(inkl. TRNG); der Enumerator prüft Konsistenz nach Abbruch an *jeder* Flash-Schreibgrenze; ein
+CBMC-Harness prüft den Journal-Reducer erschöpfend im gebundenen Raum.
 
-**Lösung**
-1. CI-Test (Host-Build), der über eine Reihe von Vektoren (leer, 1 Byte, `"IEEE_802.3"`, ein voller `toob_handoff_t`-Dump, Zufalls-Buffer) `compute_boot_crc32` **und** `toob_lib_crc32` aufruft und auf Gleichheit prüft.
-2. Den bestehenden Kommentar-Testvektor als ersten Test-Case übernehmen.
+### K5-T1 — Host-Flash-Modell als Datei                                      [M · 🟢]
+Ziel        Ein `flash_hal_t`-kompatibles Modell, das den Flash-Zustand als Datei hält und
+            NOR-Semantik (nur 1→0 per write, Sektor-Erase setzt auf `erased_value`) korrekt
+            nachbildet.
+Berührt     `test/host/flash_model.c` (neu).
+Skizze
+```c
+typedef struct {
+  uint8_t  *cells;         /* mmap'd Datei */
+  size_t    size;
+  uint32_t  sector_size;
+  uint8_t   erased_value;  /* i.d.R. 0xFF */
+  /* Fehler-/Torn-Write-Injektion (siehe K5-T3) */
+  uint32_t  fail_at_op;    /* 0 = nie; sonst: brich beim n-ten write/erase ab */
+  uint32_t  torn_prefix;   /* Bytes, die vom abgebrochenen write noch landen */
+  uint32_t  op_counter;
+} flash_model_t;
 
-**Akzeptanzkriterien**
-- [ ] CI-Test grün; ein absichtlich verfälschtes Tabellen-Wort lässt ihn rot werden.
-- [ ] Mindestens 5 Vektoren inkl. eines echten Struct-Layouts.
+static boot_status_t model_write(uint32_t a, const void *b, size_t n) {
+  flash_model_t *m = /* ctx */;
+  m->op_counter++;
+  size_t eff = n;
+  if (m->fail_at_op && m->op_counter == m->fail_at_op) eff = m->torn_prefix;
+  for (size_t i = 0; i < eff; i++)
+    m->cells[a+i] &= ((const uint8_t*)b)[i];   /* NOR: nur Bits löschen */
+  return (m->fail_at_op && m->op_counter == m->fail_at_op)
+           ? BOOT_ERR_FLASH_HW : BOOT_OK;
+}
+```
+Fertig wenn Modell besteht eine NOR-Semantik-Testsuite (write kann kein Bit setzen; erase
+            setzt Sektor auf `erased_value`; Lesen nach Erase liefert `erased_value`).
+Hängt an    E0-T2
 
----
+### K5-T2 — Record/Replay-Shim um die HAL                                    [M · 🟡]
+Ziel        Im Record-Modus wird jeder HAL-Call + Rückgabe (inkl. `crypto->random`-Bytes) auf
+            ein Band geschrieben; im Replay-Modus bit-exakt zurückgespielt. Damit werden
+            CFI-Seeds und Nonces reproduzierbar.
+Berührt     `test/host/hal_tape.c` (neu), Wrapper um `crypto->random`, `flash->read/write/erase`,
+            `crypto->read_monotonic_counter`, `clock->get_reset_reason`.
+Skizze
+```c
+/* Bandformat: [op_id u8][args...][ret u32][payload_len u16][payload...] */
+static boot_status_t tape_random(uint8_t *buf, size_t len) {
+  if (mode == RECORD) { real_random(buf, len); tape_put(OP_RND, buf, len); }
+  else                { tape_get(OP_RND, buf, len); }
+  return BOOT_OK;
+}
+```
+Fertig wenn Ein Record-Lauf, danach Replay desselben Bands, ergibt identischen End-Flash-Zustand
+            und identischen `target_out`/Handoff (byte-diff == 0).
+Hängt an    K5-T1
 
-### LIBTOOB-012 — Handoff hinter validierenden Accessor / opaken Handle
-**Prio:** P2 · **Typ:** dx · **Aufwand:** M
-**Dateien:** `sdk/libtoob/include/libtoob.h`, `sdk/libtoob/toob_handoff.c`
+### K5-T3 — Unterbrechungs-Enumerator                                        [L · 🟡]
+Ziel        Für einen nominellen Update-Boot mit W destruktiven Flash-Ops: für jedes
+            i ∈ 1…W und jede Torn-Prefix-Variante das Band bei i kappen, resultierendes
+            Flash-Abbild einfrieren, frischen Boot fahren, Invarianten prüfen.
+Berührt     `test/host/enumerate_crash.c` (neu).
+Skizze
+```c
+for (uint32_t i = 1; i <= W; i++) {
+  for (uint32_t tp = 0; tp <= max_prefix(i); tp += write_align) {
+    flash_model_t snap = clone(baseline);
+    snap.fail_at_op = i; snap.torn_prefix = tp;
+    run_boot(&snap);                 /* Abbruch bei Op i */
+    flash_model_t after = clone(snap);
+    after.fail_at_op = 0;
+    boot_result_t r = run_boot(&after); /* frischer Reboot */
+    assert_invariants(&r, &after);   /* siehe K5-T4 */
+  }
+}
+```
+Fertig wenn Enumerator läuft grün über Swap-, Revert- und Multi-Image-Pfad; ein absichtlich
+            eingebauter Off-by-one im Revert-Checkpoint wird gefangen (Mutation-Test).
+Hängt an    K5-T2
 
-**Problem**
-Aktuell ist `toob_handoff_state` als `extern` exponiert, die Validierung muss der OS-Entwickler aktiv via `toob_validate_handoff()` / `TOOB_OS_INIT_OR_PANIC()` anstoßen. Das defensive Pre-Zeroing in `toob_get_handoff()` existiert nur, *weil* das OS den rohen State direkt lesen oder den Return-Code ignorieren könnte. Die API lädt zum „erst lesen, hoffentlich vorher validieren" ein.
+### K5-T4 — Invarianten-Prädikate                                            [M · 🟡]
+Ziel        Formale, testbare Nachbedingungen, die nach *jedem* Reboot gelten müssen.
+Berührt     `test/host/invariants.c` (neu).
+Skizze
+```
+INV-1  Das Gerät bootet ein Image (kein Dead-Halt) ODER ist legitim gelockt/revoked.
+INV-2  Der TMR-Zustand ist genau EINER (alt XOR neu) — nie feldweise gemischt.
+INV-3  Kein zuvor persistierter Kern-Intent ging verloren (LOCKED bleibt LOCKED).
+INV-4  app_svn / stage1_svn sind monoton nicht-fallend über die Bootfolge.
+INV-5  Nach erfolgreichem Swap ist App-Slot-CRC == manifest-erwartete CRC.
+```
+Fertig wenn Alle fünf als Code; K5-T3 nutzt sie.
+Hängt an    K5-T3
 
-**Lösung**
-- `toob_handoff_state` aus dem Header so weit wie möglich zurückziehen (intern bleibt es `extern` für die `.noinit`-Linkage, aber die öffentliche API führt nur noch über `toob_get_handoff()`).
-- Optional: opakes Handle-Pattern — `toob_get_handoff()` als einziger legitimer Zugriffspfad, dokumentiert als „die einzige unterstützte Art, an Handoff-Daten zu kommen".
-- `device_id`-Zugriff (`toob_get_device_id`) bereits korrekt über Handoff geroutet — als Referenz-Pattern dokumentieren.
-
-**Akzeptanzkriterien**
-- [ ] Öffentliche Header-Oberfläche bietet keinen empfohlenen Direktzugriff auf den rohen `.noinit`-State mehr.
-- [ ] Doku nennt `toob_get_handoff()` explizit als einzigen unterstützten Pfad.
-
-> **Abhängigkeit:** sinnvoll *nach* LIBTOOB-010 (Single-Source-Typ), damit der Handle denselben kanonischen Typ kapselt.
-
----
-
-# EPIC C — OTA-Engine Robustheit
-
-> Die fehleranfälligste Stelle der gesamten SDK. File-scoped State + fragiler Resume.
-
----
-
-### LIBTOOB-020 — Verified-Resume-Bug: SHA-Kontext beim Resume korrekt behandeln
-**Prio:** P1 · **Typ:** bug/security · **Aufwand:** M
-**Dateien:** `sdk/libtoob/toob_ota.c`, `sdk/os_client/src/toob_network_client.c`
-
-**Problem**
-Ein **verifizierter, fortgesetzter** Download ist gebrochen. Zwei sich überlagernde Defekte:
-1. In `toob_network_trigger_ota()`: bei erfolgreichem `toob_ota_resume()` wird `toob_ota_begin_verified()` **nicht** aufgerufen → `s_is_verified_stream` bleibt `false`, `s_expected_sha256` wird nie gesetzt → die End-to-End-SHA-Prüfung in `toob_ota_finalize()` wird **stillschweigend übersprungen**.
-2. In `toob_ota_resume()`: selbst wenn man `s_is_verified_stream` setzen würde, wird der `s_sha_ctx` nicht rekonstruiert. Der bereits ins Staging geschriebene Präfix ist nicht im Hash-Zustand → Hash-Mismatch beim Finalize.
-
-**Sicherheits-Einordnung:** Defense-in-Depth, **kein** Totalbypass — der Bootloader verifiziert post-Reboot Merkle + Ed25519 über das volle Image. Aber die `libtoob`-Ebene gibt ihre Stream-Verifikations-Garantie *still* auf. Ein Angreifer, der einen Download unterbricht und auf Resume korrupte Bytes einspeist, umgeht die libtoob-SHA. Das ist eine stille Garantie-Verletzung und gehört gefixt.
-
-**Lösung (bevorzugt: Re-Hash des Präfix)**
-1. `toob_ota_resume()` so erweitern, dass bei einem verifizierten Stream der bereits gestagte Präfix (`[CHIP_STAGING_SLOT_ABS_ADDR .. resume_offset]`) erneut durch `toob_os_sha256_update` gehasht wird, um `s_sha_ctx` zu rekonstruieren. `s_is_verified_stream` und `s_expected_sha256` dabei korrekt wiederherstellen (Hash muss aus dem Manifest/Handoff verfügbar sein — siehe unten).
-2. In `toob_network_trigger_ota()`: auch im Resume-Zweig sicherstellen, dass der erwartete SHA gesetzt ist (aus dem frisch geparsten Manifest `info.sha256`), bevor `rtos_http_get` startet.
-3. **Falls Re-Hash zu teuer/unmöglich** (z.B. Hash nach Reboot nicht mehr verfügbar): Resume + Verified-Stream ehrlich als „Verifikation für diesen Lauf deaktiviert, Bootloader verifiziert das volle Image post-Reboot" dokumentieren **und** einen expliziten Status (`TOOB_ERR_NOT_SUPPORTED` o.ä.) zurückgeben, statt still durchzulaufen.
-
-**Akzeptanzkriterien**
-- [ ] Host-Test: Download abbrechen bei 50 %, resumen, korrekt zu Ende laden ⇒ `toob_ota_finalize()` verifiziert den vollen SHA und liefert `TOOB_OK`.
-- [ ] Host-Test: korrupte Bytes auf Resume ⇒ `toob_ota_finalize()` liefert `TOOB_ERR_VERIFY` (statt stillem `TOOB_OK`).
-- [ ] Kein Pfad mehr, der eine angeforderte Stream-Verifikation still überspringt.
-
-> **Hinweis:** Eng verzahnt mit LIBTOOB-021 — falls der State-Refactor parallel läuft, dieses Ticket auf der refaktorierten Context-Variante umsetzen.
-
----
-
-### LIBTOOB-021 — OTA-State aus File-Globals in übergebenen `toob_ota_ctx_t`
-**Prio:** P2 · **Typ:** refactor/dx · **Aufwand:** L
-**Datei:** `sdk/libtoob/toob_ota.c`, `sdk/libtoob/include/libtoob.h`
-
-**Problem**
-Die komplette OTA-Session liegt in `static`-File-Globals (`s_state`, `s_write_cursor`, `s_total_size`, `s_bytes_queued`, `s_align_buf`, `s_sha_ctx`, `s_expected_sha256`, `s_is_verified_stream`). Folgen: keine nebenläufigen Sessions, State-Leakage zwischen Durchläufen, schwer testbar, und `toob_ota_resume` rekonstruiert den Byte-Cursor fragil aus `toob_handoff_state.resume_offset`.
-
-**Lösung**
-- Einen `toob_ota_ctx_t` einführen (opak, vom Aufrufer alloziert), der den gesamten Session-State kapselt. Alle `toob_ota_*`-Funktionen nehmen `toob_ota_ctx_t* ctx` als ersten Parameter.
-- `_reset_state()` → `toob_ota_ctx_init(ctx)`.
-- Zero-Allocation bleibt gewahrt: der Context ist eine vom OS bereitgestellte Struktur (Stack oder statisch beim OS), `libtoob` alloziert nichts dynamisch.
-- Rückwärtskompatibilität: optional einen dünnen Shim mit dem alten globalen Context behalten, deprecaten.
-
-**Akzeptanzkriterien**
-- [ ] Alle `toob_ota_*`-Funktionen sind re-entrant über getrennte Contexts.
-- [ ] Host-Test fährt zwei unabhängige OTA-Sessions parallel ohne Cross-Contamination.
-- [ ] `_Static_assert` auf `sizeof(toob_ota_ctx_t)`-Stabilität (ABI).
-
-> **Größtes Refactor im Backlog.** Sequenzieren *vor* LIBTOOB-020, wenn beide in einem Sprint landen.
-
----
-
-### LIBTOOB-022 — `WAL_LOCKED` beim Finalize sauber surface-n
-**Prio:** P2 · **Typ:** dx · **Aufwand:** S
-**Dateien:** `sdk/libtoob/toob_ota.c`, `sdk/libtoob/toob_update.c`
-
-**Problem**
-`toob_ota_finalize()` ruft `toob_set_next_update()` → `toob_wal_naive_append()`. Liegt bereits ein nicht-konsumiertes `UPDATE_PENDING` vor, liefert der Append `TOOB_ERR_WAL_LOCKED`. Der OTA-Flow gibt das zwar weiter, aber ohne klare Semantik für den Aufrufer („was jetzt?").
-
-**Lösung**
-- `toob_ota_finalize()`-Doxygen explizit um `TOOB_ERR_WAL_LOCKED` ergänzen mit Handlungsempfehlung („vorheriges Update zuerst durch Reboot konsumieren").
-- Optional: im `os_client`-Daemon (`toob_network_trigger_ota`) `WAL_LOCKED` gesondert loggen statt generisch „Finalize failed".
-
-**Akzeptanzkriterien**
-- [ ] `WAL_LOCKED` im Finalize-Doxygen dokumentiert.
-- [ ] Daemon unterscheidet `WAL_LOCKED` von echten Flash-Fehlern im Log.
-
----
-
-### LIBTOOB-023 — Read-Back pro Flush im OTA-Schreibpfad
-**Prio:** P2 · **Typ:** bug/security · **Aufwand:** S
-**Datei:** `sdk/libtoob/toob_ota.c`
-
-**Problem**
-`_flush_buffer()` schreibt den Alignment-Puffer via `toob_os_flash_write()` ins Staging-Flash und prüft per Glitch-Shield ausschließlich den **Rückgabe-Status** des Writes — den Flash-**Inhalt** liest es nie zurück. Ein Flash-Write, der still ein Byte korrumpiert, aber `TOOB_OK` liefert, wird damit **nicht** beim Schreiben gefangen. Der OTA-rollende SHA-256 hilft hier nicht: er hasht den empfangenen Chunk in `toob_ota_process_chunk` **vor** dem Write, validiert also Netz→SRAM, nicht SRAM→Flash. Konsequenz: Speicher-Korruption wird erst beim nächsten Boot durch `boot_merkle_verify_stream` entdeckt — einen ganzen Boot-Zyklus später, mit anschließendem Verwerfen des Updates und Re-Download.
-
-**Root Cause**
-Der OTA-Hot-Path vertraut dem Status des Vendor-Flash-Treibers. Die WAL-Append-Logik (`toob_wal_naive_append`) **und** die Cloud-Command-Submission (`toob_submit_cloud_command`) führen demgegenüber bereits einen chunked Phase-Bound Read-Back-Verify durch. Der OTA-Schreibpfad ist die **einzige** Stelle in `libtoob`, die ins Flash schreibt, ohne zurückzulesen — eine Inkonsistenz im Integritätsmodell der SDK.
-
-**Lösung**
-1. Nach jedem erfolgreichen `toob_os_flash_write()` in `_flush_buffer()` den gerade geschriebenen Bereich chunked aus dem Flash zurücklesen und gegen den Quellpuffer (`s_align_buf`) vergleichen — exakt das Muster aus `toob_submit_cloud_command()`:
-   - kleiner Stack-Puffer (≤ 64 B, 8-Byte-aligned), Schleife über `write_len`;
-   - Vergleich via `toob_ct_memcmp_glitch_safe()` (bereits in `toob_internal.h` verfügbar) oder XOR-Akkumulator-Diff gegen `s_align_buf + check_off`.
-2. **Ghost-Match-Proof:** Read-Back-Puffer **vor** jedem Read nullen (zwingt den Treiber, tatsächlich aus dem Flash zu lesen statt einen RAM-Cache zu bestätigen) und am Ende zeroizen.
-3. Bei Mismatch `TOOB_ERR_FLASH_HW` zurückgeben (nicht `TOOB_OK`). `toob_ota_process_chunk` geht damit in `TOOB_OTA_STATE_ERROR`, der Download wird verworfen/retried.
-4. **Bewusst nicht-kryptografisch:** Dies ist ein Storage-Integritäts-Check (Bit-Rot / Tearing / stiller Write-Fail), **keine** Authentizitäts-Prüfung. Ed25519 + Per-Chunk-Merkle beim Boot bleiben die kryptografischen Gates — dieses Ticket schließt nur die Lücke früher (beim Schreiben statt beim Boot). Defense-in-Depth, kein neuer Vertrauensanker.
-5. **Zero-Allocation wahren:** keine zweite 256-Byte-Stack-Allokation; ausschließlich chunked vergleichen wie in `toob_submit_cloud_command`.
-
-**Akzeptanzkriterien**
-- [ ] `_flush_buffer()` liest nach jedem Write den geschriebenen Bereich zurück und vergleicht ihn gegen `s_align_buf`.
-- [ ] Host-Test mit Mock-Flash, der beim Write still ein Byte kippt, aber `TOOB_OK` liefert ⇒ `toob_ota_process_chunk` liefert `TOOB_ERR_FLASH_HW` (vorher: `TOOB_OK`, Fehler erst beim Boot-Merkle).
-- [ ] Read-Back-Puffer wird vor jedem Read genullt und am Ende zeroized.
-- [ ] Keine zweite 256-Byte-Stack-Allokation; Vergleich chunked (≤ 64 B Stack), konsistent mit `toob_submit_cloud_command`.
-- [ ] Glitch-Shield-Muster (`TOOB_GLITCH_DELAY` / Double-Check) wird beim Mismatch-Verdict beibehalten.
-
-**Abhängigkeit / Hinweis**
-Ergänzt **LIBTOOB-020** (Verified-Resume) um die SRAM→Flash-Abdeckung — zusammen schließen beide die beiden offenen Stellen der OTA-Integritätskette. Läuft **LIBTOOB-021** (OTA-Context-Refactor) parallel, dieses Ticket auf der refaktorierten `toob_ota_ctx_t`-Variante umsetzen (Read-Back-Logik im Context-basierten `_flush_buffer`).
+### K5-T5 — CBMC-Harness für den Journal-Reducer                             [L · 🟡]
+Ziel        Der Rückwärts-Rekonstruktions-/TMR-Vote-Kern wird im gebundenen Raum erschöpfend
+            geprüft (Totalität, kein Underflow, kein OOB-Read).
+Berührt     `verification/cbmc/journal_harness.c` (neu), CI-Job.
+Skizze
+```c
+void harness(void) {
+  wal_tmr_payload_t c[3]; __CPROVER_havoc_object(c);
+  int n = nondet_int(); __CPROVER_assume(n >= 1 && n <= 3);
+  wal_tmr_payload_t out = tmr_majority_vote(c, n);   /* extrahierte reine Fn */
+  /* Property: Ergebnis ist immer einer der Kandidaten, nie Frankenstein */
+  __CPROVER_assert(is_one_of(&out, c, n), "vote_returns_candidate");
+}
+```
+Fertig wenn CBMC terminiert ohne Verletzung; Job im CI. Voraussetzung: TMR-Vote als reine
+            Funktion extrahiert (kleiner Vorab-Refactor in `boot_journal.c`).
+Hängt an    E0-T1
 
 ---
 
-# EPIC D — API-DX-Härtung
+# E-K6 — Zustandslogik als Daten (Intent-Algebra + Tabellen-Pipeline)
 
-> Die größten DX-Gewinne ohne ABI- oder Integrationskosten. Genau hier zahlt sich „API schärfen statt neu schreiben" aus.
+**Warum als Zweites.** Verkleinert `boot_state_run` drastisch und schafft die Struktur, auf der
+K3 sauber aufsetzt. Alle Änderungen sofort gegen das K5-Netz verifizierbar.
 
----
+**Definition of Done (Epic).** Intent-Übergänge und die Update-Pipeline werden aus statischen
+Tabellen interpretiert; die CFI-Sollmenge wird aus der Pipeline-Tabelle generiert; ein
+Totalitätstest deckt alle `{intent, ereignis}`-Paare ab; `boot_state_run` ist wesentlich kürzer.
 
-### LIBTOOB-030 — `warn_unused_result` auf alle `toob_status_t`-Funktionen
-**Prio:** P1 · **Typ:** dx/security · **Aufwand:** S
-**Dateien:** `sdk/libtoob/include/libtoob.h`, `sdk/libtoob/include/libtoob_types.h`
+### K6-T1 — Fehlertopologie als Tabelle                                      [M · 🟡]
+Ziel        Der Reject-vs-Propagate-`switch` in `_handle_update_result` wird eine Datentabelle.
+Berührt     `boot_state.c`.
+Skizze
+```c
+typedef struct { boot_status_t in; boot_status_t out; wal_intent_t reject_to; } err_row_t;
+static const err_row_t ERR_TABLE[] = {
+  { BOOT_ERR_VERIFY,        BOOT_OK, WAL_INTENT_NONE }, /* reject: verwerfen */
+  { BOOT_ERR_DOWNGRADE,     BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_FLASH_BOUNDS,  BOOT_OK, WAL_INTENT_NONE },
+  /* Hardware-Fehler stehen NICHT hier → default: propagate */
+};
+```
+Fertig wenn Verhalten von `_handle_update_result` bitidentisch (Replay-Diff == 0);
+            neue Fehlerklasse = eine Tabellenzeile.
+Hängt an    E0-T3, K5-T2
 
-**Problem**
-Ein erheblicher Teil des defensiven Pre-Zeroing in `libtoob` (`toob_get_handoff`, `toob_get_boot_diag`) existiert **nur**, weil das OS den Return-Code ignorieren könnte und dann auf Garbage zugreift. Das Ignorieren ist heute völlig still.
+### K6-T2 — Intent-Übergangstabelle + Reducer                               [L · 🔴]
+Ziel        Die verstreute Intent-Logik (Step-2-Normalisierung, `reconstruct_txn`-Sonderfälle,
+            Sticky-Lock) wird eine Tabelle `{intent, event} → {next_intent, action}`; ein
+            Reducer interpretiert sie.
+Berührt     `boot_state.c`, `boot_journal.c` (Intent-Klassifikation).
+Skizze
+```c
+typedef enum { EV_CONFIRM_OK, EV_CRASH, EV_CLOUD_UNLOCK, EV_UPDATE_PENDING, EV_NONE } boot_event_t;
+typedef struct {
+  wal_intent_t  cur;
+  boot_event_t  ev;
+  wal_intent_t  next;
+  uint8_t       action;   /* ACT_NONE | ACT_HEAL_COUNTER | ACT_APPEND | ACT_PANIC_LOCKED */
+} intent_row_t;
 
-**Lösung**
-1. Ein Cross-Compiler-Makro definieren, z.B.
-   ```c
-   #if defined(__GNUC__) || defined(__clang__)
-   #  define TOOB_MUST_CHECK __attribute__((warn_unused_result))
-   #else
-   #  define TOOB_MUST_CHECK
-   #endif
-   ```
-   (für ICCARM/Keil ggf. passendes Pendant ergänzen).
-2. Jede `toob_status_t`-zurückgebende öffentliche Funktion in `libtoob.h` mit `TOOB_MUST_CHECK` annotieren.
+static const intent_row_t INTENT_TABLE[] = {
+  { WAL_INTENT_DEVICE_LOCKED, EV_CLOUD_UNLOCK,  WAL_INTENT_NONE,    ACT_APPEND       },
+  { WAL_INTENT_DEVICE_LOCKED, EV_CONFIRM_OK,    WAL_INTENT_DEVICE_LOCKED, ACT_PANIC_LOCKED }, /* sticky */
+  { WAL_INTENT_CONFIRM_COMMIT,EV_CONFIRM_OK,    WAL_INTENT_NONE,    ACT_HEAL_COUNTER },
+  { WAL_INTENT_CONFIRM_COMMIT,EV_CRASH,         WAL_INTENT_CONFIRM_COMMIT, ACT_NONE },
+  /* … vollständige Matrix … */
+};
+```
+Fertig wenn Reducer ersetzt Step-2/Step-3-Sonderfälle; K6-T4-Totalitätstest grün;
+            Replay-Diff == 0 gegen Referenzbänder.
+Hängt an    K6-T1
 
-**Akzeptanzkriterien**
-- [ ] Ein bewusst ignoriertes `toob_get_handoff()` erzeugt eine Compiler-Warnung im Host-Build.
-- [ ] Bestehende SDK-Aufrufe in `os_client` lösen keine neuen Warnungen aus (sie prüfen bereits).
+### K6-T3 — Pipeline-Tabelle + Treiber + generierte CFI-Sollmenge           [L · 🟡]
+Ziel        Die P6-Stages (`stage_parse` … `stage_commit`) werden eine Tabelle
+            `{fn, cfi_slot, fehlerpolitik}`; der Treiber baut die CFI-Sollmenge **aus dieser
+            Tabelle** statt aus handgepflegten `boot_cfi_add_expected`-Listen. Beseitigt die
+            fragile „PQC-Slot nachträglich addieren"-Kopplung.
+Berührt     `boot_state.c`, `boot_verify.c` (PQC-Slot-Logik).
+Skizze
+```c
+typedef boot_status_t (*stage_fn_t)(update_ctx_t*);
+typedef struct { stage_fn_t fn; uint8_t cfi_slot; bool skippable; } stage_row_t;
 
----
+static const stage_row_t PIPELINE[] = {
+  { stage_parse,          STATE_CFI_SLOT_P1, false },
+  { stage_verify_envelope,STATE_CFI_SLOT_P2, false },
+  { stage_check_svn,      STATE_CFI_SLOT_P3, false },
+  { stage_check_binding,  STATE_CFI_SLOT_P4, true  },
+  { stage_route,          STATE_CFI_SLOT_P5, false },
+  { stage_apply,          STATE_CFI_SLOT_P6, false }, /* delta|raw intern */
+  { stage_swap,           STATE_CFI_SLOT_P7, false },
+  { stage_commit,         STATE_CFI_SLOT_P8, false },
+};
 
-### LIBTOOB-031 — Phantom-Parameter `image_type` klären/entfernen
-**Prio:** P2 · **Typ:** dx · **Aufwand:** S
-**Dateien:** `sdk/libtoob/toob_ota.c`, `sdk/libtoob/include/libtoob.h`
+static boot_status_t run_pipeline(update_ctx_t *ctx, boot_cfi_ctx_t *cfi) {
+  for (size_t i = 0; i < ARRAY_LEN(PIPELINE); i++)
+    boot_cfi_add_expected(*cfi, PIPELINE[i].cfi_slot);   /* Sollmenge aus Tabelle */
+  for (size_t i = 0; i < ARRAY_LEN(PIPELINE); i++) {
+    boot_status_t s = PIPELINE[i].fn(ctx);
+    if (s != BOOT_OK) return s;
+    boot_cfi_step(*cfi, PIPELINE[i].cfi_slot);
+  }
+  return BOOT_OK;
+}
+```
+Fertig wenn `_handle_update_flow` nutzt `run_pipeline`; die separate PQC-Sollmengen-Sonderlogik
+            ist entfernt; Replay-Diff == 0; Fault-Injection-Test (Skip einer Stage) wird von
+            der finalen `boot_cfi_require` gefangen.
+Hängt an    K6-T2
 
-**Problem**
-`toob_ota_begin(total_size, image_type)` verwirft `image_type` mit `(void)image_type`. Das tatsächliche Routing (App / Recovery / Stage-1-Bank) entscheidet der SUIT-Parser im Bootloader über `component_id`. Die Signatur suggeriert Kontrolle, die der Aufrufer nicht hat — besonders irreführend bei `image_type == 3` (vermeintliches Bootloader-Update).
-
-**Lösung (Variante A bevorzugt)**
-- **A:** `image_type` aus der Signatur entfernen (`toob_ota_begin(total_size)`), alten Prototyp als deprecated-Shim behalten.
-- **B (falls API-Bruch unerwünscht):** Parameter behalten, aber Doxygen klarstellen: „informativ/zukünftig; das tatsächliche Image-Routing erfolgt ausschließlich über das SUIT-Manifest (`component_id`) im Bootloader."
-
-**Akzeptanzkriterien**
-- [ ] Entweder Parameter entfernt + Shim, oder Doxygen stellt die Wirkungslosigkeit unmissverständlich klar.
-
----
-
-### LIBTOOB-032 — `TOOB_OS_INIT_OR_PANIC()` Hänge-Semantik dokumentieren/absichern
-**Prio:** P2 · **Typ:** dx · **Aufwand:** S
-**Datei:** `sdk/libtoob/include/libtoob.h`
-
-**Problem**
-Das Makro endet bei Handoff-Korruption in `while(true){ TOOB_TRAP(); }` — eine unendliche Trap-Schleife. Auf Systemen ohne Hardware-WDT hängt damit die OS-Init **für immer**. Das ist als Fail-Closed gewollt, aber ein Makro, das deine OS-Init endlos hängen lassen kann, gehört prominent dokumentiert.
-
-**Lösung**
-- Doxygen-Warnblock am Makro: „Fail-Closed by Design. Ohne Hardware-WDT führt eine `.noinit`-Korruption zum permanenten Hang. Systeme ohne WDT sollten stattdessen `toob_validate_handoff()` direkt aufrufen und eine eigene Recovery-Strategie implementieren."
-- Optional: eine nicht-hängende Variante `toob_os_init()` anbieten, die `toob_status_t` zurückgibt (Aufrufer entscheidet über die Reaktion).
-
-**Akzeptanzkriterien**
-- [ ] Warnblock vorhanden, der das WDT-lose Hang-Risiko explizit nennt.
-- [ ] Optional: nicht-hängende Init-Variante verfügbar.
-
----
-
-### LIBTOOB-033 — Status-Logging-Format portabel machen
-**Prio:** P3 · **Typ:** cleanup · **Aufwand:** S
-**Dateien:** `sdk/os_client/src/*.c`, `sdk/os_client/include/toob_network_client.h`
-
-**Problem**
-Logs nutzen `"0x%08X"` für `toob_status_t`-Werte (Enum). Die Enum-Konstanten (z.B. `0xE6601CAE`) überschreiten `INT_MAX`; der Underlying-Type des Enums ist implementierungsdefiniert. Mit `%X` (erwartet `unsigned int`) ist das formal UB-anfällig auf manchen Toolchains.
-
-**Lösung**
-- Beim Logging konsistent nach `(unsigned)status` casten und `%08X` verwenden, oder eine kleine `toob_status_to_str()`-Hilfsfunktion einführen (lesbarer als Hex).
-
-**Akzeptanzkriterien**
-- [ ] Keine Format-Spezifizierer-Warnung mehr unter `-Wformat` auf 32- und 64-bit Host-Builds.
-
----
-
-# EPIC E — Code-Hygiene (innerhalb `libtoob`)
-
-> Reine Aufräumarbeiten. Kein Verhaltensrisiko, verbessert Wartbarkeit.
-
----
-
-### LIBTOOB-040 — Dedup: `toob_ota_secure_zeroize` / `TOOB_OTA_GLITCH_DELAY`
-**Prio:** P3 · **Typ:** cleanup · **Aufwand:** S
-**Dateien:** `sdk/libtoob/toob_ota.c`, `sdk/libtoob/toob_internal.h`
-
-**Problem**
-`toob_ota.c` definiert eine **eigene** `toob_ota_secure_zeroize()` und ein **eigenes** `TOOB_OTA_GLITCH_DELAY()`, obwohl es bereits `toob_internal.h` inkludiert, das `toob_secure_zeroize()` und `TOOB_GLITCH_DELAY()` bereitstellt. Zwei Implementierungen derselben Sache in derselben Library.
-
-**Lösung**
-- `toob_ota_secure_zeroize` → `toob_secure_zeroize` (aus `toob_internal.h`) ersetzen, lokale Definition löschen.
-- `TOOB_OTA_GLITCH_DELAY` → `TOOB_GLITCH_DELAY` ersetzen, lokales Makro löschen.
-
-**Akzeptanzkriterien**
-- [ ] Keine duplizierten Zeroize-/Glitch-Delay-Definitionen mehr in `toob_ota.c`.
-- [ ] Build grün, Verhalten unverändert.
-
----
-
-### LIBTOOB-041 — Doppelte `toob_get_boot_diag`-Deklaration bereinigen
-**Prio:** P3 · **Typ:** cleanup · **Aufwand:** S
-**Datei:** `sdk/libtoob/include/libtoob.h`
-
-**Problem**
-`toob_get_boot_diag()` ist in `libtoob.h` **zweimal** deklariert (einmal im Abschnitt „Primary Feature-OS API", einmal im OTA-Daemon-Abschnitt) mit identischem Doxygen. Legal, aber sloppy und verwirrend.
-
-**Lösung**
-- Eine der beiden Deklarationen entfernen, die verbleibende im logisch passenderen Abschnitt belassen.
-
-**Akzeptanzkriterien**
-- [ ] Genau eine Deklaration von `toob_get_boot_diag()` im Header.
+### K6-T4 — Totalitätstest + Diagramm-Generator                             [M · 🟢]
+Ziel        Host-Test iteriert *alle* `{intent, event}`-Paare und beweist: kein undefinierter
+            Übergang. Build-Schritt erzeugt aus derselben Tabelle das Zustandsdiagramm für die Doku.
+Berührt     `test/host/intent_total.c`, `tools/gen_state_diagram.py`.
+Skizze
+```c
+for (int i = 0; i < N_INTENTS; i++)
+  for (int e = 0; e < N_EVENTS; e++)
+    assert(lookup(INTENT_TABLE, i, e) != NULL); /* kein Loch */
+```
+Fertig wenn Test grün; generiertes `.mermaid`/`.svg` im Doku-Ordner; CI bricht bei
+            Tabellenloch.
+Hängt an    K6-T2
 
 ---
 
-### LIBTOOB-042 — CBOR-Telemetrie-Mapping-Hacks dokumentieren/auflösen
-**Prio:** P3 · **Typ:** cleanup · **Aufwand:** S
-**Datei:** `sdk/libtoob/toob_diag.c`
+# E-K3 — Idempotente Effekt-Transaktionen (ein Executor für alle Schreibpfade)
 
-**Problem**
-`toob_get_boot_diag_cbor()` belegt `vendor_error` in **zwei** CDDL-Feldern (`uint3` und `uint4`, Kommentar: „belege vendor_error in beiden Feldern") und setzt mehrere Felder hart auf 0 (`uint5`, `uint8bool`, `uint11`), weil das C-Struct sie nicht trägt. Das ist ein stiller Schema-Workaround.
+**Warum als Drittes.** Setzt auf K6-Struktur (`stage_swap`/`stage_apply` sind schon isoliert) und
+das K5-Netz auf. Bringt K7 fast geschenkt mit (Planner liefert die Kostenbasis).
 
-**Lösung**
-- Entweder das CDDL-Schema an das tatsächliche `toob_boot_diag_t` angleichen (Felder entfernen, die nie befüllt werden), oder die fehlenden Felder ins Diag-Struct aufnehmen.
-- Mindestens: jeden Hack mit einem präzisen Kommentar versehen, warum das Feld dupliziert/genullt ist, plus TODO mit Referenz auf das Telemetrie-Spec.
+**Definition of Done (Epic).** Swap, Revert und Multi-Image sind Effekt-Listen für einen einzigen
+Executor; Recovery nach Abbruch ist „Liste nochmal ausführen"; die drei alten Resume-Buchhaltungen
+sind entfernt; der Enumerator (K5-T3) läuft grün über den neuen Executor.
 
-**Akzeptanzkriterien**
-- [ ] Kein undokumentierter Schema-Workaround mehr; entweder Schema bereinigt oder Mapping vollständig kommentiert.
+### K3-T1 — Effekt-Typ + Planner-Schnittstelle                              [M · 🔴]
+Ziel        Ein Datentyp, der jede destruktive Flash-Operation idempotent beschreibt, plus die
+            Planner-Signatur (reine Funktion, schreibt nicht).
+Berührt     `boot_effect.h` (neu).
+Skizze
+```c
+typedef enum { EFF_ERASE = 1, EFF_COPY = 2 } effect_op_t;
+typedef struct {
+  effect_op_t op;
+  uint32_t    src;       /* nur COPY */
+  uint32_t    dst;
+  uint32_t    len;
+  uint32_t    post_crc;  /* Soll-CRC von [dst, dst+len) NACH dem Effekt */
+} flash_effect_t;
+
+/* Planner: schreibt NICHTS, füllt nur die Liste. */
+typedef boot_status_t (*planner_fn_t)(const boot_platform_t*, const update_ctx_t*,
+                                      flash_effect_t *out, size_t cap, size_t *n_out);
+```
+Fertig wenn Header + `_Static_assert(sizeof(flash_effect_t) % 4 == 0)`; drei leere Planner-Stubs
+            (swap/revert/multi) linken.
+Hängt an    E0-T1
+
+### K3-T2 — Der Executor (einziger Schreibpfad im Core)                     [L · 🔴]
+Ziel        Genau eine Funktion ruft `erase`/`write`. Regel pro Effekt: Post-CRC stimmt schon →
+            überspringen (Zero-Wear + Idempotenz); sonst ausführen und per Read-Back gegen
+            `post_crc` verifizieren. WAL-Checkpoint nur den *Index* des laufenden Effekts.
+Berührt     `boot_effect.c` (neu), ersetzt Kernschleifen in `boot_swap.c`/`boot_rollback.c`/
+            `boot_multiimage.c`.
+Skizze
+```c
+boot_status_t boot_effect_execute(const boot_platform_t *p,
+                                  const flash_effect_t *fx, size_t n,
+                                  wal_entry_payload_t *txn,
+                                  uint8_t *arena, size_t arena_len) {
+  for (size_t i = 0; i < n; i++) {
+    if (p->wdt) p->wdt->kick();
+
+    /* Idempotenz-Gate: schon im Sollzustand? → skip (Resume + Zero-Wear in einem) */
+    uint32_t cur = 0;
+    if (boot_crc32_flash_stream(p, fx[i].dst, fx[i].len, arena, arena_len, &cur) == BOOT_OK
+        && cur == fx[i].post_crc)
+      continue;
+
+    /* Checkpoint VOR Destruktion (nur der Index — die Liste ist reproduzierbar) */
+    txn->delta_chunk_id = (uint32_t)i;
+    boot_status_t cp = boot_journal_append(p, txn);
+    if (cp != BOOT_OK) return cp;
+
+    boot_status_t s = (fx[i].op == EFF_ERASE)
+        ? boot_swap_erase_safe(p, fx[i].dst, fx[i].len, arena, arena_len)
+        : stream_flash_copy(p, fx[i].src, fx[i].dst, fx[i].len, arena, arena_len);
+    if (s != BOOT_OK) return s;
+
+    /* Phase-Bound Read-Back gegen post_crc (kein lokaler bool ins SECURE_REQUIRE!) */
+    uint32_t back = 0;
+    boot_status_t rb = boot_crc32_flash_stream(p, fx[i].dst, fx[i].len, arena, arena_len, &back);
+    if (rb != BOOT_OK) return rb;
+    BOOT_SECURE_REQUIRE(back == fx[i].post_crc, { return BOOT_ERR_FLASH_HW; });
+  }
+  return BOOT_OK;
+}
+```
+Fertig wenn Executor besteht K5-Enumerator über einen synthetischen 3-Effekt-Plan an *jeder*
+            Abbruchstelle; Idempotenz-Test: doppelte Ausführung derselben Liste ändert Flash
+            nach dem ersten Durchlauf nicht mehr.
+Hängt an    K3-T1, K5-T3
+
+### K3-T3 — Revert-Planner (erster echter Nutzer)                           [M · 🟡]
+Ziel        `boot_rollback_trigger_revert` wird: Header lesen + validieren → Planner baut
+            Effekt-Liste (Staging→App, sektorweise) → Executor. Die manuelle
+            `delta_chunk_id`-Fortschreibung entfällt.
+Berührt     `boot_rollback.c`.
+Fertig wenn Äquivalenztest gegen die alte Revert-Implementierung über 50 Zufalls-Images
+            (gleicher End-Flash); Enumerator grün; `rollback_compute_flash_crc32` entfernt
+            (durch E0-T1 ersetzt).
+Hängt an    K3-T2
+
+### K3-T4 — Swap-Planner                                                    [M · 🟡]
+Ziel        `boot_swap_apply` → Planner + Executor. Der Zero-Amplification-Block-Solver
+            (Sektor-Max aus src/dst/scratch) zieht in den Planner.
+Berührt     `boot_swap.c`.
+Fertig wenn Äquivalenztest + Enumerator grün; alte Swap-Schleife entfernt.
+Hängt an    K3-T3
+
+### K3-T5 — Multi-Image-Planner mit doppelter Whitelist-Prüfung            [M · 🟡]
+Ziel        `boot_multiimage_apply` → Planner + Executor. Die Region-Whitelist wird **zweimal**
+            geprüft — im Planner (Ziel-Adressen) und im Executor (jeder `dst` gegen Whitelist) —
+            womit die §5.1-Unabhängigkeit zweier Linien aus der Architektur fällt.
+Berührt     `boot_multiimage.c`, `boot_effect.c` (Whitelist-Parameter am Executor).
+Skizze
+```c
+boot_status_t boot_effect_execute_bounded(/* … */,
+    const boot_allowed_region_t *wl, size_t wl_n /* Executor prüft erneut */);
+```
+Fertig wenn Ein Test mit manipuliertem Planner-Output (dst außerhalb Whitelist) wird vom
+            Executor gefangen; Enumerator grün.
+Hängt an    K3-T4
+
+### K3-T6 — Alte Resume-Buchhaltung entfernen                               [S · 🟡]
+Ziel        Die drei bespoke `WAL_INTENT_TXN_ROLLBACK_PENDING`-Fortschritts-Logiken sind weg;
+            Recovery ist überall „Effekt-Liste neu ausführen".
+Berührt     `boot_rollback.c`, `boot_swap.c`, `boot_multiimage.c`, `boot_state.c`
+            (`_handle_rollback_flow`).
+Fertig wenn `grep -rc "delta_chunk_id" toobloader/core/` ist deutlich gesunken; Enumerator grün;
+            Netto-Zeilendiff des Epics negativ.
+Hängt an    K3-T5
 
 ---
 
-# EPIC F — `os_client` (angrenzend, **nicht** `libtoob`)
+# E-K7 — Energie-bewusste Zulassung
 
-> **Scope-Hinweis:** `os_client` sitzt *hinter* dem C-API von `libtoob` (`toob_ota_process_chunk`, `toob_get_boot_diag`) und redet **nicht** über die `.noinit`-ABI. Es ist der stärkste Rust-Kandidat der SDK, weil es untrusted Netzwerk-Input parst. Hier gelistet, weil es Teil der SDK-Auslieferung ist — aber bewusst von den `libtoob`-Tickets getrennt.
+**Warum als Anhängsel an K3.** Der Planner liefert die vollständige Effekt-Liste — ihre
+Worst-Case-Kosten sind damit *vor* dem ersten destruktiven Schreibzugriff bekannt.
 
----
+**Definition of Done (Epic).** Vor einem Swap prüft eine Zulassung, ob Erase-Budget (und wo
+verfügbar: Spannung) reichen; sonst wird per `WAL_INTENT_SLEEP_BACKOFF` vertagt und das alte
+Image gebootet.
 
-### LIBTOOB-050 — `os_client` CBOR-Manifest-Parser auditieren/härten (Rust-Kandidat)
-**Prio:** P2 · **Typ:** security/spike · **Aufwand:** M
-**Datei:** `sdk/os_client/src/toob_network_client.c`
+### K7-T1 — HAL-Kostenmetadaten                                             [S · 🔴]
+Ziel        `flash_hal_t` erhält optionale Kostenfelder; ABI-V2 bleibt kompatibel (append-only am
+            Struct-Ende, Null bedeutet „unbekannt").
+Berührt     `boot_hal.h`.
+Skizze
+```c
+/* Append-only am Ende von flash_hal_t: */
+  uint32_t erase_time_us_max;   /* Worst-Case Erase eines max_sector_size-Sektors, 0=unbekannt */
+  uint32_t write_time_us_page;  /* pro write_align-Page, 0=unbekannt */
+  /* optionaler Versorgungs-Readout (kann NULL sein): */
+  boot_status_t (*get_supply_mv)(uint32_t *mv_out);
+```
+Fertig wenn `_Static_assert(offsetof(...))` sichert Feld-Reihenfolge; ein Vendor-Port füllt die
+            Werte, alle anderen lassen sie 0 (Zulassung degradiert zu No-Op — fail-open bei
+            Unwissen, dokumentiert).
+Hängt an    E0-T2
 
-**Problem**
-`_parse_cbor_manifest()` und der HTTP-Stream verarbeiten **untrusted** Server-Input. Das ist die genuin angriffsexponierte Stelle der SDK. Aktuell C + zcbor.
+### K7-T2 — Zulassungsprüfung vor dem Swap                                  [M · 🟡]
+Ziel        Aus der K3-Effekt-Liste Worst-Case-Kosten summieren, gegen Budget prüfen, sonst
+            vertagen.
+Berührt     `boot_state.c` (vor `stage_swap`), `boot_effect.c` (Kosten-Summierer).
+Skizze
+```c
+static boot_status_t admit_or_defer(const boot_platform_t *p,
+                                    const flash_effect_t *fx, size_t n) {
+  uint64_t worst_us = effect_cost_us(p, fx, n);  /* Σ erase/write Worst-Case */
+  uint32_t mv = 0;
+  bool have_mv = p->flash->get_supply_mv && p->flash->get_supply_mv(&mv) == BOOT_OK;
 
-**Lösung (Spike + Entscheidung)**
-1. Audit des bestehenden C-Parsers: Bounds, Pflichtfeld-Erzwingung (`has_size`/`has_sha256`/`has_svn`), Integer-Overflow im Chunk-Callback (`_manifest_chunk_cb`), URL-Parsing in `rtos_http_zephyr.c`.
-2. Spike: Re-Implementierung des Parsers als Rust-`#![no_std]`-Crate, eingebunden als staticlib hinter dem bestehenden C-API. **Wichtig:** berührt **keinen** `_Static_assert` der `libtoob`-ABI, da `os_client` nicht über `.noinit` redet.
-3. Entscheidungsvorlage: Rust-Parser vs. gehärteter C-Parser, inkl. Integrationskosten in Zephyr-CMake / ESP-IDF-Component.
+  /* Erase-Budget aus Wear-Countern (Daten sind schon in der TMR): */
+  if (wear_exceeds_limit(p)) return BOOT_ERR_COUNTER_EXHAUSTED;
 
-**Akzeptanzkriterien**
-- [ ] Audit-Findings dokumentiert (mind. Bounds, Overflow, Pflichtfelder, URL-Parsing).
-- [ ] Spike-Ergebnis + Entscheidungsvorlage (Rust vs. C-Härtung) liegt vor.
-
----
-
-### LIBTOOB-051 — Optionale Rust-Wrapper-Crate über C-`libtoob` (DX-Layer)
-**Prio:** P3 · **Typ:** spike · **Aufwand:** L
-
-**Problem / Chance**
-Das stärkste Pro-Rust-Argument ist nicht Memory-Safety, sondern **Typestate**. Eine `OtaSession<Receiving> → OtaSession<Done>`-Maschine würde die Missbrauchsanfälligkeit von LIBTOOB-021 *strukturell* beseitigen (kein `process_chunk` vor `begin`, kein Re-Entry). Trait-basierte Flash-Ops (`impl FlashOps for MyFlash`) sind discoverbarer als ein „undefined symbol"-Linker-Contract.
-
-**Lösung (Spike)**
-- Dünne, **optionale** Rust-Crate über dem C-`libtoob`: idiomatische Wrapper, Typestate für die OTA-Session, Trait für die Zero-Bloat-Flash-/Crypto-Hooks.
-- Ausdrücklich **kein** Ersatz von `libtoob` — C bleibt die ABI-tragende Schicht (behält Cross-Asserts + niedrige Integrationshürde für die Rust-fremde Hälfte der Zielgruppe). Die Rust-Crate ist DX-Zuckerguss für Rust-affine Integratoren.
-
-**Akzeptanzkriterien**
-- [ ] Spike-Crate kapselt mindestens die OTA-Session als Typestate-Maschine über dem C-API.
-- [ ] Bewertung: DX-Gewinn vs. Wartungslast einer zweiten API-Oberfläche.
-
----
-
-## Empfohlene Reihenfolge (abhängigkeitsbewusst)
-
-**Sprint 1 — „Stop the bleeding" (Korrektheit + billige DX):**
-`LIBTOOB-001` (P0, trivial) → `LIBTOOB-011` (CRC-CI) → `LIBTOOB-030` (`warn_unused_result`) → `LIBTOOB-003` (Error-Kontrakte) → Hygiene `LIBTOOB-040/041`.
-
-**Sprint 2 — ABI & OTA-Robustheit:**
-`LIBTOOB-010` (Single-Source-Typ) → `LIBTOOB-021` (OTA-Context-Refactor) → darauf aufbauend `LIBTOOB-020` (Verified-Resume-Fix) → `LIBTOOB-023` (Read-Back pro Flush) → `LIBTOOB-022`.
-
-**Sprint 3 — DX-Politur & Kohärenz:**
-`LIBTOOB-012` (opaker Handoff) → `LIBTOOB-002` (Confirm-Backend-Kohärenz) → `LIBTOOB-031/032/033` → `LIBTOOB-042`.
-
-**Parallel/separat (eigenes Team, eigene Entscheidung):**
-`LIBTOOB-050` (os_client-Audit + Rust-Spike) → `LIBTOOB-051` (optionale Rust-Wrapper-Crate).
+  if (have_mv && !supply_sufficient(mv, worst_us, BOOT_SUPPLY_MARGIN_MV))
+    return BOOT_ERR_DEFER;   /* neu: nicht fatal */
+  return BOOT_OK;
+}
+```
+Fertig wenn Bei `BOOT_ERR_DEFER` wird `WAL_INTENT_SLEEP_BACKOFF` angehängt und das alte Image
+            gebootet (Test); bei fehlenden Kostendaten ist der Pfad ein No-Op (kein
+            Verhaltensbruch).
+Hängt an    K7-T1, K3-T4
 
 ---
 
-## Architektur-Merksatz für neue Mitarbeiter
+# E-K1 — Beweis-tragende Boot-Handles
 
-`libtoob` ist die **OS-Seite einer Zwei-Binary-Grenze**. Es trägt keine Glitch-kritische Logik — die sitzt im Core. Drei Kanäle: `.noinit`-Handoff (CRC-versiegelt), Flash-Slots (OS schreibt, Bootloader evaluiert/mutiert — niemals umgekehrt), und der Zero-Bloat-Linker-Contract (OS liefert Flash-/SHA-Hooks). Die Grenze lebt von **bit-exakten Typ-Layouts** und **CRC-Gleichheit**. Jede Änderung an `libtoob` muss diese drei Annahmen wahren — die Tickets in EPIC B existieren, um genau das compiler-/CI-prüfbar zu machen, statt es zu hoffen.
+**Warum parallel möglich.** Berührt nur Schnittstellen (Verify → Jump), keine Algorithmen —
+kann neben K5/K6/K3 laufen. Löst nebenbei den ungeprüften Header-Re-Read in `stage0_main.c`.
+
+**Definition of Done (Epic).** `jump_to_payload` (Stage 0) und `boot_main`s finaler Übergang
+akzeptieren nur ein versiegeltes `boot_proof_t`; Sprungziel und Verifikationsergebnis sind ein
+Datum; der rohe Header-Re-Read ist entfernt.
+
+### K1-T1 — `boot_proof_t` + Siegel-Primitive                               [M · 🔴]
+Ziel        Ein Handle-Typ + Siegel/Prüf-Funktionen; der Siegel-Schlüssel ist ein pro Boot
+            einmalig gezogener TRNG-Wert, sichtbar nur innerhalb der Verify-Übersetzungseinheit.
+Berührt     `boot_proof.h`/`.c` (neu, Core); `stage0_proof.h`/`.c` (neu, Stage 0 — eigene
+            Instanz, da Stage 0 nicht gegen Core linkt).
+Skizze
+```c
+typedef struct {
+  uint32_t image_addr, image_size, entry_point, svn;
+  uint32_t seal[2];   /* keyed checksum über die vier Felder */
+} boot_proof_t;
+
+/* seal_key: static, per Boot aus boot_random_safe() befüllt, nie exportiert. */
+void boot_proof_seal(boot_proof_t *pr, const uint32_t seal_key[4]);
+boot_status_t boot_proof_verify(const boot_proof_t *pr, const uint32_t seal_key[4]);
+```
+            Siegel = zwei unabhängige geschlüsselte Prüfsummen über dieselben Felder (Doppel-Akku
+            gegen Einzel-Bit-Fault), analog zu `constant_time_memcmp_glitch_safe`.
+Fertig wenn Unit-Test: manipuliertes Feld ODER falscher Key ⇒ `boot_proof_verify != BOOT_OK`;
+            Seal-Key wird über `boot_random_safe` gezogen (schließt die in der Review notierte
+            TRNG-Health-Lücke gleich mit).
+Hängt an    E0-T1
+
+### K1-T2 — Stage-0-Verify gibt ein Handle zurück                          [M · 🟡]
+Ziel        `stage0_try_boot_bank` befüllt `boot_proof_t` im Moment der Hash-Berechnung
+            (Entry-Point kommt aus dem *gehashten* Header) und versiegelt es bei Erfolg.
+Berührt     `stage0_main.c` (`stage0_try_boot_bank`, `main`), `stage0_verify.c`.
+Skizze
+```c
+static bool stage0_try_boot_bank(/* … */, boot_proof_t *out_proof) {
+  /* … Header lesen, hashen, Signatur prüfen … */
+  out_proof->image_addr  = bank_addr;
+  out_proof->image_size  = hdr.image_size;
+  out_proof->entry_point = hdr.entry_point;   /* aus dem SIGNIERTEN Header */
+  out_proof->svn         = /* … */;
+  boot_proof_seal(out_proof, g_seal_key);
+  return true;
+}
+```
+Fertig wenn Der zweite, rohe `flash->read(active_slot, &hdr, …)` in `main()` ist entfernt —
+            der Entry-Point stammt jetzt aus dem versiegelten Handle.
+Hängt an    K1-T1
+
+### K1-T3 — `jump_to_payload` verlangt ein gültiges Handle                  [M · 🔴]
+Ziel        Die Sprung-Primitive akzeptiert kein rohes `vector_table_addr` mehr, sondern ein
+            `boot_proof_t*`; sie prüft das Siegel unmittelbar vor dem Sprung.
+Berührt     `stage0_main.c` (`jump_to_payload`).
+Skizze
+```c
+static void __attribute__((naked)) jump_to_payload_sealed(const boot_proof_t *pr);
+/* Nicht-naked Wrapper prüft Siegel, berechnet Ziel, ruft dann den naked-Jump: */
+static void jump_gate(const boot_proof_t *pr) {
+  if (boot_proof_verify(pr, g_seal_key) != BOOT_OK) dead_halt();
+  uint32_t target = pr->image_addr + pr->entry_point;
+  /* Bounds-Recheck aus dem Handle, dann Assembler-Jump */
+  jump_to_payload_raw(target);
+}
+```
+Fertig wenn Fault-Injection-Test: ein Skip der Verifikation (per `should_inject_fault`) führt zu
+            fehlendem/ungültigem Siegel ⇒ `dead_halt` statt Sprung; Happy-Path unverändert.
+Hängt an    K1-T2
+
+### K1-T4 — Handle-Form auch für Stage-1→OS-Übergang                        [M · 🟡]
+Ziel        `boot_main`s finaler Übergang nutzt dieselbe Form: `target_out->active_entry_point`
+            wird durch ein versiegeltes Handle ersetzt, das `boot_state_run` befüllt.
+Berührt     `boot_main.c`, `boot_state.c` (Handoff-Block), `boot_types.h` (Handle im
+            `boot_target_config_t`).
+Fertig wenn Der Bounds-Block in `boot_main.c` prüft das Handle statt roher Felder; CFI-Akkus
+            bleiben als zweite Schicht (§5.1); Replay-Diff == 0.
+Hängt an    K1-T3
+
+---
+
+# E-K4 — Das Journal beweist seine eigene Geschichte
+
+**Warum spät.** Setzt ein gerätegebundenes Geheimnis voraus (aus DICE/KDM-Material); gehört in
+denselben Planungsblock wie die Identitätsarbeit. Härtet den heute „advisory" genannten
+WAL-Floor zu einer echten zweiten Linie.
+
+**Definition of Done (Epic).** Die drei sicherheitstragenden Intents (LOCKED, SVN-relevante
+TMR-Updates, CONFIRM) sind gerätegebunden verkettet; ein manipulierter oder voll-zurückgespielter
+Journal-Zustand fällt auf, sobald die eFuse-Epoche je fortgeschritten ist. Grenzen sind in
+`security_model.md` benannt.
+
+### K4-T1 — Gerätegebundenen Journal-Schlüssel ableiten                     [M · 🔴]
+Ziel        Ein Schlüssel `k_dev` aus vorhandenem Identitätsmaterial (Chip-UID +
+            Fuse-Geheimnis via KDF); Fallback-Verhalten auf Chips ohne geschützten Speicher
+            explizit definiert und dokumentiert.
+Berührt     `boot_identity.c` (neben `boot_derive_device_id`), `security_model.md`.
+Fertig wenn `k_dev` deterministisch pro Gerät; auf Chips ohne Fuse-Geheimnis degradiert die
+            Kette zu „Erkennung gegen Akteure ohne Codeausführung" (dokumentiert, nicht
+            verschwiegen).
+Hängt an    —
+
+### K4-T2 — Verkettungs-Tag am WAL-Eintrag                                  [L · 🔴]
+Ziel        Sicherheitstragende Einträge tragen `tag_n = H(k_dev, entry_n ‖ tag_{n-1})`; der
+            Sektor-Header verankert den Kettenkopf.
+Berührt     `boot_journal.h` (Feld im `wal_entry_payload_t` — nutzt `reserved`-Raum; ABI-Bump),
+            `boot_journal.c` (`append`/`reconstruct_txn`).
+Skizze
+```c
+/* Nur für sicherheitstragende Intents befüllt; sonst 0. Verankert im reserved-tail: */
+uint8_t chain_tag[16];   /* verkürztes H(k_dev, entry ‖ prev_tag) */
+```
+Fertig wenn Ein nachträglich CRC-konform manipulierter LOCKED-Eintrag wird von der
+            Ketten-Prüfung erkannt (Test); nicht-sicherheitstragende Einträge bleiben CRC-only
+            (Hash-Kosten pro Boot begrenzt).
+Hängt an    K4-T1
+
+### K4-T3 — Epochen-Anker gegen Voll-Replay                                 [M · 🟡]
+Ziel        Bei jeder TMR-Rotation wird die aktuelle eFuse-Epoche in die Kette eingebunden; ein
+            voll-zurückgespieltes altes WAL-Abbild fällt auf, sobald die Epoche fortgeschritten ist.
+Berührt     `boot_journal.c` (`update_tmr`).
+Fertig wenn Test: komplettes altes (in sich konsistentes) WAL-Abbild + fortgeschrittene Epoche
+            ⇒ Ketten-/Epochen-Mismatch erkannt; innerhalb derselben Epoche bleibt Replay
+            unentdeckt (als Grenze dokumentiert).
+Hängt an    K4-T2
+
+### K4-T4 — WAL-Floor von „advisory" zu „enforced" hochstufen              [S · 🟡]
+Ziel        Da die Kette den WAL-Zustand jetzt trägt, wird die SVN-Untergrenze aus dem WAL zur
+            belastbaren zweiten Linie neben der eFuse-Epoche.
+Berührt     `stage0_svn.c`-Kommentare, `boot_rollback.c` (`boot_rollback_verify_svn`),
+            `security_model.md` (§5.1-Unabhängigkeit).
+Fertig wenn Der Kommentar „advisory (A1)" ist durch eine belastbare Aussage ersetzt; die
+            Zwei-Linien-Unabhängigkeit ist im Modell dokumentiert.
+Hängt an    K4-T3
+
+---
+
+# E-K2 — Der Core parst keine Grammatik (Festformat-Manifest)
+
+**Warum zuletzt.** Höchster Koordinationsaufwand (Registry, Manifest-Compiler,
+Migrationsfenster), größter Einzelgewinn an Core-Minimalität. Braucht das K5-Netz, die
+K6-Struktur und einen sauberen K3-Executor als Fundament.
+
+**Definition of Done (Epic).** Der Boot-Pfad liest ein kanonisches Festformat („TBM1") über
+konstante Offsets; kein zcbor mehr im Trusted Core; CBOR/SUIT bleibt Transport-/Cloud-Hülle,
+abgestreift von libtoob (das ein volles OS unter sich hat). Migrationsfenster mit Doppel-Support.
+
+### K2-T1 — TBM1-Spezifikation                                              [M · 🔴]
+Ziel        Ein-Seiten-Spec: versionierter Header, feste Feld-Offsets, definite Längen, keine
+            optionalen Umsortierungen. Deckt alles ab, was der *Boot-Pfad* aus dem Manifest liest
+            (Signatur, Key-Index, SVN, Device-Binding, Chunk-Hashes, Image-Deskriptoren, PQC).
+Berührt     `docs/tbm1_format.md` (neu), `boot_tbm1.h` (neu, Struct-Layout + `_Static_assert`s).
+Skizze
+```c
+/* Alles little-endian, feste Offsets, keine Pointer — der "Parser" sind Feld-Reads. */
+typedef struct __attribute__((packed)) {
+  uint32_t magic;            /* 'TBM1' */
+  uint16_t version;
+  uint16_t header_len;
+  uint32_t svn;
+  uint8_t  key_index;
+  uint8_t  pqc_active;
+  uint16_t image_count;
+  uint32_t chunk_size;
+  uint32_t num_chunks;
+  uint32_t chunk_hash_off;   /* Offset in Bytes ab TBM1-Start */
+  uint32_t device_bind_off;  /* 0 = nicht vorhanden */
+  /* … definierte, feste Reihenfolge … */
+  uint8_t  sig_ed25519[64];  /* deckt [0 .. sig_off) ab */
+} tbm1_header_t;
+_Static_assert(offsetof(tbm1_header_t, sig_ed25519) == /* fix */, "TBM1 layout drift");
+```
+Fertig wenn Spec reviewt; alle heute aus dem SUIT-Objekt gelesenen Boot-Felder sind abgedeckt;
+            Layout per `_Static_assert` fixiert.
+Hängt an    —
+
+### K2-T2 — TBM1-Encoder im Manifest-Compiler / in der Registry            [L · 🔴]
+Ziel        Die Registry erzeugt TBM1 direkt aus dem Build; die Signatur deckt die TBM1-Bytes ab.
+Berührt     Registry/Manifest-Compiler (außerhalb dieses Repos), Testvektoren.
+Fertig wenn Ein Referenz-Update liegt als TBM1 + gültiger Signatur vor; Testvektoren im
+            Repo für K2-T3.
+Hängt an    K2-T1
+
+### K2-T3 — TBM1-Reader im Core (ersetzt zcbor im Boot-Pfad)               [L · 🟡]
+Ziel        `stage_parse` wird ~100 Zeilen bounds-geprüfte Feld-Reads über konstante Offsets;
+            das gesamte Pointer-Sandboxing (`is_buffer_within`-Aufrufe gegen die Arena) entfällt,
+            weil es keine parser-generierten Pointer mehr gibt.
+Berührt     `boot_state.c` (`stage_parse`, `stage_route`, PQC-Feldzugriffe), Entfernen der
+            zcbor-Abhängigkeit im Core-Build.
+Skizze
+```c
+static boot_status_t stage_parse_tbm1(update_ctx_t *ctx) {
+  ctx->platform->flash->read(ctx->open_txn->offset, ctx->arena, sizeof(tbm1_header_t));
+  const tbm1_header_t *h = (const tbm1_header_t*)ctx->arena;
+  if (h->magic != TBM1_MAGIC) return BOOT_ERR_INVALID_ARG;
+  if (h->header_len > ctx->arena_len) return BOOT_ERR_INVALID_ARG;
+  /* Chunk-Hash-Region als Offset+Länge — Bounds gegen header_len, KEIN Pointer-Sandbox nötig */
+  if (h->chunk_hash_off + h->num_chunks*32u > h->header_len) return BOOT_ERR_INVALID_ARG;
+  /* … Felder direkt übernehmen … */
+  return BOOT_OK;
+}
+```
+Fertig wenn `TOOB_MANIFEST_TBM1`-Build besteht denselben Verify-/Swap-Testvektorsatz wie der
+            zcbor-Pfad; die 53 zcbor-Voll-Ketten-Zugriffe in `boot_state.c` sind eliminiert;
+            Enumerator grün.
+Hängt an    K2-T2, K3-T4
+
+### K2-T4 — libtoob streift die Transport-Hülle ab                          [M · 🟡]
+Ziel        CBOR/SUIT bleibt auf Transport-/Cloud-Ebene; libtoob (mit OS darunter) extrahiert
+            TBM1 aus der Hülle und legt es ins Staging. Der Core sieht nur noch TBM1.
+Berührt     `sdk/libtoob/toob_ota.c`, `toob_update.c`.
+Fertig wenn Ein CBOR/SUIT-Update wird von libtoob korrekt in ein TBM1-Staging überführt;
+            End-to-End-Test (Cloud-Hülle → Boot) grün.
+Hängt an    K2-T3
+
+### K2-T5 — Migrationsfenster + zcbor-Ausbau                                [M · 🔴]
+Ziel        Doppel-Support (zcbor **und** TBM1) für ein definiertes Fenster; danach zcbor aus dem
+            Core-Build entfernt.
+Berührt     Core-Build, `boot_state.c`, `common/lib/zcbor/*` (Entfernung aus Core-Link).
+Fertig wenn Feldgeräte-Flotte migriert (Betriebsentscheidung); `grep -rl zcbor toobloader/core`
+            leer; Trusted-Core-Zeilenzahl messbar gesunken.
+Hängt an    K2-T4
+
+---
+
+## Sprint-Vorschlag (Reihenfolge, nicht Kalender)
+
+| Sprint | Inhalt | Ergebnis |
+|---|---|---|
+| S1 | E0 komplett + K5-T1/T2 | Dedup erledigt; Replay läuft |
+| S2 | K5-T3/T4/T5 | Enumerator + CBMC grün — **das Netz steht** |
+| S3 | K6-T1/T2 | Intent- & Fehlerlogik als Tabellen |
+| S4 | K6-T3/T4 | Pipeline-Tabelle + generierte CFI-Sollmenge |
+| S5 | K3-T1/T2 | Effekt-Executor, gegen Enumerator gehärtet |
+| S6 | K3-T3/T4/T5/T6 | Alle Schreibpfade auf einem Executor; Resume-Buchhaltung weg |
+| S7 | K7-T1/T2 (+ K1-T1/T2 parallel) | Energie-Zulassung; Handles beginnen |
+| S8 | K1-T3/T4 | Sprung nur mit Siegel; roher Header-Re-Read weg |
+| S9 | K4-T1..T4 (mit DICE/KDM-Block) | Journal-Kette; WAL-Floor „enforced" |
+| S10+ | K2-T1..T5 | Festformat; zcbor aus dem Core |
+
+## Messgrößen fürs Epic-Review
+
+- **Trusted-Core-Zeilen** (LoC in `toobloader/core` + `stage0`, ohne Fremdcode) — soll sinken.
+- **Zyklomatik** von `boot_state_run`, `stage_parse`, `boot_rollback_trigger_revert` — soll sinken.
+- **Anzahl Schreibpfade** (Funktionen, die `flash->write/erase` rufen) — Zielwert nach K3: **1**.
+- **Enumerator-Abdeckung** — Anteil der Flash-Schreibgrenzen mit geprüfter Nachbedingung: **100 %**.
+- **Fremdcode im Core-Link** — nach K2: zcbor entfernt.

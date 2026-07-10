@@ -57,25 +57,7 @@
  * ==============================================================================
  */
 
-/**
- * @brief O(1) Mathematisch perfekter Buffer-Boundary Check (UB-frei).
- */
-static inline bool is_buffer_within(const uint8_t *inner, size_t inner_len,
-                                    const uint8_t *outer, size_t outer_len) {
-  if (inner_len == 0 || outer_len == 0)
-    return false;
-  uintptr_t i_start = (uintptr_t)inner;
-  uintptr_t o_start = (uintptr_t)outer;
 
-  /* Wraparound Bounds-Proof */
-  if (UINTPTR_MAX - i_start < inner_len)
-    return false;
-  if (UINTPTR_MAX - o_start < outer_len)
-    return false;
-
-  return (i_start >= o_start) &&
-         ((i_start + inner_len) <= (o_start + outer_len));
-}
 
 /**
  * @brief Step 2.5: Evaluates the Cloud-Command Flash Slot.
@@ -863,9 +845,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t state_cfi_seed = 0;
-  if (platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&state_cfi_seed, sizeof(state_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&state_cfi_seed, sizeof(state_cfi_seed));
   boot_cfi_ctx_t state_cfi_ctx;
   boot_cfi_init(state_cfi_ctx, state_cfi_seed);
   boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_1);
@@ -880,6 +860,9 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   wal_tmr_payload_t current_tmr;
   boot_secure_zeroize(&open_txn, sizeof(open_txn));
   boot_secure_zeroize(&current_tmr, sizeof(current_tmr));
+
+  toob_image_header_t app_header;
+  boot_secure_zeroize(&app_header, sizeof(app_header));
 
   boot_status_t core_status = BOOT_OK;
 
@@ -1033,15 +1016,11 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
                        open_txn.intent != WAL_INTENT_UPDATE_PENDING &&
                        open_txn.intent != WAL_INTENT_TXN_BEGIN);
 
-    if (is_app_crash) {
-      BOOT_SECURE_REQUIRE(is_app_crash, {
-        goto state_cleanup;
-      });
-      current_tmr.boot_failure_counter++;
-      core_status = boot_journal_update_tmr(platform, &current_tmr);
-      if (core_status != BOOT_OK)
-        goto state_cleanup;
-    }
+  if (is_app_crash) {
+    current_tmr.boot_failure_counter++;
+    core_status = boot_journal_update_tmr(platform, &current_tmr);
+    if (core_status != BOOT_OK)
+      goto state_cleanup;
   }
 
   core_status = _handle_rollback_flow(platform, &current_tmr, &open_txn,
@@ -1080,8 +1059,6 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
    * STEP 5 - Handoff Preparation / Nonce Registration
    * ==============================================================================
    */
-  toob_image_header_t app_header;
-  boot_secure_zeroize(&app_header, sizeof(app_header));
 
   uint32_t slot_addr = target_out->boot_recovery_os ? CHIP_RECOVERY_OS_ABS_ADDR
                                                     : CHIP_APP_SLOT_ABS_ADDR;

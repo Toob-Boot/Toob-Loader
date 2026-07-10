@@ -24,6 +24,9 @@ int stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig,
     status = (platform->crypto->verify_ed25519(msg_digest, 32, sig, pubkey) == BOOT_OK) ? 0 : -1;
   }
 #elif defined(TOOB_STAGE0_VERIFY_MODE_HASH_ONLY)
+  #if !defined(TOOB_ALLOW_DEV_BYPASS)
+    #error "HASH_ONLY mode requires TOOB_ALLOW_DEV_BYPASS — do NOT ship in production!"
+  #endif
   (void)sig;
   (void)pubkey;
   (void)msg_digest;

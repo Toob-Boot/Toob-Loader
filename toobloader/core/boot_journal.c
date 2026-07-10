@@ -55,6 +55,32 @@ static uint32_t cached_write_offset = 0;
 #include "boot_ct_utils.h"
 
 /**
+ * @brief Migriert eine v1 TMR-Payload auf die aktuelle Version.
+ *
+ * Felder, die in v1 nicht existieren (stage1_svn), werden aus der
+ * Compile-Time-Konstante BOOT_STAGE1_SVN initialisiert.
+ */
+static void migrate_v1_tmr(wal_tmr_payload_t *dst,
+                           const wal_tmr_payload_v1_t *src) {
+  boot_secure_zeroize(dst, sizeof(wal_tmr_payload_t));
+  dst->struct_version = WAL_TMR_VERSION_CURRENT;
+  dst->populated_size = 56;
+  dst->primary_slot_id = src->primary_slot_id;
+  dst->active_stage1_bank = src->active_stage1_bank;
+  dst->app_svn = src->app_svn;
+  dst->boot_failure_counter = src->boot_failure_counter;
+  dst->svn_recovery_counter = src->svn_recovery_counter;
+  dst->app_slot_erase_counter = src->app_slot_erase_counter;
+  dst->staging_slot_erase_counter = src->staging_slot_erase_counter;
+  dst->swap_buffer_erase_counter = src->swap_buffer_erase_counter;
+  dst->active_nonce_lo = src->active_nonce_lo;
+  dst->active_nonce_hi = src->active_nonce_hi;
+  dst->_deprecated_kdm_sequence = src->kdm_sequence;
+  dst->_deprecated_active_kdm_slot = src->active_kdm_slot;
+  dst->stage1_svn = BOOT_STAGE1_SVN;
+}
+
+/**
  * @brief Glitch-resistente CRC-32 Sector Header Validation (Double Check
  * Pattern)
  */
@@ -344,25 +370,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
       current_active_header.sector_magic = WAL_ABI_VERSION_MAGIC_CURRENT;
       current_active_header.sequence_id = legacy_hdr->sequence_id;
       current_active_header.erase_count = legacy_hdr->erase_count;
-      
-      boot_secure_zeroize(&current_active_header.tmr_data, sizeof(wal_tmr_payload_t));
-      current_active_header.tmr_data.struct_version = WAL_TMR_VERSION_CURRENT;
-      current_active_header.tmr_data.populated_size = 56;
-      
-      current_active_header.tmr_data.primary_slot_id = legacy_hdr->tmr_data.primary_slot_id;
-      current_active_header.tmr_data.active_stage1_bank = legacy_hdr->tmr_data.active_stage1_bank;
-      current_active_header.tmr_data.app_svn = legacy_hdr->tmr_data.app_svn;
-      current_active_header.tmr_data.boot_failure_counter = legacy_hdr->tmr_data.boot_failure_counter;
-      current_active_header.tmr_data.svn_recovery_counter = legacy_hdr->tmr_data.svn_recovery_counter;
-      current_active_header.tmr_data.app_slot_erase_counter = legacy_hdr->tmr_data.app_slot_erase_counter;
-      current_active_header.tmr_data.staging_slot_erase_counter = legacy_hdr->tmr_data.staging_slot_erase_counter;
-      current_active_header.tmr_data.swap_buffer_erase_counter = legacy_hdr->tmr_data.swap_buffer_erase_counter;
-      current_active_header.tmr_data.active_nonce_lo = legacy_hdr->tmr_data.active_nonce_lo;
-      current_active_header.tmr_data.active_nonce_hi = legacy_hdr->tmr_data.active_nonce_hi;
-      current_active_header.tmr_data._deprecated_kdm_sequence = legacy_hdr->tmr_data.kdm_sequence;
-      current_active_header.tmr_data._deprecated_active_kdm_slot = legacy_hdr->tmr_data.active_kdm_slot;
-      /* P7a: Seed stage1_svn from compile-time constant. The running bootloader IS confirmed. */
-      current_active_header.tmr_data.stage1_svn = BOOT_STAGE1_SVN;
+      migrate_v1_tmr(&current_active_header.tmr_data, &legacy_hdr->tmr_data);
       
       current_active_header.header_crc32 = compute_boot_crc32(
           (const uint8_t *)&current_active_header,
@@ -405,24 +413,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
             if (s_hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
               const wal_sector_header_v1_t *legacy_shdr = (const wal_sector_header_v1_t *)&s_hdr.data;
               wal_tmr_payload_t converted_tmr;
-              boot_secure_zeroize(&converted_tmr, sizeof(wal_tmr_payload_t));
-              converted_tmr.struct_version = WAL_TMR_VERSION_CURRENT;
-              converted_tmr.populated_size = 56;
-              converted_tmr.primary_slot_id = legacy_shdr->tmr_data.primary_slot_id;
-              converted_tmr.active_stage1_bank = legacy_shdr->tmr_data.active_stage1_bank;
-              converted_tmr.app_svn = legacy_shdr->tmr_data.app_svn;
-              converted_tmr.boot_failure_counter = legacy_shdr->tmr_data.boot_failure_counter;
-              converted_tmr.svn_recovery_counter = legacy_shdr->tmr_data.svn_recovery_counter;
-              converted_tmr.app_slot_erase_counter = legacy_shdr->tmr_data.app_slot_erase_counter;
-              converted_tmr.staging_slot_erase_counter = legacy_shdr->tmr_data.staging_slot_erase_counter;
-              converted_tmr.swap_buffer_erase_counter = legacy_shdr->tmr_data.swap_buffer_erase_counter;
-              converted_tmr.active_nonce_lo = legacy_shdr->tmr_data.active_nonce_lo;
-              converted_tmr.active_nonce_hi = legacy_shdr->tmr_data.active_nonce_hi;
-              converted_tmr._deprecated_kdm_sequence = legacy_shdr->tmr_data.kdm_sequence;
-              converted_tmr._deprecated_active_kdm_slot = legacy_shdr->tmr_data.active_kdm_slot;
-              /* P7a: Seed stage1_svn from compile-time constant */
-              converted_tmr.stage1_svn = BOOT_STAGE1_SVN;
-              
+              migrate_v1_tmr(&converted_tmr, &legacy_shdr->tmr_data);
               tmr_candidates[num_candidates++] = converted_tmr;
             } else {
               tmr_candidates[num_candidates++] = s_hdr.data.tmr_data;

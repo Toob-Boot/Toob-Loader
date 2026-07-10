@@ -43,46 +43,6 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
  * ==============================================================================
  */
 
-/**
- * @brief O(1) Streaming CRC-32 Berechnung direkt aus dem Flash.
- * Ersetzt den RAM-fressenden Monolithic-Buffer durch effizientes Chunking.
- */
-static boot_status_t compute_flash_crc32(const boot_platform_t *platform,
-                                         uint32_t addr, size_t len,
-                                         uint32_t *out_crc,
-                                         uint8_t *arena, size_t arena_len) {
-  uint32_t crc = 0xFFFFFFFF;
-  size_t offset = 0;
-
-  while (offset < len) {
-    if (platform->wdt && platform->wdt->kick)
-      platform->wdt->kick();
-
-    size_t step = (len - offset > arena_len)
-                      ? arena_len
-                      : (len - offset);
-
-    boot_status_t st = platform->flash->read(addr + (uint32_t)offset, arena, (uint32_t)step);
-    if (st != BOOT_OK) {
-      boot_secure_zeroize(arena, arena_len);
-      return st;
-    }
-
-    for (size_t i = 0; i < step; i++) {
-      crc ^= arena[i];
-      for (uint8_t j = 0; j < 8; j++) {
-        crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
-      }
-    }
-    offset += step;
-  }
-
-  /* P10 Leakage Prevention */
-  boot_secure_zeroize(arena, arena_len);
-  *out_crc = ~crc;
-  return BOOT_OK;
-}
-
 
 
 /**
@@ -121,7 +81,7 @@ stream_flash_copy_and_verify(const boot_platform_t *platform, uint32_t src,
 
   /* Phase-Bound ECC Readback Verification */
   uint32_t verify_crc = 0;
-  boot_status_t st = compute_flash_crc32(platform, dest, len, &verify_crc, arena, arena_len);
+  boot_status_t st = boot_crc32_flash_stream(platform, dest, len, &verify_crc, arena, arena_len);
   if (st != BOOT_OK)
     return st;
 
@@ -372,12 +332,12 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
       /* ====================================================================
        * 1. O(1) ZERO-WEAR IDENTITY CHECK (Flash Life Extender)
        * ==================================================================== */
-      status = compute_flash_crc32(platform, current_src, block_size, &crc_src, arena, arena_len);
+      status = boot_crc32_flash_stream(platform, current_src, block_size, &crc_src, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
 
       status =
-          compute_flash_crc32(platform, current_dest, block_size, &crc_dest, arena, arena_len);
+          boot_crc32_flash_stream(platform, current_dest, block_size, &crc_dest, arena, arena_len);
       if (status != BOOT_OK)
         goto swap_cleanup;
 
@@ -445,16 +405,16 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
      * ==================================================================== */
     uint32_t phys_src = 0, phys_dest = 0, phys_scratch = 0;
 
-    status = compute_flash_crc32(platform, current_src, block_size, &phys_src, arena, arena_len);
+    status = boot_crc32_flash_stream(platform, current_src, block_size, &phys_src, arena, arena_len);
     if (status != BOOT_OK)
       goto swap_cleanup;
 
     status =
-        compute_flash_crc32(platform, current_dest, block_size, &phys_dest, arena, arena_len);
+        boot_crc32_flash_stream(platform, current_dest, block_size, &phys_dest, arena, arena_len);
     if (status != BOOT_OK)
       goto swap_cleanup;
 
-    status = compute_flash_crc32(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
+    status = boot_crc32_flash_stream(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
                                  block_size, &phys_scratch, arena, arena_len);
     if (status != BOOT_OK)
       goto swap_cleanup;

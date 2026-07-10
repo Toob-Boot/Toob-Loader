@@ -294,9 +294,7 @@ boot_status_t boot_main(const boot_platform_t *platform,
   }
 
   /* TRNG ist jetzt verfügbar: CFI-Tokens ableiten */
-  if (platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&main_cfi_seed, sizeof(main_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&main_cfi_seed, sizeof(main_cfi_seed));
   boot_cfi_init(main_cfi_ctx, main_cfi_seed);
   for (uint8_t i = 1; i < MAIN_CFI_NUM_TOKENS; i++) {
     boot_cfi_add_expected(main_cfi_ctx, i);
@@ -424,7 +422,10 @@ init_success:
     }
   }
 
-  BOOT_SECURE_REQUIRE(bounds_ok, { status = BOOT_ERR_FLASH_BOUNDS; goto panic_fallthrough; });
+  if (boot_secure_confirm(bounds_ok ? BOOT_OK : BOOT_ERR_FLASH_BOUNDS) != BOOT_OK) {
+    status = BOOT_ERR_FLASH_BOUNDS;
+    goto panic_fallthrough;
+  }
 
   boot_cfi_step(main_cfi_ctx, MAIN_CFI_SLOT_BOUNDS);
 
@@ -489,7 +490,10 @@ init_success:
 
   boot_secure_zeroize(&local_handoff, sizeof(local_handoff));
 
-  BOOT_SECURE_REQUIRE(ram_ok, { status = BOOT_ERR_VERIFY; goto panic_fallthrough; });
+  if (boot_secure_confirm(ram_ok ? BOOT_OK : BOOT_ERR_VERIFY) != BOOT_OK) {
+    status = BOOT_ERR_VERIFY;
+    goto panic_fallthrough;
+  }
 
   boot_cfi_step(main_cfi_ctx, MAIN_CFI_SLOT_HANDOFF);
 

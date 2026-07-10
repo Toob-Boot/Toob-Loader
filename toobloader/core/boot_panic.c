@@ -202,9 +202,7 @@ session_reset:
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t panic_cfi_seed = 0;
-  if (platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed));
   boot_cfi_ctx_t panic_cfi_ctx;
   boot_cfi_init(panic_cfi_ctx, panic_cfi_seed);
   boot_cfi_add_expected(panic_cfi_ctx, PANIC_CFI_SLOT_AUTH);
@@ -585,12 +583,11 @@ session_reset:
         aligned_len += padding;
       }
 
-      bool bounds_ok =
+      BOOT_SECURE_REQUIRE(
           (aligned_len <= CHIP_APP_SLOT_SIZE) &&
           (flash_offset <= (CHIP_APP_SLOT_SIZE - aligned_len)) &&
-          (CHIP_STAGING_SLOT_ABS_ADDR <= (UINT32_MAX - CHIP_APP_SLOT_SIZE));
-
-      BOOT_SECURE_REQUIRE(bounds_ok, {
+          (CHIP_STAGING_SLOT_ABS_ADDR <= (UINT32_MAX - CHIP_APP_SLOT_SIZE)),
+      {
         boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
         goto session_reset;
       });

@@ -149,17 +149,16 @@ static bool stage0_try_boot_bank(const boot_platform_t *platform,
     return false;
   }
 
-  /* 6. P7a: SVN Floor Gate
-   * Stage 1 has no embedded SVN in its header. The floor is enforced
-   * by the eFuse epoch (hard) + WAL-persisted stage1_svn (advisory).
-   * The BOOT_STAGE1_SVN compile constant represents THIS binary's SVN.
-   * Bank is eligible iff its SVN >= floor. Since Stage 0 cannot read
-   * the candidate's SVN from its binary, we check the persisted floor:
-   * the floor was set when the image was installed via the update pipeline.
-   * A bank that was installed correctly will have passed the gate at install time. */
-  if (BOOT_STAGE1_SVN < svn_floor) {
-    return false;
-  }
+  /* P7a: Stage-1 Anti-Rollback — INSTALL-TIME enforcement only.
+   *
+   * Stage 0 cannot read the candidate's SVN from its binary — both banks
+   * share the same BOOT_STAGE1_SVN compile-time constant, so a per-bank
+   * comparison here is structurally a no-op. Anti-rollback for Stage 1 is
+   * enforced by boot_rollback_verify_svn(ROLLBACK_TARGET_STAGE1) in the
+   * update pipeline at install time, and by the eFuse epoch (hard floor).
+   *
+   * A bank that was installed correctly will have passed the gate at that
+   * point. Removing this dead check to avoid false confidence. */
 
   return true;
 }

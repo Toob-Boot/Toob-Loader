@@ -47,32 +47,6 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 #define VERIFY_CFI_SLOT_5_SKIP    6
 #define VERIFY_CFI_NUM_TOKENS     7
 
-/**
- * @brief O(1) Mathematisch perfekter Buffer-Boundary Check (UB-frei).
- * Verhindert "Anchored Payload" CVEs. Arbeitet via uintptr_t Addition,
- * um Integer/Pointer Wraparounds auf 32/64-bit Architekturen absolut
- * auszuschließen.
- */
-static inline bool is_buffer_within(const uint8_t *inner, size_t inner_len,
-                                    const uint8_t *outer, size_t outer_len) {
-  if (inner_len == 0 || outer_len == 0)
-    return false;
-
-  uintptr_t i_start = (uintptr_t)inner;
-  uintptr_t o_start = (uintptr_t)outer;
-
-  /* Wraparound Proof: Kann die Länge den Addressraum sprengen? */
-  if (UINTPTR_MAX - i_start < inner_len)
-    return false;
-  if (UINTPTR_MAX - o_start < outer_len)
-    return false;
-
-  uintptr_t i_end = i_start + inner_len;
-  uintptr_t o_end = o_start + outer_len;
-
-  /* Liegt der innere Buffer mathematisch komplett im äußeren? */
-  return (i_start >= o_start) && (i_end <= o_end);
-}
 
 /**
  * @brief O(1) Mathematical Zero-Buffer Verification (Glitch Protected)
@@ -107,9 +81,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t verify_cfi_seed = 0;
-  if (platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&verify_cfi_seed, sizeof(verify_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&verify_cfi_seed, sizeof(verify_cfi_seed));
   boot_cfi_ctx_t verify_cfi_ctx;
   boot_cfi_init(verify_cfi_ctx, verify_cfi_seed);
   boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_1);

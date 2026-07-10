@@ -101,7 +101,8 @@ static boot_status_t load_active_cloud_key(const boot_platform_t *platform,
 
     /* Verify KDM signature against Root Key */
     boot_status_t sig_stat = platform->crypto->verify_ed25519(
-        (const uint8_t *)&kdm, 36, kdm.signature_ed25519, root_pubkey);
+        (const uint8_t *)&kdm, offsetof(toob_kdm_t, signature_ed25519),
+        kdm.signature_ed25519, root_pubkey);
     boot_secure_zeroize(root_pubkey, 32);
 
     if (boot_secure_confirm(sig_stat) == BOOT_OK) {
@@ -141,9 +142,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t cmd_cfi_seed = 0;
-  if (platform && platform->crypto && platform->crypto->random) {
-    platform->crypto->random((uint8_t *)&cmd_cfi_seed, sizeof(cmd_cfi_seed));
-  }
+  boot_random_safe(platform, (uint8_t *)&cmd_cfi_seed, sizeof(cmd_cfi_seed));
   boot_cfi_ctx_t cmd_cfi_ctx;
   boot_cfi_init(cmd_cfi_ctx, cmd_cfi_seed);
   boot_cfi_add_expected(cmd_cfi_ctx, CMD_CFI_SLOT_PARSE);
@@ -291,8 +290,8 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     }
 
     boot_status_t kdm_sig = platform->crypto->verify_ed25519(
-        (const uint8_t *)&new_kdm, 36, new_kdm.signature_ed25519,
-        rotate_root_key);
+        (const uint8_t *)&new_kdm, offsetof(toob_kdm_t, signature_ed25519),
+        new_kdm.signature_ed25519, rotate_root_key);
     boot_secure_zeroize(rotate_root_key, 32);
 
     if (boot_secure_confirm(kdm_sig) != BOOT_OK) {

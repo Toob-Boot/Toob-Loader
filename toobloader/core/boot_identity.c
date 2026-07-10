@@ -42,7 +42,7 @@ boot_status_t boot_derive_device_id(const boot_platform_t *platform, uint8_t out
 
     /* 3. Domain Separator */
     const char domain_separator[] = "toob-device-id-v1";
-    size_t sep_len = 17;
+    size_t sep_len = sizeof(domain_separator) - 1;
 
     /* 4. Iterative Hashing (O(1) memory footprint) */
     uint8_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
