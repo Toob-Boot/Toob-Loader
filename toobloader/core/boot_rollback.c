@@ -32,6 +32,7 @@
 #include "boot_panic.h"
 #include "boot_secure_zeroize.h"
 #include "boot_swap.h"
+#include "boot_effect.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -129,7 +130,13 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
   /* 3. MATHEMATISCHER GLITCH-BEWEIS (Voltage Skip Protection)
    * Verweigert Downgrades rigoros. Identische Versionen (Re-Flashes) sind für
    * Reparaturen zulässig. Statt einem simplen Branch (manifest < persisted)
-   * nutzen wir das O(1) Double-Check Pattern. */
+   * nutzen wir das O(1) Double-Check Pattern.
+   *
+   * K4: WAL-SVN is now chain-backed (device-bound hash chain).
+   * A2 = eFuse monotonic counter (hardware root of trust).
+   * A1 = WAL-persisted SVN (integrity enforced via K4 chain_tag).
+   * Both lines are independently verified — compromise of one
+   * does not weaken the other. */
   bool valid_wal = (manifest_svn >= persisted_wal_svn);
   bool valid_efuse = (manifest_svn >= efuse_epoch);
 
@@ -364,12 +371,15 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
       goto revert_cleanup;
   }
 
-  /* P10 Mathematical Loop Guard: Verhindert Endlosschleifen ohne Magic Numbers!
-   */
+  /* P10 Mathematical Loop Guard: Verhindert Endlosschleifen ohne Magic Numbers! */
   const uint32_t MAX_LOOP_GUARD = (CHIP_FLASH_TOTAL_SIZE / 64) + 100;
   uint32_t loop_iter = 0;
 
-  /* 4. ZERO-ALLOCATION 1-Way Copy */
+  boot_allowed_region_t whitelist[1] = {
+      {CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE}
+  };
+
+  /* 4. ZERO-ALLOCATION 1-Way Copy (Planned & Executed) */
   while (current_offset < backup_header.image_size) {
     if (++loop_iter > MAX_LOOP_GUARD) {
       status = BOOT_ERR_FLASH_HW; /* Anti-Endless-Loop Guard Trap */
@@ -441,8 +451,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
         if (platform->wdt && platform->wdt->kick)
           platform->wdt->kick();
 
-        /* Splitten der Arena in zwei alignte Hälften für Source/Dest
-         * Check */
+        /* Splitten der Arena in zwei alignte Hälften für Source/Dest Check */
         size_t step = (block_size - chk_off > half_arena)
                           ? half_arena
                           : (block_size - chk_off);
@@ -456,8 +465,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
           break;
         }
 
-        /* Glitch-Shielded Evaluation um Exploit-Bypasses der Reparatur zu
-         * stoppen! */
+        /* Glitch-Shielded Evaluation um Exploit-Bypasses der Reparatur zu stoppen! */
         if (constant_time_memcmp_glitch_safe(buf_dst, buf_src, step) !=
             BOOT_OK) {
           is_identical = false;
@@ -466,8 +474,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
         chk_off += (uint32_t)step;
       }
 
-      /* Radikal nullifizieren, damit keine Krypto-Residuen den nachfolgenden
-       * SPI Read verfälschen! */
+      /* Radikal nullifizieren, damit keine Krypto-Residuen den nachfolgenden SPI Read verfälschen! */
       boot_secure_zeroize(arena, arena_len);
 
       if (is_identical) {
@@ -478,66 +485,26 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
     }
 
     /* ====================================================================
-     * 4.b Physikalische Wiederherstellung & WAL-Checkpointing
+     * 4.b Flash Effect Planning & Execution
      * ==================================================================== */
+    flash_effect_t fx[2];
+    size_t planned_n = 0;
+    status = boot_rollback_plan_chunk(platform, current_offset, (uint32_t)block_size, crc_src, fx, 2, &planned_n);
+    if (status != BOOT_OK)
+      goto revert_cleanup;
 
-    /* WAL Checkpoint VOR der Destruktion des App-Sektors setzen! */
+    /* WAL Checkpoint VOR der Destruktion des App-Sektors setzen! (P10 Tearing Guard) */
     pending_intent.delta_chunk_id = current_offset;
     status = boot_journal_append(platform, &pending_intent);
     if (status != BOOT_OK)
       goto revert_cleanup;
 
-    /* Hardware Erase mit WDT Protection (Tearing-Tracked) */
-    status = boot_swap_erase_safe(platform, dst, block_size);
+    status = boot_effect_execute(platform, fx, planned_n, whitelist, 1, arena, arena_len);
     if (status != BOOT_OK)
       goto revert_cleanup;
+
     physical_app_erases +=
         (uint32_t)((block_size / dst_sec_size > 0) ? (block_size / dst_sec_size) : 1);
-
-    /* ====================================================================
-     * 4.c Chunk-weiser Copy & Phase-Bound Verify (ECC-Proof)
-     * ==================================================================== */
-    uint32_t wr_off = 0;
-    while (wr_off < block_size) {
-      if (platform->wdt && platform->wdt->kick)
-        platform->wdt->kick();
-      size_t step = (block_size - wr_off > arena_len)
-                        ? arena_len
-                        : (block_size - wr_off);
-
-      /* Lese Source in gesamte Arena */
-      status = platform->flash->read(src + wr_off, arena, step);
-      if (status != BOOT_OK)
-        goto revert_cleanup;
-
-      /* Phase-Bound CRC der Source für diesen Step */
-      uint32_t step_src_crc = compute_boot_crc32(arena, step);
-
-      /* Schreibe Target */
-      status = platform->flash->write(dst + wr_off, arena, step);
-      if (status != BOOT_OK)
-        goto revert_cleanup;
-
-      /* PHASE-BOUND GHOST-MATCH PREVENTION FIX:
-       * Zwingendes Nullen der Arena *vor* dem Read-Back beweist physikalisch,
-       * dass der Vendor-Treiber uns nicht einfach den RAM Cache validiert,
-       * sondern tatsächlich mit dem SPI-Flash gesprochen hat! */
-      boot_secure_zeroize(arena, step);
-
-      /* Lese Dest zurück und prüfe ECC-Integrität! */
-      status = platform->flash->read(dst + wr_off, arena, step);
-      if (status != BOOT_OK)
-        goto revert_cleanup;
-
-      uint32_t step_dst_crc = compute_boot_crc32(arena, step);
-
-      BOOT_SECURE_REQUIRE(step_src_crc == step_dst_crc, {
-        status = BOOT_ERR_FLASH_HW; /* FATAL: Bit-Rot bei Hardware Write detektiert! */
-        goto revert_cleanup;
-      });
-
-      wr_off += (uint32_t)step;
-    }
 
     current_offset += (uint32_t)block_size;
   }
@@ -581,4 +548,30 @@ revert_cleanup:
   boot_secure_zeroize(&backup_header, sizeof(backup_header));
 
   return status;
+}
+
+boot_status_t boot_rollback_plan_chunk(const boot_platform_t *platform,
+                                       uint32_t current_offset, uint32_t block_size,
+                                       uint32_t crc_src,
+                                       flash_effect_t *out_fx, size_t cap, size_t *n_out) {
+  (void)platform;
+  if (cap < 2) return BOOT_ERR_INVALID_ARG;
+
+  uint32_t src = CHIP_STAGING_SLOT_ABS_ADDR + current_offset;
+  uint32_t dst = CHIP_APP_SLOT_ABS_ADDR + current_offset;
+
+  out_fx[0].op = EFF_ERASE;
+  out_fx[0].src = 0;
+  out_fx[0].dst = dst;
+  out_fx[0].len = block_size;
+  out_fx[0].post_crc = boot_effect_compute_erased_crc(block_size);
+
+  out_fx[1].op = EFF_COPY;
+  out_fx[1].src = src;
+  out_fx[1].dst = dst;
+  out_fx[1].len = block_size;
+  out_fx[1].post_crc = crc_src;
+
+  *n_out = 2;
+  return BOOT_OK;
 }

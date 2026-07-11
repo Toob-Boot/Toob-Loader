@@ -44,4 +44,6 @@ void mock_flash_set_fail_limit(uint32_t write_count_limit);
  */
 void mock_flash_set_bitrot(uint32_t addr, uint8_t value);
 
+void mock_flash_set_supply_mv(uint32_t mv);
+
 #endif /* MOCK_FLASH_H */

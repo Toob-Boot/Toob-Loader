@@ -40,12 +40,18 @@ void boot_diag_set_boot_time(uint32_t time_ms);
 void boot_diag_set_error(boot_status_t error, uint32_t vendor_fault);
 
 /**
- * @brief Transfers security and identity metadata from the SUIT manifest.
+ * @brief Transfers security and identity metadata from the TBM1 manifest.
  * @param svn The Current Security Version Number.
  * @param key_idx The eFuse Epoch Index of the active key.
  * @param sbom_hash The 32-byte SHA-256 digest of the SBOM.
+ * @param build_number CI build number.
+ * @param fw_ver_major Semantic version major.
+ * @param fw_ver_minor Semantic version minor.
+ * @param fw_ver_patch Semantic version patch.
  */
-void boot_diag_set_security_meta(uint32_t svn, uint32_t key_idx, const uint8_t *sbom_hash);
+void boot_diag_set_security_meta(uint32_t svn, uint32_t key_idx, const uint8_t *sbom_hash,
+                                 uint32_t build_number, uint16_t fw_ver_major,
+                                 uint16_t fw_ver_minor, uint16_t fw_ver_patch);
 
 /**
  * @brief Sets the amount of encountered edge recovery attempts.

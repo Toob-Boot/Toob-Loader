@@ -15,6 +15,6 @@
  * @return BOOT_OK wenn erfolgeich. Das Vendor-spezifische Startup-Skript (Assembly/C) 
  *         wertet target_out aus und triggert den physischen PC-Jump.
  */
-boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *target_out);
+boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *target_out, const uint32_t seal_key[4]);
 
 #endif /* BOOT_MAIN_H */

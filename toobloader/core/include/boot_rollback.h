@@ -42,4 +42,11 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform, const w
 boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
                                            uint8_t *arena, size_t arena_len);
 
+#include "boot_effect.h"
+
+boot_status_t boot_rollback_plan_chunk(const boot_platform_t *platform,
+                                       uint32_t current_offset, uint32_t block_size,
+                                       uint32_t crc_src,
+                                       flash_effect_t *out_fx, size_t cap, size_t *n_out);
+
 #endif /* BOOT_ROLLBACK_H */

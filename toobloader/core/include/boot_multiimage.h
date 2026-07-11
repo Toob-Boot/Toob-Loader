@@ -61,6 +61,8 @@ typedef struct __attribute__((aligned(8))) {
  * @return BOOT_OK bei komplettem Erfolg, Error-Code bei
  * Glitch/Bounds-Breach/HW-Fault.
  */
+#include "boot_effect.h"
+
 boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
                                     uint32_t staging_base,
                                     const boot_component_t *components,
@@ -69,5 +71,11 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
                                     uint32_t num_regions,
                                     wal_entry_payload_t *open_txn,
                                     uint8_t *arena, size_t arena_len);
+
+boot_status_t boot_multiimage_plan_component(const boot_platform_t *platform,
+                                             uint32_t staging_base,
+                                             const boot_component_t *comp,
+                                             uint32_t src_crc,
+                                             flash_effect_t *out_fx, size_t cap, size_t *n_out);
 
 #endif /* TOOB_BOOT_MULTIIMAGE_H */

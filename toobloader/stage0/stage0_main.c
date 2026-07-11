@@ -14,6 +14,9 @@
 #include "boot_types.h"
 #include "stage0_crypto.h"
 #include "boot_fih.h"
+#include "boot_proof.h"
+
+static uint32_t g_seal_key[4];
 
 extern uint32_t stage0_get_active_slot(const boot_platform_t *platform);
 extern uint32_t stage0_evaluate_tentative(const boot_platform_t *platform,
@@ -82,7 +85,7 @@ static void __attribute__((naked)) jump_to_payload(uint32_t vector_table_addr) {
  */
 static bool stage0_try_boot_bank(const boot_platform_t *platform,
                                  uint32_t bank_addr, uint8_t confirmed_dslc,
-                                 uint32_t svn_floor) {
+                                 uint32_t svn_floor, boot_proof_t *out_proof) {
   (void)confirmed_dslc; /* Used only with TOOB_ALLOW_DEV_BYPASS */
 
   /* 1. Read and validate header */
@@ -149,16 +152,14 @@ static bool stage0_try_boot_bank(const boot_platform_t *platform,
     return false;
   }
 
-  /* P7a: Stage-1 Anti-Rollback — INSTALL-TIME enforcement only.
-   *
-   * Stage 0 cannot read the candidate's SVN from its binary — both banks
-   * share the same BOOT_STAGE1_SVN compile-time constant, so a per-bank
-   * comparison here is structurally a no-op. Anti-rollback for Stage 1 is
-   * enforced by boot_rollback_verify_svn(ROLLBACK_TARGET_STAGE1) in the
-   * update pipeline at install time, and by the eFuse epoch (hard floor).
-   *
-   * A bank that was installed correctly will have passed the gate at that
-   * point. Removing this dead check to avoid false confidence. */
+  /* K1-T2: Populate and seal the proof handle */
+  if (out_proof) {
+    out_proof->image_addr = bank_addr;
+    out_proof->image_size = hdr.image_size;
+    out_proof->entry_point = hdr.entry_point;
+    out_proof->svn = svn_floor;
+    boot_proof_seal(out_proof, g_seal_key);
+  }
 
   return true;
 }
@@ -176,6 +177,11 @@ int main(void) {
     platform->crypto->init();
   if (platform->wdt)
     platform->wdt->init(BOOT_WDT_TIMEOUT_MS);
+
+  /* P10 Rule: Secure Initialization of the Boot-Proof Seal Key using TRNG */
+  if (boot_random_safe(platform, (uint8_t *)g_seal_key, sizeof(g_seal_key)) != BOOT_OK) {
+    while (1) { BOOT_GLITCH_DELAY(); } /* TRNG Failure - Starve watchdog */
+  }
 
   /* 1.5 DSLC Majority Vote Gate (Phase 2) */
   uint8_t dslc_reads[5];
@@ -230,29 +236,30 @@ int main(void) {
   uint32_t wal_stage1_svn = stage0_get_stage1_svn(platform);
 
   /* P7a: Determine the effective Anti-Rollback floor.
-   * eFuse is the hard floor (A2 defense), WAL is advisory (A1 defense).
+   * eFuse is the hard floor (A2 defense), WAL is enforced (A1 defense, K4 chain-backed).
    * Use the higher of the two as the combined floor for defense-in-depth. */
   uint32_t svn_floor = (wal_stage1_svn > efuse_epoch) ? wal_stage1_svn : efuse_epoch;
+
+  boot_proof_t proof;
+  boot_secure_zeroize(&proof, sizeof(proof));
 
   /* 3-8. Per-Bank Verification (Signature + SVN)
    * Try preferred bank first. If ineligible, try the fallback bank.
    * If neither bank passes: Rescue-Pfad (boot_panic). */
-  if (!stage0_try_boot_bank(platform, active_slot, confirmed_dslc, svn_floor)) {
+  if (!stage0_try_boot_bank(platform, active_slot, confirmed_dslc, svn_floor, &proof)) {
     /* Preferred bank ineligible — try fallback */
     uint32_t fallback_slot = (active_slot == CHIP_STAGE1A_ABS_ADDR)
                                  ? CHIP_STAGE1B_ABS_ADDR
                                  : CHIP_STAGE1A_ABS_ADDR;
-    if (!stage0_try_boot_bank(platform, fallback_slot, confirmed_dslc, svn_floor)) {
+    if (!stage0_try_boot_bank(platform, fallback_slot, confirmed_dslc, svn_floor, &proof)) {
       /* No eligible bank → Rescue (erholbar, nicht permanent brick) */
       boot_panic(platform, BOOT_ERR_DOWNGRADE);
     }
     active_slot = fallback_slot;
   }
 
-  /* Re-read the validated header for the entry point */
-  toob_image_header_t hdr __attribute__((aligned(8)));
-  if (platform->flash->read(active_slot, (uint8_t *)&hdr, sizeof(hdr)) !=
-      BOOT_OK) {
+  /* Siegelprüfung direkt vor dem Jump */
+  if (boot_proof_verify(&proof, g_seal_key) != BOOT_OK) {
     dead_halt();
   }
 
@@ -272,7 +279,7 @@ int main(void) {
   /* P10 FIX: Jump Target muss weiterhin payload_addr + hdr.entry_point (also active_slot + hdr.entry_point) bleiben, 
    * da das Image relativ zum Slot-Start inkl. Header kompiliert wird. */
   __asm__ volatile("" ::: "memory");
-  jump_to_payload(active_slot + hdr.entry_point);
+  jump_to_payload(proof.image_addr + proof.entry_point);
 
   /* Fallback: jump_to_payload should never return */
   while (1) {

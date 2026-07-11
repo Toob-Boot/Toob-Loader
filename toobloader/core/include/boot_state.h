@@ -10,6 +10,7 @@
 
 #include "boot_hal.h"
 #include "boot_types.h"
+#include "boot_proof.h"
 
 /**
  * @brief The resolved target configuration for boot_main to execute.
@@ -17,8 +18,7 @@
  * zuvor in boot_main() sauber gerufen werden kann.
  */
 typedef struct {
-    uint32_t active_entry_point;  /**< Physikalischer Flash-Offset des OS Vector Tables */
-    uint32_t active_image_size;   /**< Für XIP Bounds Verifikation via Stage 0 / MPU */
+    boot_proof_t proof;           /**< Sealed boot proof carrying address, size, entry, and svn */
     uint32_t net_search_accum_ms; /**< Extrahierter Netzwerk-Suchzeit Akkumulator */
     uint32_t resume_offset;       /**< Extrahierter Delta-Resume-Checkpoint */
     uint64_t generated_nonce;     /**< Dem OS bereitzustellende Anti-Replay Nonce */
@@ -33,10 +33,12 @@ typedef struct {
  *
  * @param platform The initialized hardware platform structs.
  * @param target_out Populated with the entry_point and nonce for the OS jump.
+ * @param seal_key The random key used to seal the target proof handle.
  * @return BOOT_OK on stable resolution, BOOT_ERR_* otherwise (which triggers panic/rescue).
  */
 boot_status_t boot_state_run(const boot_platform_t *platform,
                              boot_target_config_t *target_out,
+                             const uint32_t seal_key[4],
                              uint8_t *arena, size_t arena_len);
 
 /*

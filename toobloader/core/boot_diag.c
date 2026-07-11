@@ -28,9 +28,16 @@ void boot_diag_set_error(boot_status_t error, uint32_t vendor_fault) {
     toob_diag_state.vendor_error = vendor_fault;
 }
 
-void boot_diag_set_security_meta(uint32_t svn, uint32_t key_idx, const uint8_t *sbom_hash) {
+void boot_diag_set_security_meta(uint32_t svn, uint32_t key_idx, const uint8_t *sbom_hash,
+                                 uint32_t build_number, uint16_t fw_ver_major,
+                                 uint16_t fw_ver_minor, uint16_t fw_ver_patch) {
     toob_diag_state.current_svn = svn;
     toob_diag_state.active_key_index = key_idx;
+    toob_diag_state.build_number = build_number;
+    toob_diag_state.fw_ver_major = fw_ver_major;
+    toob_diag_state.fw_ver_minor = fw_ver_minor;
+    toob_diag_state.fw_ver_patch = fw_ver_patch;
+    boot_secure_zeroize(toob_diag_state._reserved_diag, sizeof(toob_diag_state._reserved_diag));
     if (sbom_hash) {
         for (size_t i = 0; i < 32; i++) {
             toob_diag_state.sbom_digest[i] = sbom_hash[i];

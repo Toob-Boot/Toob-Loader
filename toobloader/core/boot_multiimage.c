@@ -27,6 +27,7 @@
 #include "boot_crc32.h"
 #include "boot_panic.h"
 #include "boot_secure_zeroize.h"
+#include "boot_effect.h"
 #include <string.h>
 
 /* P5: Arena is now passed explicitly by the orchestrator */
@@ -205,107 +206,61 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
       continue;
     }
 
-    /* 3. Hardware Erase für die Peripherie (Abstrahiert durch HAL) */
-    uint32_t current_erase_addr = comp.target_addr;
-    uint32_t erase_end = comp.target_addr + comp.image_size;
-    uint32_t e_loop = 0;
+    /* 3. CRC des Source-Images im Staging-Slot berechnen */
+    uint32_t src_crc = 0;
+    final_status = boot_crc32_flash_stream(platform, staging_base + comp.staging_offset, comp.image_size, &src_crc, stream_buf, half_stream);
+    if (final_status != BOOT_OK)
+      goto multi_cleanup;
 
-    while (current_erase_addr < erase_end) {
-      if (++e_loop > 100000) {
-        final_status = BOOT_ERR_FLASH_HW;
-        goto multi_cleanup;
-      }
-      if (platform->wdt && platform->wdt->kick)
-        platform->wdt->kick();
+    /* 4. Flash-Effekte planen und ausführen */
+    flash_effect_t fx[2];
+    size_t planned_n = 0;
+    final_status = boot_multiimage_plan_component(platform, staging_base, &comp, src_crc, fx, 2, &planned_n);
+    if (final_status != BOOT_OK)
+      goto multi_cleanup;
 
-      size_t sec_size = 0;
-      if (platform->flash->get_sector_size(current_erase_addr, &sec_size) !=
-              BOOT_OK ||
-          sec_size == 0) {
-        final_status = BOOT_ERR_FLASH_HW;
-        goto multi_cleanup;
-      }
-      if (platform->flash->erase_sector(current_erase_addr) != BOOT_OK) {
-        final_status = BOOT_ERR_FLASH_HW;
-        goto multi_cleanup;
-      }
-      if (UINT32_MAX - current_erase_addr < sec_size) {
-        final_status = BOOT_ERR_FLASH_BOUNDS;
-        goto multi_cleanup; /* Wrap-Proof */
-      }
-      current_erase_addr += (uint32_t)sec_size;
-    }
+    final_status = boot_effect_execute(platform, fx, planned_n, whitelist, num_regions, stream_buf, half_stream);
+    if (final_status != BOOT_OK)
+      goto multi_cleanup;
 
-    /* 4. O(1) Streaming Copy & On-the-Fly Hashing */
-    uint32_t written = 0;
+    /* 5. Kryptografische Signatur des geschriebenen Images verifizieren */
     boot_secure_zeroize(hash_ctx, ctx_size);
     if (platform->crypto->hash_init(hash_ctx, ctx_size) != BOOT_OK) {
       final_status = BOOT_ERR_CRYPTO;
       goto multi_cleanup;
     }
 
-    while (written < comp.image_size) {
+    uint32_t hashed_len = 0;
+    while (hashed_len < comp.image_size) {
       if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
-      size_t step = (comp.image_size - written > half_stream)
+      size_t step = (comp.image_size - hashed_len > half_stream)
                         ? half_stream
-                        : (comp.image_size - written);
+                        : (comp.image_size - hashed_len);
 
-      uint32_t src_addr = staging_base + comp.staging_offset + written;
-      uint32_t dst_addr = comp.target_addr + written;
-
-      /* Read from Staging Archive */
-      if (platform->flash->read(src_addr, stream_buf, step) != BOOT_OK) {
+      if (platform->flash->read(comp.target_addr + hashed_len, stream_buf, step) != BOOT_OK) {
         final_status = BOOT_ERR_FLASH_HW;
         goto multi_cleanup;
       }
 
-      /* Write to Peripheral Address (VASR Routing) */
-      if (platform->flash->write(dst_addr, stream_buf, step) != BOOT_OK) {
-        final_status = BOOT_ERR_FLASH_HW;
-        goto multi_cleanup;
-      }
-
-      /* PHASE-BOUND PHANTOM-READ-BACK DEFENSE
-       * Zwingt die Peripherie, die geschriebenen Daten via SPI wieder
-       * auszuspucken! */
-      uint8_t *rb_buf = stream_buf + half_stream;
-      boot_secure_zeroize(rb_buf, step); /* TOCTOU Proof */
-
-      if (platform->flash->read(dst_addr, rb_buf, step) != BOOT_OK) {
-        final_status = BOOT_ERR_FLASH_HW;
-        goto multi_cleanup;
-      }
-
-      if (constant_time_memcmp_glitch_safe(stream_buf, rb_buf, step) !=
-          BOOT_OK) {
-        final_status = BOOT_ERR_FLASH_HW;
-        goto multi_cleanup; /* Tearing auf dem SPI-Bus der Peripherie! */
-      }
-
-      /* Update Stream Hash ONLY on Read-Back Buffer to ensure HW integrity! */
-      if (platform->crypto->hash_update(hash_ctx, rb_buf, step) != BOOT_OK) {
+      if (platform->crypto->hash_update(hash_ctx, stream_buf, step) != BOOT_OK) {
         final_status = BOOT_ERR_CRYPTO;
         goto multi_cleanup;
       }
-
-      written += (uint32_t)step;
+      hashed_len += (uint32_t)step;
     }
 
-    /* 5. Verifikation des fertiggestellten Peripherie-Images */
     uint8_t final_hash[32] __attribute__((aligned(8)));
     size_t d_len = 32;
-    if (platform->crypto->hash_finish(hash_ctx, final_hash, &d_len) !=
-            BOOT_OK ||
+    if (platform->crypto->hash_finish(hash_ctx, final_hash, &d_len) != BOOT_OK ||
         d_len != 32) {
       final_status = BOOT_ERR_CRYPTO;
       goto multi_cleanup;
     }
 
-    if (constant_time_memcmp_glitch_safe(final_hash, comp.expected_hash, 32) !=
-        BOOT_OK) {
+    if (constant_time_memcmp_glitch_safe(final_hash, comp.expected_hash, 32) != BOOT_OK) {
       final_status = BOOT_ERR_VERIFY;
-      goto multi_cleanup; /* Peripheral Firmware Corrupt! */
+      goto multi_cleanup;
     }
     boot_secure_zeroize(final_hash, 32);
 
@@ -335,4 +290,28 @@ multi_cleanup:
   /* P10 Single Exit: Leakage Defense für dekryptete Sub-Images */
   boot_secure_zeroize(arena, arena_len);
   return final_status;
+}
+
+boot_status_t boot_multiimage_plan_component(const boot_platform_t *platform,
+                                             uint32_t staging_base,
+                                             const boot_component_t *comp,
+                                             uint32_t src_crc,
+                                             flash_effect_t *out_fx, size_t cap, size_t *n_out) {
+  (void)platform;
+  if (cap < 2) return BOOT_ERR_INVALID_ARG;
+
+  out_fx[0].op = EFF_ERASE;
+  out_fx[0].src = 0;
+  out_fx[0].dst = comp->target_addr;
+  out_fx[0].len = comp->image_size;
+  out_fx[0].post_crc = boot_effect_compute_erased_crc(comp->image_size);
+
+  out_fx[1].op = EFF_COPY;
+  out_fx[1].src = staging_base + comp->staging_offset;
+  out_fx[1].dst = comp->target_addr;
+  out_fx[1].len = comp->image_size;
+  out_fx[1].post_crc = src_crc;
+
+  *n_out = 2;
+  return BOOT_OK;
 }

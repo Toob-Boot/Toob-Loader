@@ -10,19 +10,7 @@
 extern "C" {
 #endif
 
-/**
- * @brief Enum of all possible Cloud Commands.
- * Maps directly to the toob_cloud_cmd.cddl definition.
- */
-typedef enum {
-  TOOB_CMD_NOP = 0x00,          /* Heartbeat / Connectivity Test */
-  TOOB_CMD_FORCE_UPDATE = 0x01, /* Erzwinge OTA beim nächsten Boot */
-  TOOB_CMD_KILLSWITCH = 0x02,   /* Gerät sperren (Soft Lock) */
-  TOOB_CMD_UNLOCK = 0x03,       /* Soft Lock aufheben */
-  TOOB_CMD_ROTATE_KEY = 0x04,   /* Cloud-Key rotieren (eFuse!) */
-  TOOB_CMD_WIPE = 0x05,         /* Factory Reset */
-  TOOB_CMD_REVOKE = 0x06,       /* Hard Lock: DSLC → 0xFF (permanent!) */
-} toob_cloud_cmd_t;
+#define TOOB_CMD_NOP 0x00
 
 /**
  * @brief Structure representing the decoded Cloud Command Envelope.

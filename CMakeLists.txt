@@ -169,6 +169,52 @@ if(NOT TOOB_ARCH STREQUAL "host")
 endif()
 
 # ------------------------------------------------------------------------------
-# 6. Software Integration Testing / SIL (TODO)
+# 6. Software Integration Testing / SIL (sandbox-replay Target)
 # ------------------------------------------------------------------------------
-# TODO: [Phase 4 / M-SANDBOX] HIL / SIL Unit Testing via toob-test-runner
+if(TOOB_ARCH STREQUAL "host")
+    add_executable(sandbox-replay
+        test/host/enumerate_crash.c
+        test/host/flash_model.c
+        test/host/hal_tape.c
+        test/host/invariants.c
+        test/host/sandbox_platform.c
+        internal/mocks/mocks/mock_clock.c
+        internal/mocks/mocks/mock_console.c
+        internal/mocks/mocks/mock_crypto_policy.c
+        internal/mocks/mocks/mock_efuses.c
+        internal/mocks/mocks/mock_flash.c
+        internal/mocks/mocks/mock_rtc_ram.c
+        internal/mocks/mocks/mock_soc.c
+        internal/mocks/mocks/mock_wdt.c
+    )
+
+    target_include_directories(sandbox-replay PUBLIC
+        ${CMAKE_SOURCE_DIR}/common/include
+        ${CMAKE_SOURCE_DIR}/toobloader/core/include
+        ${CMAKE_BINARY_DIR}/generated
+        ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
+        ${CMAKE_SOURCE_DIR}/internal/mocks/mocks
+    )
+
+    # Link modular libraries
+    target_link_libraries(sandbox-replay PRIVATE toob_core toob_zcbor toob_heatshrink)
+    if(TARGET toob_crypto)
+        target_link_libraries(sandbox-replay PRIVATE toob_crypto)
+    endif()
+
+    # K6-T4: Totality Check Target
+    add_executable(intent-total
+        test/host/intent_total.c
+    )
+    target_include_directories(intent-total PUBLIC
+        ${CMAKE_SOURCE_DIR}/common/include
+        ${CMAKE_SOURCE_DIR}/toobloader/core/include
+        ${CMAKE_BINARY_DIR}/generated
+        ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
+        ${CMAKE_SOURCE_DIR}/internal/mocks/mocks
+    )
+    target_link_libraries(intent-total PRIVATE toob_zcbor toob_heatshrink)
+    if(TARGET toob_crypto)
+        target_link_libraries(intent-total PRIVATE toob_crypto)
+    endif()
+endif()

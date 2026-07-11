@@ -23,6 +23,7 @@
  */
 
 #include "boot_main.h"
+#include "boot_proof.h"
 #include "generated_boot_config.h"
 
 #include "boot_crc32.h"
@@ -98,7 +99,8 @@ BOOT_NOINIT toob_handoff_t toob_handoff_state;
 BOOT_NOINIT toob_boot_diag_t toob_diag_state;
 
 boot_status_t boot_main(const boot_platform_t *platform,
-                        boot_target_config_t *target_out) {
+                        boot_target_config_t *target_out,
+                        const uint32_t seal_key[4]) {
 
   /* P10 CFI Randomisierung: Seed wird später nach crypto->init gezogen */
   uint32_t main_cfi_seed = 0;
@@ -108,6 +110,10 @@ boot_status_t boot_main(const boot_platform_t *platform,
    */
   if (target_out != NULL) {
     boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+  }
+
+  if (seal_key == NULL) {
+    return BOOT_ERR_INVALID_ARG;
   }
 
   /*
@@ -378,7 +384,7 @@ init_success:
   uint32_t boot_start_time_ms = platform->clock->get_tick_ms();
 
   /* Betritt den Lebenszyklus des Bootloaders (WAL, Merkle, Swap, Confirm) */
-  status = boot_state_run(platform, target_out, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+  status = boot_state_run(platform, target_out, seal_key, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
   /* P10 O(1) Zeitmessung beenden und Wrap-around safe ablegen */
   uint32_t boot_end_time_ms = platform->clock->get_tick_ms();
@@ -400,23 +406,24 @@ init_success:
    */
   bool bounds_ok = false;
 
-  /* Subtraktiver Check umgeht `uint32_t` Wrapping wenn OOB! */
+  if (boot_proof_verify(&target_out->proof, seal_key) == BOOT_OK) {
+    uint32_t absolute_entry = target_out->proof.image_addr + target_out->proof.entry_point;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wtype-limits"
-  if (CHIP_FLASH_BASE_ADDR == 0 || target_out->active_entry_point >= CHIP_FLASH_BASE_ADDR) {
+    if (CHIP_FLASH_BASE_ADDR == 0 || absolute_entry >= CHIP_FLASH_BASE_ADDR) {
 #pragma GCC diagnostic pop
-    uint32_t relative_offset =
-        target_out->active_entry_point - CHIP_FLASH_BASE_ADDR;
+      uint32_t relative_offset = absolute_entry - CHIP_FLASH_BASE_ADDR;
 
-    /* O(1) Wrap-Around proof: Limit verification against Chip Size */
-    if (CHIP_FLASH_TOTAL_SIZE >= relative_offset) {
-      uint32_t max_allowed_size = CHIP_FLASH_TOTAL_SIZE - relative_offset;
-      if (target_out->active_image_size > 0 &&
-          target_out->active_image_size <= max_allowed_size) {
-        /* P10 Rule: OS Vector Tables müssen zwingend auf 4-Byte
-         * Architektur-Grenzen liegen */
-        if (target_out->active_entry_point % 4 == 0) {
-          bounds_ok = true;
+      /* O(1) Wrap-Around proof: Limit verification against Chip Size */
+      if (CHIP_FLASH_TOTAL_SIZE >= relative_offset) {
+        uint32_t max_allowed_size = CHIP_FLASH_TOTAL_SIZE - relative_offset;
+        if (target_out->proof.image_size > 0 &&
+            target_out->proof.image_size <= max_allowed_size) {
+          /* P10 Rule: OS Vector Tables müssen zwingend auf 4-Byte
+           * Architektur-Grenzen liegen */
+          if (absolute_entry % 4 == 0) {
+            bounds_ok = true;
+          }
         }
       }
     }

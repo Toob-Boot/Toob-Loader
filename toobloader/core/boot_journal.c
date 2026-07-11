@@ -26,6 +26,8 @@
 #include "generated_boot_config.h"
 
 #include "boot_crc32.h"
+#include "boot_identity.h"
+#include "boot_merkle.h"
 #include "boot_secure_zeroize.h"
 #include <stddef.h>
 #include <string.h>
@@ -44,6 +46,10 @@ static size_t wal_sector_sizes[MAX_WAL_SECTORS];
 static wal_sector_header_t current_active_header;
 static bool wal_initialized = false;
 static uint32_t cached_write_offset = 0;
+
+/* K4: Device-bound journal chain state */
+static uint8_t journal_key[WAL_CHAIN_TAG_BYTES];
+static bool    journal_key_valid = false;
 
 /* ==============================================================================
  * INTERNAL MATHEMATICS & HELPERS
@@ -64,7 +70,7 @@ static void migrate_v1_tmr(wal_tmr_payload_t *dst,
                            const wal_tmr_payload_v1_t *src) {
   boot_secure_zeroize(dst, sizeof(wal_tmr_payload_t));
   dst->struct_version = WAL_TMR_VERSION_CURRENT;
-  dst->populated_size = 56;
+  dst->populated_size = 76; /* 4 (version hdr) + 48 (v1) + 4 (stage1_svn) + 16 (chain_tag) + 4 (chain_entry_count) */
   dst->primary_slot_id = src->primary_slot_id;
   dst->active_stage1_bank = src->active_stage1_bank;
   dst->app_svn = src->app_svn;
@@ -78,7 +84,93 @@ static void migrate_v1_tmr(wal_tmr_payload_t *dst,
   dst->_deprecated_kdm_sequence = src->kdm_sequence;
   dst->_deprecated_active_kdm_slot = src->active_kdm_slot;
   dst->stage1_svn = BOOT_STAGE1_SVN;
+  /* K4: chain_tag and chain_entry_count are zero from the zeroize above,
+   * representing an empty chain on a freshly migrated device. */
 }
+
+/**
+ * @brief K4: Computes H(key ‖ entry_bytes ‖ prev_tag), truncated to 16 bytes.
+ *
+ * Uses the platform's SHA-256 hash to compute a device-bound chain tag.
+ * Returns BOOT_ERR_CRYPTO on hash failure (caller decides how to degrade).
+ */
+static boot_status_t compute_chain_tag(const boot_platform_t *platform,
+                                       const uint8_t key[WAL_CHAIN_TAG_BYTES],
+                                       const wal_entry_payload_t *entry,
+                                       const uint8_t prev_tag[WAL_CHAIN_TAG_BYTES],
+                                       uint8_t out_tag[WAL_CHAIN_TAG_BYTES]) {
+  uint8_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
+  boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+  boot_secure_zeroize(out_tag, WAL_CHAIN_TAG_BYTES);
+
+  boot_status_t s = platform->crypto->hash_init(hash_ctx, sizeof(hash_ctx));
+  if (s != BOOT_OK) goto cleanup;
+
+  s = platform->crypto->hash_update(hash_ctx, key, WAL_CHAIN_TAG_BYTES);
+  if (s != BOOT_OK) goto finalize;
+
+  /* Hash the entry bytes up to (but not including) the CRC trailer.
+   * The CRC is computed over the same range, so it's redundant. */
+  s = platform->crypto->hash_update(hash_ctx, (const uint8_t *)entry,
+                                    offsetof(wal_entry_payload_t, crc32_trailer));
+  if (s != BOOT_OK) goto finalize;
+
+  s = platform->crypto->hash_update(hash_ctx, prev_tag, WAL_CHAIN_TAG_BYTES);
+  if (s != BOOT_OK) goto finalize;
+
+  {
+    uint8_t digest[32];
+    size_t digest_len = 32;
+    s = platform->crypto->hash_finish(hash_ctx, digest, &digest_len);
+    if (s == BOOT_OK) {
+      memcpy(out_tag, digest, WAL_CHAIN_TAG_BYTES);
+    }
+    boot_secure_zeroize(digest, sizeof(digest));
+  }
+  goto cleanup;
+
+finalize:
+  {
+    uint8_t dummy[64];
+    size_t dummy_len = sizeof(dummy);
+    (void)platform->crypto->hash_finish(hash_ctx, dummy, &dummy_len);
+    boot_secure_zeroize(dummy, sizeof(dummy));
+  }
+
+cleanup:
+  boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+  return s;
+}
+
+/**
+ * @brief Führt eine Ganz-Struktur Mehrheitsentscheidung (TMR Majority Vote) durch.
+ *
+ * Verhindert das Zusammenstückeln einzelner korrupten Bytes (Frankenstein-Voting)
+ * durch constant-time Vergleiche der vollständigen Strukturen.
+ */
+static wal_tmr_payload_t tmr_majority_vote(const wal_tmr_payload_t *tmr_candidates, int num_candidates) {
+  if (num_candidates >= 2) {
+    size_t tmr_sz = sizeof(wal_tmr_payload_t);
+    if (constant_time_memcmp_glitch_safe((const uint8_t *)&tmr_candidates[0],
+                                         (const uint8_t *)&tmr_candidates[1],
+                                         tmr_sz) == BOOT_OK) {
+      return tmr_candidates[0];
+    } else if (num_candidates == 3 &&
+               constant_time_memcmp_glitch_safe(
+                   (const uint8_t *)&tmr_candidates[0],
+                   (const uint8_t *)&tmr_candidates[2], tmr_sz) == BOOT_OK) {
+      return tmr_candidates[0];
+    } else if (num_candidates == 3 &&
+               constant_time_memcmp_glitch_safe(
+                   (const uint8_t *)&tmr_candidates[1],
+                   (const uint8_t *)&tmr_candidates[2], tmr_sz) == BOOT_OK) {
+      return tmr_candidates[1];
+    }
+  }
+  /* Extreme Korruptions-Absicherung: Vertraue dem neuesten kryptografisch validen Eintrag */
+  return tmr_candidates[0];
+}
+
 
 /**
  * @brief Glitch-resistente CRC-32 Sector Header Validation (Double Check
@@ -428,28 +520,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     }
 
     if (num_candidates >= 2) {
-      /* Blockiert das Zusammenstückeln einzelner Bytes via Constant Time
-       * Gating! */
-      size_t tmr_sz = sizeof(wal_tmr_payload_t);
-      if (constant_time_memcmp_glitch_safe((const uint8_t *)&tmr_candidates[0],
-                                           (const uint8_t *)&tmr_candidates[1],
-                                           tmr_sz) == BOOT_OK) {
-        current_active_header.tmr_data = tmr_candidates[0];
-      } else if (num_candidates == 3 &&
-                 constant_time_memcmp_glitch_safe(
-                     (const uint8_t *)&tmr_candidates[0],
-                     (const uint8_t *)&tmr_candidates[2], tmr_sz) == BOOT_OK) {
-        current_active_header.tmr_data = tmr_candidates[0];
-      } else if (num_candidates == 3 &&
-                 constant_time_memcmp_glitch_safe(
-                     (const uint8_t *)&tmr_candidates[1],
-                     (const uint8_t *)&tmr_candidates[2], tmr_sz) == BOOT_OK) {
-        current_active_header.tmr_data = tmr_candidates[1];
-      } else {
-        /* Extreme Corruption Fallback: Trust the highest cryptographic valid
-         * sequence */
-        current_active_header.tmr_data = tmr_candidates[0];
-      }
+      current_active_header.tmr_data = tmr_majority_vote(tmr_candidates, num_candidates);
     }
     boot_secure_zeroize(tmr_candidates,
                         sizeof(tmr_candidates)); /* P10 Stack Clean */
@@ -467,6 +538,15 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     if (mig_stat != BOOT_OK) {
       return mig_stat;
     }
+  }
+
+  /* K4: Derive device-bound journal chain key.
+   * On failure, chain degrades silently — the boot continues but
+   * security-bearing entries won't be chain-protected. */
+  journal_key_valid = false;
+  boot_secure_zeroize(journal_key, sizeof(journal_key));
+  if (boot_derive_journal_key(platform, journal_key) == BOOT_OK) {
+    journal_key_valid = true;
   }
 
   return BOOT_OK;
@@ -760,6 +840,20 @@ boot_status_t boot_journal_append(const boot_platform_t *platform,
     boot_secure_zeroize(&verify_entry, sizeof(verify_entry));
     return BOOT_ERR_FLASH_HW;
   }
+  /* K4: Update chain tag for security-bearing intents.
+   * The tag lives in the RAM-cached TMR and gets persisted on the
+   * next sector rotation or explicit TMR update.
+   * Must happen before entry is zeroized — needs entry.data. */
+  if (journal_key_valid && wal_intent_is_security_bearing(new_entry->intent)) {
+    uint8_t new_tag[WAL_CHAIN_TAG_BYTES];
+    if (compute_chain_tag(platform, journal_key, &entry.data,
+                          current_active_header.tmr_data.chain_tag,
+                          new_tag) == BOOT_OK) {
+      memcpy(current_active_header.tmr_data.chain_tag, new_tag, WAL_CHAIN_TAG_BYTES);
+      current_active_header.tmr_data.chain_entry_count++;
+    }
+    boot_secure_zeroize(new_tag, sizeof(new_tag));
+  }
 
   boot_secure_zeroize(&entry, sizeof(entry));
   boot_secure_zeroize(&verify_entry, sizeof(verify_entry));
@@ -802,6 +896,50 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
     return BOOT_ERR_COUNTER_EXHAUSTED;
   }
 
+  /* K4-T3: Create a mutable copy of the TMR for epoch-anchor binding.
+   * The caller's new_tmr is const — we may need to update chain_tag. */
+  wal_tmr_payload_t tmr_to_write = *new_tmr;
+
+  /* K4-T3: Epoch-Anker — bind eFuse epoch into the chain before
+   * persisting the TMR. A full-replay of an old WAL image is detected
+   * once the eFuse epoch has advanced beyond the value baked into the tag. */
+  if (journal_key_valid && tmr_to_write.chain_entry_count > 0) {
+    uint32_t efuse_epoch = 0;
+    boot_read_monotonic_counter_safe(platform, &efuse_epoch);
+
+    /* H(journal_key ‖ tmr_bytes ‖ efuse_epoch ‖ prev_chain_tag) */
+    uint8_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
+    boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+
+    boot_status_t hs = platform->crypto->hash_init(hash_ctx, sizeof(hash_ctx));
+    if (hs == BOOT_OK) {
+      hs = platform->crypto->hash_update(hash_ctx, journal_key, WAL_CHAIN_TAG_BYTES);
+    }
+    if (hs == BOOT_OK) {
+      hs = platform->crypto->hash_update(hash_ctx, (const uint8_t *)&tmr_to_write,
+                                         sizeof(wal_tmr_payload_t));
+    }
+    if (hs == BOOT_OK) {
+      hs = platform->crypto->hash_update(hash_ctx, (const uint8_t *)&efuse_epoch,
+                                         sizeof(efuse_epoch));
+    }
+    if (hs == BOOT_OK) {
+      uint8_t digest[32];
+      size_t digest_len = 32;
+      hs = platform->crypto->hash_finish(hash_ctx, digest, &digest_len);
+      if (hs == BOOT_OK) {
+        memcpy(tmr_to_write.chain_tag, digest, WAL_CHAIN_TAG_BYTES);
+      }
+      boot_secure_zeroize(digest, sizeof(digest));
+    } else {
+      uint8_t dummy[64];
+      size_t dummy_len = sizeof(dummy);
+      (void)platform->crypto->hash_finish(hash_ctx, dummy, &dummy_len);
+      boot_secure_zeroize(dummy, sizeof(dummy));
+    }
+    boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+  }
+
   uint32_t active_seq = current_active_header.sequence_id;
   uint32_t new_idx = active_wal_index;
 
@@ -842,7 +980,7 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
     write_hdr.data.sector_magic = WAL_ABI_VERSION_MAGIC;
     write_hdr.data.sequence_id = active_seq;
     write_hdr.data.erase_count = prev_erase_count + 1;
-    write_hdr.data.tmr_data = *new_tmr;
+    write_hdr.data.tmr_data = tmr_to_write;
     write_hdr.data.header_crc32 =
         compute_boot_crc32((const uint8_t *)&write_hdr.data,
                            offsetof(wal_sector_header_t, header_crc32));
@@ -865,10 +1003,10 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
   cached_write_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
   current_active_header.sequence_id = active_seq;
   current_active_header.erase_count = final_erase_count;
-  current_active_header.tmr_data = *new_tmr;
+  current_active_header.tmr_data = tmr_to_write;
   current_active_header.header_crc32 =
       compute_boot_crc32((const uint8_t *)&current_active_header,
                          offsetof(wal_sector_header_t, header_crc32));
 
   return BOOT_OK;
-}
+}

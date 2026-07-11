@@ -95,6 +95,7 @@ option(TOOB_DOUBLE_VERIFY "Enable double-execution of Ed25519 for highest fault 
 add_library(toob_core STATIC
     ${TOOB_CORE_DIR}/boot_main.c
     ${TOOB_CORE_DIR}/boot_state.c
+    ${TOOB_CORE_DIR}/boot_effect.c
     ${TOOB_CORE_DIR}/boot_journal.c
     ${TOOB_CORE_DIR}/boot_verify.c
     ${TOOB_CORE_DIR}/boot_crc32.c

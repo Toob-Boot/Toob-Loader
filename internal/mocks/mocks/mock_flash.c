@@ -178,6 +178,18 @@ void mock_flash_set_fail_limit(uint32_t limit) {
     g_fault_config.simulated_writes = 0;
 }
 
+static uint32_t g_mock_supply_mv = 3300U; /* Default to healthy 3.3V */
+
+boot_status_t mock_flash_get_supply_mv(uint32_t *mv_out) {
+    if (!mv_out) return BOOT_ERR_INVALID_ARG;
+    *mv_out = g_mock_supply_mv;
+    return BOOT_OK;
+}
+
+void mock_flash_set_supply_mv(uint32_t mv) {
+    g_mock_supply_mv = mv;
+}
+
 void mock_flash_set_bitrot(uint32_t addr, uint8_t value) {
     g_fault_config.bitrot_addr = addr;
     g_fault_config.bitrot_value = value;
@@ -196,6 +208,12 @@ const flash_hal_t sandbox_flash_hal = {
 
     .max_sector_size = CHIP_FLASH_MAX_SECTOR_SIZE,
     .total_size = CHIP_FLASH_TOTAL_SIZE,
+    .max_erase_cycles = 100000U,
     .write_align = CHIP_FLASH_WRITE_ALIGNMENT,
-    .erased_value = CHIP_FLASH_ERASURE_MAPPING
+    .erased_value = CHIP_FLASH_ERASURE_MAPPING,
+
+    /* Cost metadata for E-K7 */
+    .erase_time_us_max = 40000U,
+    .write_time_us_page = 800U,
+    .get_supply_mv = mock_flash_get_supply_mv
 };

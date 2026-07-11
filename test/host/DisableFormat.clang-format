@@ -1,0 +1,12 @@
+# Diese Datei als ".clang-format" (exakt so benannt) in jeden Ordner legen, der
+# NICHT formatiert werden soll — z.B.:
+#   common/lib/zcbor/.clang-format
+#   common/lib/heatshrink/.clang-format
+#   <generierter-code>/.clang-format
+#
+# clang-format sucht aufwärts nach der nächstgelegenen .clang-format; diese hier
+# gewinnt für ihren Teilbaum und schaltet die Formatierung dort komplett ab.
+---
+DisableFormat: true
+SortIncludes: Never
+...

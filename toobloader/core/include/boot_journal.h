@@ -44,9 +44,22 @@ typedef enum {
   WAL_INTENT_DEVICE_LOCKED = 13
 } wal_intent_t;
 
+/**
+ * @brief K4: Classifies whether a WAL intent is security-bearing.
+ * Only security-bearing intents participate in the device-bound chain.
+ */
+static inline bool wal_intent_is_security_bearing(uint32_t intent) {
+  return intent == WAL_INTENT_DEVICE_LOCKED ||
+         intent == WAL_INTENT_CONFIRM_COMMIT ||
+         intent == WAL_INTENT_TXN_COMMIT;
+}
+
 #define TMR_PAYLOAD_SLOT_BYTES 112
 #define WAL_TMR_VERSION_1 1
-#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_1
+#define WAL_TMR_VERSION_2 2
+#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_2
+
+#define WAL_CHAIN_TAG_BYTES 16
 
 /**
  * @brief Legacy v1 structure layout for backward compatibility and migration mapping.
@@ -105,8 +118,12 @@ typedef struct {
   /* --- v2-Felder (Phase 7a: Self-Anti-Rollback) --- */
   uint32_t stage1_svn;  /* Last-confirmed Stage 1 SVN (defense-in-depth, A1 protection) */
 
+  /* --- v3-Felder (K4: Device-Bound Journal Chain) --- */
+  uint8_t  chain_tag[WAL_CHAIN_TAG_BYTES]; /* H(k_journal, entry ‖ prev_tag), truncated */
+  uint32_t chain_entry_count;              /* Monotonic counter of chained entries */
+
   /* --- reserved tail (for future versions) --- */
-  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52];
+  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4];
 } wal_tmr_payload_t;
 
 /**

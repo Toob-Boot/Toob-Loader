@@ -29,6 +29,7 @@
 #include "boot_secure_zeroize.h"
 #include "boot_ct_utils.h"
 #include "boot_fih.h"
+#include "boot_effect.h"
 #include <string.h>
 
 /* P5: Arena is now passed explicitly by the orchestrator */
@@ -45,52 +46,7 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 
 
 
-/**
- * @brief Kopiert Daten iterativ zwischen Flash-Sektoren mit simultanem
- * ECC Read-Back Verify.
- */
-static boot_status_t
-stream_flash_copy_and_verify(const boot_platform_t *platform, uint32_t src,
-                             uint32_t dest, size_t len, uint32_t expected_crc,
-                             uint8_t *arena, size_t arena_len) {
-  size_t offset = 0;
 
-  while (offset < len) {
-    if (platform->wdt && platform->wdt->kick)
-      platform->wdt->kick();
-    size_t step = (len - offset > arena_len)
-                      ? arena_len
-                      : (len - offset);
-
-    boot_status_t st = platform->flash->read(src + (uint32_t)offset, arena, (uint32_t)step);
-    if (st != BOOT_OK) {
-      boot_secure_zeroize(arena, arena_len);
-      return st;
-    }
-
-    st = platform->flash->write(dest + (uint32_t)offset, arena, (uint32_t)step);
-    if (st != BOOT_OK) {
-      boot_secure_zeroize(arena, arena_len);
-      return st;
-    }
-
-    offset += step;
-  }
-
-  boot_secure_zeroize(arena, arena_len);
-
-  /* Phase-Bound ECC Readback Verification */
-  uint32_t verify_crc = 0;
-  boot_status_t st = boot_crc32_flash_stream(platform, dest, len, &verify_crc, arena, arena_len);
-  if (st != BOOT_OK)
-    return st;
-
-  BOOT_SECURE_REQUIRE(verify_crc == expected_crc, {
-    return BOOT_ERR_FLASH_HW; /* Bit-Rot / Tearing / Voltage Fault detektiert */
-  });
-
-  return BOOT_OK;
-}
 
 /**
  * @brief Internal Tracker für physikalische Flash-Erases.
@@ -468,45 +424,39 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
      * 3. ATOMIC SWAP EXECUTION (Phase Bound Verify)
      * ==================================================================== */
 
-    /* PHASE A: Backup Dest -> Scratch */
+    /* ====================================================================
+     * 3. ATOMIC SWAP EXECUTION (Planned & Executed)
+     * ==================================================================== */
+    boot_allowed_region_t whitelist[3] = {
+        {CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE},
+        {CHIP_STAGING_SLOT_ABS_ADDR, CHIP_STAGING_SLOT_SIZE},
+        {CHIP_SCRATCH_SLOT_ABS_ADDR, 65536}
+    };
+
+    flash_effect_t fx[6];
+    size_t fx_cnt = 0;
+
+    status = boot_swap_plan_chunk(platform, current_src, current_dest, (uint32_t)block_size,
+                                  crc_src, crc_dest, run_phase_a, run_phase_b, run_phase_c,
+                                  fx, 6, &fx_cnt);
+    if (status != BOOT_OK)
+      goto swap_cleanup;
+
+    status = boot_effect_execute(platform, fx, fx_cnt, whitelist, 3, arena, arena_len);
+    if (status != BOOT_OK)
+      goto swap_cleanup;
+
     if (run_phase_a) {
-      status = _boot_swap_erase_tracked(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
-                                        block_size, &physical_scratch_erases, arena, arena_len);
-      if (status != BOOT_OK)
-        goto swap_cleanup;
-
-      status = stream_flash_copy_and_verify(platform, current_dest,
-                                            CHIP_SCRATCH_SLOT_ABS_ADDR,
-                                            block_size, crc_dest, arena, arena_len);
-      if (status != BOOT_OK)
-        goto swap_cleanup;
+      physical_scratch_erases +=
+          (uint32_t)((block_size / scratch_sec_size > 0) ? (block_size / scratch_sec_size) : 1);
     }
-
-    /* PHASE B: Copy Src -> Dest */
     if (run_phase_b) {
-      status = _boot_swap_erase_tracked(platform, current_dest, block_size,
-                                        &physical_dest_erases, arena, arena_len);
-      if (status != BOOT_OK)
-        goto swap_cleanup;
-
-      status = stream_flash_copy_and_verify(platform, current_src, current_dest,
-                                            block_size, crc_src, arena, arena_len);
-      if (status != BOOT_OK)
-        goto swap_cleanup;
+      physical_dest_erases +=
+          (uint32_t)((block_size / dest_sec_size > 0) ? (block_size / dest_sec_size) : 1);
     }
-
-    /* PHASE C: Copy Scratch -> Src */
     if (run_phase_c) {
-      status = _boot_swap_erase_tracked(platform, current_src, block_size,
-                                        &physical_src_erases, arena, arena_len);
-      if (status != BOOT_OK)
-        goto swap_cleanup;
-
-      status =
-          stream_flash_copy_and_verify(platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
-                                       current_src, block_size, crc_dest, arena, arena_len);
-      if (status != BOOT_OK)
-        goto swap_cleanup;
+      physical_src_erases +=
+          (uint32_t)((block_size / src_sec_size > 0) ? (block_size / src_sec_size) : 1);
     }
 
     current_offset += (uint32_t)block_size;
@@ -532,8 +482,71 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
   }
 
 swap_cleanup:
-  /* P10 Single Exit: Zerstöre unverschlüsselte Firmware-Residuen aus der Arena
-   */
+  /* P10 Single Exit: Zerstöre unverschlüsselte Firmware-Residuen aus der Arena */
   boot_secure_zeroize(arena, arena_len);
   return status;
+}
+
+boot_status_t boot_swap_plan_chunk(const boot_platform_t *platform,
+                                   uint32_t current_src, uint32_t current_dest,
+                                   uint32_t block_size,
+                                   uint32_t crc_src, uint32_t crc_dest,
+                                   bool run_phase_a, bool run_phase_b, bool run_phase_c,
+                                   flash_effect_t *out_fx, size_t cap, size_t *n_out) {
+  (void)platform;
+  size_t count = 0;
+
+  if (run_phase_a) {
+    if (count + 2 > cap) return BOOT_ERR_INVALID_ARG;
+    out_fx[count].op = EFF_ERASE;
+    out_fx[count].src = 0;
+    out_fx[count].dst = CHIP_SCRATCH_SLOT_ABS_ADDR;
+    out_fx[count].len = block_size;
+    out_fx[count].post_crc = boot_effect_compute_erased_crc(block_size);
+    count++;
+
+    out_fx[count].op = EFF_COPY;
+    out_fx[count].src = current_dest;
+    out_fx[count].dst = CHIP_SCRATCH_SLOT_ABS_ADDR;
+    out_fx[count].len = block_size;
+    out_fx[count].post_crc = crc_dest;
+    count++;
+  }
+
+  if (run_phase_b) {
+    if (count + 2 > cap) return BOOT_ERR_INVALID_ARG;
+    out_fx[count].op = EFF_ERASE;
+    out_fx[count].src = 0;
+    out_fx[count].dst = current_dest;
+    out_fx[count].len = block_size;
+    out_fx[count].post_crc = boot_effect_compute_erased_crc(block_size);
+    count++;
+
+    out_fx[count].op = EFF_COPY;
+    out_fx[count].src = current_src;
+    out_fx[count].dst = current_dest;
+    out_fx[count].len = block_size;
+    out_fx[count].post_crc = crc_src;
+    count++;
+  }
+
+  if (run_phase_c) {
+    if (count + 2 > cap) return BOOT_ERR_INVALID_ARG;
+    out_fx[count].op = EFF_ERASE;
+    out_fx[count].src = 0;
+    out_fx[count].dst = current_src;
+    out_fx[count].len = block_size;
+    out_fx[count].post_crc = boot_effect_compute_erased_crc(block_size);
+    count++;
+
+    out_fx[count].op = EFF_COPY;
+    out_fx[count].src = CHIP_SCRATCH_SLOT_ABS_ADDR;
+    out_fx[count].dst = current_src;
+    out_fx[count].len = block_size;
+    out_fx[count].post_crc = crc_dest;
+    count++;
+  }
+
+  *n_out = count;
+  return BOOT_OK;
 }

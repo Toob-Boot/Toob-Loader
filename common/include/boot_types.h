@@ -57,6 +57,7 @@ typedef enum {
     BOOT_ERR_STATE             = 0xEA4A4A4A,  /**< Ungültiger Zustand (z.B. init nicht aufgerufen) */
     BOOT_ERR_FLASH_NOT_ERASED  = 0xEB5B5B5B,  /**< Zielsektor wurde vor Write nicht gelöscht */
     BOOT_ERR_COUNTER_EXHAUSTED = 0xEC6C6C6C,  /**< OTP/eFuse Counter am Limit */
+    BOOT_ERR_DEFER             = 0xEC7C7C7C,  /**< Vorübergehende Vertagung (z.B. Energie/Spannung zu niedrig) */
     BOOT_ERR_ECC_HARDFAULT     = 0xED7D7D7D,  /**< FATAL: NMI Unkorrigierbarer Bit-Rot (hals.md Z.47) */
     BOOT_ERR_FLASH_HW          = 0xEE8E8E8E,  /**< FATAL: Hardware Flash Controller Error / Sektor-Mismatch */
     
@@ -73,8 +74,37 @@ typedef enum {
     /* Cloud Command Errors */
     BOOT_ERR_DEVICE_LOCKED       = 0xF9090909,
     BOOT_ERR_CMD_REPLAY          = 0xFA1A1A1A,
-    BOOT_ERR_CMD_DEVICE_MISMATCH = 0xFB2B2B2B
+    BOOT_ERR_CMD_DEVICE_MISMATCH = 0xFB2B2B2B,
+
+    /* TBM1 Manifest Errors (K2 v2 Fehler-Taxonomie) */
+    BOOT_ERR_MANIFEST_CORRUPT    = 0xFC3C3C3C,  /**< TBM1 CRC32 pre-check failed (staging corrupt) */
+    BOOT_ERR_MANIFEST_VERSION    = 0xFC4D4D4D,  /**< TBM1 version incompatible with this bootloader */
+    BOOT_ERR_MANIFEST_PRODUCT    = 0xFC5E5E5E   /**< vendor/product/hw_rev mismatch */
 } boot_status_t;
+
+/**
+ * @brief Fehlerklassen-Taxonomie: Ist der Fehler ein kontrollierter Reject?
+ *
+ * Rejectable Fehler führen beim Update-Vorgang zum Abbruch des Update-Intents (WAL_INTENT_NONE),
+ * anstatt das Gerät in einen harten Panic-Reset zu schicken. Hardware-Fehler dagegen
+ * propagieren direkt zum Panic/Recovery-System.
+ *
+ * WICHTIG: Neue boot_status_t Werte müssen hier einsortiert werden. Default = false (Panic).
+ */
+static inline bool boot_error_is_rejectable(boot_status_t s) {
+  switch (s) {
+    case BOOT_ERR_VERIFY:
+    case BOOT_ERR_DOWNGRADE:
+    case BOOT_ERR_INVALID_ARG:
+    case BOOT_ERR_FLASH_BOUNDS:
+    case BOOT_ERR_INVALID_STATE:
+    case BOOT_ERR_NOT_FOUND:
+    case BOOT_ERR_DEFER:
+      return true;
+    default:
+      return false;
+  }
+}
 
 /* --- 2. Hardware Reset Reasons --- */
 

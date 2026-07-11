@@ -65,9 +65,13 @@ Alles ruht auf einem kleinen, unveränderlichen Fundament. Wird ein Anker gebroc
 | Netzwerk / Control-Plane / KDM-Kommandos | untrusted | jedes Kommando ist signiert und wird gegen Sequenz/Replay geprüft |
 | Applikation / OS (nach Handoff) | untrusted | der Bootloader schützt sich selbst und die Persistenz gegen eine kompromittierte App |
 
-### 2.3 Katastrophaler Single-Point (benannt, hier nicht mitigiert)
+### 2.4 HAL Isolation Contract
 
-Eine Kompromittierung des **Registry-Signatur-Privatschlüssels** würde dem Angreifer erlauben, gültige Images zu erzeugen. Das ist außerhalb des Geltungsbereichs dieses Dokuments (Registry-Trust-Domäne). Die *On-Device-Restmitigation* ist Schlüsselrotation in Kombination mit Anti-Rollback-Epochen (Phase 7): ein nach Rotation re-signiertes Altimage unterhalb der Epoch wird trotzdem abgelehnt. Der Schutz vor Schlüsseldiebstahl selbst liegt bei der Registry.
+Der Bootloader-Core (`toobloader/core/` und `toobloader/stage0/`) darf zu keinem Zeitpunkt direkte Hardware-Interaktionen (MMIO-Zugriffe, volatile Hardware-Zeiger oder direkte Aufrufe herstellerspezifischer SDKs) ausführen.
+
+- **Kapselung**: Jede physische Interaktion ist hinter den Zeiger-Interfaces (Traits) der `boot_platform_t` abstrahiert.
+- **Vorteil für Tests & Verifikation**: Diese strikte Trennung erlaubt es uns, den gesamten Bootloader im Host-System zu mocken und zu testen (Record/Replay-Naht).
+- **Automatisierte Validierung**: Ein Test-Script (`scripts/check_mmio_isolation.ps1`) analysiert die Codebasis und schlägt fehl, wenn direkte MMIO-Zugriffe (z. B. `(volatile uint32_t *)0x...`) außerhalb der HAL-Implementierung gefunden werden.
 
 ---
 

@@ -1,0 +1,149 @@
+# ============================================================================
+#  .clang-format — Toob-Boot Core
+# ----------------------------------------------------------------------------
+#  Leitgedanke: den BESTEHENDEN Stil exakt reproduzieren (2-Space, angehängte
+#  Klammern, 80 Spalten, Pointer rechts), damit der erste Lauf einen kleinen,
+#  reviewbaren Diff erzeugt — und darauf genau die Lesbarkeits-Features setzen,
+#  die zu diesem Code passen (ausgerichtete Tabellen, ausgerichtete #defines,
+#  erzwungene Klammern gegen die goto-fail-Fehlerklasse).
+#
+#  Getestet gegen clang-format 15–18. Optionen, die eine höhere Mindestversion
+#  brauchen, sind an Ort und Stelle markiert ("[≥NN]").
+#
+#  Nicht formatieren: Assembler (.S), Fremdcode (zcbor, heatshrink), Generat.
+#  → dort separate .clang-format mit "DisableFormat: true" ablegen (s. README).
+# ============================================================================
+---
+Language: Cpp   # clang-format behandelt C unter der Sprache "Cpp".
+
+# --- Grundraster: 1:1 der aktuelle Stil ------------------------------------
+BasedOnStyle: LLVM        # LLVM trifft euren Bestand am nächsten.
+IndentWidth: 2            # bestehend.
+TabWidth: 2
+UseTab: Never             # nur Spaces — kein Tab/Space-Mischmasch im Diff.
+ColumnLimit: 80           # bestehend. Auf 100 erhöhbar, wenn die zcbor-Ketten
+                          # wegfallen (K2) — dann weniger erzwungene Umbrüche.
+ContinuationIndentWidth: 4
+PointerAlignment: Right   # bestehend: "const boot_platform_t *platform".
+DerivePointerAlignment: false
+
+# --- Klammern & Blöcke ------------------------------------------------------
+BreakBeforeBraces: Attach # K&R: "if (x) {" — bestehend.
+InsertBraces: true        # [≥15] SICHERHEIT: erzwingt Klammern um jeden if/
+                          # for/while/else-Körper. Genau die Klasse "goto fail",
+                          # die euer BOOT_SECURE_REQUIRE-Ethos ohnehin bekämpft,
+                          # wird damit auf Formatter-Ebene unmöglich.
+                          # HINWEIS: ändert eure einzeiligen "if (x) goto y;" zu
+                          # geklammerter Form → den ERSTEN Diff bewusst prüfen.
+                          # Berührt KEINE Makro-Aufrufe wie BOOT_SECURE_REQUIRE(...).
+# RemoveBracesLLVM: false # NICHT aktivieren — würde InsertBraces gegenspielen
+                          # und schützende Klammern wieder entfernen.
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1    # mehrfache Leerzeilen einsammeln.
+SeparateDefinitionBlocks: Always  # [≥14] eine Leerzeile zwischen Funktionen —
+                                  # Luft in großen Dateien wie boot_state.c.
+
+# --- Kurzformen: im Sicherheitspfad grundsätzlich AUSschreiben --------------
+# Kein Zusammenziehen — jede Bedingung, Schleife und jeder Körper bleibt sicht-
+# bar auf eigener Zeile. Das ist die menschenfreundliche (und review-sichere)
+# Wahl für kritischen Code.
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false        # ein Enum-Wert pro Zeile → saubere Diffs.
+AllowShortFunctionsOnASingleLine: Empty     # nur leere {} kollabieren; inline-Helfer
+                                            # zeigen ihren Körper (gut für Review).
+AlwaysBreakAfterReturnType: None            # Rückgabetyp bleibt beim Namen.
+
+# --- Ausrichtung, die WIRKLICH beim Lesen hilft -----------------------------
+AlignConsecutiveMacros: AcrossComments      # #define-Konstantengruppen (WAL_INTENT_*,
+                                            # CFI-Slots, Magics) in eine saubere Spalte —
+                                            # der größte Lesbarkeitsgewinn bei euren
+                                            # vielen verwandten Konstanten.
+AlignArrayOfStructures: Left  # [≥13] richtet Tabellen-Initialisierer spaltenweise aus.
+                              # Macht die K6-Lookup-Tabellen (INTENT_TABLE, PIPELINE,
+                              # Effekt-Listen) scanbar wie eine Tabelle im Papier.
+Cpp11BracedListStyle: false   # Leerzeichen INNEN: "{ a, b, c }" statt "{a,b,c}" —
+                              # zusammen mit AlignArrayOfStructures deutlich lesbarer.
+AlignTrailingComments: true   # Doxygen-Randkommentare "/**< ... */" in eine Spalte.
+                              # [≥16] akzeptiert stattdessen die Struct-Form
+                              #   { Kind: Always, OverEmptyLines: 0 }
+AlignEscapedNewlines: Left    # Backslashes in mehrzeiligen Makros dicht statt an
+                              # Spalte 80 — eure CFI-/SECURE-Makros bleiben kompakt.
+AlignOperands: Align
+AlignAfterOpenBracket: Align  # Umbruch-Fortsetzung unter die öffnende Klammer —
+                              # bestehend bei euren umbrochenen Signaturen.
+
+# Bewusst NICHT ausgerichtet (erzeugt fragile Spalten + Massen-Churn, sobald ein
+# langer Name die Spalte sprengt — kontrovers, deshalb aus):
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+
+# --- Operatoren-Umbruch ------------------------------------------------------
+BreakBeforeBinaryOperators: None   # Operator am ZEILENENDE — bestehend
+                                   # ("... wal_indicates_crash ||"). Alternative
+                                   # "NonAssignment" zieht &&/|| an den Zeilenanfang
+                                   # (manche finden Bedingungen so besser scanbar).
+BreakBeforeTernaryOperators: true
+
+# --- Parameter/Argumente -----------------------------------------------------
+BinPackParameters: true    # bestehend (fließen und brechen um). Auf "false" =
+BinPackArguments: true     # ein Parameter pro Zeile → sauberere Diffs beim
+                           # Hinzufügen eines Arguments, aber mehr Zeilen.
+
+# --- switch/case & Labels ----------------------------------------------------
+IndentCaseLabels: true     # case unter switch eingerückt — lesbarer für die
+                           # Fehler-/Intent-Switches (E0-T3, K6).
+IndentGotoLabels: true     # Cleanup-Labels (state_cleanup:) auf Blockeinrückung.
+
+# --- Präprozessor ------------------------------------------------------------
+IndentPPDirectives: None   # bestehend (#if/#else/#endif an Spalte 0). Für tiefe
+                           # Verschachtelung ist "AfterHash" lesbarer — bei Bedarf.
+
+# --- Kommentare: HANDARBEIT SCHÜTZEN ----------------------------------------
+ReflowComments: false      # WICHTIG (aus Menschensicht): eure handgesetzten
+                           # Beweis-/Reasoning-Kommentare ("Mathematischer Beweis:
+                           # Fällt der Strom nach [n+1] ...") und ASCII-Skizzen
+                           # werden NICHT umgebrochen. Maschinelle Ordnung darf
+                           # menschliche Absicht im Kommentar nicht zerstören.
+
+# --- Includes: NICHT umsortieren (Compile-Reihenfolge!) ---------------------
+SortIncludes: Never        # Embedded-C: Include-Reihenfolge ist oft semantisch
+                           # (config-/feature-Header zuerst). Automatisches Sortieren
+                           # kann still den Build brechen — deshalb aus. Reihenfolge
+                           # bleibt Sache des Entwicklers.
+
+# --- Whitespace-Feinheiten ---------------------------------------------------
+SpaceBeforeParens: ControlStatements  # "if (" / "for (", aber "func(".
+SpaceAfterCStyleCast: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceBeforeAssignmentOperators: true
+SpacesBeforeTrailingComments: 2
+
+# --- Zeilenenden -------------------------------------------------------------
+LineEnding: LF             # [≥16] einheitlich LF (der Export enthielt CRLF).
+                           # Für clang-format < 16 stattdessen:  UseCRLF: false
+# InsertNewlineAtEOF: true # [≥17] optional: garantierte Schluss-Leerzeile.
+
+# ============================================================================
+#  Makro-Registrierung — HIER EURE MAKROS EINTRAGEN
+# ----------------------------------------------------------------------------
+#  Ohne Registrierung rückt clang-format attribut-/statement-artige Makros
+#  falsch ein. Ergänzt die tatsächlichen Namen aus eurem Baum:
+#
+# AttributeMacros:            # Makros, die wie __attribute__ wirken
+#   - PACKED
+#   - NORETURN
+#   - WEAK
+#   - USED
+#   - SECTION
+#
+# StatementMacros:            # Makros, die als vollständige Anweisung stehen
+#   - BOOT_UNUSED
+#
+# WhitespaceSensitiveMacros:  # Makros, in denen Whitespace bedeutungstragend ist
+#   - STRINGIZE
+# ============================================================================
+...

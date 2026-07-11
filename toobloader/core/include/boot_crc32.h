@@ -33,4 +33,7 @@ boot_status_t boot_crc32_flash_stream(const boot_platform_t *platform,
                                       uint32_t *out_crc,
                                       uint8_t *arena, size_t arena_len);
 
+uint32_t boot_crc32_update(uint32_t crc_init, const uint8_t *data, size_t len);
+uint32_t boot_crc32_fill(uint32_t crc_init, uint8_t val, size_t len);
+
 #endif /* TOOB_BOOT_CRC32_H */

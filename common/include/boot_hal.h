@@ -58,7 +58,16 @@ typedef struct {
   uint32_t max_erase_cycles; /* Vendor Limit (e.g. 100000) */
   uint8_t  write_align;
   uint8_t  erased_value;
+
+  /* Append-only fields for Energy-aware Admission (K7) */
+  uint32_t erase_time_us_max;   /* Worst-case erase time of max_sector_size sector in us, 0=unknown */
+  uint32_t write_time_us_page;  /* per write_align-Page in us, 0=unknown */
+  boot_status_t (*get_supply_mv)(uint32_t *mv_out);  /* Optional supply voltage readout, NULL if unsupported */
 } flash_hal_t;
+
+#include <stddef.h>
+_Static_assert(offsetof(flash_hal_t, erased_value) < offsetof(flash_hal_t, erase_time_us_max),
+               "ABI Layout Violation: erase_time_us_max must be appended at the end of flash_hal_t");
 
 /* --- 2. Confirm HAL (Survival State Storage) --- */
 
@@ -273,6 +282,13 @@ typedef struct {
 
 /**
  * @brief Aggregation of all HAL Pointers.
+ *
+ * HAL-CONTRACT: boot_platform_t ist der EINZIGE zulässige Hardware- und Peripherie-Zugang
+ * für den Toob-Boot Core (toobloader/core/) und Stage 0 (toobloader/stage0/).
+ * Kein Code außerhalb der HAL-Implementierung (hal/ bzw. test/host/) darf direkt auf
+ * MMIO-Register, volatile Hardware-Adressen oder herstellerspezifische SDK-Funktionen zugreifen.
+ * Diese Invariante wird durch das Test-Script scripts/check_mmio_isolation.ps1 erzwungen.
+ *
  * Instantiated natively by the Host/Sandbox or target Vendor startup sequence.
  */
 typedef struct {

@@ -48,4 +48,13 @@ boot_status_t boot_swap_erase_safe(const boot_platform_t *platform,
                                    uint32_t addr, size_t len,
                                    uint8_t *arena, size_t arena_len);
 
+#include "boot_effect.h"
+
+boot_status_t boot_swap_plan_chunk(const boot_platform_t *platform,
+                                   uint32_t current_src, uint32_t current_dest,
+                                   uint32_t block_size,
+                                   uint32_t crc_src, uint32_t crc_dest,
+                                   bool run_phase_a, bool run_phase_b, bool run_phase_c,
+                                   flash_effect_t *out_fx, size_t cap, size_t *n_out);
+
 #endif /* BOOT_SWAP_H */
