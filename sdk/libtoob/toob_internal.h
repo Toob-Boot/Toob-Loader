@@ -10,7 +10,7 @@
  * - boot_secure_zeroize.h  →  toob_secure_zeroize()
  * - boot_ct_utils.h        →  toob_ct_memcmp_glitch_safe()
  * - boot_types.h (GLITCH)  →  TOOB_GLITCH_DELAY()
- * - boot_crc32.h           →  toob_lib_crc32()
+ * - boot_crc32.h           →  toob_lib_crc32() (contract: toob_crc32_contract.h)
  *
  * ARCHITECTURE: libtoob must NEVER include bootloader-internal headers.
  * These are independent re-implementations that maintain Zero-Dependency
@@ -56,9 +56,11 @@
 /* ==============================================================================
  * 2. Secure Memory Zeroization (Anti-DCE)
  *
- * OS-side equivalent of boot_secure_zeroize() from boot_secure_zeroize.h.
- * Prevents modern compilers from eliminating security-critical memset(0)
- * calls via Dead Code Elimination (DCE).
+ * ABI-CONTRACT: Intentionally separate implementations exist:
+ *   Core:  Assembly (boot_secure_zeroize.S) — DCE-proof by ISA guarantee.
+ *   OS:    volatile + compiler barrier (below) — sufficient for RTOS guest
+ *          context where the compiler is not cross-TU aware.
+ * Both MUST zero exactly len bytes at ptr. Neither may return before completion.
  * ============================================================================== */
 static inline void toob_secure_zeroize(void *ptr, size_t len) {
   volatile uint8_t *p = (volatile uint8_t *)ptr;
@@ -116,16 +118,14 @@ static inline toob_status_t toob_ct_memcmp_glitch_safe(const uint8_t *a,
 uint32_t toob_lib_crc32(const uint8_t *data, size_t length);
 
 /* ==============================================================================
- * 5. WAL Naive Append
- * ============================================================================== */
-
-/**
- * @brief O(1) WAL Append without sector rotation or TMR healing.
+ * 5. Mailbox Writer (replaces WAL Naive Append)
  *
- * Those lifecycle tasks are strictly reserved for the Bootloader (S1)
- * upon reset to prevent OS-induced Wear-Suicide.
- */
-toob_status_t toob_wal_naive_append(const toob_wal_entry_payload_t *intent);
+ * Writes a single request record to a dedicated Flash sector.
+ * The Core reads it at boot and folds it into its own rich WAL.
+ * ============================================================================== */
+toob_status_t toob_mailbox_set_update(uint32_t manifest_flash_addr);
+toob_status_t toob_mailbox_set_confirm(uint64_t nonce);
+toob_status_t toob_mailbox_set_recovery_resolved(void);
 
 /* Private SDK Linkage: Hidden from public API to prevent unvalidated memory access */
 extern TOOB_NOINIT toob_handoff_t toob_handoff_state;

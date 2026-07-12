@@ -142,7 +142,7 @@ typedef struct {
   boot_status_t (*hash_finish)(void *ctx, uint8_t *digest, size_t *digest_len);
 
   /* Envelopes */
-  boot_status_t (*verify_ed25519)(
+  boot_status_t (*verify_signature)(
       const uint8_t *message, size_t msg_len,
       const uint8_t *sig, const uint8_t *pubkey);
   boot_status_t (*verify_pqc)(
@@ -178,6 +178,9 @@ typedef struct {
   size_t (*get_hash_ctx_size)(void);
   bool has_hw_acceleration;
   bool (*is_pqc_enforced)(void); /* Hardware profile enforces PQC */
+  boot_status_t (*verify_signature_ph)(
+      const uint8_t *msg_digest,
+      const uint8_t *sig, const uint8_t *pubkey);
 } crypto_hal_t;
 
 /* --- 5. Clock HAL (Timing & Resets) --- */
@@ -322,5 +325,17 @@ const boot_platform_t *boot_platform_init(void);
  * ein ECC-Rot detektiert wurde (anstatt ins Leere zu loopen).
  */
 extern void toob_ecc_trap(void);
+
+/* --- Crypto HAL Generic Symbols --- */
+boot_status_t toob_crypto_hal_init(void);
+void toob_crypto_hal_deinit(void);
+boot_status_t toob_crypto_hal_hash_init(void *ctx, size_t ctx_size);
+boot_status_t toob_crypto_hal_hash_update(void *ctx, const void *data, size_t len);
+boot_status_t toob_crypto_hal_hash_finish(void *ctx, uint8_t *digest, size_t *digest_len);
+boot_status_t toob_crypto_hal_verify_signature(const uint8_t *message, size_t msg_len, const uint8_t *sig, const uint8_t *pubkey);
+boot_status_t toob_crypto_hal_verify_pqc(const uint8_t *message, size_t msg_len, const uint8_t *sig, size_t sig_len, const uint8_t *pubkey, size_t pubkey_len);
+boot_status_t toob_crypto_hal_verify_signature_ph(const uint8_t *msg_digest, const uint8_t *sig, const uint8_t *pubkey);
+size_t toob_crypto_hal_get_hash_ctx_size(void);
+bool toob_crypto_hal_is_pqc_enforced(void);
 
 #endif /* TOOB_BOOT_HAL_H */

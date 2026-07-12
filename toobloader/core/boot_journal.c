@@ -28,6 +28,7 @@
 #include "boot_crc32.h"
 #include "boot_identity.h"
 #include "boot_merkle.h"
+#include "boot_panic.h"
 #include "boot_secure_zeroize.h"
 #include <stddef.h>
 #include <string.h>
@@ -120,6 +121,17 @@ static void migrate_v1_tmr(wal_tmr_payload_t *dst,
   dst->stage1_svn = BOOT_STAGE1_SVN;
   /* K4: chain_tag and chain_entry_count are zero from the zeroize above,
    * representing an empty chain on a freshly migrated device. */
+}
+
+static void upgrade_tmr_payload(wal_tmr_payload_t *tmr) {
+  if (tmr->struct_version < WAL_TMR_VERSION_2) {
+    tmr->stage1_svn = BOOT_STAGE1_SVN;
+  }
+  if (tmr->struct_version < WAL_TMR_VERSION_3) {
+    tmr->last_consumed_mailbox_seq = 0;
+  }
+  tmr->struct_version = WAL_TMR_VERSION_CURRENT;
+  tmr->populated_size = WAL_TMR_POPULATED_SIZE;
 }
 
 /* ---- C2: Scatter-gather hash for chain tags ---- */
@@ -514,12 +526,17 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
       current_active_header.sequence_id = legacy_hdr->sequence_id;
       current_active_header.erase_count = legacy_hdr->erase_count;
       migrate_v1_tmr(&current_active_header.tmr_data, &legacy_hdr->tmr_data);
+      upgrade_tmr_payload(&current_active_header.tmr_data);
       
       current_active_header.header_crc32 = sector_hdr_crc(&current_active_header);
       
       migration_required = true;
     } else {
       current_active_header = cached_winner.data;
+      if (current_active_header.tmr_data.struct_version < WAL_TMR_VERSION_CURRENT) {
+        upgrade_tmr_payload(&current_active_header.tmr_data);
+        migration_required = true;
+      }
     }
     boot_secure_zeroize(&cached_winner, sizeof(cached_winner));
 

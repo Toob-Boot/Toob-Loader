@@ -1,9 +1,9 @@
 /**
  * @file boot_verify.h
- * @brief SUIT-Manifest Signatur Envelope Wrapper. 
+ * @brief TBM1-Manifest Signatur Envelope Wrapper. 
  *
  * Toob-Boot Stage 1 wertet ein Manifest erst aus, wenn das gesamte Paket mathematisch 
- * als legitim bewiesen ist (Sign-then-Hash nach RFC/COSE_Sign1). 
+ * als legitim bewiesen ist (Sign-then-Hash). 
  * 
  * Relevant Specs:
  * - docs/concept_fusion.md (Anti-Truncation, Branch-Delay, OTFDEC Offline-Zwang)
@@ -25,8 +25,8 @@
  */
 typedef struct {
     uint32_t manifest_flash_addr;     /* Absoluter physikalischer SPI Pointer */
-    size_t   manifest_size;           /* Exakte ZCBOR-dekodierte Größe des signierten Bereichs.
-                                       * MUSS vom Decoder kommen, NIEMALS aus dem Pufferrand inferiert. */
+    size_t   manifest_size;           /* Exakte Größe des signierten Bereichs (total_len - 64).
+                                       * MUSS aus dem TBM1-Header kommen, NIEMALS aus dem Pufferrand inferiert. */
     const uint8_t* signature_ed25519; /* Pointer auf die Ed25519 Signatur */
     uint8_t  key_index;               /* eFuse OTP Key-Index (0..) für Key-Revocation Check */
 

@@ -4,14 +4,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/BurntSushi/toml"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
 func CheckBudget(tomlPath, binPath, stage string) error {
-	var dt DeviceToml
-	if _, err := toml.DecodeFile(tomlPath, &dt); err != nil {
-		return fmt.Errorf("BUDGET CHECK ERROR: Could not read %s: %w", tomlPath, err)
+	dt, err := ParseToml(tomlPath)
+	if err != nil {
+		return fmt.Errorf("BUDGET CHECK ERROR: Could not read/parse %s: %w", tomlPath, err)
 	}
 
 	budget := uint32(0)
@@ -19,12 +18,12 @@ func CheckBudget(tomlPath, binPath, stage string) error {
 	case "stage0":
 		budget = dt.Partitions.Stage0Size
 		if budget == 0 {
-			budget = 16384
+			return fmt.Errorf("FATAL [BUDGET_001]: stage0_size is mandatory in [partitions] of device.toml")
 		}
 	case "stage1":
 		budget = dt.Partitions.Stage1Size
 		if budget == 0 {
-			budget = 28672
+			return fmt.Errorf("FATAL [BUDGET_002]: stage1_size is mandatory in [partitions] of device.toml")
 		}
 	default:
 		return fmt.Errorf("invalid stage %s", stage)

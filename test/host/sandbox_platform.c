@@ -33,8 +33,13 @@ static boot_status_t sandbox_crypto_hash_finish(void *ctx, uint8_t *digest, size
     return BOOT_OK;
 }
 
-static boot_status_t sandbox_crypto_verify_ed25519(const uint8_t *message, size_t msg_len, const uint8_t *sig, const uint8_t *pubkey) {
+static boot_status_t sandbox_crypto_verify_signature(const uint8_t *message, size_t msg_len, const uint8_t *sig, const uint8_t *pubkey) {
     (void)message; (void)msg_len; (void)sig; (void)pubkey;
+    return BOOT_OK;
+}
+
+static boot_status_t sandbox_crypto_verify_signature_ph(const uint8_t *msg_digest, const uint8_t *sig, const uint8_t *pubkey) {
+    (void)msg_digest; (void)sig; (void)pubkey;
     return BOOT_OK;
 }
 
@@ -92,7 +97,7 @@ static const crypto_hal_t sandbox_crypto_hal = {
     .hash_init = sandbox_crypto_hash_init,
     .hash_update = sandbox_crypto_hash_update,
     .hash_finish = sandbox_crypto_hash_finish,
-    .verify_ed25519 = sandbox_crypto_verify_ed25519,
+    .verify_signature = sandbox_crypto_verify_signature,
     .verify_pqc = sandbox_crypto_verify_pqc,
     .random = sandbox_crypto_random,
     .get_last_vendor_error = NULL,
@@ -104,7 +109,8 @@ static const crypto_hal_t sandbox_crypto_hal = {
     .advance_monotonic_counter = sandbox_crypto_advance_monotonic_counter,
     .get_hash_ctx_size = sandbox_crypto_get_hash_ctx_size,
     .has_hw_acceleration = false,
-    .is_pqc_enforced = NULL
+    .is_pqc_enforced = NULL,
+    .verify_signature_ph = sandbox_crypto_verify_signature_ph
 };
 
 static boot_platform_t sandbox_platform = {

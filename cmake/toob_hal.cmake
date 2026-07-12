@@ -100,9 +100,11 @@ if(FLAT_BOM_SOURCES)
         ${FLAT_BOM_INCLUDES}
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
+        ${TOOB_CORE_DIR}/utils/include
         ${CMAKE_BINARY_DIR}/generated
         ${TOOB_SDK_DIR}/libtoob/include
-        ${TOOB_CRYPTO_DIR}/monocypher
+        ${TOOB_CRYPTO_BACKEND_DIR}
+        ${TOOB_CRYPTO_HASH_DIR}
     )
     if(TOOB_CHIP STREQUAL "sandbox")
         target_include_directories(toob_chip PUBLIC test/mocks)

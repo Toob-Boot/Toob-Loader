@@ -219,13 +219,16 @@ boot_status_t boot_main(const boot_platform_t *platform,
 
     /* Try RTC backup registers first */
     if (platform->soc && platform->soc->read_rtc_backup) {
-      uint32_t *words = (uint32_t *)&forensic_record;
+      uint32_t words[5];
       boot_status_t rtc_stat = BOOT_OK;
       for (uint8_t slot = 1; slot <= 5; slot++) {
         boot_status_t s = platform->soc->read_rtc_backup(slot, &words[slot - 1]);
         if (s != BOOT_OK) {
           rtc_stat = s;
         }
+      }
+      if (rtc_stat == BOOT_OK) {
+        memcpy(&forensic_record, words, sizeof(forensic_record));
       }
       if (rtc_stat == BOOT_OK && forensic_record.magic == 0x464F524E) {
         uint32_t calculated_crc = compute_boot_crc32((const uint8_t *)&forensic_record, 16);

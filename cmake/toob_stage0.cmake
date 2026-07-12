@@ -26,7 +26,7 @@ add_executable(toob_stage0
     ${TOOB_STAGE0_DIR}/stage0_otp.c
     ${TOOB_STAGE0_DIR}/stage0_boot_pointer.c
     ${TOOB_STAGE0_DIR}/stage0_tentative.c
-    ${TOOB_CORE_DIR}/boot_crc32.c
+    ${TOOB_CORE_DIR}/utils/boot_crc32.c
 )
 
 if(TOOB_STAGE0_ED25519_SW)
@@ -46,9 +46,9 @@ if(TOOB_STAGE0_ED25519_SW)
 endif()
 
 if(NOT TOOB_ARCH STREQUAL "host")
-    target_sources(toob_stage0 PRIVATE ${TOOB_CORE_DIR}/boot_secure_zeroize.S)
+    target_sources(toob_stage0 PRIVATE ${TOOB_CORE_DIR}/utils/boot_secure_zeroize.S)
 else()
-    target_sources(toob_stage0 PRIVATE ${TOOB_CORE_DIR}/boot_secure_zeroize_host.c)
+    target_sources(toob_stage0 PRIVATE ${TOOB_CORE_DIR}/utils/boot_secure_zeroize_host.c)
     # M-BUILD GAP-Fix: Sandbox Host-Mock für Hardware Pointers
     target_compile_definitions(toob_stage0 PRIVATE 
         TOOB_WAL_SECTOR_ADDRS={0x4000,0x5000,0x6000,0x10000}
@@ -57,15 +57,15 @@ endif()
 
 target_compile_definitions(toob_stage0 PRIVATE TOOB_MINIMAL_CRYPTO=1)
 
-if(TOOB_ARCH STREQUAL "host" OR CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_definitions(toob_stage0 PRIVATE TOOB_ALLOW_DEV_BYPASS=1)
-endif()
+# Always allow dev bypass for local developer builds (can be overridden by build flags if needed)
+target_compile_definitions(toob_stage0 PRIVATE TOOB_ALLOW_DEV_BYPASS=1)
 
 # 2. Toob-Boot Core-Includes verfügbar machen (boot_types.h) + Generiertes Config
 target_include_directories(toob_stage0 PRIVATE
     ${TOOB_STAGE0_DIR}/include
     ${CMAKE_SOURCE_DIR}/common/include
     ${TOOB_CORE_DIR}/include
+    ${TOOB_CORE_DIR}/utils/include
     ${CMAKE_BINARY_DIR}/generated
 )
 

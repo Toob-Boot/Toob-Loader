@@ -213,12 +213,12 @@ func downloadAndExtractTarball(client *http.Client, url string, targetDir string
 		return fmt.Errorf("bad status %d from %s", resp.StatusCode, url)
 	}
 
-	return extractTarball(resp.Body, targetDir)
+	return ExtractTarball(resp.Body, targetDir)
 }
 
-// extractTarball decompresses a gzipped tar stream into targetDir,
+// ExtractTarball decompresses a gzipped tar stream into targetDir,
 // stripping the top-level directory from archive paths.
-func extractTarball(r io.Reader, targetDir string) error {
+func ExtractTarball(r io.Reader, targetDir string) error {
 	gzr, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)

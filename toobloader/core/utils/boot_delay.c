@@ -28,6 +28,7 @@
 
 #include "boot_delay.h"
 #include "boot_fih.h"
+#include "boot_panic.h"
 #include "boot_types.h"
 #include <stdbool.h>
 #include <stdint.h>

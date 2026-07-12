@@ -30,6 +30,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
    * Only skip truly degenerate sizes that add no value. */
   if (size < 16) return 0;
 
-  (void)tbm1_validate(data, size);
+  uint32_t out_off[TBM1_MAX_IMAGES];
+  (void)tbm1_validate(data, size, size, out_off);
   return 0;
 }

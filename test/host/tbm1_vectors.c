@@ -103,6 +103,12 @@ static void fixup_crc(uint8_t *buf) {
   h->fixed_crc32 = compute_boot_crc32(buf, TBM1_CRC_LEN);
 }
 
+/** Test wrapper: calls tbm1_validate with a stack-local out_off array. */
+static tbm1_reject_t validate_buf(const uint8_t *buf, size_t cap) {
+  uint32_t out_off[TBM1_MAX_IMAGES];
+  return tbm1_validate(buf, cap, cap, out_off);
+}
+
 /* ========================================================================
  * V1 — Golden Vectors: one per tbm1_reject_t code
  * ======================================================================== */
@@ -111,7 +117,7 @@ static void test_happy_path(void) {
   uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
   make_valid_header(buf, sizeof(buf));
 
-  tbm1_reject_t rc = tbm1_validate(buf, sizeof(buf));
+  tbm1_reject_t rc = validate_buf(buf, sizeof(buf));
   assert(rc == TBM1_OK);
   printf("  [PASS] V0  Happy-Path\n");
 }
@@ -124,7 +130,7 @@ static void test_bad_magic(void) {
   h->magic = 0xDEADBEEF;
   /* No CRC fixup: magic is checked before CRC */
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_MAGIC);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_MAGIC);
   printf("  [PASS] V1  BAD_MAGIC\n");
 }
 
@@ -136,7 +142,7 @@ static void test_bad_fixed_len(void) {
   h->fixed_len = 256;
   /* No CRC fixup: fixed_len is checked before CRC */
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_FIXED_LEN);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_FIXED_LEN);
   printf("  [PASS] V2  BAD_FIXED_LEN\n");
 }
 
@@ -148,7 +154,7 @@ static void test_bad_version(void) {
   h->version_major = 99;
   /* No CRC fixup: version is checked before CRC */
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_VERSION);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_VERSION);
   printf("  [PASS] V3  BAD_VERSION\n");
 }
 
@@ -160,7 +166,7 @@ static void test_bad_total_len_small(void) {
   h->total_len = 100;  /* < TBM1_FIXED_LEN + TBM1_SIG_LEN (576) */
   /* No CRC fixup: total_len is checked before CRC */
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_TOTAL_LEN);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_TOTAL_LEN);
   printf("  [PASS] V4a BAD_TOTAL_LEN (too small)\n");
 }
 
@@ -172,7 +178,7 @@ static void test_bad_total_len_exceeds(void) {
   h->total_len = BUF_SIZE + 1;  /* > staging capacity */
   /* No CRC fixup: total_len is checked before CRC */
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_TOTAL_LEN);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_TOTAL_LEN);
   printf("  [PASS] V4b BAD_TOTAL_LEN (exceeds staging)\n");
 }
 
@@ -183,7 +189,7 @@ static void test_bad_crc(void) {
   tbm1_header_t *h = (tbm1_header_t *)buf;
   h->fixed_crc32 ^= 1;  /* 1-bit flip → CRC mismatch */
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_CRC);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_CRC);
   printf("  [PASS] V5  BAD_CRC\n");
 }
 
@@ -195,7 +201,7 @@ static void test_bad_crit_flag(void) {
   h->flags_critical = 0x8000;  /* Unknown critical bit */
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_CRIT_FLAG);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_CRIT_FLAG);
   printf("  [PASS] V6  BAD_CRIT_FLAG\n");
 }
 
@@ -207,7 +213,7 @@ static void test_bad_reader_version(void) {
   h->min_reader_major = 255;
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_READER_VERSION);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_READER_VERSION);
   printf("  [PASS] V7  BAD_READER_VERSION\n");
 }
 
@@ -219,7 +225,7 @@ static void test_bad_image_count(void) {
   h->image_count = 0;
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_IMAGE_COUNT);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_IMAGE_COUNT);
   printf("  [PASS] V8  BAD_IMAGE_COUNT\n");
 }
 
@@ -231,7 +237,7 @@ static void test_bad_key_index(void) {
   h->key_index = TOOB_DEVICE_KEY_SLOTS;  /* == 6, exactly one past valid range */
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_KEY_INDEX);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_KEY_INDEX);
   printf("  [PASS] V9  BAD_KEY_INDEX\n");
 }
 
@@ -243,7 +249,7 @@ static void test_bad_hw_compat(void) {
   h->product_id = 0xBEEF;  /* Mismatch vs TOOB_DEVICE_PRODUCT_ID (0x0042) */
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_HW_COMPAT);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_HW_COMPAT);
   printf("  [PASS] V10 BAD_HW_COMPAT\n");
 }
 
@@ -255,7 +261,7 @@ static void test_bad_chunk_math(void) {
   h->images[0].chunk_size = 0;  /* Division-by-zero guard */
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_CHUNK_MATH);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_CHUNK_MATH);
   printf("  [PASS] V11 BAD_CHUNK_MATH\n");
 }
 
@@ -268,7 +274,7 @@ static void test_bad_region_bounds(void) {
   h->regions[0].off = 961;
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_REGION_BOUNDS);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_REGION_BOUNDS);
   printf("  [PASS] V12 BAD_REGION_BOUNDS\n");
 }
 
@@ -286,7 +292,7 @@ static void test_bad_region_order(void) {
   h->regions[1].len = 32;
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_REGION_ORDER);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_REGION_ORDER);
   printf("  [PASS] V13 BAD_REGION_ORDER\n");
 }
 
@@ -304,7 +310,7 @@ static void test_bad_region_dup(void) {
   h->regions[1].len = 32;
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_REGION_DUP);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_REGION_DUP);
   printf("  [PASS] V14 BAD_REGION_DUP\n");
 }
 
@@ -317,8 +323,21 @@ static void test_bad_chunkhash_len(void) {
   h->regions[0].len = 0;
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_CHUNKHASH_LEN);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_CHUNKHASH_LEN);
   printf("  [PASS] V15 BAD_CHUNKHASH_LEN\n");
+}
+
+static void test_bad_region_alignment(void) {
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  make_valid_header(buf, sizeof(buf));
+
+  tbm1_header_t *h = (tbm1_header_t *)buf;
+  /* Make region offset misaligned (e.g. 513 instead of 512) */
+  h->regions[0].off = 513;
+  fixup_crc(buf);
+
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_REGION_ALIGN);
+  printf("  [PASS] V16 BAD_REGION_ALIGN\n");
 }
 
 /* ========================================================================
@@ -334,7 +353,7 @@ static void test_chunkhash_off_by_one(void) {
   h->regions[0].len = 33;  /* Should be 32 (1 chunk × 32) */
   fixup_crc(buf);
 
-  assert(tbm1_validate(buf, sizeof(buf)) == TBM1_BAD_CHUNKHASH_LEN);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_CHUNKHASH_LEN);
   printf("  [PASS] V2-interop: Off-by-one chunk-hash caught\n");
 }
 
@@ -365,12 +384,13 @@ int main(void) {
   test_bad_region_order();
   test_bad_region_dup();
   test_bad_chunkhash_len();
+  test_bad_region_alignment();
 
   printf("\n[V2] Encoder Interop Vectors:\n");
   test_chunkhash_off_by_one();
 
   printf("\n==================================================\n");
-  printf("   ALL %d VECTORS PASSED\n", 18);
+  printf("   ALL %d VECTORS PASSED\n", 19);
   printf("==================================================\n");
 
   return 0;

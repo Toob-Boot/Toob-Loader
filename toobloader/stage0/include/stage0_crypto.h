@@ -11,6 +11,7 @@ int stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig,
                             const uint8_t *msg_digest);
 
 uint32_t stage0_get_active_slot(const boot_platform_t *platform);
+uint32_t stage0_get_stage1_svn(const boot_platform_t *platform);
 uint32_t stage0_evaluate_tentative(const boot_platform_t *platform, uint32_t current_slot);
 uint8_t stage0_get_active_otp_key_index(const boot_platform_t *platform);
 

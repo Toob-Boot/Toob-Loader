@@ -16,6 +16,7 @@
 #define BOOT_CT_UTILS_H
 
 #include "boot_types.h"
+#include "boot_fih.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -176,6 +177,26 @@ static inline uint32_t cfi_derive(uint32_t seed, uint8_t slot) {
   h *= 0x45D9F3Bu;
   h ^= h >> 16;
   return h | 1u; /* Bit 0 erzwungen: Garantiert niemals 0 */
+}
+
+/**
+ * @brief O(1) Mathematical Zero-Buffer Verification (Glitch Protected)
+ * Verhindert Triviale-Signatur-Fälschungen durch fabrikneue (leere) eFuses
+ * oder Hardware-Glitches, die einen All-Zero (oder All-0xFF) Public Key
+ * produzieren.
+ */
+static inline boot_status_t verify_not_all_zeros_glitch_safe(const uint8_t *buf,
+                                                             size_t len) {
+  uint8_t or_acc = 0x00;
+  uint8_t and_acc = 0xFF;
+
+  for (size_t i = 0; i < len; i++) {
+    or_acc |= buf[i];
+    and_acc &= buf[i];
+  }
+
+  BOOT_SECURE_REQUIRE(or_acc != 0x00 && and_acc != 0xFF, { return BOOT_ERR_VERIFY; });
+  return BOOT_OK;
 }
 
 #endif /* BOOT_CT_UTILS_H */

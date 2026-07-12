@@ -14,35 +14,34 @@
 #include "boot_hal.h"
 #include "boot_types.h"
 
-#define WAL_ABI_VERSION_MAGIC_LEGACY 0x57414C02  /* "WAL\x02" */
-#define WAL_ABI_VERSION_MAGIC_CURRENT 0x57414C03 /* "WAL\x03" */
-#define WAL_ABI_VERSION_MAGIC WAL_ABI_VERSION_MAGIC_CURRENT
-#define WAL_ENTRY_MAGIC 0xB007BEEF
+#include "toob_wal_wire.h"
 
-/**
- * @brief Spezifische Boot-Intents (WAL Transaction States)
- */
-typedef enum {
-  WAL_INTENT_NONE = 0,
-  WAL_INTENT_TXN_BEGIN = 1,
-  WAL_INTENT_UPDATE_PENDING = 2,
-  WAL_INTENT_TXN_COMMIT = 3,
-  WAL_INTENT_CONFIRM_COMMIT = 4,
-  WAL_INTENT_RECOVERY_RESOLVED = 5,
-  WAL_INTENT_TXN_ROLLBACK = 6,
-  WAL_INTENT_DEPRECATED_NONCE =
-      7, /**< Deprecated. Nonce resides in TMR payload now */
-  WAL_INTENT_NET_SEARCH_ACCUM = 8, /**< Anti-Lagerhaus Lockout: Persistiert die
-                                      akkumulierte Netz-Suchzeit */
-  WAL_INTENT_SLEEP_BACKOFF =
-      9, /**< Edge Recovery: Exponential Backoff Level vor Deep-Sleep */
-  WAL_INTENT_TXN_ROLLBACK_PENDING =
-      10, /**< 1-way Firmware restore in progress */
-  WAL_INTENT_DOWNLOAD_CHECKPOINT =
-      11, /**< OS-Side Checkpoint for resumable OTA downloads */
-  WAL_INTENT_CLOUD_CMD = 12,
-  WAL_INTENT_DEVICE_LOCKED = 13
-} wal_intent_t;
+/* Core-internal aliases: existing code uses WAL_* names without TOOB_ prefix.
+ * These aliases avoid a mass-rename across ~40 call sites in boot_state.c,
+ * boot_journal.c, boot_rollback.c, boot_delta.c, boot_multiimage.c. */
+typedef toob_wal_intent_t        wal_intent_t;
+typedef toob_wal_entry_payload_t wal_entry_payload_t;
+typedef toob_wal_entry_aligned_t wal_entry_aligned_t;
+
+#define WAL_ABI_VERSION_MAGIC_LEGACY  TOOB_WAL_SECTOR_MAGIC_LEGACY
+#define WAL_ABI_VERSION_MAGIC_CURRENT TOOB_WAL_SECTOR_MAGIC_CURRENT
+#define WAL_ABI_VERSION_MAGIC         TOOB_WAL_SECTOR_MAGIC
+#define WAL_ENTRY_MAGIC               TOOB_WAL_ENTRY_MAGIC
+
+#define WAL_INTENT_NONE               TOOB_WAL_INTENT_NONE
+#define WAL_INTENT_TXN_BEGIN          TOOB_WAL_INTENT_TXN_BEGIN
+#define WAL_INTENT_UPDATE_PENDING     TOOB_WAL_INTENT_UPDATE_PENDING
+#define WAL_INTENT_TXN_COMMIT         TOOB_WAL_INTENT_TXN_COMMIT
+#define WAL_INTENT_CONFIRM_COMMIT     TOOB_WAL_INTENT_CONFIRM_COMMIT
+#define WAL_INTENT_RECOVERY_RESOLVED  TOOB_WAL_INTENT_RECOVERY_RESOLVED
+#define WAL_INTENT_TXN_ROLLBACK       TOOB_WAL_INTENT_TXN_ROLLBACK
+#define WAL_INTENT_DEPRECATED_NONCE   TOOB_WAL_INTENT_DEPRECATED_NONCE
+#define WAL_INTENT_NET_SEARCH_ACCUM   TOOB_WAL_INTENT_NET_SEARCH_ACCUM
+#define WAL_INTENT_SLEEP_BACKOFF      TOOB_WAL_INTENT_SLEEP_BACKOFF
+#define WAL_INTENT_TXN_ROLLBACK_PENDING TOOB_WAL_INTENT_TXN_ROLLBACK_PENDING
+#define WAL_INTENT_DOWNLOAD_CHECKPOINT  TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT
+#define WAL_INTENT_CLOUD_CMD          TOOB_WAL_INTENT_CLOUD_CMD
+#define WAL_INTENT_DEVICE_LOCKED      TOOB_WAL_INTENT_DEVICE_LOCKED
 
 /**
  * @brief K4: Classifies whether a WAL intent is security-bearing.
@@ -57,7 +56,8 @@ static inline bool wal_intent_is_security_bearing(uint32_t intent) {
 #define TMR_PAYLOAD_SLOT_BYTES 112
 #define WAL_TMR_VERSION_1 1
 #define WAL_TMR_VERSION_2 2
-#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_2
+#define WAL_TMR_VERSION_3 3
+#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_3
 
 #define WAL_CHAIN_TAG_BYTES 16
 
@@ -119,11 +119,14 @@ typedef struct {
   uint32_t stage1_svn;  /* Last-confirmed Stage 1 SVN (defense-in-depth, A1 protection) */
 
   /* --- v3-Felder (K4: Device-Bound Journal Chain) --- */
-  uint8_t  chain_tag[WAL_CHAIN_TAG_BYTES]; /* H(k_journal, entry ‖ prev_tag), truncated */
+  uint8_t  chain_tag[WAL_CHAIN_TAG_BYTES]; /* H(k_journal, entry || prev_tag), truncated */
   uint32_t chain_entry_count;              /* Monotonic counter of chained entries */
 
+  /* --- v4-Felder (L1: OS Mailbox Integration) --- */
+  uint32_t last_consumed_mailbox_seq;      /* Last processed seq number from OS Mailbox */
+
   /* --- reserved tail (for future versions) --- */
-  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4];
+  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4 - 4];
 } wal_tmr_payload_t;
 
 /** Canonical populated-size: all fields before the reserved tail.
@@ -135,16 +138,16 @@ typedef struct {
 #define WAL_PROTECT_WINDOW  4u
 
 /**
- * @brief Der Header eines jeden WAL-Sektors
- * Liegt am Offset 0 eines jeden der 4-8 physikalischen WAL-Sektoren.
+ * @brief Der Header eines jeden WAL-Sektors.
+ * Core-internal: contains typed TMR payload (not the opaque _reserved_tmr_space
+ * that the OS side sees through toob_wal_wire.h).
  */
 typedef struct {
-  uint32_t sector_magic; /**< Immer WAL_ABI_VERSION_MAGIC */
-  uint32_t
-      sequence_id; /**< Fortlaufende ID für O(1) Sliding-Window Discovery */
-  uint32_t erase_count;       /**< Tracks sector wear leveling */
-  wal_tmr_payload_t tmr_data; /**< Eine von 3 TMR Kopien (GAP-C01) */
-  uint32_t header_crc32;      /**< Sichert den Sector-Header */
+  uint32_t sector_magic;        /**< Immer WAL_ABI_VERSION_MAGIC */
+  uint32_t sequence_id;         /**< Fortlaufende ID fuer O(1) Sliding-Window Discovery */
+  uint32_t erase_count;         /**< Tracks sector wear leveling */
+  wal_tmr_payload_t tmr_data;   /**< Eine von 3 TMR Kopien (GAP-C01) */
+  uint32_t header_crc32;        /**< Sichert den Sector-Header */
 } wal_sector_header_t;
 
 /**
@@ -152,77 +155,26 @@ typedef struct {
  */
 typedef union {
   wal_sector_header_t data;
-  /* Festes 128-Byte Padding für Hardware-Alignment */
   uint8_t padding[128];
 } wal_sector_header_aligned_t;
 
-_Static_assert(
-    sizeof(wal_sector_header_aligned_t) % 8 == 0,
-    "GAP-C03: WAL Sector Header padding violates hardware alignment!");
+_Static_assert(sizeof(wal_sector_header_aligned_t) % 8 == 0,
+               "GAP-C03: WAL Sector Header padding violates hardware alignment!");
 _Static_assert(sizeof(wal_tmr_payload_t) <= TMR_PAYLOAD_SLOT_BYTES,
                "ABI Drift: TMR payload exceeds slot size!");
 _Static_assert(sizeof(wal_sector_header_t) <= 128,
                "ABI Drift: WAL Header exceeds slot size!");
 _Static_assert(sizeof(wal_sector_header_aligned_t) == 128,
                "ABI Drift: Aligned WAL Header must be exactly 128 bytes!");
-_Static_assert(WAL_TMR_POPULATED_SIZE == 76,
-               "ABI Drift: populated_size must match hand-computed 76!");
+_Static_assert(WAL_TMR_POPULATED_SIZE == 80,
+               "ABI Drift: populated_size must match hand-computed 80!");
 
-/**
- * @brief Der Payload eines einzelnen angehängten WAL-Eintrags.
- */
-typedef struct {
-  uint32_t magic;  /**< Immer WAL_ENTRY_MAGIC (0xBEEF) */
-  uint32_t intent; /**< Der Transaction Intent (enum wal_intent_t) */
-
-  /* FIX: 64-bit Nonce direkt hier für 8-Byte Alignment ohne Struct-Padding (P10
-   * Struct Geometry) */
-  uint64_t expected_nonce; /**< Sichert EXPECTED_NONCE vor dem OS-Jump */
-
-  /* Transaktionale Daten für Resume/Checkpointing */
-  uint32_t update_deadline;
-  uint32_t transfer_bitmap[8]; /**< 1 Bit = 1 Chunk (256 Chunks max) */
-  uint32_t delta_chunk_id;     /**< Aktueller Checkpoint für Delta-Patches */
-  uint32_t offset; /**< Generisches Offset (z.B. für Net-Search Accumulator) */
-
-  uint32_t crc32_trailer; /**< CRC-32 Trailer über den Entry */
-} wal_entry_payload_t;
-
-/**
- * @brief GAP-C03: WAL Struct Padding Pattern
- * Jeder Append-Eintrag muss auf Hardware-Flash-Größen aligned sein.
- */
-typedef union {
-  wal_entry_payload_t data;
-  /* Festes 64-Byte Padding für Hardware-Alignment */
-  uint8_t padding[64];
-} wal_entry_aligned_t;
-
-_Static_assert(sizeof(wal_entry_aligned_t) % 8 == 0,
-               "GAP-C03: WAL padding violates hardware alignment!");
-
-/* P10 Zero-Dependency Sicherung: Zentraler Translation-Layer Check gegen
- * ABI-Drift der Boundaries */
-_Static_assert(sizeof(wal_entry_payload_t) == sizeof(toob_wal_entry_payload_t),
-               "ABI Drift: WAL Entry Type Size Mismatch!");
-_Static_assert((uint32_t)WAL_ENTRY_MAGIC == (uint32_t)TOOB_WAL_ENTRY_MAGIC,
-               "ABI Drift: WAL Entry Magic Mismatch!");
-_Static_assert((int)WAL_INTENT_CONFIRM_COMMIT ==
-                   (int)TOOB_WAL_INTENT_CONFIRM_COMMIT,
-               "ABI Drift: Enum Confirm Commit Mismatch!");
-_Static_assert((int)WAL_INTENT_UPDATE_PENDING ==
-                   (int)TOOB_WAL_INTENT_UPDATE_PENDING,
-               "ABI Drift: Enum Update Pending Mismatch!");
-_Static_assert((int)WAL_INTENT_CLOUD_CMD == (int)TOOB_WAL_INTENT_CLOUD_CMD,
-               "ABI Drift: Enum Cloud Cmd Mismatch!");
-_Static_assert((int)WAL_INTENT_DEVICE_LOCKED ==
-                   (int)TOOB_WAL_INTENT_DEVICE_LOCKED,
-               "ABI Drift: Enum Device Locked Mismatch!");
+/* Cross-check: Core's typed sector header must match the wire format's opaque version */
 _Static_assert(sizeof(wal_sector_header_t) == sizeof(toob_wal_sector_header_t),
-               "ABI Drift: WAL Header Size Mismatch!");
+               "ABI Drift: Core sector header vs wire format size mismatch!");
 
 /**
- * @brief Initialisiert das WAL (Scannt Sliding Window & lädt TMR via Majority
+ * @brief Initialisiert das WAL (Scannt Sliding Window & laedt TMR via Majority
  * Vote)
  */
 boot_status_t boot_journal_init(const boot_platform_t *platform);

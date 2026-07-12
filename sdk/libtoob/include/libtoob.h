@@ -13,17 +13,14 @@
  * Es spannt den C++ kompatiblen Schutzschirm (extern "C") für externe Feature-OS.
  *
  * ==============================================================================
- * ERROR HANDLING MATRIX & OS CONTRACTS (P7b / WAL Policy)
+ * ERROR HANDLING MATRIX & OS CONTRACTS (L1 / Mailbox Policy)
  * ==============================================================================
  * Die Funktionen toob_confirm_boot(), toob_recovery_resolved(), 
- * toob_accumulate_net_search() und toob_set_next_update() führen WAL-Appends aus.
+ * und toob_set_next_update() schreiben Mailbox-Anfragen in den Flash.
  * Diese Operationen können spezifische Fehlercodes zurückgeben:
  *
  * | Fehlercode                 | Ursache                              | Erwartete OS-Reaktion          |
  * |----------------------------|--------------------------------------|--------------------------------|
- * | TOOB_ERR_REQUIRES_RESET    | Unvollständiger Write (torn write).  | System sofort neu starten.     |
- * | TOOB_ERR_WAL_FULL          | Aktiver Sektor ist voll.             | System sofort neu starten.     |
- * | TOOB_ERR_WAL_LOCKED        | Ein anderes Update steht aus/aktiv.  | Operation abbrechen/später.    |
  * | TOOB_ERR_FLASH / FLASH_HW  | Hardwarefehler im Flash-Treiber.     | Fehler protokollieren.         |
  */
 
@@ -150,9 +147,8 @@ static inline TOOB_MUST_CHECK toob_status_t toob_os_init(void) {
  *        dieses TTLs führt das Ausbleiben des Aufrufs unwiderruflich zum Rollback.
  * 
  * @return TOOB_OK bei Erfolg.
- *         Mögliche WAL-Fehler (erfordern OS-Handhabung):
- *         - TOOB_ERR_REQUIRES_RESET: Torn Write entdeckt. OS muss einen Reboot auslösen.
- *         - TOOB_ERR_WAL_FULL: WAL-Sektor voll. OS muss einen Reboot auslösen.
+ * @return TOOB_OK bei Erfolg.
+ *         Mögliche Fehler:
  *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
  */
 TOOB_MUST_CHECK toob_status_t toob_confirm_boot(void);
@@ -160,27 +156,13 @@ TOOB_MUST_CHECK toob_status_t toob_confirm_boot(void);
 /**
  * @brief Befreit das Recovery-OS aus dem Rettungsmodus (Anti Roach-Motel).
  * @note  Sobald das Recovery-OS die App repariert hat, MUSS es diese Funktion 
- *        aufrufen, um den RECOVERY_RESOLVED Intent ins WAL zu schreiben.
+ *        aufrufen, um den RECOVERY_RESOLVED Intent in die Mailbox zu schreiben.
  * 
  * @return TOOB_OK bei Erfolg.
- *         Mögliche WAL-Fehler (erfordern OS-Handhabung):
- *         - TOOB_ERR_REQUIRES_RESET: Sektor-Korruption. OS muss einen Reboot auslösen.
- *         - TOOB_ERR_WAL_FULL: Sektor voll. OS muss einen Reboot auslösen.
+ *         Mögliche Fehler:
  *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
  */
 TOOB_MUST_CHECK toob_status_t toob_recovery_resolved(void);
-
-/**
- * @brief Akkumuliert die aktive Cloud-Suchzeit (Anti-Lagerhaus Lockout).
- * @param active_search_ms Dauer der aktiven Netzwerk-Suche seit dem letzten Reset.
- * 
- * @return TOOB_OK bei Erfolg.
- *         Mögliche WAL-Fehler (erfordern OS-Handhabung):
- *         - TOOB_ERR_REQUIRES_RESET: Sektor-Korruption. OS muss einen Reboot auslösen.
- *         - TOOB_ERR_WAL_FULL: Sektor voll. OS muss einen Reboot auslösen.
- *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
- */
-TOOB_MUST_CHECK toob_status_t toob_accumulate_net_search(uint32_t active_search_ms);
 
 
 /* ==============================================================================
@@ -318,20 +300,16 @@ TOOB_MUST_CHECK toob_status_t toob_ota_process_chunk(toob_ota_ctx_t *ctx, const 
 TOOB_MUST_CHECK toob_status_t toob_ota_finalize(toob_ota_ctx_t *ctx);
 
 /**
- * @brief Registriert ein empfangenes SUIT-Manifest im Write-Ahead-Log (WAL).
+ * @brief Registriert ein empfangenes Manifest in der Mailbox.
  * 
- * @note  [GAP-37: P10 WAL-Atomarität]
- *        Toob-Loader stützt sich auf absolute P10-Resilienz. Ein Crash (Brownout) 
- *        während der Ausführung dieser Funktion hinterlässt niemals einen halben
- *        Zustand! Das System evaluiert CRC-gesicherte 64-Byte WAL-Sektoren beim
- *        nächsten Boot und schließt das Update ab, oder verwirft das Rausch-Fragment.
+ * @note  [L1: Mailbox-Atomarität]
+ *        Ein Crash (Brownout) während der Ausführung dieser Funktion hinterlässt
+ *        niemals einen halben Zustand. Das System evaluiert CRC-gesicherte Mailbox-Einträge
+ *        beim nächsten Boot und faltet sie in seine interne WAL ein.
  *
  * @param manifest_flash_addr Absolute, hardware-bündige Flash-Adresse des Manifests im SPI.
  * @return TOOB_OK bei Erfolg.
- *         Mögliche WAL-Fehler (erfordern OS-Handhabung):
- *         - TOOB_ERR_REQUIRES_RESET: Sektor-Korruption. OS muss einen Reboot auslösen.
- *         - TOOB_ERR_WAL_FULL: Sektor voll. OS muss einen Reboot auslösen.
- *         - TOOB_ERR_WAL_LOCKED: Ein anderes Update steht bereits aus.
+ *         Mögliche Fehler:
  *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
  */
 TOOB_MUST_CHECK toob_status_t toob_set_next_update(uint32_t manifest_flash_addr);

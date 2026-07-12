@@ -103,6 +103,7 @@ if(_CRYPTO_ALL_SOURCES)
         ${_CRYPTO_ALL_INCLUDES}
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
+        ${TOOB_CORE_DIR}/utils/include
     )
 
     # Apply per-slot compiler flags

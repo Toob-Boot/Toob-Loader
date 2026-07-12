@@ -283,17 +283,20 @@ typedef enum {
   TBM1_BAD_FIXED_LEN,       /**< fixed_len != 512 */
   TBM1_BAD_VERSION,         /**< version_major != TBM1_VERSION_MAJOR */
   TBM1_BAD_TOTAL_LEN,       /**< total_len too small or exceeds staging capacity */
+  TBM1_BAD_ALIGN,           /**< buf is NULL or not 4-byte aligned */
   TBM1_BAD_CRC,             /**< fixed_crc32 pre-check failed (staging corrupt) */
   TBM1_BAD_CRIT_FLAG,       /**< Unknown flags_critical bit set */
   TBM1_BAD_READER_VERSION,  /**< min_reader_* exceeds this reader's version */
   TBM1_BAD_IMAGE_COUNT,     /**< image_count not in [1..TBM1_MAX_IMAGES] */
   TBM1_BAD_KEY_INDEX,       /**< key_index >= provisioned key slots */
   TBM1_BAD_HW_COMPAT,       /**< product_id or hw_rev mismatch */
-  TBM1_BAD_CHUNK_MATH,      /**< chunk_size==0, num_chunks mismatch, or bad slot */
+  TBM1_BAD_CHUNK_MATH,      /**< chunk_size==0 or num_chunks mismatch */
+  TBM1_BAD_IMAGE_FIELD,     /**< target_slot, compression_alg, delta_alg, or data bounds OOB */
   TBM1_BAD_REGION_BOUNDS,   /**< Region off/len exceeds signed area */
   TBM1_BAD_REGION_ORDER,    /**< Regions not ascending or overlapping */
   TBM1_BAD_REGION_DUP,      /**< Duplicate region_id in directory */
   TBM1_BAD_CHUNKHASH_LEN,   /**< REGION_CHUNK_HASHES len != Σ(num_chunks_i)×32 */
+  TBM1_BAD_REGION_ALIGN,    /**< Region offset is not 8-byte aligned */
 } tbm1_reject_t;
 
 /* ---- Compile-Time Device Identity Defaults ----------------------------- */
@@ -319,15 +322,15 @@ tbm1_reject_t tbm1_precheck(const uint8_t *buf, size_t staging_cap);
 /** Region directory: overflow-safe bounds, ascending order, no duplicates. */
 tbm1_reject_t tbm1_validate_regions(const tbm1_header_t *h);
 
-/** Image descriptors: count, key_index, HW-compat, chunk math. */
-tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h);
+/** Image descriptors + chunk-hash partitioning (fused R4+R5).
+ *  out_off must point to an array of at least TBM1_MAX_IMAGES uint32_t. */
+tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap,
+                                   uint32_t *out_off);
 
-/** Chunk-hash partitioning: region.len == Σ(num_chunks_i)×32. */
-tbm1_reject_t tbm1_chunkhash_slices(const tbm1_header_t *h,
-                                    uint32_t *out_off);
-
-/** Top-level facade: precheck → regions → images → chunkhash. */
-tbm1_reject_t tbm1_validate(const uint8_t *buf, size_t staging_cap);
+/** Top-level facade: precheck → regions → images(+chunkhash).
+ *  out_off must point to an array of at least TBM1_MAX_IMAGES uint32_t. */
+tbm1_reject_t tbm1_validate(const uint8_t *buf, size_t manifest_cap, size_t staging_cap,
+                            uint32_t *out_off);
 
 /** Map tbm1_reject_t to boot_status_t for the pipeline error handler. */
 boot_status_t tbm1_reject_to_boot_status(tbm1_reject_t rc);
@@ -337,4 +340,3 @@ boot_status_t tbm1_reject_to_boot_status(tbm1_reject_t rc);
 #endif
 
 #endif /* TOOB_BOOT_TBM1_H */
-

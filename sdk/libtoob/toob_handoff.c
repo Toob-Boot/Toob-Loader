@@ -1,28 +1,10 @@
 /**
- * ==============================================================================
- * Toob-Boot libtoob: Handoff-RAM (.noinit) Validierung (toob_handoff.c)
- * (Mathematical Perfection Revision)
- * ==============================================================================
+ * @file toob_handoff.c
+ * @brief Handoff Reader — reads bootloader diagnostic state from shared RAM.
  *
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (toob_handoff_t structure definition and Magic values)
- * - docs/concept_fusion.md (P10 CRC-32 validation requirements across ABI
- * boundaries)
- * - docs/testing_requirements.md (RAM bound checks to prevent .noinit arbitrary
- * read vulnerabilities)
- *
- * ARCHITECTURAL UPGRADES:
- * 1. Tentative Boot Enablement: Magic-Validation akzeptiert nun
- * TOOB_STATE_TENTATIVE, damit das OS Probe-Updates testen und via
- * toob_confirm_boot() besiegeln kann.
- * 2. ABI Versioning Shield: Explizite Prüfung der struct_version gegen
- * Memory-Drifts.
- * 3. Glitch-Resistant OS Boundary: Cross-Compiler-kompatible Delay-Injections
- *    und Double-Check Patterns verhindern Voltage-Glitches in der
- * RAM-Validierung.
- * 4. TOCTOU Defense: Verhindert asynchrone RTOS-Interrupt Korruptionen während
- * des Reads.
- * 5. P10 Leakage Defense: Präemptive Nullifizierung des OS-Buffers vor Output.
+ * Validates and extracts the toob_handoff_t struct from the .noinit RAM
+ * section. CRC-32 + magic verification with TOCTOU defense (local copy)
+ * and glitch-resistant double-check patterns.
  */
 
 #include "libtoob.h"

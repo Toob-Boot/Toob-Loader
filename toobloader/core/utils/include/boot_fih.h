@@ -68,11 +68,11 @@ typedef struct {
 } while(0)
 
 #define boot_cfi_step(ctx, slot) do { \
-    (ctx).current_val ^= cfi_derive((ctx).seed, (slot)); \
+    (ctx).current_val ^= cfi_derive((ctx).seed, (uint8_t)(slot)); \
 } while(0)
 
 #define boot_cfi_add_expected(ctx, slot) do { \
-    (ctx).expected_val ^= cfi_derive((ctx).seed, (slot)); \
+    (ctx).expected_val ^= cfi_derive((ctx).seed, (uint8_t)(slot)); \
 } while(0)
 
 #define boot_cfi_require(ctx, on_fault) do { \

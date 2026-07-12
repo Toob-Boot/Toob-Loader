@@ -29,6 +29,7 @@
 #include "boot_delta.h"
 #include "boot_diag.h"
 #include "boot_journal.h"
+#include "boot_mailbox.h"
 #include "boot_merkle.h"
 #include "boot_multiimage.h"
 #include "boot_panic.h"
@@ -87,13 +88,14 @@ static const intent_row_t INTENT_TABLE[] = {
 /* P10 CFI Token Slots (Randomized per boot via TRNG) */
 #define STATE_CFI_SLOT_INIT   0
 #define STATE_CFI_SLOT_1      1
-#define STATE_CFI_SLOT_2      2
-#define STATE_CFI_SLOT_2_5    3 /* Cloud-Command Evaluation */
-#define STATE_CFI_SLOT_2_7    4 /* Lock-State Gate */
-#define STATE_CFI_SLOT_3      5
-#define STATE_CFI_SLOT_4      6
-#define STATE_CFI_SLOT_5      7
-#define STATE_CFI_NUM_TOKENS  8
+#define STATE_CFI_SLOT_1_5    2 /* OS Mailbox Fold-In */
+#define STATE_CFI_SLOT_2      3
+#define STATE_CFI_SLOT_2_5    4 /* Cloud-Command Evaluation */
+#define STATE_CFI_SLOT_2_7    5 /* Lock-State Gate */
+#define STATE_CFI_SLOT_3      6
+#define STATE_CFI_SLOT_4      7
+#define STATE_CFI_SLOT_5      8
+#define STATE_CFI_NUM_TOKENS  9
 
 /* K6-T3: Pipeline Sub-CFI slots */
 #define STATE_CFI_SLOT_P1     9
@@ -129,6 +131,7 @@ static boot_status_t _handle_cloud_cmd(const boot_platform_t *platform,
                                        boot_cfi_ctx_t *cfi_ctx,
                                        uint32_t slot,
                                        uint8_t *arena, size_t arena_len) {
+  (void)arena_len;
   toob_cloud_cmd_t cmd_intent = TOOB_CMD_NOP;
 
   boot_status_t eval_stat =
@@ -291,6 +294,7 @@ typedef struct {
   /* stage_parse output (TBM1 v2 fixed-format) */
   const tbm1_header_t *tbm1;     /* Pointer into arena (read-only after parse) */
   uint32_t tbm1_total_len;       /* == tbm1->total_len */
+  uint32_t chunk_hash_offs[TBM1_MAX_IMAGES]; /* Per-image chunk-hash offsets from tbm1_validate */
 
   /* stage_check_svn output */
   uint32_t extracted_svn;
@@ -330,7 +334,7 @@ static boot_status_t stage_parse(update_ctx_t *ctx) {
   if (read_stat != BOOT_OK)
     return read_stat;
 
-  tbm1_reject_t rc = tbm1_validate(ctx->arena, ctx->arena_len);
+  tbm1_reject_t rc = tbm1_validate(ctx->arena, ctx->arena_len, CHIP_STAGING_SLOT_SIZE, ctx->chunk_hash_offs);
   if (rc != TBM1_OK)
     return tbm1_reject_to_boot_status(rc);
 
@@ -469,13 +473,10 @@ static boot_status_t stage_route(update_ctx_t *ctx) {
 
   ctx->primary_image = &ctx->tbm1->images[0];
 
-  /* Chunk-hash pointer from Region Directory */
+  /* Chunk-hash pointer from pre-computed tbm1_validate offsets */
+  ctx->chunk_hash_ptr = ctx->arena + ctx->chunk_hash_offs[0];
   const tbm1_region_t *hash_reg = tbm1_find_region(ctx->tbm1, TBM1_REGION_CHUNK_HASHES);
-  if (!hash_reg)
-    return BOOT_ERR_INVALID_ARG;
-
-  ctx->chunk_hash_ptr = ctx->arena + hash_reg->off;
-  ctx->chunk_hash_len = hash_reg->len;
+  ctx->chunk_hash_len = hash_reg ? hash_reg->len : 0;
 
   /* Primary image fields */
   ctx->num_chunks = ctx->primary_image->num_chunks;
@@ -849,6 +850,7 @@ static boot_status_t evaluate_transition(
     uint8_t *arena,
     size_t arena_len) {
 
+  (void)target_cfg;
   const intent_row_t *match = NULL;
   for (size_t i = 0; i < sizeof(INTENT_TABLE)/sizeof(INTENT_TABLE[0]); i++) {
     if (INTENT_TABLE[i].cur == open_txn->intent && INTENT_TABLE[i].ev == event) {
@@ -934,6 +936,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   boot_cfi_ctx_t state_cfi_ctx;
   boot_cfi_init(state_cfi_ctx, state_cfi_seed);
   boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_1);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_1_5);
   boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2);
   boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2_5);
   boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2_7);
@@ -979,6 +982,20 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   }
 
   boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_1); /* Proof Step 1 */
+  platform->wdt->kick();
+
+  /*
+   * ==============================================================================
+   * STEP 1.5 - OS Mailbox Fold-In
+   * ==============================================================================
+   */
+  core_status = boot_mailbox_fold_in(platform, &open_txn, &current_tmr);
+  if (core_status != BOOT_OK && core_status != BOOT_ERR_NOT_FOUND) {
+    goto state_cleanup;
+  }
+  core_status = BOOT_OK;
+
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_1_5); /* Proof Step 1.5 */
   platform->wdt->kick();
 
   /*

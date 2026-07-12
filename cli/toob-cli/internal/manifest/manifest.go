@@ -27,6 +27,14 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 		return fmt.Errorf("FATAL: flash.regions array is mandatory in hardware.json")
 	}
 
+	for _, r := range hj.Flash.Regions {
+		if r.Type == "writable" || r.Type == "" {
+			if r.SectorSize == 0 || r.Count == 0 {
+				return fmt.Errorf("FATAL [FLASH_004]: Writable flash region '%s' must specify both 'sector_size' and 'count'", r.Name)
+			}
+		}
+	}
+
 	alloc, err := NewAllocator(hj.Flash.Regions)
 	if err != nil {
 		return err
@@ -135,6 +143,13 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 		return err
 	}
 
+	// Allocate OS→Core Mailbox (1 sector, Double-Slot: 2×32 Bytes)
+	mailboxSize := alloc.maxSectorSize
+	mailboxAddr, mailboxBudget, err := alloc.Allocate(mailboxSize, 0, "Mailbox")
+	if err != nil {
+		return err
+	}
+
 	// Allocate Forensic Slot (1 sector)
 	forensicSize := alloc.maxSectorSize
 	forensicAddr, forensicBudget, err := alloc.Allocate(forensicSize, 0, "Forensic Slot")
@@ -156,7 +171,7 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 	err = GenerateHeadersAndScripts(dt, hj, alloc, outDir,
 		s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget,
 		recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize,
-		walAddrs, walSizes, kdmAddr, kdmBudget, cloudCmdAddr, cloudCmdBudget, forensicAddr, forensicBudget)
+		walAddrs, walSizes, kdmAddr, kdmBudget, cloudCmdAddr, cloudCmdBudget, mailboxAddr, mailboxBudget, forensicAddr, forensicBudget)
 	if err != nil {
 		return fmt.Errorf("failed to generate outputs: %w", err)
 	}

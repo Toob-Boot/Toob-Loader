@@ -24,6 +24,7 @@ boot_status_t boot_confirm_evaluate(const boot_platform_t* platform, uint64_t ex
 
     /* 1. Lese den hardware-spezifischen Reset-Reason aus */
     reset_reason_t reason = platform->clock->get_reset_reason();
+    (void)reason;
 
     /* 2. Prüfe die Nonce (Ist das OS "Tentative" oder "Committed"?) mit WDT Kicks */
     platform->wdt->kick();

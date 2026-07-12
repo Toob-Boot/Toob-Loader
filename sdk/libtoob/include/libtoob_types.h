@@ -224,85 +224,15 @@ _Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 100, "crc32_trailer 
 #define TOOB_DIAG_STRUCT_VERSION 0x02000000
 
 /* ========================================================
- * 4. WAL (Write-Ahead-Log) OS Boundary (Zero-Dependency)
+ * 4. WAL (Write-Ahead-Log) Wire Format
+ *    Shared definition lives in common/include/toob_wal_wire.h.
  * ======================================================== */
-
-/* GAP-C03: Zero-Dependency WAL Payload Declaration für OS Hooks */
-#define TOOB_WAL_ENTRY_MAGIC  0xB007BEEF
-#define TOOB_WAL_SECTOR_MAGIC_LEGACY 0x57414C02
-#define TOOB_WAL_SECTOR_MAGIC_CURRENT 0x57414C03
-#define TOOB_WAL_SECTOR_MAGIC TOOB_WAL_SECTOR_MAGIC_CURRENT
-#define TOOB_WAL_HEADER_SIZE  128
+#include "toob_wal_wire.h"
 
 /* OTA Network Failsafe Timeout (Default: 5 Minutes) */
 #ifndef TOOB_SMOKE_TEST_TIMEOUT_MS
 #define TOOB_SMOKE_TEST_TIMEOUT_MS 300000
 #endif
-
-typedef enum {
-    TOOB_WAL_INTENT_NONE = 0,
-    TOOB_WAL_INTENT_TXN_BEGIN = 1,
-    TOOB_WAL_INTENT_UPDATE_PENDING = 2,
-    TOOB_WAL_INTENT_TXN_COMMIT = 3,
-    TOOB_WAL_INTENT_CONFIRM_COMMIT = 4,
-    TOOB_WAL_INTENT_RECOVERY_RESOLVED = 5,
-    TOOB_WAL_INTENT_TXN_ROLLBACK = 6,
-    TOOB_WAL_INTENT_DEPRECATED_NONCE = 7,  /**< Deprecated. Stored in TMR now */
-    TOOB_WAL_INTENT_NET_SEARCH_ACCUM = 8,
-    TOOB_WAL_INTENT_SLEEP_BACKOFF = 9,
-    TOOB_WAL_INTENT_TXN_ROLLBACK_PENDING = 10,
-    TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT = 11, /**< OS-Side Checkpoint for resumable OTA downloads */
-    TOOB_WAL_INTENT_CLOUD_CMD = 12,
-    TOOB_WAL_INTENT_DEVICE_LOCKED = 13
-} toob_wal_intent_t;
-
-/* 
- * Arch-Note (Zero-Dependency): This struct is a bit-perfect OS-safe duplicate 
- * of the internal `wal_entry_payload_t` from Stage 1. ABI safety is mathematically 
- * proven via _Static_assert rules over in boot_journal.h.
- */
-typedef struct {
-    uint32_t magic;           /**< Immer TOOB_WAL_ENTRY_MAGIC (0xBEEF) */
-    uint32_t intent;          /**< Der Transaction Intent (enum toob_wal_intent_t) fixiert auf 32-bit (ABI Safety) */
-    
-    uint64_t expected_nonce;  /**< Sichert EXPECTED_NONCE vor dem OS-Jump (Aligned nativ ohne Padding) */
-    
-    /* Transaktionale Daten für Resume/Checkpointing */
-    uint32_t update_deadline;
-    uint32_t transfer_bitmap[8]; /**< 1 Bit = 1 Chunk (256 Chunks max) */
-    uint32_t delta_chunk_id;     /**< Aktueller Checkpoint für Delta-Patches */
-    uint32_t offset;             /**< Generisches Offset (z.B. Net-Search Accumulator). \n @note Bei TOOB_WAL_INTENT_UPDATE_PENDING fungiert dies zwingend als manifest_flash_addr! */
-    
-    uint32_t crc32_trailer;   /**< CRC-32 Trailer über den Entry */
-} toob_wal_entry_payload_t;
-
-typedef union {
-    toob_wal_entry_payload_t data;
-    /* Festes 64-Byte Padding für Hardware-Alignment */
-    uint8_t padding[64]; 
-} toob_wal_entry_aligned_t;
-
-_Static_assert(sizeof(toob_wal_entry_aligned_t) % 8 == 0, "GAP-C03: WAL padding violates hardware alignment!");
-_Static_assert(sizeof(toob_wal_entry_payload_t) == 64, "GAP-C03: toob_wal_entry_payload_t ABI size drift (Tail Padding miscalc)!");
-
-/* ========================================================
- * Sektor Header Boundary Definition
- * ======================================================== */
-typedef struct {
-    uint32_t sector_magic;    /**< Immer TOOB_WAL_SECTOR_MAGIC */
-    uint32_t sequence_id;     /**< Fortlaufende ID für O(1) Sliding-Window Discovery */
-    uint32_t erase_count;     /**< Tracks sector wear leveling */
-    uint8_t  _reserved_tmr_space[112]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
-    uint32_t header_crc32;    /**< Sichert den Sector-Header */
-} toob_wal_sector_header_t;
-
-typedef union {
-    toob_wal_sector_header_t head;
-    uint8_t raw[TOOB_WAL_HEADER_SIZE];
-} toob_wal_sector_header_aligned_t;
-
-_Static_assert(sizeof(toob_wal_sector_header_aligned_t) == TOOB_WAL_HEADER_SIZE, "WAL Header Boundary breach!");
-_Static_assert(offsetof(toob_wal_sector_header_t, header_crc32) == 124, "Sector Header Layout Drift: CRC32 must be at offset 124");
 
 /* Extern Definitions (After structs are fully typed!) */
 extern TOOB_NOINIT toob_boot_diag_t toob_diag_state;

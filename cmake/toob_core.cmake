@@ -53,15 +53,13 @@ target_include_directories(toob_heatshrink PUBLIC common/lib/heatshrink)
 # Die SUIT-Manifest Parser C-File wird via zcbor Compiler-Tool dynamisch
 # anhand von device.toml generiert. Daher müssen wir CMake warnen, dass
 # die Datei zur Evaluierungszeit evtl. noch gar nicht im Filebaum liegt.
-set(GENERATED_SUIT_C "${CMAKE_BINARY_DIR}/generated/boot_suit.c")
 set(GENERATED_TELEMETRY_ENCODE_C "${CMAKE_BINARY_DIR}/generated/toob_telemetry_encode.c")
 set(GENERATED_CLOUD_CMD_C "${CMAKE_BINARY_DIR}/generated/boot_cloud_cmd_decode.c")
-set_source_files_properties(${GENERATED_SUIT_C} ${GENERATED_TELEMETRY_ENCODE_C} ${GENERATED_CLOUD_CMD_C} PROPERTIES GENERATED TRUE)
+set_source_files_properties(${GENERATED_TELEMETRY_ENCODE_C} ${GENERATED_CLOUD_CMD_C} PROPERTIES GENERATED TRUE)
 
 # M-BUILD GAP-Fix: Custom Command zum Aufrufen der SUIT & Config Generation
 add_custom_command(
-    OUTPUT ${GENERATED_SUIT_C}
-           ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
            ${GENERATED_TELEMETRY_ENCODE_C}
            ${GENERATED_CLOUD_CMD_C}
            ${CMAKE_BINARY_DIR}/generated/generated_boot_config.h
@@ -80,8 +78,7 @@ add_custom_command(
 
 # Dieses Target wird von toob_chip und toob_stage0 erwartet!
 add_custom_target(generate_manifest
-    DEPENDS ${GENERATED_SUIT_C}
-            ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
+    DEPENDS ${CMAKE_BINARY_DIR}/generated/toob_telemetry_decode.c
             ${GENERATED_CLOUD_CMD_C}
             ${CMAKE_BINARY_DIR}/generated/generated_boot_config.h
             ${CMAKE_BINARY_DIR}/generated/stage0_layout.ld
@@ -140,6 +137,7 @@ toob_apply_strict_flags(toob_utils TRUE)
 add_library(toob_core STATIC
     ${TOOB_CORE_DIR}/boot_main.c
     ${TOOB_CORE_DIR}/boot_state.c
+    ${TOOB_CORE_DIR}/boot_mailbox.c
     ${TOOB_CORE_DIR}/boot_tbm1.c
     ${TOOB_CORE_DIR}/boot_effect.c
     ${TOOB_CORE_DIR}/boot_journal.c
@@ -153,12 +151,11 @@ add_library(toob_core STATIC
     ${TOOB_CORE_DIR}/boot_multiimage.c
     ${TOOB_CORE_DIR}/boot_cloud_cmd.c
     ${TOOB_CORE_DIR}/boot_rstore.c
-    ${GENERATED_SUIT_C}
     ${GENERATED_CLOUD_CMD_C}
 )
 
 # Harte Abhängigkeits-Schranke: Schützt vor Race-Conditions bei parallelen Builds (ninja -j8)!
-# toob_core MUSS zwingend warten, bis die generate.sh alle Header & Mocks abgeworfen hat.
+# toob_core MUSS zwingend warten, bis der CBOR CodeGen alle Header & Mocks abgeworfen hat.
 add_dependencies(toob_core generate_manifest)
 
 if(TOOB_ARCH STREQUAL "host")

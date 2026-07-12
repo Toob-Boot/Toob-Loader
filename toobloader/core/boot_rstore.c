@@ -244,7 +244,6 @@ boot_status_t boot_rstore_read(const boot_platform_t *platform,
   uint8_t majority_record[RSTORE_MAX_RECORD_BYTES];
   boot_secure_zeroize(majority_record, sizeof(majority_record));
   bool majority_found = false;
-  uint8_t majority_idx = newest_idx;
 
   if (valid_count >= 2) {
     /* Count agreements with the newest record */
@@ -278,7 +277,6 @@ boot_status_t boot_rstore_read(const boot_platform_t *platform,
         }
         if (pair_agree >= 2) {
           memcpy(majority_record, records[i], desc->record_size);
-          majority_idx = i;
           majority_found = true;
         }
       }

@@ -1,26 +1,32 @@
 #include "boot_crc32.h"
 #include "boot_secure_zeroize.h"
+#include "toob_crc32_contract.h"
+
+static inline uint32_t crc32_byte(uint32_t crc, uint8_t val) {
+    crc ^= val;
+    for (uint8_t j = 0; j < 8; j++) {
+        crc = (crc >> 1) ^ (TOOB_CRC32_POLY & (-(crc & 1)));
+    }
+    return crc;
+}
 
 uint32_t boot_crc32_update(uint32_t crc_init, const uint8_t *data, size_t len) {
     uint32_t crc = crc_init;
     for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (uint8_t j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
-        }
+        crc = crc32_byte(crc, data[i]);
     }
     return crc;
 }
 
 uint32_t compute_boot_crc32(const uint8_t *data, size_t len) {
-    return ~boot_crc32_update(0xFFFFFFFF, data, len);
+    return boot_crc32_update(TOOB_CRC32_INIT, data, len) ^ TOOB_CRC32_FINAL_XOR;
 }
 
 boot_status_t boot_crc32_flash_stream(const boot_platform_t *platform,
                                       uint32_t addr, size_t len,
                                       uint32_t *out_crc,
                                       uint8_t *arena, size_t arena_len) {
-  uint32_t crc = 0xFFFFFFFF;
+  uint32_t crc = TOOB_CRC32_INIT;
   size_t offset = 0;
 
   while (offset < len) {
@@ -41,6 +47,14 @@ boot_status_t boot_crc32_flash_stream(const boot_platform_t *platform,
   }
 
   boot_secure_zeroize(arena, arena_len);
-  *out_crc = ~crc;
+  *out_crc = crc ^ TOOB_CRC32_FINAL_XOR;
   return BOOT_OK;
+}
+
+uint32_t boot_crc32_fill(uint32_t crc_init, uint8_t val, size_t len) {
+    uint32_t crc = crc_init;
+    for (size_t i = 0; i < len; i++) {
+        crc = crc32_byte(crc, val);
+    }
+    return crc;
 }

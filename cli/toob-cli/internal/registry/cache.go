@@ -321,7 +321,11 @@ func (c *Cache) checkoutAPI(version string, force bool) error {
 		return fmt.Errorf("failed to download registry index: %w", err)
 	}
 
-	if err := os.WriteFile(filepath.Join(targetDir, "registry.json"), indexData, 0o644); err != nil {
+	tmpIndex := filepath.Join(targetDir, "registry.json.tmp")
+	if err := os.WriteFile(tmpIndex, indexData, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpIndex, filepath.Join(targetDir, "registry.json")); err != nil {
 		return err
 	}
 
@@ -330,7 +334,10 @@ func (c *Cache) checkoutAPI(version string, force bool) error {
 	matrixData, err := client.GetMatrix(context.Background(), "")
 	if err == nil {
 		if raw, err := json.Marshal(matrixData); err == nil {
-			os.WriteFile(filepath.Join(targetDir, "compatibility_matrix.json"), raw, 0o644)
+			tmpMatrix := filepath.Join(targetDir, "compatibility_matrix.json.tmp")
+			if err := os.WriteFile(tmpMatrix, raw, 0o644); err == nil {
+				os.Rename(tmpMatrix, filepath.Join(targetDir, "compatibility_matrix.json"))
+			}
 		}
 	}
 
@@ -363,6 +370,71 @@ func (c *Cache) persistActive(ver string) {
 // SwitchVersion activates a specific registry version (used by chip add/spawn).
 func (c *Cache) SwitchVersion(version string) error {
 	return c.checkoutAPI(version, false)
+}
+
+// SelectVersion sets the active directory for this Cache instance.
+// If the version is not cached and downloadIfMissing is true, it downloads it.
+// Bypasses global active_version persistence.
+func (c *Cache) SelectVersion(version string, downloadIfMissing bool) error {
+	targetDir := filepath.Join(c.rootDir, "versions", version)
+
+	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
+		c.dir = targetDir
+		c.index = nil // clear cached index
+		return nil
+	}
+
+	if !downloadIfMissing {
+		return fmt.Errorf("registry version %s is not cached", version)
+	}
+
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return err
+	}
+
+	unlock, err := c.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	// Double-check inside lock
+	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
+		c.dir = targetDir
+		c.index = nil
+		return nil
+	}
+
+	ui.Step("Downloading Registry Index from API...")
+	client := apiclient.New()
+	indexData, err := client.GetIndex(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to download registry index: %w", err)
+	}
+
+	tmpIndex := filepath.Join(targetDir, "registry.json.tmp")
+	if err := os.WriteFile(tmpIndex, indexData, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpIndex, filepath.Join(targetDir, "registry.json")); err != nil {
+		return err
+	}
+
+	// Fetch matrix to cache it
+	ui.Step("Downloading Compatibility Matrix...")
+	matrixData, err := client.GetMatrix(context.Background(), "")
+	if err == nil {
+		if raw, err := json.Marshal(matrixData); err == nil {
+			tmpMatrix := filepath.Join(targetDir, "compatibility_matrix.json.tmp")
+			if err := os.WriteFile(tmpMatrix, raw, 0o644); err == nil {
+				os.Rename(tmpMatrix, filepath.Join(targetDir, "compatibility_matrix.json"))
+			}
+		}
+	}
+
+	c.dir = targetDir
+	c.index = nil
+	return nil
 }
 
 // LoadIndex parses registry.json and returns a typed index.
@@ -544,7 +616,9 @@ func (c *Cache) fetchPackage(name, version, path string) error {
 
 	ui.Step("Downloading package %s@%s...", name, version)
 
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+	// Create temp directory for atomic extraction
+	tempDestPath := destPath + ".tmp-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	if err := os.MkdirAll(filepath.Dir(tempDestPath), 0o755); err != nil {
 		return err
 	}
 
@@ -555,8 +629,17 @@ func (c *Cache) fetchPackage(name, version, path string) error {
 	}
 	defer body.Close()
 
-	if err := extractTarball(body, destPath); err != nil {
+	if err := ExtractTarball(body, tempDestPath); err != nil {
+		os.RemoveAll(tempDestPath)
 		return fmt.Errorf("failed to extract package %s: %w", name, err)
+	}
+
+	if err := os.Rename(tempDestPath, destPath); err != nil {
+		os.RemoveAll(tempDestPath)
+		if _, statErr := os.Stat(destPath); statErr == nil {
+			return nil // Already completed by another process
+		}
+		return fmt.Errorf("failed to finalize atomic package extraction: %w", err)
 	}
 
 	return nil

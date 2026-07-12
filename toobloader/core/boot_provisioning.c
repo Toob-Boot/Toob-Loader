@@ -26,6 +26,7 @@
 #include "boot_fih.h"
 #include "boot_cobs.h"
 #include "boot_crc32.h"
+#include "boot_panic.h"
 #include "boot_secure_zeroize.h"
 #include "generated_boot_config.h"
 #include <stddef.h>
@@ -238,6 +239,7 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform,
 
       /* Starve the WDT to trigger a hardware reset */
       boot_terminal_halt(platform, BOOT_OK, SITE_PROVISIONING_GLITCH);
+      break;
     }
 
     default:

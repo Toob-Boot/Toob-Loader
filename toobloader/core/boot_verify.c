@@ -48,25 +48,7 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 #define VERIFY_CFI_NUM_TOKENS     7
 
 
-/**
- * @brief O(1) Mathematical Zero-Buffer Verification (Glitch Protected)
- * Verhindert Triviale-Signatur-Fälschungen durch fabrikneue (leere) eFuses
- * oder Hardware-Glitches, die einen All-Zero (oder All-0xFF) Public Key
- * produzieren.
- */
-static inline boot_status_t verify_not_all_zeros_glitch_safe(const uint8_t *buf,
-                                                             size_t len) {
-  uint8_t or_acc = 0x00;
-  uint8_t and_acc = 0xFF;
 
-  for (size_t i = 0; i < len; i++) {
-    or_acc |= buf[i];
-    and_acc &= buf[i];
-  }
-
-  BOOT_SECURE_REQUIRE(or_acc != 0x00 && and_acc != 0xFF, { return BOOT_ERR_VERIFY; });
-  return BOOT_OK;
-}
 
 boot_status_t
 boot_verify_manifest_envelope(const boot_platform_t *platform,
@@ -128,7 +110,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  if (!platform->crypto->read_pubkey || !platform->crypto->verify_ed25519) {
+  if (!platform->crypto->read_pubkey || !platform->crypto->verify_signature) {
     final_status = BOOT_ERR_NOT_SUPPORTED;
     goto cleanup;
   }
@@ -219,7 +201,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
    * ==================================================================== */
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();
-  boot_status_t verify_stat = platform->crypto->verify_ed25519(
+  boot_status_t verify_stat = platform->crypto->verify_signature(
       work_buffer, local_env.manifest_size, local_env.signature_ed25519,
       root_pubkey);
   if (platform->wdt && platform->wdt->kick)
@@ -231,7 +213,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
    * Trade-off: root_pubkey bleibt ~30ms länger im RAM (dokumentiert in
    * docs/security_model.md, Abschnitt "DPA vs. Glitch-Resistenz"). */
   BOOT_GLITCH_DELAY();
-  boot_status_t verify_stat_2 = platform->crypto->verify_ed25519(
+  boot_status_t verify_stat_2 = platform->crypto->verify_signature(
       work_buffer, local_env.manifest_size, local_env.signature_ed25519,
       root_pubkey);
   if (platform->wdt && platform->wdt->kick)

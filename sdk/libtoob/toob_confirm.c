@@ -1,26 +1,10 @@
 /**
- * ==============================================================================
- * Toob-Boot libtoob: Update Confirmation Implementation (toob_confirm.c)
- * (Mathematical Perfection Revision)
- * ==============================================================================
+ * @file toob_confirm.c
+ * @brief Boot Confirmation — OS-side confirm/recovery intent via Mailbox.
  *
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (toob_confirm_boot API behavior and COMMITTED flag
- * specification)
- * - docs/concept_fusion.md (TENTATIVE -> COMMITTED state transition logic)
- * - docs/hals.md (Confirm abstracting - RTC RAM vs. WAL Append)
- * - docs/structure_plan.md (Zero-dependency policy: No access to
- * boot_journal.h)
- *
- * ARCHITECTURAL UPGRADES:
- * 1. Blind-Write Elimination: Hardware RTC Register Writes werden nun durch
- *    ein striktes Phase-Bound Read-Back Verify gesichert.
- * 2. Glitch-Resistant Verification: Der Register-Check ist via Double-Check
- *    und Cross-Compiler Delay-Barrieren vor Voltage Faults geschützt.
- * 3. Stack Leakage Defense: Kryptografische Nonces und WAL Intents werden
- *    zwingend via toob_secure_zeroize vom OS-C-Stack radiert (P10 Single-Exit).
- * 4. P10 Memory Alignment: Zwingt alle Payload-Structs auf 8-Byte Boundaries,
- *    um SPI-DMA UsageFaults (Unaligned Access) in der Feature-OS HAL zu meiden.
+ * Implements toob_confirm_boot() and toob_recovery_resolved().
+ * Writes Mailbox records instead of WAL entries. The RTC fast-path
+ * remains for hardware with backup registers.
  */
 
 #include "libtoob.h"
@@ -29,194 +13,88 @@
 #include <stddef.h>
 
 #if TOOB_MOCK_CONFIRM_BACKEND == TOOB_MOCK_CONFIRM_BACKEND_RTC
-/* Instanziiert den x86 Dummy-Pointer zur Laufzeit, um Segfaults auf dem OS-Host
- * zu verhindern */
 uint64_t mock_rtc_ram = 0;
 #endif
 
-/* ==============================================================================
- * PUBLIC API IMPLEMENTATION
- * ==============================================================================
- */
-
 toob_status_t toob_confirm_boot(void) {
-  /* P10 8-Byte Alignment für DMA/Cortex-M Safety */
-  toob_handoff_t handoff __attribute__((aligned(8)));
-  toob_secure_zeroize(&handoff,
-                      sizeof(handoff)); /* P10 Uninitialized Mem Trap */
-
-  /* Schritt 1: Hole verifizierte Nonce über Handoff-API (Anti-Replay) */
-  toob_status_t status = toob_get_handoff(&handoff);
-
-  /* P10 Glitch Protection: Fehler-Propagation absichern */
-  volatile uint32_t get_shield_1 = 0, get_shield_2 = 0;
-  if (status == TOOB_OK)
-    get_shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (get_shield_1 == TOOB_OK && status == TOOB_OK)
-    get_shield_2 = TOOB_OK;
-
-  if (get_shield_1 != TOOB_OK || get_shield_2 != TOOB_OK ||
-      get_shield_1 != get_shield_2) {
+    toob_handoff_t handoff __attribute__((aligned(8)));
     toob_secure_zeroize(&handoff, sizeof(handoff));
-    return (status != TOOB_OK) ? status : TOOB_ERR_VERIFY;
-  }
+
+    toob_status_t status = toob_get_handoff(&handoff);
+
+    volatile uint32_t get_shield_1 = 0, get_shield_2 = 0;
+    if (status == TOOB_OK)
+        get_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (get_shield_1 == TOOB_OK && status == TOOB_OK)
+        get_shield_2 = TOOB_OK;
+
+    if (get_shield_1 != TOOB_OK || get_shield_2 != TOOB_OK ||
+        get_shield_1 != get_shield_2) {
+        toob_secure_zeroize(&handoff, sizeof(handoff));
+        return (status != TOOB_OK) ? status : TOOB_ERR_VERIFY;
+    }
 
 #ifdef ADDR_CONFIRM_RTC_RAM
-  /* ====================================================================
-   * Pfad A: Direkter Write bei Hardware mit Backup-Registern/RTC
-   * ====================================================================
-   * Zwingendes Volatile-Casting, um C-Optimizer (z.B. GCC -O3) beim
-   * Hardware-Write zu blockieren!
-   */
-  volatile uint64_t *rtc_ptr = (volatile uint64_t *)ADDR_CONFIRM_RTC_RAM;
+    /* RTC fast-path: write nonce to backup register + mailbox. */
+    volatile uint64_t *rtc_ptr = (volatile uint64_t *)ADDR_CONFIRM_RTC_RAM;
+    *rtc_ptr = handoff.boot_nonce;
 
-  /* Hardware Write */
-  *rtc_ptr = handoff.boot_nonce;
-
-  /* Memory Barrier: Erzwingt das Flushen der CPU-Write-Buffer auf den
-   * Systembus, BEVOR wir den Read-Back initiieren! */
 #if defined(__GNUC__) || defined(__clang__)
-  __sync_synchronize();
+    __sync_synchronize();
 #endif
 
-  /* PHASE-BOUND READ-BACK VERIFY (Tearing / Hardware-Fault Defense)
-   * Verhindert OS-Lockouts durch stille SPI/Bus Write-Fehler in die RTC
-   * Peripherie! */
-  uint64_t verified_nonce = *rtc_ptr;
+    uint64_t verified_nonce = *rtc_ptr;
 
-  volatile uint32_t rtc_shield_1 = 0;
-  volatile uint32_t rtc_shield_2 = 0;
+    volatile uint32_t rtc_shield_1 = 0, rtc_shield_2 = 0;
+    if (verified_nonce == handoff.boot_nonce)
+        rtc_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (rtc_shield_1 == TOOB_OK && verified_nonce == handoff.boot_nonce)
+        rtc_shield_2 = TOOB_OK;
 
-  if (verified_nonce == handoff.boot_nonce) {
-    rtc_shield_1 = TOOB_OK;
-  }
+    /* Mailbox write (fire-and-forget alongside RTC). */
+    (void)toob_mailbox_set_confirm(handoff.boot_nonce);
 
-  TOOB_GLITCH_DELAY(); /* Branch-Skip Mitigation */
+    toob_secure_zeroize(&handoff, sizeof(handoff));
 
-  if (rtc_shield_1 == TOOB_OK && verified_nonce == handoff.boot_nonce) {
-    rtc_shield_2 = TOOB_OK;
-  }
-
-  /* Fire-and-forget WAL append to ensure transaction log coherence (P7b alignment) */
-  {
-    toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-    toob_secure_zeroize(&intent, sizeof(intent));
-
-    intent.magic = TOOB_WAL_ENTRY_MAGIC;
-    intent.intent = TOOB_WAL_INTENT_CONFIRM_COMMIT;
-    intent.expected_nonce = handoff.boot_nonce;
-
-    (void)toob_wal_naive_append(&intent);
-    toob_secure_zeroize(&intent, sizeof(intent));
-  }
-
-  /* Data-Privacy: Nonce sofort vernichten, bevor wir returnen! */
-  toob_secure_zeroize(&handoff, sizeof(handoff));
-
-  if (rtc_shield_1 != TOOB_OK || rtc_shield_2 != TOOB_OK ||
-      rtc_shield_1 != rtc_shield_2) {
-    return TOOB_ERR_FLASH_HW; /* Hardware Backup Domain Failed (Bus Error /
-                                 Glitch) */
-  }
-
-  return TOOB_OK;
+    if (rtc_shield_1 != TOOB_OK || rtc_shield_2 != TOOB_OK ||
+        rtc_shield_1 != rtc_shield_2) {
+        return TOOB_ERR_FLASH_HW;
+    }
+    return TOOB_OK;
 #else
-  toob_status_t final_stat = TOOB_ERR_VERIFY;
-  /* ====================================================================
-   * Pfad B: Naive WAL Append
-   * ====================================================================
-   */
-  toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-  toob_secure_zeroize(&intent, sizeof(intent));
+    /* Mailbox-only path. */
+    toob_status_t mb_stat = toob_mailbox_set_confirm(handoff.boot_nonce);
 
-  intent.magic = TOOB_WAL_ENTRY_MAGIC;
-  intent.intent = TOOB_WAL_INTENT_CONFIRM_COMMIT;
-  intent.expected_nonce = handoff.boot_nonce;
+    volatile uint32_t mb_shield_1 = 0, mb_shield_2 = 0;
+    if (mb_stat == TOOB_OK)
+        mb_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (mb_shield_1 == TOOB_OK && mb_stat == TOOB_OK)
+        mb_shield_2 = TOOB_OK;
 
-  /* Naive Delegation (schützt vor Duplikation und Erase-Komplexitaet) */
-  toob_status_t app_stat = toob_wal_naive_append(&intent);
+    toob_secure_zeroize(&handoff, sizeof(handoff));
 
-  volatile uint32_t wal_shield_1 = 0, wal_shield_2 = 0;
-  if (app_stat == TOOB_OK)
-    wal_shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (wal_shield_1 == TOOB_OK && app_stat == TOOB_OK)
-    wal_shield_2 = TOOB_OK;
-
-  if (wal_shield_1 == TOOB_OK && wal_shield_2 == TOOB_OK &&
-      wal_shield_1 == wal_shield_2) {
-    final_stat = TOOB_OK;
-  } else {
-    final_stat = (app_stat != TOOB_OK) ? app_stat : TOOB_ERR_FLASH_HW;
-  }
-
-  /* P10 Leakage Defense */
-  toob_secure_zeroize(&handoff, sizeof(handoff));
-  toob_secure_zeroize(&intent, sizeof(intent));
-
-  return final_stat;
+    if (mb_shield_1 == TOOB_OK && mb_shield_2 == TOOB_OK &&
+        mb_shield_1 == mb_shield_2) {
+        return TOOB_OK;
+    }
+    return (mb_stat != TOOB_OK) ? mb_stat : TOOB_ERR_FLASH_HW;
 #endif
 }
 
 toob_status_t toob_recovery_resolved(void) {
-  toob_status_t final_stat = TOOB_ERR_VERIFY;
+    toob_status_t status = toob_mailbox_set_recovery_resolved();
 
-  toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-  toob_secure_zeroize(&intent, sizeof(intent));
+    volatile uint32_t shield_1 = 0, shield_2 = 0;
+    if (status == TOOB_OK)
+        shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (shield_1 == TOOB_OK && status == TOOB_OK)
+        shield_2 = TOOB_OK;
 
-  intent.magic = TOOB_WAL_ENTRY_MAGIC;
-  intent.intent = TOOB_WAL_INTENT_RECOVERY_RESOLVED;
-
-  toob_status_t append_stat = toob_wal_naive_append(&intent);
-
-  volatile uint32_t wal_shield_1 = 0, wal_shield_2 = 0;
-  if (append_stat == TOOB_OK)
-    wal_shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (wal_shield_1 == TOOB_OK && append_stat == TOOB_OK)
-    wal_shield_2 = TOOB_OK;
-
-  if (wal_shield_1 == TOOB_OK && wal_shield_2 == TOOB_OK &&
-      wal_shield_1 == wal_shield_2) {
-    final_stat = TOOB_OK;
-  } else {
-    final_stat = (append_stat != TOOB_OK) ? append_stat : TOOB_ERR_FLASH_HW;
-  }
-
-  toob_secure_zeroize(&intent, sizeof(intent)); /* Stack Clean */
-  return final_stat;
-}
-
-toob_status_t toob_accumulate_net_search(uint32_t active_search_ms) {
-  toob_status_t final_stat = TOOB_ERR_VERIFY;
-
-  toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-  toob_secure_zeroize(&intent, sizeof(intent));
-
-  intent.magic = TOOB_WAL_ENTRY_MAGIC;
-  intent.intent = TOOB_WAL_INTENT_NET_SEARCH_ACCUM;
-
-  /* P10 Spec: Das OS sammelt kontinuierlich und schickt das Delta oder den
-   * Totalwert. Wir casten via offset für den dynamischen Accumulator State. */
-  intent.offset = active_search_ms;
-
-  toob_status_t append_stat = toob_wal_naive_append(&intent);
-
-  volatile uint32_t wal_shield_1 = 0, wal_shield_2 = 0;
-  if (append_stat == TOOB_OK)
-    wal_shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (wal_shield_1 == TOOB_OK && append_stat == TOOB_OK)
-    wal_shield_2 = TOOB_OK;
-
-  if (wal_shield_1 == TOOB_OK && wal_shield_2 == TOOB_OK &&
-      wal_shield_1 == wal_shield_2) {
-    final_stat = TOOB_OK;
-  } else {
-    final_stat = (append_stat != TOOB_OK) ? append_stat : TOOB_ERR_FLASH_HW;
-  }
-
-  toob_secure_zeroize(&intent, sizeof(intent)); /* Stack Clean */
-  return final_stat;
+    if (shield_1 == TOOB_OK && shield_2 == TOOB_OK && shield_1 == shield_2)
+        return TOOB_OK;
+    return (status != TOOB_OK) ? status : TOOB_ERR_FLASH_HW;
 }

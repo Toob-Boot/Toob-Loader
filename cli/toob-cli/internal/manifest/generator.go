@@ -21,7 +21,7 @@ type MapEntry struct {
 func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocator, outDir string,
 	s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget,
 	recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize uint32,
-	walAddrs []uint32, walSizes []uint32, kdmAddr, kdmBudget, cloudCmdAddr, cloudCmdBudget, forensicAddr, forensicBudget uint32) error {
+	walAddrs []uint32, walSizes []uint32, kdmAddr, kdmBudget, cloudCmdAddr, cloudCmdBudget, mailboxAddr, mailboxBudget, forensicAddr, forensicBudget uint32) error {
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
@@ -53,6 +53,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		{fmt.Sprintf("WAL Journal (%d sec)", dt.Partitions.WalSectors), walAddr, walSize, "SYSTEM"},
 		{"KDM Quorum", kdmAddr, kdmBudget, "SYSTEM"},
 		{"Cloud Command", cloudCmdAddr, cloudCmdBudget, "SYSTEM"},
+		{"Mailbox", mailboxAddr, mailboxBudget, "SYSTEM"},
 		{"Forensic Slot", forensicAddr, forensicBudget, "SYSTEM"},
 	}
 	if recBudget > 0 {
@@ -253,7 +254,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 
 	b.WriteString("#endif /* GENERATED_BOOT_CONFIG_H */\n")
 
-	if err := os.WriteFile(headerPath, []byte(b.String()), 0o644); err != nil {
+	if err := writeFileIfChanged(headerPath, []byte(b.String())); err != nil {
 		return err
 	}
 
@@ -296,7 +297,9 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	lob.WriteString(fmt.Sprintf("#define CHIP_KDM_QUORUM_ABS_ADDR     0x%08XU\n", kdmAddr))
 	lob.WriteString(fmt.Sprintf("#define CHIP_KDM_QUORUM_SIZE         0x%08XU\n", kdmBudget))
 	lob.WriteString(fmt.Sprintf("#define CHIP_CLOUD_CMD_SLOT_ABS_ADDR 0x%08XU\n", cloudCmdAddr))
-	lob.WriteString(fmt.Sprintf("#define CHIP_CLOUD_CMD_SLOT_SIZE     0x%08XU\n", cloudCmdBudget))
+	lob.WriteString(fmt.Sprintf("#define CHIP_CLOUD_CMD_SLOT_SIZE     0x%08XU\n\n", cloudCmdBudget))
+	lob.WriteString(fmt.Sprintf("#define CHIP_MAILBOX_ABS_ADDR        0x%08XU\n", mailboxAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_MAILBOX_SIZE            0x%08XU\n\n", mailboxBudget))
 	lob.WriteString(fmt.Sprintf("#define CHIP_FORENSIC_SLOT_ABS_ADDR  0x%08XU\n", forensicAddr))
 	lob.WriteString(fmt.Sprintf("#define CHIP_FORENSIC_SLOT_SIZE      0x%08XU\n\n", forensicBudget))
 
@@ -304,7 +307,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 
 	lob.WriteString("#endif /* BOOT_LAYOUT_H */\n")
 
-	if err := os.WriteFile(layoutPath, []byte(lob.String()), 0o644); err != nil {
+	if err := writeFileIfChanged(layoutPath, []byte(lob.String())); err != nil {
 		return err
 	}
 
@@ -338,6 +341,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		{"NetCore Slot", "CHIP_NETCORE_SLOT_ABS_ADDR", "CHIP_NETCORE_SLOT_SIZE"},
 		{"KDM Quorum", "CHIP_KDM_QUORUM_ABS_ADDR", "CHIP_KDM_QUORUM_SIZE"},
 		{"Cloud Command", "CHIP_CLOUD_CMD_SLOT_ABS_ADDR", "CHIP_CLOUD_CMD_SLOT_SIZE"},
+		{"Mailbox", "CHIP_MAILBOX_ABS_ADDR", "CHIP_MAILBOX_SIZE"},
 		{"Forensic Slot", "CHIP_FORENSIC_SLOT_ABS_ADDR", "CHIP_FORENSIC_SLOT_SIZE"},
 	}
 
@@ -380,7 +384,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 
 	aob.WriteString("#endif /* BOOT_LAYOUT_ASSERT_H */\n")
 
-	if err := os.WriteFile(assertPath, []byte(aob.String()), 0o644); err != nil {
+	if err := writeFileIfChanged(assertPath, []byte(aob.String())); err != nil {
 		return err
 	}
 
@@ -395,7 +399,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	ldb.WriteString(fmt.Sprintf("__S1_BUDGET_SIZE = 0x%08X;\n", s1Budget))
 	ldb.WriteString(fmt.Sprintf("__APP_BUDGET_START = 0x%08X;\n", appAddr))
 	ldb.WriteString(fmt.Sprintf("__APP_BUDGET_SIZE = 0x%08X;\n", appBudget))
-	if err := os.WriteFile(ldPath, []byte(ldb.String()), 0o644); err != nil {
+	if err := writeFileIfChanged(ldPath, []byte(ldb.String())); err != nil {
 		return err
 	}
 
@@ -432,11 +436,18 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	s0ld.WriteString("        KEEP(*(.toob_mock_section))\n")
 	s0ld.WriteString("    } > S0_ROM\n")
 	s0ld.WriteString("}\n")
-	if err := os.WriteFile(stage0LdPath, []byte(s0ld.String()), 0o644); err != nil {
+	if err := writeFileIfChanged(stage0LdPath, []byte(s0ld.String())); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func writeFileIfChanged(path string, data []byte) error {
+	if old, err := os.ReadFile(path); err == nil && string(old) == string(data) {
+		return nil
+	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 func VerifyMacroUsage(headerPath, bootloaderDir, halChipDir string, extraDirs []string) error {
@@ -463,8 +474,9 @@ func VerifyMacroUsage(headerPath, bootloaderDir, halChipDir string, extraDirs []
 	}
 	dirsToWalk = append(dirsToWalk, extraDirs...)
 
+	var errAllFound = fmt.Errorf("all macros found")
 	for _, dir := range dirsToWalk {
-		err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -472,19 +484,28 @@ func VerifyMacroUsage(headerPath, bootloaderDir, halChipDir string, extraDirs []
 				b, err := os.ReadFile(path)
 				if err == nil {
 					text := string(b)
-					// We intentionally do NOT strip comments anymore, as regex stripping is fragile
-					// and destroys macros embedded in strings.
+					allUsed := true
 					for m, used := range macros {
-						if !used && strings.Contains(text, m) {
-							macros[m] = true
+						if !used {
+							if strings.Contains(text, m) {
+								macros[m] = true
+							} else {
+								allUsed = false
+							}
 						}
+					}
+					if allUsed {
+						return errAllFound
 					}
 				}
 			}
 			return nil
 		})
-		if err != nil {
-			return err
+		if walkErr == errAllFound {
+			break
+		}
+		if walkErr != nil {
+			return walkErr
 		}
 	}
 
@@ -507,6 +528,7 @@ func VerifyMacroUsage(headerPath, bootloaderDir, halChipDir string, extraDirs []
 		errb.WriteString("=\nThis indicates a severe architectural gap! Either:\n")
 		errb.WriteString("  1. The C code is using a hardcoded fallback and ignoring the manifest.\n")
 		errb.WriteString("  2. The manifest is generating dead code that should be pruned.\n")
+		errb.WriteString("  3. You are developing/building locally and the registry sources in the cache (~/.toob/registry) are out of sync with your local registry. Ensure TOOB_REGISTRY_DIR points to your local registry directory!\n")
 		errb.WriteString("Fix the C code to use these macros, or remove them from the generator.\n")
 		errb.WriteString("======================================================================\n")
 		return fmt.Errorf("%s", errb.String())

@@ -1,26 +1,9 @@
 /**
- * ==============================================================================
- * Toob-Boot libtoob: Diagnostics Extraktions Implementation (toob_diag.c)
- * (Mathematical Perfection Revision)
- * ==============================================================================
+ * @file toob_diag.c
+ * @brief Boot Diagnostics — telemetry extraction and diag struct management.
  *
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (toob_get_boot_diag function definition)
- * - docs/toob_telemetry.md (Boot diagnostic data model, CBOR readiness)
- * - docs/concept_fusion.md (Fleet insight extraction without static buffer
- * dependencies)
- *
- * ARCHITECTURAL UPGRADES:
- * 1. TOCTOU Defense: Verhindert asynchrone RTOS-Interrupt Korruptionen während
- *    des Reads. Die Payload wird erst isoliert geklont und dann mathematisch
- *    auf dem sicheren Thread-Stack verifiziert.
- * 2. P10 Leakage Prevention: Das Ziel-Struct des OS wird präemptiv genullt.
- *    Ignoriert das OS fahrlässig den Return-Code, liest es Nullen statt
- *    kryptografischem RAM-Garbage (verhindert Heuristik-Leaks).
- * 3. Glitch-Resistant OS Boundary: Cross-Compiler-kompatible Delay-Injections
- *    und Double-Check Patterns blockieren Voltage-Glitches bei der CRC-Prüfung.
- * 4. ABI Versioning Shield & Padding Sanitization: Blockiert Daten-Drifts und
- *    Informationslecks bei der Serialisierung für das Cloud-Backend.
+ * Extracts toob_boot_diag_t from .noinit shared RAM with TOCTOU defense,
+ * CRC-32 validation, and CBOR telemetry encoding for cloud submission.
  */
 
 #include "libtoob.h"

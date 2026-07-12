@@ -38,10 +38,6 @@
 #define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
 #endif
 
-/* OTA Checkpoint Intervall: 64 KB (Konfigurierbar für stark abnutzende Flashs) */
-#ifndef TOOB_OTA_CHECKPOINT_INTERVAL
-#define TOOB_OTA_CHECKPOINT_INTERVAL 65536
-#endif
 
 
 /* ==============================================================================
@@ -338,15 +334,7 @@ toob_status_t toob_ota_process_chunk(toob_ota_ctx_t *ctx, const uint8_t *chunk, 
       ctx->buf_len = 0;
       toob_secure_zeroize(ctx->align_buf, TOOB_OTA_BUF_SIZE);
 
-      /* Write Resume Checkpoint basierend auf konfiguriertem Makro */
-      if ((ctx->bytes_queued % TOOB_OTA_CHECKPOINT_INTERVAL) == 0) {
-          toob_wal_entry_payload_t ckpt;
-          toob_secure_zeroize(&ckpt, sizeof(ckpt));
-          ckpt.magic = TOOB_WAL_ENTRY_MAGIC;
-          ckpt.intent = TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT;
-          ckpt.delta_chunk_id = ctx->bytes_queued;
-          (void)toob_wal_naive_append(&ckpt); /* Fire-and-forget, non-critical */
-      }
+
     }
   }
 

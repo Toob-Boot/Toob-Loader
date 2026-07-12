@@ -445,7 +445,7 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
 
       /* P10 ALIGNMENT FIX: Maskiert die Division auf exakt 8 Bytes,
        * um Unaligned UsageFaults in den Hardware-SPI-DMAs auszuschließen! */
-      size_t half_arena = (arena_len / 2) & ~7ULL;
+      size_t half_arena = (arena_len / 2) & ~((size_t)7);
 
       while (chk_off < block_size) {
         if (platform->wdt && platform->wdt->kick)

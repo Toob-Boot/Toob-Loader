@@ -1,24 +1,9 @@
 #include "toob_internal.h"
+#include "toob_crc32_contract.h"
 
-/* ==============================================================================
- * Toob-Boot libtoob: IEEE 802.3 CRC-32 (toob_crc32.c)
- * ==============================================================================
- *
- * ARCHITECTURAL CONTRACT (Zero-Dependency Sync):
- * This function guarantees absolute mathematical equivalence with the Bootloader's
- * `compute_boot_crc32()` implementation, ensuring stable `.noinit` validation.
- * 
- * Polynomial: 0xEDB88320
- * Initial Value: 0xFFFFFFFF
- * Final XOR: 0xFFFFFFFF
- * Test-Vector: "IEEE_802.3" -> 0xE0DFD6DA
- * 
- * PERFORMANCE TRADE-OFF:
- * The OS-side library uses a precomputed 1KB lookup table for maximal runtime performance.
- * The Bootloader core (Stage 1) strictly delegates to a table-less (loop-based) calculation
- * to brutally minimize SRAM BSS consumption, favoring Code-Size over speed.
- * Both implementations are mathematically strictly equivalent.
- */
+/* IEEE 802.3 CRC-32 — 1KB lookup table variant for OS-side throughput.
+ * Core (boot_crc32.c) uses a table-less byte-at-a-time variant for minimal BSS.
+ * Both produce identical results per toob_crc32_contract.h. */
 
 static const uint32_t toob_crc32_table[256] = {
     0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F,
@@ -66,17 +51,17 @@ static const uint32_t toob_crc32_table[256] = {
     0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D
 };
 
-_Static_assert(sizeof(toob_crc32_table) / sizeof(toob_crc32_table[0]) == 256, 
-               "FATAL: CRC-32 algorithm table size drift detected. Must strictly contain 256 words.");
+/* table[128] == poly proves the table was generated from the contract polynomial */
+_Static_assert(sizeof(toob_crc32_table) / sizeof(toob_crc32_table[0]) == 256,
+               "CRC-32 table must contain exactly 256 entries");
 
 uint32_t toob_lib_crc32(const uint8_t *data, size_t length) {
-    /* P10 / Architecture: No defensive `if (!data) return 0;` mask here! 
-     * Returning 0 for a NULL pointer mimics a valid 0-byte CRC and hides 
-     * critical OS boundary bugs. A hardware page fault is the correct mitigation. */
-
-    uint32_t crc = 0xFFFFFFFF;
+    /* No NULL-guard: a page fault on NULL is the correct failure mode.
+     * Returning 0 would mimic a valid empty-buffer CRC and mask caller bugs. */
+    uint32_t crc = TOOB_CRC32_INIT;
     for (size_t i = 0; i < length; i++) {
         crc = toob_crc32_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
     }
-    return ~crc;
+    return crc ^ TOOB_CRC32_FINAL_XOR;
 }
+

@@ -129,6 +129,7 @@ typedef enum {
  * @brief Identifiziert den Typ eines signierten Cloud Commands.
  */
 typedef enum {
+    TOOB_CMD_NOP           = 0x00,
     TOOB_CMD_FORCE_UPDATE  = 0x01,
     TOOB_CMD_KILLSWITCH    = 0x02,
     TOOB_CMD_UNLOCK        = 0x03,

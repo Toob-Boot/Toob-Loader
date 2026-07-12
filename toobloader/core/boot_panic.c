@@ -73,6 +73,16 @@ _Static_assert(
 /* COBS encode/decode/recv extracted to boot_cobs.c (DRY with
  * boot_provisioning.c) */
 
+_Noreturn static void enter_sos_loop(const boot_platform_t *platform) {
+  while (1) {
+    if (platform && platform->wdt && platform->wdt->kick)
+      platform->wdt->kick();
+    if (platform && platform->clock && platform->clock->delay_ms)
+      boot_delay_with_wdt(platform, 500);
+  }
+}
+
+
 _Noreturn void boot_terminal_halt(const boot_platform_t *platform,
                                   boot_status_t reason, uint16_t site_id) {
   /* Zero-initialize local forensic record */
@@ -98,7 +108,8 @@ _Noreturn void boot_terminal_halt(const boot_platform_t *platform,
     /* RTC-Backup-Register bevorzugt */
     if (platform->soc && platform->soc->write_rtc_backup) {
       /* Write the 20-byte record across slots 1 to 5 */
-      uint32_t *words = (uint32_t *)&record;
+      uint32_t words[5];
+      memcpy(words, &record, sizeof(record));
       boot_status_t rtc_stat = BOOT_OK;
       for (uint8_t slot = 1; slot <= 5; slot++) {
         boot_status_t s = platform->soc->write_rtc_backup(slot, words[slot - 1]);
@@ -330,7 +341,7 @@ session_reset:
 
             if (platform->wdt && platform->wdt->kick)
               platform->wdt->kick();
-            boot_status_t sig_stat = platform->crypto->verify_ed25519(
+            boot_status_t sig_stat = platform->crypto->verify_signature(
                 verify_msg, 72, auth_sig, root_pubkey);
             if (platform->wdt && platform->wdt->kick)
               platform->wdt->kick();

@@ -5,13 +5,15 @@
 
 /**
  * @brief O(1) Memory Zeroization (P10 Compliant)
- * 
- * Verhindert, dass moderne C-Compiler (GCC/Clang) sicherheitskritische 
- * memset(0) Aufrufe am Ende von Funktionen wegoptimieren (DCE: Dead Code Elimination).
- * Zwingend vorgeschrieben in hals.md für alle Crypto-Materialien (Key-Residuen).
- * 
- * @param ptr Pointer auf das zu vernichtende SRAM-Material
- * @param len Anzahl der zu nullenden Bytes
+ *
+ * ABI-CONTRACT: Intentionally separate implementations exist:
+ *   Core:  Assembly (boot_secure_zeroize.S) — DCE-proof by ISA guarantee.
+ *   OS:    volatile + compiler barrier in toob_internal.h — sufficient for
+ *          RTOS guest context where the compiler is not cross-TU aware.
+ * Both MUST zero exactly len bytes at ptr. Neither may return before completion.
+ *
+ * @param ptr Pointer to the SRAM material to be destroyed
+ * @param len Number of bytes to zero
  */
 void boot_secure_zeroize(void* ptr, size_t len);
 

@@ -390,16 +390,13 @@ type BootConfigSection struct {
 
 // CompilerInputFiles defines files the compiler pipeline reads.
 type CompilerInputFiles struct {
-	SuitCDDL       string `json:"suit_cddl"      port:"required"`  // cli/suit/toob_suit.cddl
-	TelemetryCDDL  string `json:"telemetry_cddl"  port:"required"` // cli/suit/toob_telemetry.cddl
+	TelemetryCDDL  string `json:"telemetry_cddl"  port:"required"` // cli/cbor/toob_telemetry.cddl
 	CMakeLists     string `json:"cmakelists"      port:"required"` // CMakeLists.txt
 	ToolchainCMake string `json:"toolchain_cmake" port:"required"` // cmake/toolchain-{arch}.cmake
 }
 
 // CompilerOutputFiles defines files the compiler pipeline produces.
 type CompilerOutputFiles struct {
-	BootSuitC        string `json:"boot_suit_c"        port:"required"`  // generated/boot_suit.c
-	BootSuitH        string `json:"boot_suit_h"        port:"required"`  // generated/boot_suit.h
 	TelemetryDecodeC string `json:"telemetry_decode_c"  port:"required"` // generated/toob_telemetry_decode.c
 	TelemetryDecodeH string `json:"telemetry_decode_h"  port:"required"` // generated/toob_telemetry_decode.h
 	TelemetryEncodeC string `json:"telemetry_encode_c"  port:"required"` // generated/toob_telemetry_encode.c

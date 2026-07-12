@@ -3,6 +3,8 @@
 #include "boot_ct_utils.h"
 #include "boot_swap.h"
 #include "boot_fih.h"
+#include "generated_boot_config.h"
+#include "boot_secure_zeroize.h"
 
 static boot_status_t stream_copy(const boot_platform_t *platform, uint32_t src,
                                  uint32_t dest, size_t len,

@@ -91,8 +91,6 @@ static boot_status_t load_active_cloud_key(const boot_platform_t *platform,
     }
 
     /* Zero-Key Forgery Defense */
-    extern boot_status_t verify_not_all_zeros_glitch_safe(const uint8_t *buf,
-                                                          size_t len);
     if (verify_not_all_zeros_glitch_safe(root_pubkey, 32) != BOOT_OK) {
       boot_secure_zeroize(root_pubkey, 32);
       boot_secure_zeroize(&kdm, sizeof(kdm));
@@ -100,7 +98,7 @@ static boot_status_t load_active_cloud_key(const boot_platform_t *platform,
     }
 
     /* Verify KDM signature against Root Key */
-    boot_status_t sig_stat = platform->crypto->verify_ed25519(
+    boot_status_t sig_stat = platform->crypto->verify_signature(
         (const uint8_t *)&kdm, offsetof(toob_kdm_t, signature_ed25519),
         kdm.signature_ed25519, root_pubkey);
     boot_secure_zeroize(root_pubkey, 32);
@@ -228,7 +226,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
 
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();
-  boot_status_t sig_stat = platform->crypto->verify_ed25519(
+  boot_status_t sig_stat = platform->crypto->verify_signature(
       envelope_buf, sig_payload_len, decoded.signature_ed25519, cloud_pubkey);
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();
@@ -289,7 +287,7 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
       goto cleanup;
     }
 
-    boot_status_t kdm_sig = platform->crypto->verify_ed25519(
+    boot_status_t kdm_sig = platform->crypto->verify_signature(
         (const uint8_t *)&new_kdm, offsetof(toob_kdm_t, signature_ed25519),
         new_kdm.signature_ed25519, rotate_root_key);
     boot_secure_zeroize(rotate_root_key, 32);

@@ -110,8 +110,8 @@ include(cmake/toob_libtoob.cmake)
 
 # 5.1 CMAKE_BUILD_TYPE Build Fallback Logic
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-    message(STATUS "No build type selected, defaulting to Release.")
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
+    message(STATUS "No build type selected, defaulting to MinSizeRel.")
+    set(CMAKE_BUILD_TYPE "MinSizeRel" CACHE STRING "Choose the type of build." FORCE)
 endif()
 
 # 5.2 Define the final bootloader Target (toob_stage1)
