@@ -13,11 +13,19 @@
  * Layout: [Fixed Header 512][Variable Regions…][Ed25519 Signature 64]
  *
  * See docs/tbm1_format.md for the wire format specification.
+ *
+ * NOTE: "TBM1" is the format FAMILY name, not the version number.
+ * The schema version within the TBM1 family is version_major (currently 2).
+ *
+ * Hard format limits (exceeding requires a new major version):
+ *   TBM1_MAX_IMAGES  = 4   (fixed array at fixed offset)
+ *   TBM1_MAX_REGIONS = 8   (fixed array at fixed offset)
  */
 
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "boot_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,7 +40,9 @@ extern "C" {
 #define TBM1_VERSION_MINOR      0
 #define TBM1_FIXED_LEN          512
 #define TBM1_SIG_LEN            64
+/** Hard format ceiling — exceeding requires a major version bump. */
 #define TBM1_MAX_IMAGES         4
+/** Hard format ceiling — exceeding requires a major version bump. */
 #define TBM1_MAX_REGIONS        8
 
 /* ---- flags_critical bits (unknown bit → must reject) ------------------- */
@@ -91,7 +101,7 @@ enum {
  */
 typedef struct __attribute__((packed)) {
   uint16_t region_id;   /**< TBM1_REGION_* enum value, 0 = empty slot */
-  uint16_t _rsvd;       /**< Must be zero */
+  uint16_t _rsvd;       /**< Encoder: must set to 0. Reader: must not reject on non-zero. */
   uint32_t off;         /**< Offset from TBM1 start */
   uint32_t len;         /**< Byte length of region data */
 } tbm1_region_t;
@@ -119,7 +129,7 @@ typedef struct __attribute__((packed)) {
   uint16_t ver_major;        /**< Semantic version of this image */
   uint16_t ver_minor;
   uint16_t ver_patch;
-  uint16_t _rsvd;            /**< Must be zero */
+  uint16_t _rsvd;            /**< Encoder: must set to 0. Reader: must not reject on non-zero. */
   uint8_t  base_fingerprint[8]; /**< Delta: 8-byte truncated SHA-256 of base */
 } tbm1_image_desc_t;
 
@@ -171,7 +181,7 @@ typedef struct __attribute__((packed)) {
   uint16_t fw_ver_major;         /**< Firmware semantic version */
   uint16_t fw_ver_minor;
   uint16_t fw_ver_patch;
-  uint16_t _rsvd0;               /**< Must be zero */
+  uint16_t _rsvd0;               /**< Encoder: must set to 0. Reader: must not reject on non-zero. */
 
   /* ---- SBOM Digest (32 bytes) ---- */
   uint8_t  sbom_digest[32];      /**< EU-CRA SBOM SHA-256 */
@@ -183,7 +193,11 @@ typedef struct __attribute__((packed)) {
   tbm1_image_desc_t images[TBM1_MAX_IMAGES];
 
   /* ---- Reserved Tail for Additive Growth (148 bytes) ---- */
-  uint8_t  _reserved_tail[148];  /**< Must be zero; future minor-version fields */
+  uint8_t  _reserved_tail[148];  /**< Additive growth area for future minor versions.
+                                  *   Encoder: must zero all unused bytes.
+                                  *   Reader: must NOT reject on non-zero (signed area
+                                  *   guarantees only the legitimate signer fills it;
+                                  *   unknown bytes are semantically ignored). */
 
   /* ---- CRC32 Pre-Check (4 bytes) ---- */
   uint32_t fixed_crc32;          /**< CRC32 over [0..508), fast staging check */
@@ -216,20 +230,37 @@ _Static_assert(offsetof(tbm1_header_t, fixed_crc32) == 508,
 
 /* ---- Derived Constants ------------------------------------------------- */
 
-/** Signed region: everything except the trailing 64-byte signature. */
-#define TBM1_SIGNED_LEN(hdr) ((size_t)(hdr)->total_len - TBM1_SIG_LEN)
-
 /** CRC32 covers [0..508) — everything except the CRC32 field itself. */
 #define TBM1_CRC_LEN  (TBM1_FIXED_LEN - sizeof(uint32_t))
+
+/**
+ * @brief Compute the signed region length: [0 .. total_len − 64).
+ *
+ * Returns 0 if total_len is too small to contain the fixed header plus
+ * trailing signature — the caller must treat 0 as a reject.
+ */
+static inline size_t tbm1_signed_len(const tbm1_header_t *hdr) {
+  if (hdr->total_len < (uint32_t)(TBM1_FIXED_LEN + TBM1_SIG_LEN)) return 0;
+  return (size_t)hdr->total_len - TBM1_SIG_LEN;
+}
 
 /* ---- Region Directory Accessor ----------------------------------------- */
 
 /**
  * @brief Find a region entry by ID in the directory.
- * @return Pointer to the matching region, or NULL if not found.
+ *
+ * Returns NULL if @p id is TBM1_REGION_NONE (0) — prevents accidental
+ * matches against empty directory slots. Duplicate region IDs are rejected
+ * during validation (see tbm1_validate in boot_state.c); this function
+ * should only be called on a validated header.
+ *
+ * @param hdr  Pointer to a validated TBM1 header.
+ * @param id   Region ID to search for (must be != 0).
+ * @return Pointer to the matching region entry, or NULL.
  */
 static inline const tbm1_region_t *
 tbm1_find_region(const tbm1_header_t *hdr, uint16_t id) {
+  if (id == TBM1_REGION_NONE) return NULL;
   for (unsigned i = 0; i < TBM1_MAX_REGIONS; i++) {
     if (hdr->regions[i].region_id == id)
       return &hdr->regions[i];
@@ -237,8 +268,73 @@ tbm1_find_region(const tbm1_header_t *hdr, uint16_t id) {
   return NULL;
 }
 
+/* ---- Reject Taxonomy --------------------------------------------------- */
+
+/**
+ * @brief Distinct reject codes for TBM1 validation stages.
+ *
+ * Each code maps to exactly one failure mode, enabling field telemetry to
+ * distinguish "staging corrupt" from "wrong product" from "too-old reader"
+ * without device returns. Mapped to boot_status_t via tbm1_reject_to_boot_status().
+ */
+typedef enum {
+  TBM1_OK = 0,
+  TBM1_BAD_MAGIC,           /**< magic != TBM1_MAGIC */
+  TBM1_BAD_FIXED_LEN,       /**< fixed_len != 512 */
+  TBM1_BAD_VERSION,         /**< version_major != TBM1_VERSION_MAJOR */
+  TBM1_BAD_TOTAL_LEN,       /**< total_len too small or exceeds staging capacity */
+  TBM1_BAD_CRC,             /**< fixed_crc32 pre-check failed (staging corrupt) */
+  TBM1_BAD_CRIT_FLAG,       /**< Unknown flags_critical bit set */
+  TBM1_BAD_READER_VERSION,  /**< min_reader_* exceeds this reader's version */
+  TBM1_BAD_IMAGE_COUNT,     /**< image_count not in [1..TBM1_MAX_IMAGES] */
+  TBM1_BAD_KEY_INDEX,       /**< key_index >= provisioned key slots */
+  TBM1_BAD_HW_COMPAT,       /**< product_id or hw_rev mismatch */
+  TBM1_BAD_CHUNK_MATH,      /**< chunk_size==0, num_chunks mismatch, or bad slot */
+  TBM1_BAD_REGION_BOUNDS,   /**< Region off/len exceeds signed area */
+  TBM1_BAD_REGION_ORDER,    /**< Regions not ascending or overlapping */
+  TBM1_BAD_REGION_DUP,      /**< Duplicate region_id in directory */
+  TBM1_BAD_CHUNKHASH_LEN,   /**< REGION_CHUNK_HASHES len != Σ(num_chunks_i)×32 */
+} tbm1_reject_t;
+
+/* ---- Compile-Time Device Identity Defaults ----------------------------- */
+/* Override via generated_boot_config.h or -D flags for production builds.   */
+
+#ifndef TOOB_DEVICE_PRODUCT_ID
+#define TOOB_DEVICE_PRODUCT_ID  0xFFFFU  /**< Unset → skip HW-compat check */
+#endif
+
+#ifndef TOOB_DEVICE_HW_REV
+#define TOOB_DEVICE_HW_REV     0U
+#endif
+
+#ifndef TOOB_DEVICE_KEY_SLOTS
+#define TOOB_DEVICE_KEY_SLOTS  6U  /**< ESP32-C6: 6 eFuse key blocks */
+#endif
+
+/* ---- Validation API (boot_tbm1.c) -------------------------------------- */
+
+/** Structural pre-checks before any field is trusted. Includes CRC32. */
+tbm1_reject_t tbm1_precheck(const uint8_t *buf, size_t staging_cap);
+
+/** Region directory: overflow-safe bounds, ascending order, no duplicates. */
+tbm1_reject_t tbm1_validate_regions(const tbm1_header_t *h);
+
+/** Image descriptors: count, key_index, HW-compat, chunk math. */
+tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h);
+
+/** Chunk-hash partitioning: region.len == Σ(num_chunks_i)×32. */
+tbm1_reject_t tbm1_chunkhash_slices(const tbm1_header_t *h,
+                                    uint32_t *out_off);
+
+/** Top-level facade: precheck → regions → images → chunkhash. */
+tbm1_reject_t tbm1_validate(const uint8_t *buf, size_t staging_cap);
+
+/** Map tbm1_reject_t to boot_status_t for the pipeline error handler. */
+boot_status_t tbm1_reject_to_boot_status(tbm1_reject_t rc);
+
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* TOOB_BOOT_TBM1_H */
+

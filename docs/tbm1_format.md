@@ -33,6 +33,13 @@ Layout in staging area:
 
 ## 1. Fixed Header (512 Bytes)
 
+> **Naming**: "TBM1" is the format family name, not the version number.
+> The schema version within the TBM1 family is `version_major` (currently 2).
+
+> **Hard Limits**: `TBM1_MAX_IMAGES` (4) and `TBM1_MAX_REGIONS` (8) are fixed
+> arrays at fixed offsets. Exceeding either limit requires a new major version
+> with a new reader — `_reserved_tail` cannot extend them.
+
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0 | 4 | `magic` | `0x314D4254` (`'TBM1'` LE — mnemonic: "TBM1 Manifest") |
@@ -58,11 +65,11 @@ Layout in staging area:
 | 48 | 2 | `fw_ver_major` | Firmware semantic version major |
 | 50 | 2 | `fw_ver_minor` | Firmware semantic version minor |
 | 52 | 2 | `fw_ver_patch` | Firmware semantic version patch |
-| 54 | 2 | `_rsvd0` | Alignment padding (must be 0) |
+| 54 | 2 | `_rsvd0` | Alignment padding (Encoder: must be 0. Reader: tolerate non-zero) |
 | 56 | 32 | `sbom_digest` | SHA-256 digest of the EU-CRA SBOM |
 | 88 | 96 | `regions[8]` | Region Directory (8 slots × 12 bytes each) |
 | 184 | 176 | `images[4]` | Image descriptors (4 slots × 44 bytes each) |
-| 360 | 148 | `_reserved_tail` | Padding for future minor-version expansion (must be 0) |
+| 360 | 148 | `_reserved_tail` | Additive growth for future minor versions (Encoder: must zero unused. Reader: tolerate non-zero) |
 | 508 | 4 | `fixed_crc32` | Fast CRC32 pre-check over bytes `[0..508)` |
 
 ---
@@ -130,3 +137,31 @@ Instead of generic aborts, v2 utilizes precise reject codes for telemetries:
 * `BOOT_ERR_MANIFEST_CORRUPT`: `fixed_crc32` pre-check failed (staging write rot).
 * `BOOT_ERR_MANIFEST_VERSION`: Major version mismatch, or critical flags/min_reader check failed.
 * `BOOT_ERR_MANIFEST_PRODUCT`: Vendor, product family, or hardware revision mismatch.
+
+---
+
+## 6. Reserved-Field Discipline
+
+All reserved and padding fields (`_rsvd`, `_rsvd0`, `_reserved_tail`) follow a split rule:
+
+- **Encoder obligation**: Set all unused reserved bytes to `0x00`.
+- **Reader tolerance**: Do NOT reject a manifest because reserved bytes are non-zero.
+
+**Rationale**: Reserved fields lie within the signed area `[0 .. total_len − 64)`. Only the legitimate signer can fill them. A future minor version may place new scalar fields into `_reserved_tail` — a zero-check would reject manifests that the reader should accept (minor versions are backward-compatible by definition). Unknown bytes are semantically ignored by the reader.
+
+---
+
+## 7. Chunk-Hash Partitioning Rule
+
+`REGION_CHUNK_HASHES` contains per-image SHA-256 chunk hashes **concatenated in image-descriptor order** (index 0 first). Each image contributes `num_chunks × 32` bytes.
+
+**Reader verification**: `region.len == Σ(images[i].num_chunks) × 32` for `i ∈ [0 .. image_count)`. Mismatch → reject (`TBM1_BAD_CHUNKHASH_LEN`).
+
+**Per-image offset computation** (prefix sum):
+```
+slice_off[0] = region.off
+slice_off[i] = region.off + Σ(images[j].num_chunks × 32) for j < i
+```
+
+This rule is the sole source of truth for how encoder and reader partition the hash region. The prefix-sum computation uses `uint64_t` accumulation to prevent overflow.
+

@@ -270,32 +270,10 @@ session_reset:
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
 
-    boot_secure_zeroize(rx_buf, PANIC_RX_MAX_SIZE);
     size_t rx_len = 0;
-    bool frame_ready = false;
-
-    /* Frame Retrieval Logic */
-    while (!frame_ready) {
-      if (platform->wdt && platform->wdt->kick)
-        platform->wdt->kick();
-
-      uint8_t c;
-      if (platform->console->getchar &&
-          platform->console->getchar(&c, 100) != BOOT_OK)
-        continue;
-
-      if (c == COBS_MARKER_END) {
-        if (rx_len > 0)
-          frame_ready = true;
-      } else {
-        if (rx_len < PANIC_RX_MAX_SIZE) {
-          rx_buf[rx_len++] = c;
-        } else {
-          /* Overflow Defense: Buffer vernichten und auf nächsten Sync warten */
-          boot_secure_zeroize(rx_buf, PANIC_RX_MAX_SIZE);
-          rx_len = 0;
-        }
-      }
+    if (boot_cobs_recv_frame(platform, rx_buf, PANIC_RX_MAX_SIZE, &rx_len) !=
+        BOOT_OK) {
+      continue;
     }
 
     size_t decoded_len = 0;
@@ -686,15 +664,13 @@ session_reset:
           }
 
           /* Glitch-Resistant Constant-Time Chunk Comparison */
-          uint32_t diff = 0;
-          for (size_t i = 0; i < step; i++) {
-            diff |= (rb_buf[i] ^ chunk_buf[check_off + i]);
-          }
-
-          BOOT_SECURE_REQUIRE(diff == 0, {
-            write_ok = false;
-            break;
-          });
+          BOOT_SECURE_REQUIRE(
+              constant_time_memcmp_glitch_safe(rb_buf, chunk_buf + check_off,
+                                              step) == BOOT_OK,
+              {
+                write_ok = false;
+                break;
+              });
 
           check_off += (uint32_t)step;
         }

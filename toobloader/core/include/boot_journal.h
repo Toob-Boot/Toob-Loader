@@ -126,6 +126,14 @@ typedef struct {
   uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4];
 } wal_tmr_payload_t;
 
+/** Canonical populated-size: all fields before the reserved tail.
+ *  Both factory-blank and migration must use this — never a magic number. */
+#define WAL_TMR_POPULATED_SIZE  offsetof(wal_tmr_payload_t, reserved)
+
+/** Number of recent sequence IDs protected from wear-leveling recycling.
+ *  TMR quorum uses 3 sectors + 1 cross-sector intent = 4 protected. */
+#define WAL_PROTECT_WINDOW  4u
+
 /**
  * @brief Der Header eines jeden WAL-Sektors
  * Liegt am Offset 0 eines jeden der 4-8 physikalischen WAL-Sektoren.
@@ -157,6 +165,8 @@ _Static_assert(sizeof(wal_sector_header_t) <= 128,
                "ABI Drift: WAL Header exceeds slot size!");
 _Static_assert(sizeof(wal_sector_header_aligned_t) == 128,
                "ABI Drift: Aligned WAL Header must be exactly 128 bytes!");
+_Static_assert(WAL_TMR_POPULATED_SIZE == 76,
+               "ABI Drift: populated_size must match hand-computed 76!");
 
 /**
  * @brief Der Payload eines einzelnen angehängten WAL-Eintrags.

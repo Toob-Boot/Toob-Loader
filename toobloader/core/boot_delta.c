@@ -157,14 +157,10 @@ flush_target_buffer(const boot_platform_t *platform, uint32_t target_base,
     if (platform->flash->read(dest_addr + rb_off, rb_buf, step) != BOOT_OK)
       return BOOT_ERR_FLASH_HW;
 
-    uint32_t diff = 0;
-    for (size_t i = 0; i < step; i++) {
-      diff |= (rb_buf[i] ^ write_buf[rb_off + i]);
-    }
-
-    BOOT_SECURE_REQUIRE(diff == 0, {
-      return BOOT_ERR_FLASH_HW; /* SPI-Rauschen oder Bit-Rot! */
-    });
+    BOOT_SECURE_REQUIRE(
+        constant_time_memcmp_glitch_safe(rb_buf, write_buf + rb_off, step) ==
+            BOOT_OK,
+        { return BOOT_ERR_FLASH_HW; });
     rb_off += (uint32_t)step;
   }
   boot_secure_zeroize(rb_buf, sizeof(rb_buf));

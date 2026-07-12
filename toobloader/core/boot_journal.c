@@ -41,11 +41,16 @@
  * allocation.
  */
 static uint32_t active_wal_index = 0;
-static uint32_t wal_sector_addrs[MAX_WAL_SECTORS];
-static size_t wal_sector_sizes[MAX_WAL_SECTORS];
+static const uint32_t wal_sector_addrs[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_ADDRS;
+static const size_t   wal_sector_sizes[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_SIZES;
 static wal_sector_header_t current_active_header;
 static bool wal_initialized = false;
 static uint32_t cached_write_offset = 0;
+
+/** Shared read-scratch for header reads (single-threaded, non-reentrant).
+ *  Owned by read_header() — callers must extract needed values before
+ *  the next read_header() call. */
+static wal_sector_header_aligned_t g_hdr_scratch __attribute__((aligned(8)));
 
 /* K4: Device-bound journal chain state */
 static uint8_t journal_key[WAL_CHAIN_TAG_BYTES];
@@ -60,6 +65,35 @@ static bool    journal_key_valid = false;
 
 #include "boot_ct_utils.h"
 
+/* ---- C5: Non-inline CRC helpers (single copy instead of 9 call-sites) ---- */
+
+/** CRC32 over sector header fields (excludes trailing header_crc32). */
+static uint32_t sector_hdr_crc(const wal_sector_header_t *h) {
+  return compute_boot_crc32((const uint8_t *)h,
+                            offsetof(wal_sector_header_t, header_crc32));
+}
+
+/** CRC32 over entry payload fields (excludes trailing crc32_trailer). */
+static uint32_t entry_crc(const wal_entry_payload_t *e) {
+  return compute_boot_crc32((const uint8_t *)e,
+                            offsetof(wal_entry_payload_t, crc32_trailer));
+}
+
+/* ---- C4: Entry classification helper ---- */
+
+typedef enum { WAL_E_ERASED, WAL_E_VALID, WAL_E_CORRUPT } wal_entry_state_t;
+
+/** Classify a WAL entry as erased, valid, or corrupt. */
+static wal_entry_state_t classify_entry(const wal_entry_aligned_t *e,
+                                        uint8_t erased_val) {
+  if (is_fully_erased_constant_time((const uint8_t *)e, sizeof(*e), erased_val))
+    return WAL_E_ERASED;
+  if (e->data.magic == WAL_ENTRY_MAGIC &&
+      entry_crc(&e->data) == e->data.crc32_trailer)
+    return WAL_E_VALID;
+  return WAL_E_CORRUPT;
+}
+
 /**
  * @brief Migriert eine v1 TMR-Payload auf die aktuelle Version.
  *
@@ -70,7 +104,7 @@ static void migrate_v1_tmr(wal_tmr_payload_t *dst,
                            const wal_tmr_payload_v1_t *src) {
   boot_secure_zeroize(dst, sizeof(wal_tmr_payload_t));
   dst->struct_version = WAL_TMR_VERSION_CURRENT;
-  dst->populated_size = 76; /* 4 (version hdr) + 48 (v1) + 4 (stage1_svn) + 16 (chain_tag) + 4 (chain_entry_count) */
+  dst->populated_size = WAL_TMR_POPULATED_SIZE;
   dst->primary_slot_id = src->primary_slot_id;
   dst->active_stage1_bank = src->active_stage1_bank;
   dst->app_svn = src->app_svn;
@@ -88,87 +122,80 @@ static void migrate_v1_tmr(wal_tmr_payload_t *dst,
    * representing an empty chain on a freshly migrated device. */
 }
 
+/* ---- C2: Scatter-gather hash for chain tags ---- */
+
+/** Scatter-gather segment for hash_chain_compute. */
+typedef struct { const uint8_t *p; size_t n; } hash_seg_t;
+
+/**
+ * @brief Hash a chain of segments and truncate to WAL_CHAIN_TAG_BYTES.
+ *
+ * Computes SHA-256(seg[0] ‖ seg[1] ‖ ... ‖ seg[nseg-1]) and copies
+ * the first WAL_CHAIN_TAG_BYTES into out. Handles the full
+ * init/update/finish lifecycle including error-path context cleanup.
+ */
+static boot_status_t hash_chain_compute(const boot_platform_t *pf,
+                                        const hash_seg_t *seg, size_t nseg,
+                                        uint8_t out[WAL_CHAIN_TAG_BYTES]) {
+  uint8_t ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
+  boot_secure_zeroize(ctx, sizeof(ctx));
+  boot_secure_zeroize(out, WAL_CHAIN_TAG_BYTES);
+
+  boot_status_t s = pf->crypto->hash_init(ctx, sizeof(ctx));
+  for (size_t i = 0; s == BOOT_OK && i < nseg; i++)
+    s = pf->crypto->hash_update(ctx, seg[i].p, seg[i].n);
+
+  uint8_t digest[32];
+  size_t dl = sizeof(digest);
+  if (s == BOOT_OK) {
+    s = pf->crypto->hash_finish(ctx, digest, &dl);
+    if (s == BOOT_OK) memcpy(out, digest, WAL_CHAIN_TAG_BYTES);
+  } else {
+    /* Finalize to release crypto context even on error */
+    (void)pf->crypto->hash_finish(ctx, digest, &dl);
+  }
+  boot_secure_zeroize(digest, sizeof(digest));
+  boot_secure_zeroize(ctx, sizeof(ctx));
+  return s;
+}
+
 /**
  * @brief K4: Computes H(key ‖ entry_bytes ‖ prev_tag), truncated to 16 bytes.
- *
- * Uses the platform's SHA-256 hash to compute a device-bound chain tag.
- * Returns BOOT_ERR_CRYPTO on hash failure (caller decides how to degrade).
  */
 static boot_status_t compute_chain_tag(const boot_platform_t *platform,
                                        const uint8_t key[WAL_CHAIN_TAG_BYTES],
                                        const wal_entry_payload_t *entry,
                                        const uint8_t prev_tag[WAL_CHAIN_TAG_BYTES],
                                        uint8_t out_tag[WAL_CHAIN_TAG_BYTES]) {
-  uint8_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
-  boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
-  boot_secure_zeroize(out_tag, WAL_CHAIN_TAG_BYTES);
-
-  boot_status_t s = platform->crypto->hash_init(hash_ctx, sizeof(hash_ctx));
-  if (s != BOOT_OK) goto cleanup;
-
-  s = platform->crypto->hash_update(hash_ctx, key, WAL_CHAIN_TAG_BYTES);
-  if (s != BOOT_OK) goto finalize;
-
-  /* Hash the entry bytes up to (but not including) the CRC trailer.
-   * The CRC is computed over the same range, so it's redundant. */
-  s = platform->crypto->hash_update(hash_ctx, (const uint8_t *)entry,
-                                    offsetof(wal_entry_payload_t, crc32_trailer));
-  if (s != BOOT_OK) goto finalize;
-
-  s = platform->crypto->hash_update(hash_ctx, prev_tag, WAL_CHAIN_TAG_BYTES);
-  if (s != BOOT_OK) goto finalize;
-
-  {
-    uint8_t digest[32];
-    size_t digest_len = 32;
-    s = platform->crypto->hash_finish(hash_ctx, digest, &digest_len);
-    if (s == BOOT_OK) {
-      memcpy(out_tag, digest, WAL_CHAIN_TAG_BYTES);
-    }
-    boot_secure_zeroize(digest, sizeof(digest));
-  }
-  goto cleanup;
-
-finalize:
-  {
-    uint8_t dummy[64];
-    size_t dummy_len = sizeof(dummy);
-    (void)platform->crypto->hash_finish(hash_ctx, dummy, &dummy_len);
-    boot_secure_zeroize(dummy, sizeof(dummy));
-  }
-
-cleanup:
-  boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
-  return s;
+  hash_seg_t seg[] = {
+    {key,                    WAL_CHAIN_TAG_BYTES},
+    {(const uint8_t *)entry, offsetof(wal_entry_payload_t, crc32_trailer)},
+    {prev_tag,               WAL_CHAIN_TAG_BYTES}
+  };
+  return hash_chain_compute(platform, seg, 3, out_tag);
 }
 
 /**
- * @brief Führt eine Ganz-Struktur Mehrheitsentscheidung (TMR Majority Vote) durch.
+ * @brief Returns index of the majority-winner in tmr_candidates[].
  *
- * Verhindert das Zusammenstückeln einzelner korrupten Bytes (Frankenstein-Voting)
- * durch constant-time Vergleiche der vollständigen Strukturen.
+ * Whole-struct constant-time compare prevents Frankenstein-voting.
+ * Falls back to index 0 (newest) if no majority found.
  */
-static wal_tmr_payload_t tmr_majority_vote(const wal_tmr_payload_t *tmr_candidates, int num_candidates) {
-  if (num_candidates >= 2) {
-    size_t tmr_sz = sizeof(wal_tmr_payload_t);
-    if (constant_time_memcmp_glitch_safe((const uint8_t *)&tmr_candidates[0],
-                                         (const uint8_t *)&tmr_candidates[1],
-                                         tmr_sz) == BOOT_OK) {
-      return tmr_candidates[0];
-    } else if (num_candidates == 3 &&
-               constant_time_memcmp_glitch_safe(
-                   (const uint8_t *)&tmr_candidates[0],
-                   (const uint8_t *)&tmr_candidates[2], tmr_sz) == BOOT_OK) {
-      return tmr_candidates[0];
-    } else if (num_candidates == 3 &&
-               constant_time_memcmp_glitch_safe(
-                   (const uint8_t *)&tmr_candidates[1],
-                   (const uint8_t *)&tmr_candidates[2], tmr_sz) == BOOT_OK) {
-      return tmr_candidates[1];
-    }
+static int tmr_majority_vote_idx(const wal_tmr_payload_t *c, int n) {
+  size_t sz = sizeof(wal_tmr_payload_t);
+  if (n >= 2 &&
+      constant_time_memcmp_glitch_safe(
+          (const uint8_t *)&c[0], (const uint8_t *)&c[1], sz) == BOOT_OK)
+    return 0;
+  if (n == 3) {
+    if (constant_time_memcmp_glitch_safe(
+            (const uint8_t *)&c[0], (const uint8_t *)&c[2], sz) == BOOT_OK)
+      return 0;
+    if (constant_time_memcmp_glitch_safe(
+            (const uint8_t *)&c[1], (const uint8_t *)&c[2], sz) == BOOT_OK)
+      return 1;
   }
-  /* Extreme Korruptions-Absicherung: Vertraue dem neuesten kryptografisch validen Eintrag */
-  return tmr_candidates[0];
+  return 0;
 }
 
 
@@ -188,7 +215,7 @@ static bool verify_header_crc_glitch_safe(
     });
     return true;
   } else if (magic == WAL_ABI_VERSION_MAGIC_CURRENT) {
-    uint32_t calc_crc = compute_boot_crc32((const uint8_t *)&aligned_header->data, offsetof(wal_sector_header_t, header_crc32));
+    uint32_t calc_crc = sector_hdr_crc(&aligned_header->data);
     bool crc_ok = (calc_crc == aligned_header->data.header_crc32);
     BOOT_SECURE_REQUIRE(crc_ok, {
       return false;
@@ -196,6 +223,38 @@ static bool verify_header_crc_glitch_safe(
     return true;
   }
   return false;
+}
+
+/* ---- C3: Header-Read + Seq-Search helpers ---- */
+
+/**
+ * @brief Read sector header from flash and verify CRC integrity.
+ *
+ * Result is stored in g_hdr_scratch. Callers must extract needed
+ * values before the next read_header() call.
+ * @return true if read succeeded AND CRC passed, false otherwise.
+ */
+static bool read_header(const boot_platform_t *p, uint32_t idx) {
+  boot_secure_zeroize(&g_hdr_scratch, sizeof(g_hdr_scratch));
+  if (p->flash->read(wal_sector_addrs[idx], (uint8_t *)&g_hdr_scratch,
+                     sizeof(g_hdr_scratch)) != BOOT_OK)
+    return false;
+  return verify_header_crc_glitch_safe(&g_hdr_scratch);
+}
+
+/**
+ * @brief Find the sector index holding the given sequence_id.
+ *
+ * On success, g_hdr_scratch contains the matching header.
+ * @return Sector index (0..TOOB_WAL_SECTORS-1), or -1 if not found.
+ */
+static int32_t find_sector_by_seq(const boot_platform_t *p, uint32_t seq) {
+  for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
+    if (read_header(p, i) &&
+        g_hdr_scratch.data.sequence_id == seq)
+      return (int32_t)i;
+  }
+  return -1;
 }
 
 /**
@@ -257,6 +316,47 @@ static boot_status_t smart_erase_sector(const boot_platform_t *platform,
   return status;
 }
 
+/* ---- C1: Unified sector rotation (erase + write fresh header) ---- */
+
+/**
+ * @brief Erase a sector and write a fresh header with updated metadata.
+ *
+ * Reads the old erase_count (via read_header), performs a smart erase,
+ * then writes a new header with the given sequence_id and TMR payload.
+ * Returns the new erase_count via out_erase on success.
+ */
+static boot_status_t rotate_to_sector(const boot_platform_t *p,
+                                      uint32_t idx, uint32_t seq,
+                                      const wal_tmr_payload_t *tmr,
+                                      uint32_t *out_erase) {
+  /* 1. Recover previous erase count for wear tracking */
+  uint32_t prev = 0;
+  if (read_header(p, idx))
+    prev = g_hdr_scratch.data.erase_count;
+
+  /* 2. Erase the physical sector */
+  boot_status_t s = smart_erase_sector(p, idx);
+  if (s != BOOT_OK) return s;
+
+  /* 3. Build and write the new header */
+  wal_sector_header_aligned_t wh __attribute__((aligned(8)));
+  memset(&wh, p->flash->erased_value, sizeof(wh));
+  wh.data.sector_magic = WAL_ABI_VERSION_MAGIC;
+  wh.data.sequence_id  = seq;
+  wh.data.erase_count  = prev + 1;
+  wh.data.tmr_data     = *tmr;
+  wh.data.header_crc32 = sector_hdr_crc(&wh.data);
+
+  if (p->wdt && p->wdt->kick) p->wdt->kick();
+  s = p->flash->write(wal_sector_addrs[idx],
+                      (const uint8_t *)&wh, sizeof(wh));
+  boot_secure_zeroize(&wh, sizeof(wh));
+
+  if (s == BOOT_OK && out_erase)
+    *out_erase = prev + 1;
+  return s;
+}
+
 /**
  * @brief Findet den am wenigsten abgenutzten physischen Sektor (Wear-Leveling).
  * Schützt das TMR-Quorum (die letzten 3 Sequenzen) PLUS Cross-Sector Intents
@@ -280,29 +380,15 @@ static uint32_t get_best_wear_leveling_sector(const boot_platform_t *platform,
     if (excluded)
       continue;
 
-    wal_sector_header_aligned_t hdr __attribute__((aligned(8)));
-    boot_secure_zeroize(&hdr, sizeof(hdr));
+    if (read_header(platform, i)) {
+      /* Protect the last WAL_PROTECT_WINDOW sequences from recycling.
+       * Modular subtraction handles 32-bit wrap correctly. */
+      if ((uint32_t)(highest_seq - g_hdr_scratch.data.sequence_id)
+          < WAL_PROTECT_WINDOW)
+        continue;
 
-    if (platform->flash->read(wal_sector_addrs[i], (uint8_t *)&hdr,
-                              sizeof(hdr)) != BOOT_OK)
-      continue;
-
-    if (verify_header_crc_glitch_safe(&hdr)) {
-      /* CROSS-SECTOR FIX: Schütze die letzten 4 WAL-Historien (N, N-1, N-2,
-       * N-3) Dies blockiert radikal, dass Wear-Leveling Intents zerstört, die
-       * während eines 3-Sektor-TMR-Updates überrollt wurden! */
-      if (!is_newer_sequence(hdr.data.sequence_id, highest_seq)) {
-        /* Underflow-Proof: Nur prüfen, wenn Subtraktion sicher im 32-bit Limit
-         * greift */
-        if (highest_seq >= hdr.data.sequence_id ||
-            (hdr.data.sequence_id > 0xFFFFFFF0 && highest_seq < 10)) {
-          uint32_t diff = highest_seq - hdr.data.sequence_id;
-          if (diff < 4) /* Mathematisch bewiesen 4 statt 3 */
-            continue;
-        }
-      }
-      if (hdr.data.erase_count < min_erase) {
-        min_erase = hdr.data.erase_count;
+      if (g_hdr_scratch.data.erase_count < min_erase) {
+        min_erase = g_hdr_scratch.data.erase_count;
         best_idx = i;
       }
     } else {
@@ -330,32 +416,20 @@ static uint32_t scan_for_frontier_linear(const boot_platform_t *platform,
       platform->wdt->kick();
 
     wal_entry_aligned_t entry __attribute__((aligned(8)));
-    boot_secure_zeroize(&entry, sizeof(entry));
 
     if (platform->flash->read(sector_addr + offset, (uint8_t *)&entry,
                               sizeof(entry)) != BOOT_OK) {
       break; /* Hardware instability -> Stop here */
     }
 
-    /* 1. Erkennung von völlig gelöschtem Flash (Saubere Front) UB-Frei via
-     * is_fully_erased */
-    if (is_fully_erased_constant_time((const uint8_t *)&entry, sizeof(entry),
-                                      erased_val)) {
+    wal_entry_state_t es = classify_entry(&entry, erased_val);
+    if (es == WAL_E_ERASED) {
       boot_secure_zeroize(&entry, sizeof(entry));
-      return offset; /* Frontier gefunden! */
+      return offset;
     }
-
-    /* 2. Validation: Glitch-Resistant Double Check */
-    size_t crc_len = offsetof(wal_entry_payload_t, crc32_trailer);
-    uint32_t calc_crc =
-        compute_boot_crc32((const uint8_t *)&entry.data, crc_len);
-
-    bool magic_ok = (entry.data.magic == WAL_ENTRY_MAGIC);
-    bool crc_ok = (calc_crc == entry.data.crc32_trailer);
-
-    BOOT_SECURE_REQUIRE(magic_ok && crc_ok, {
+    BOOT_SECURE_REQUIRE(es == WAL_E_VALID, {
       boot_secure_zeroize(&entry, sizeof(entry));
-      break; /* Garbage/Torn Write (Brownout). Stop frontier here! */
+      break;
     });
 
     offset += sizeof(wal_entry_aligned_t);
@@ -376,18 +450,8 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
   if (TOOB_WAL_SECTORS < 4 || TOOB_WAL_SECTORS > MAX_WAL_SECTORS)
     return BOOT_ERR_INVALID_ARG;
 
-  /* 1. O(1) Static Layout Initialization (Single Source of Truth)
-   * Nutzt P10-Stack-Free Arrays (.rodata) für physikalisch perfekte Asymmetrie
-   */
-  static const uint32_t hw_addrs[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_ADDRS;
-  static const size_t hw_sizes[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_SIZES;
-
+  /* 1. Layout Sanity Check (arrays are now file-scope const, R1) */
   for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
-    wal_sector_addrs[i] = hw_addrs[i];
-    wal_sector_sizes[i] = hw_sizes[i];
-
-    /* Sanity-Check: Ist der vom Manifest spezifizierte Sektor physikalisch groß
-     * genug für Header + 1 Entry? */
     if (wal_sector_sizes[i] <
         sizeof(wal_sector_header_aligned_t) + sizeof(wal_entry_aligned_t)) {
       return BOOT_ERR_FLASH_HW;
@@ -398,20 +462,15 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
   uint32_t highest_seq = 0;
   int32_t highest_idx = -1;
   bool migration_required = false;
+  wal_sector_header_aligned_t cached_winner __attribute__((aligned(8)));
 
   for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
-    wal_sector_header_aligned_t hdr __attribute__((aligned(8)));
-    boot_secure_zeroize(&hdr, sizeof(hdr));
-
-    if (platform->flash->read(wal_sector_addrs[i], (uint8_t *)&hdr,
-                              sizeof(hdr)) != BOOT_OK)
-      continue;
-
-    if (verify_header_crc_glitch_safe(&hdr)) {
+    if (read_header(platform, i)) {
       if (highest_idx == -1 ||
-          is_newer_sequence(hdr.data.sequence_id, highest_seq)) {
-        highest_seq = hdr.data.sequence_id;
+          is_newer_sequence(g_hdr_scratch.data.sequence_id, highest_seq)) {
+        highest_seq = g_hdr_scratch.data.sequence_id;
         highest_idx = (int32_t)i;
+        cached_winner = g_hdr_scratch;
       }
     }
   }
@@ -424,15 +483,13 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     current_active_header.sequence_id = 1;
     current_active_header.erase_count = 1;
     current_active_header.tmr_data.struct_version = WAL_TMR_VERSION_CURRENT;
-    current_active_header.tmr_data.populated_size = 52;
+    current_active_header.tmr_data.populated_size = WAL_TMR_POPULATED_SIZE;
 
     boot_status_t er_stat = smart_erase_sector(platform, 0);
     if (er_stat != BOOT_OK)
       return er_stat;
 
-    current_active_header.header_crc32 =
-        compute_boot_crc32((const uint8_t *)&current_active_header,
-                           offsetof(wal_sector_header_t, header_crc32));
+    current_active_header.header_crc32 = sector_hdr_crc(&current_active_header);
 
     wal_sector_header_aligned_t write_hdr __attribute__((aligned(8)));
     boot_secure_zeroize(&write_hdr, sizeof(write_hdr));
@@ -448,31 +505,23 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     boot_secure_zeroize(&write_hdr, sizeof(write_hdr)); /* P10 Stack Clean */
   } else {
     active_wal_index = (uint32_t)highest_idx;
-    wal_sector_header_aligned_t hdr __attribute__((aligned(8)));
-    boot_secure_zeroize(&hdr, sizeof(hdr));
-
-    if (platform->flash->read(wal_sector_addrs[highest_idx], (uint8_t *)&hdr,
-                              sizeof(hdr)) != BOOT_OK)
-      return BOOT_ERR_FLASH;
 
     migration_required = false;
-    if (hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
-      const wal_sector_header_v1_t *legacy_hdr = (const wal_sector_header_v1_t *)&hdr.data;
+    if (cached_winner.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+      const wal_sector_header_v1_t *legacy_hdr = (const wal_sector_header_v1_t *)&cached_winner.data;
       
       current_active_header.sector_magic = WAL_ABI_VERSION_MAGIC_CURRENT;
       current_active_header.sequence_id = legacy_hdr->sequence_id;
       current_active_header.erase_count = legacy_hdr->erase_count;
       migrate_v1_tmr(&current_active_header.tmr_data, &legacy_hdr->tmr_data);
       
-      current_active_header.header_crc32 = compute_boot_crc32(
-          (const uint8_t *)&current_active_header,
-          offsetof(wal_sector_header_t, header_crc32));
+      current_active_header.header_crc32 = sector_hdr_crc(&current_active_header);
       
       migration_required = true;
     } else {
-      current_active_header = hdr.data;
+      current_active_header = cached_winner.data;
     }
-    boot_secure_zeroize(&hdr, sizeof(hdr));
+    boot_secure_zeroize(&cached_winner, sizeof(cached_winner));
 
     if (current_active_header.tmr_data.struct_version > WAL_TMR_VERSION_CURRENT) {
       boot_terminal_halt(platform, BOOT_ERR_ABI_MISMATCH, SITE_TMR_FUTURE);
@@ -496,23 +545,18 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
       bool found_contiguous = false;
 
       for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
-        wal_sector_header_aligned_t s_hdr __attribute__((aligned(8)));
-        boot_secure_zeroize(&s_hdr, sizeof(s_hdr));
-        if (platform->flash->read(wal_sector_addrs[i], (uint8_t *)&s_hdr,
-                                  sizeof(s_hdr)) == BOOT_OK) {
-          if (verify_header_crc_glitch_safe(&s_hdr) &&
-              s_hdr.data.sequence_id == target_seq) {
-            if (s_hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
-              const wal_sector_header_v1_t *legacy_shdr = (const wal_sector_header_v1_t *)&s_hdr.data;
+        if (read_header(platform, i) &&
+            g_hdr_scratch.data.sequence_id == target_seq) {
+            if (g_hdr_scratch.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+              const wal_sector_header_v1_t *legacy_shdr = (const wal_sector_header_v1_t *)&g_hdr_scratch.data;
               wal_tmr_payload_t converted_tmr;
               migrate_v1_tmr(&converted_tmr, &legacy_shdr->tmr_data);
               tmr_candidates[num_candidates++] = converted_tmr;
             } else {
-              tmr_candidates[num_candidates++] = s_hdr.data.tmr_data;
+              tmr_candidates[num_candidates++] = g_hdr_scratch.data.tmr_data;
             }
             found_contiguous = true;
             break;
-          }
         }
       }
       if (!found_contiguous)
@@ -520,7 +564,8 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     }
 
     if (num_candidates >= 2) {
-      current_active_header.tmr_data = tmr_majority_vote(tmr_candidates, num_candidates);
+      current_active_header.tmr_data =
+          tmr_candidates[tmr_majority_vote_idx(tmr_candidates, num_candidates)];
     }
     boot_secure_zeroize(tmr_candidates,
                         sizeof(tmr_candidates)); /* P10 Stack Clean */
@@ -590,19 +635,7 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
    * die durch ein 3-Sektor TMR-Update versehentlich im Sektor N-3
    * "zurückgelassen" wurden! */
   for (uint32_t step = 0; step < TOOB_WAL_SECTORS; step++) {
-    int32_t sec_idx = -1;
-    for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
-      wal_sector_header_aligned_t hdr __attribute__((aligned(8)));
-      boot_secure_zeroize(&hdr, sizeof(hdr));
-      if (platform->flash->read(wal_sector_addrs[i], (uint8_t *)&hdr,
-                                sizeof(hdr)) == BOOT_OK) {
-        if (verify_header_crc_glitch_safe(&hdr) &&
-            hdr.data.sequence_id == search_seq) {
-          sec_idx = (int32_t)i;
-          break;
-        }
-      }
-    }
+    int32_t sec_idx = find_sector_by_seq(platform, search_seq);
 
     if (sec_idx == -1) {
       /* Underflow Guard: Wenn das Gerät neu ist, stoppe sofort das
@@ -633,7 +666,6 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
       current_offset -= (uint32_t)sizeof(wal_entry_aligned_t);
 
       wal_entry_aligned_t entry __attribute__((aligned(8)));
-      boot_secure_zeroize(&entry, sizeof(entry));
 
       if (platform->wdt && platform->wdt->kick)
         platform->wdt->kick();
@@ -642,17 +674,12 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
         continue;
       }
 
-      size_t crc_len = offsetof(wal_entry_payload_t, crc32_trailer);
-      uint32_t calc_crc =
-          compute_boot_crc32((const uint8_t *)&entry.data, crc_len);
-
-      bool magic_ok = (entry.data.magic == WAL_ENTRY_MAGIC);
-      bool crc_ok = (calc_crc == entry.data.crc32_trailer);
-
-      BOOT_SECURE_REQUIRE(magic_ok && crc_ok, {
-        boot_secure_zeroize(&entry, sizeof(entry));
-        continue;
-      });
+      BOOT_SECURE_REQUIRE(
+          classify_entry(&entry, platform->flash->erased_value) == WAL_E_VALID,
+          {
+            boot_secure_zeroize(&entry, sizeof(entry));
+            continue;
+          });
 
       uint32_t intent = entry.data.intent;
 
@@ -760,45 +787,17 @@ boot_status_t boot_journal_append(const boot_platform_t *platform,
       return BOOT_ERR_COUNTER_EXHAUSTED;
     }
 
-    uint32_t prev_erase_count = 0;
-    wal_sector_header_aligned_t tg_hdr __attribute__((aligned(8)));
-    boot_secure_zeroize(&tg_hdr, sizeof(tg_hdr));
-
-    if (platform->flash->read(wal_sector_addrs[new_idx], (uint8_t *)&tg_hdr,
-                              sizeof(tg_hdr)) == BOOT_OK) {
-      if (verify_header_crc_glitch_safe(&tg_hdr))
-        prev_erase_count = tg_hdr.data.erase_count;
-    }
-    boot_secure_zeroize(&tg_hdr, sizeof(tg_hdr));
-
-    boot_status_t status = smart_erase_sector(platform, new_idx);
-    if (status != BOOT_OK)
-      return status;
-
-    wal_sector_header_aligned_t write_hdr __attribute__((aligned(8)));
-    memset(&write_hdr, platform->flash->erased_value, sizeof(write_hdr));
-
-    write_hdr.data.sector_magic = WAL_ABI_VERSION_MAGIC;
-    write_hdr.data.sequence_id = current_active_header.sequence_id + 1;
-    write_hdr.data.erase_count = prev_erase_count + 1;
-    write_hdr.data.tmr_data = current_active_header.tmr_data;
-    write_hdr.data.header_crc32 =
-        compute_boot_crc32((const uint8_t *)&write_hdr.data,
-                           offsetof(wal_sector_header_t, header_crc32));
-
-    if (platform->wdt && platform->wdt->kick)
-      platform->wdt->kick();
-    status =
-        platform->flash->write(wal_sector_addrs[new_idx],
-                               (const uint8_t *)&write_hdr, sizeof(write_hdr));
-    boot_secure_zeroize(&write_hdr, sizeof(write_hdr));
-
+    uint32_t new_erase = 0;
+    boot_status_t status = rotate_to_sector(
+        platform, new_idx,
+        current_active_header.sequence_id + 1,
+        &current_active_header.tmr_data, &new_erase);
     if (status != BOOT_OK)
       return status;
 
     active_wal_index = new_idx;
     current_active_header.sequence_id++;
-    current_active_header.erase_count = prev_erase_count + 1;
+    current_active_header.erase_count = new_erase;
     target_offset = (uint32_t)sizeof(wal_sector_header_aligned_t);
     cached_write_offset = target_offset;
   }
@@ -809,9 +808,7 @@ boot_status_t boot_journal_append(const boot_platform_t *platform,
   memcpy(&entry.data, new_entry, sizeof(wal_entry_payload_t));
 
   entry.data.magic = WAL_ENTRY_MAGIC;
-  size_t crc_len = offsetof(wal_entry_payload_t, crc32_trailer);
-  entry.data.crc32_trailer =
-      compute_boot_crc32((const uint8_t *)&entry.data, crc_len);
+  entry.data.crc32_trailer = entry_crc(&entry.data);
 
   if (platform->wdt && platform->wdt->kick)
     platform->wdt->kick();
@@ -875,14 +872,11 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
    * Leakage und EMFI Instruction-Skips zu blockieren.
    * Ausnahme: Der Sektor auf Flash hat noch die Legacy-Magic -> Erzeige Migration. */
   bool magic_legacy = false;
-  wal_sector_header_aligned_t tg_hdr __attribute__((aligned(8)));
-  boot_secure_zeroize(&tg_hdr, sizeof(tg_hdr));
-  if (platform->flash->read(wal_sector_addrs[active_wal_index], (uint8_t *)&tg_hdr, sizeof(tg_hdr)) == BOOT_OK) {
-    if (tg_hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+  if (read_header(platform, active_wal_index)) {
+    if (g_hdr_scratch.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
       magic_legacy = true;
     }
   }
-  boot_secure_zeroize(&tg_hdr, sizeof(tg_hdr));
 
   if (!magic_legacy && constant_time_memcmp_glitch_safe(
           (const uint8_t *)&current_active_header.tmr_data,
@@ -901,43 +895,18 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
   wal_tmr_payload_t tmr_to_write = *new_tmr;
 
   /* K4-T3: Epoch-Anker — bind eFuse epoch into the chain before
-   * persisting the TMR. A full-replay of an old WAL image is detected
-   * once the eFuse epoch has advanced beyond the value baked into the tag. */
+   * persisting the TMR. tmr_to_write.chain_tag still holds the old tag
+   * during hash_update; it is overwritten only after hash_finish. */
   if (journal_key_valid && tmr_to_write.chain_entry_count > 0) {
     uint32_t efuse_epoch = 0;
     boot_read_monotonic_counter_safe(platform, &efuse_epoch);
 
-    /* H(journal_key ‖ tmr_bytes ‖ efuse_epoch ‖ prev_chain_tag) */
-    uint8_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
-    boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
-
-    boot_status_t hs = platform->crypto->hash_init(hash_ctx, sizeof(hash_ctx));
-    if (hs == BOOT_OK) {
-      hs = platform->crypto->hash_update(hash_ctx, journal_key, WAL_CHAIN_TAG_BYTES);
-    }
-    if (hs == BOOT_OK) {
-      hs = platform->crypto->hash_update(hash_ctx, (const uint8_t *)&tmr_to_write,
-                                         sizeof(wal_tmr_payload_t));
-    }
-    if (hs == BOOT_OK) {
-      hs = platform->crypto->hash_update(hash_ctx, (const uint8_t *)&efuse_epoch,
-                                         sizeof(efuse_epoch));
-    }
-    if (hs == BOOT_OK) {
-      uint8_t digest[32];
-      size_t digest_len = 32;
-      hs = platform->crypto->hash_finish(hash_ctx, digest, &digest_len);
-      if (hs == BOOT_OK) {
-        memcpy(tmr_to_write.chain_tag, digest, WAL_CHAIN_TAG_BYTES);
-      }
-      boot_secure_zeroize(digest, sizeof(digest));
-    } else {
-      uint8_t dummy[64];
-      size_t dummy_len = sizeof(dummy);
-      (void)platform->crypto->hash_finish(hash_ctx, dummy, &dummy_len);
-      boot_secure_zeroize(dummy, sizeof(dummy));
-    }
-    boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+    hash_seg_t seg[] = {
+      {journal_key,                    WAL_CHAIN_TAG_BYTES},
+      {(const uint8_t *)&tmr_to_write, sizeof(wal_tmr_payload_t)},
+      {(const uint8_t *)&efuse_epoch,  sizeof(efuse_epoch)}
+    };
+    (void)hash_chain_compute(platform, seg, 3, tmr_to_write.chain_tag);
   }
 
   uint32_t active_seq = current_active_header.sequence_id;
@@ -960,43 +929,14 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
     exclude_list[exclude_count++] = new_idx;
     active_seq++;
 
-    uint32_t prev_erase_count = 0;
-    wal_sector_header_aligned_t tg_hdr __attribute__((aligned(8)));
-    boot_secure_zeroize(&tg_hdr, sizeof(tg_hdr));
-
-    if (platform->flash->read(wal_sector_addrs[new_idx], (uint8_t *)&tg_hdr,
-                              sizeof(tg_hdr)) == BOOT_OK) {
-      if (verify_header_crc_glitch_safe(&tg_hdr))
-        prev_erase_count = tg_hdr.data.erase_count;
-    }
-
-    boot_status_t status = smart_erase_sector(platform, new_idx);
-    if (status != BOOT_OK)
-      return status;
-
-    wal_sector_header_aligned_t write_hdr __attribute__((aligned(8)));
-    memset(&write_hdr, platform->flash->erased_value, sizeof(write_hdr));
-
-    write_hdr.data.sector_magic = WAL_ABI_VERSION_MAGIC;
-    write_hdr.data.sequence_id = active_seq;
-    write_hdr.data.erase_count = prev_erase_count + 1;
-    write_hdr.data.tmr_data = tmr_to_write;
-    write_hdr.data.header_crc32 =
-        compute_boot_crc32((const uint8_t *)&write_hdr.data,
-                           offsetof(wal_sector_header_t, header_crc32));
-
-    if (platform->wdt && platform->wdt->kick)
-      platform->wdt->kick();
-    status =
-        platform->flash->write(wal_sector_addrs[new_idx],
-                               (const uint8_t *)&write_hdr, sizeof(write_hdr));
-    boot_secure_zeroize(&write_hdr, sizeof(write_hdr));
-
+    uint32_t new_erase = 0;
+    boot_status_t status = rotate_to_sector(
+        platform, new_idx, active_seq, &tmr_to_write, &new_erase);
     if (status != BOOT_OK)
       return status;
 
     active_wal_index = new_idx;
-    final_erase_count = prev_erase_count + 1;
+    final_erase_count = new_erase;
   }
 
   /* Aktualisierung des Globalen RAM-State */
@@ -1004,9 +944,7 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
   current_active_header.sequence_id = active_seq;
   current_active_header.erase_count = final_erase_count;
   current_active_header.tmr_data = tmr_to_write;
-  current_active_header.header_crc32 =
-      compute_boot_crc32((const uint8_t *)&current_active_header,
-                         offsetof(wal_sector_header_t, header_crc32));
+  current_active_header.header_crc32 = sector_hdr_crc(&current_active_header);
 
   return BOOT_OK;
-}
+}

@@ -32,34 +32,6 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein, um "
                "das Double-Check Pattern zu garantieren!");
 
-/**
- * @brief Führt einen speichersicheren, konstanten Zeit-Vergleich für SHA-256
- * Hashes aus. O(1) Laufzeit ohne SRAM-Bus-Stalls, doppelt gesichert gegen
- * physikalische Voltage-Glitches.
- */
-static inline boot_status_t
-constant_time_memcmp_32_glitch_safe(const uint8_t *a, const uint8_t *b) {
-  uint32_t acc_fwd = 0;
-  uint32_t acc_rev = 0;
-
-  /* ALU Loop Unrolling durch den Compiler erlauben, aber Datenabhängigkeit
-   * erzwingen. Vorwärts- und Rückwärts-Evaluierung macht Timing-Orakel und
-   * Fault-Injection extrem schwer. Byte-Zugriffe gewährleisten Cortex-M0
-   * (Unaligned-Access) Kompatibilität ohne HardFaults. */
-  for (uint32_t i = 0; i < BOOT_MERKLE_HASH_LEN; i++) {
-    acc_fwd |= (uint32_t)(a[i] ^ b[i]);
-    acc_rev |= (uint32_t)(a[BOOT_MERKLE_HASH_LEN - 1 - i] ^
-                          b[BOOT_MERKLE_HASH_LEN - 1 - i]);
-  }
-
-  /* P10 Glitch-Defense Pattern via Hamming-Distance Mapping */
-  BOOT_SECURE_REQUIRE(acc_fwd == 0 && acc_rev == 0, {
-    return BOOT_ERR_VERIFY;
-  });
-
-  return BOOT_OK;
-}
-
 boot_status_t
 boot_merkle_verify_stream(const boot_platform_t *platform,
                           uint32_t image_flash_addr, uint32_t image_size,
@@ -231,7 +203,8 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
 
     /* Glitch-Resistant CONSTANT-TIME Verifikation (gibt sauber BOOT_ERR_VERIFY
      * bei Fail zurück) */
-    stat = constant_time_memcmp_32_glitch_safe(computed_hash, current_hash_ptr);
+    stat = constant_time_memcmp_glitch_safe(computed_hash, current_hash_ptr,
+                                            BOOT_MERKLE_HASH_LEN);
 
     /* O(1) Säuberung transienter Secrets sofort nach der Nutzung (Verhindert
      * Leakage bei Interrupts) */

@@ -311,10 +311,11 @@ typedef struct {
 } update_ctx_t;
 
 /* --------------------------------------------------------------------------
- * Stage PARSE: Flash-Read → TBM1 v2 Fixed-Format Validation
+ * Stage PARSE: Flash-Read → TBM1 v2 Validation via boot_tbm1.c
  *
- * K2 v2: 512B page-aligned header, Region Directory validated in one loop,
- * overflow-safe bounds, flags_critical must-understand gate.
+ * Delegates all structural validation (magic, version, CRC, bounds, regions,
+ * images, chunk-hash partitioning) to tbm1_validate(). This stage only handles
+ * flash I/O and maps reject codes to boot_status_t.
  * -------------------------------------------------------------------------- */
 static boot_status_t stage_parse(update_ctx_t *ctx) {
 #ifdef TOOB_MOCK_TEST
@@ -329,91 +330,12 @@ static boot_status_t stage_parse(update_ctx_t *ctx) {
   if (read_stat != BOOT_OK)
     return read_stat;
 
-  /* Structural minimum: arena must hold the fixed header */
-  if (ctx->arena_len < TBM1_FIXED_LEN)
-    return BOOT_ERR_INVALID_ARG;
+  tbm1_reject_t rc = tbm1_validate(ctx->arena, ctx->arena_len);
+  if (rc != TBM1_OK)
+    return tbm1_reject_to_boot_status(rc);
 
   ctx->tbm1 = (const tbm1_header_t *)ctx->arena;
-
-  /* 1. Magic gate */
-  if (ctx->tbm1->magic != TBM1_MAGIC)
-    return BOOT_ERR_INVALID_ARG;
-
-  /* 2. Version gate — reject unknown major versions */
-  if (ctx->tbm1->version_major != TBM1_VERSION_MAJOR)
-    return BOOT_ERR_MANIFEST_VERSION;
-
-  /* 3. Fixed header length must be exactly 512 */
-  if (ctx->tbm1->fixed_len != TBM1_FIXED_LEN)
-    return BOOT_ERR_MANIFEST_VERSION;
-
-  /* 4. Total length: at least fixed header + signature, fits in arena */
-  if (ctx->tbm1->total_len < TBM1_FIXED_LEN + TBM1_SIG_LEN ||
-      ctx->tbm1->total_len > ctx->arena_len)
-    return BOOT_ERR_INVALID_ARG;
-
-  /* 5. flags_critical must-understand gate — reject unknown critical bits */
-  if (ctx->tbm1->flags_critical & ~TBM1_CRIT_KNOWN_MASK)
-    return BOOT_ERR_MANIFEST_VERSION;
-
-  /* 6. min_reader gate — reject if our version is too old */
-  if (ctx->tbm1->min_reader_major > TBM1_VERSION_MAJOR ||
-      (ctx->tbm1->min_reader_major == TBM1_VERSION_MAJOR &&
-       ctx->tbm1->min_reader_minor > TBM1_VERSION_MINOR))
-    return BOOT_ERR_MANIFEST_VERSION;
-
-  /* 7. Image count bounds */
-  if (ctx->tbm1->image_count == 0 || ctx->tbm1->image_count > TBM1_MAX_IMAGES)
-    return BOOT_ERR_INVALID_ARG;
-
-  /* 8. Region Directory — one validation loop (overflow-safe bounds) */
-  for (unsigned i = 0; i < TBM1_MAX_REGIONS; i++) {
-    const tbm1_region_t *r = &ctx->tbm1->regions[i];
-    if (r->region_id == TBM1_REGION_NONE)
-      continue;
-    if (r->_rsvd != 0)
-      return BOOT_ERR_INVALID_ARG;
-    /* Overflow-safe: off <= total_len && len <= total_len - off */
-    if (r->off > ctx->tbm1->total_len ||
-        r->len > ctx->tbm1->total_len - r->off)
-      return BOOT_ERR_INVALID_ARG;
-    /* Region must not overlap the trailing signature */
-    if (r->off + r->len > ctx->tbm1->total_len - TBM1_SIG_LEN)
-      return BOOT_ERR_INVALID_ARG;
-  }
-
-  /* 9. Image descriptor consistency: num_chunks vs. sizes */
-  for (uint8_t i = 0; i < ctx->tbm1->image_count; i++) {
-    const tbm1_image_desc_t *img = &ctx->tbm1->images[i];
-    if (img->chunk_size > 0 && img->installed_size > 0) {
-      uint32_t expected = (img->installed_size + img->chunk_size - 1) / img->chunk_size;
-      if (img->num_chunks != expected)
-        return BOOT_ERR_INVALID_ARG;
-    }
-  }
-
-  /* 10. Reserved tail must be zero (reject malformed encoders) */
-  for (unsigned i = 0; i < sizeof(ctx->tbm1->_reserved_tail); i++) {
-    if (ctx->tbm1->_reserved_tail[i] != 0)
-      return BOOT_ERR_INVALID_ARG;
-  }
-
   ctx->tbm1_total_len = ctx->tbm1->total_len;
-  return BOOT_OK;
-#endif
-}
-
-/* --------------------------------------------------------------------------
- * Stage CHECK CRC: Fast CRC32 pre-check over the fixed header [0..508)
- * -------------------------------------------------------------------------- */
-static boot_status_t stage_check_crc(update_ctx_t *ctx) {
-#ifdef TOOB_MOCK_TEST
-  return BOOT_OK;
-#else
-  uint32_t expected = ctx->tbm1->fixed_crc32;
-  uint32_t computed = compute_boot_crc32(ctx->arena, TBM1_CRC_LEN);
-  if (computed != expected)
-    return BOOT_ERR_MANIFEST_CORRUPT;
   return BOOT_OK;
 #endif
 }
@@ -445,7 +367,7 @@ static boot_status_t stage_verify_envelope(update_ctx_t *ctx) {
 
   boot_verify_envelope_t envelope = {
       .manifest_flash_addr = ctx->open_txn->offset,
-      .manifest_size = TBM1_SIGNED_LEN(ctx->tbm1),
+      .manifest_size = tbm1_signed_len(ctx->tbm1),
       .signature_ed25519 = sig_ptr,
       .key_index = ctx->tbm1->key_index,
 #if TOOB_PQC_ENABLED
@@ -481,29 +403,8 @@ static boot_status_t stage_check_svn(update_ctx_t *ctx) {
   return boot_rollback_verify_svn(ctx->platform, ctx->extracted_svn, ROLLBACK_TARGET_APP);
 }
 
-/* --------------------------------------------------------------------------
- * Stage CHECK COMPAT: Hardware compatibility gating (vendor/product/hw_rev)
- * -------------------------------------------------------------------------- */
-static boot_status_t stage_check_compat(update_ctx_t *ctx) {
-#ifdef TOOB_MOCK_TEST
-  return BOOT_OK;
-#else
-  /* If chip provides identity/compatibility definitions, gate compatibility */
-#if defined(CHIP_VENDOR_ID) && defined(CHIP_PRODUCT_ID)
-  if (ctx->tbm1->vendor_id != CHIP_VENDOR_ID ||
-      ctx->tbm1->product_id != CHIP_PRODUCT_ID) {
-    return BOOT_ERR_MANIFEST_PRODUCT;
-  }
-#endif
-#if defined(CHIP_HW_REV)
-  if (CHIP_HW_REV < ctx->tbm1->hw_rev_min ||
-      CHIP_HW_REV > ctx->tbm1->hw_rev_max) {
-    return BOOT_ERR_MANIFEST_PRODUCT;
-  }
-#endif
-  return BOOT_OK;
-#endif
-}
+/* stage_check_compat removed — HW compatibility is now part of
+ * tbm1_validate_images() in boot_tbm1.c (compile-time device identity). */
 
 /* --------------------------------------------------------------------------
  * Stage CHECK BINDING: Device-ID DSLC Match + EU-CRA SBOM Extraction
@@ -786,13 +687,12 @@ typedef struct {
   bool       skippable;
 } stage_row_t;
 
-/* K6-T3: Pipeline-Stages als statische Tabelle (erweitert für v2) */
+/* K6-T3: Pipeline-Stages als statische Tabelle (R-Block v2: CRC + HW-compat
+ * sind jetzt Teil von tbm1_validate in stage_parse — P1B/P3B entfallen) */
 static const stage_row_t PIPELINE[] = {
   { stage_parse,            STATE_CFI_SLOT_P1,  false },
-  { stage_check_crc,        STATE_CFI_SLOT_P1B, false },
   { stage_verify_envelope,  STATE_CFI_SLOT_P2,  false },
   { stage_check_svn,        STATE_CFI_SLOT_P3,  false },
-  { stage_check_compat,     STATE_CFI_SLOT_P3B, false },
   { stage_check_binding,    STATE_CFI_SLOT_P4,  true  },
   { stage_route,            STATE_CFI_SLOT_P5,  false },
   { stage_apply_unified,    STATE_CFI_SLOT_P6,  false },

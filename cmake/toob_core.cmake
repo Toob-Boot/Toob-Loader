@@ -92,27 +92,67 @@ add_custom_target(generate_manifest
 # Detektiert auch algorithmus-interne Faults auf Kosten von ~30-50ms Boot-Zeit.
 option(TOOB_DOUBLE_VERIFY "Enable double-execution of Ed25519 for highest fault resistance (~+30ms)" OFF)
 
+# ------------------------------------------------------------------------------
+# 2a. Toob-Boot Utilities (Algorithmen & Hilfsmodule)
+# ------------------------------------------------------------------------------
+# Reine Hilfsmodule ohne Boot-Ablauflogik. Werden vom Core gelinkt, können aber
+# auch unabhängig in Recovery/Stage0/Tests eingebunden werden.
+#
+# Inhalt: CRC32, COBS (Framing), Merkle-Streaming, Delay/WDT-Integration,
+#         Diagnostik-Telemetrie, Energiemodell, Identitäts-KDF, Secure Zeroize.
+
+set(TOOB_UTILS_DIR ${TOOB_CORE_DIR}/utils)
+
+add_library(toob_utils STATIC
+    ${TOOB_UTILS_DIR}/boot_cobs.c
+    ${TOOB_UTILS_DIR}/boot_crc32.c
+    ${TOOB_UTILS_DIR}/boot_delay.c
+    ${TOOB_UTILS_DIR}/boot_diag.c
+    ${TOOB_UTILS_DIR}/boot_energy.c
+    ${TOOB_UTILS_DIR}/boot_identity.c
+    ${TOOB_UTILS_DIR}/boot_merkle.c
+)
+
+# Architektur-bedingter Ausschluss: In der Sandbox (x86 host) können wir 
+# keine Bare-Metal (ARM/Xtensa) Assembler-Anweisungen ausführen.
+if(NOT TOOB_ARCH STREQUAL "host")
+    target_sources(toob_utils PRIVATE ${TOOB_UTILS_DIR}/boot_secure_zeroize.S)
+else()
+    target_sources(toob_utils PRIVATE ${TOOB_UTILS_DIR}/boot_secure_zeroize_host.c)
+endif()
+
+target_include_directories(toob_utils PUBLIC
+    ${CMAKE_SOURCE_DIR}/common/include
+    ${TOOB_UTILS_DIR}/include
+    ${TOOB_CORE_DIR}/include
+    ${CMAKE_BINARY_DIR}/generated
+    ${TOOB_SDK_DIR}/libtoob/include
+)
+
+toob_apply_strict_flags(toob_utils TRUE)
+
+# ------------------------------------------------------------------------------
+# 2b. Toob-Boot Kern (Die State-Machine & Boot-Ablauf)
+# ------------------------------------------------------------------------------
+# Boot-Pipeline, WAL-Journal, Image-Swapping, Delta-Patching, Krypto-Verifikation,
+# Rollback-Protection, Cloud-Commands, Provisioning, Panic/Recovery.
+
 add_library(toob_core STATIC
     ${TOOB_CORE_DIR}/boot_main.c
     ${TOOB_CORE_DIR}/boot_state.c
+    ${TOOB_CORE_DIR}/boot_tbm1.c
     ${TOOB_CORE_DIR}/boot_effect.c
     ${TOOB_CORE_DIR}/boot_journal.c
     ${TOOB_CORE_DIR}/boot_verify.c
-    ${TOOB_CORE_DIR}/boot_crc32.c
-    ${TOOB_CORE_DIR}/boot_merkle.c
     ${TOOB_CORE_DIR}/boot_swap.c
     ${TOOB_CORE_DIR}/boot_delta.c
     ${TOOB_CORE_DIR}/boot_rollback.c
-    ${TOOB_CORE_DIR}/boot_cobs.c
     ${TOOB_CORE_DIR}/boot_panic.c
     ${TOOB_CORE_DIR}/boot_provisioning.c
     ${TOOB_CORE_DIR}/boot_confirm.c
-    ${TOOB_CORE_DIR}/boot_diag.c
-    ${TOOB_CORE_DIR}/boot_energy.c
     ${TOOB_CORE_DIR}/boot_multiimage.c
-    ${TOOB_CORE_DIR}/boot_identity.c
-    ${TOOB_CORE_DIR}/boot_delay.c
     ${TOOB_CORE_DIR}/boot_cloud_cmd.c
+    ${TOOB_CORE_DIR}/boot_rstore.c
     ${GENERATED_SUIT_C}
     ${GENERATED_CLOUD_CMD_C}
 )
@@ -121,15 +161,7 @@ add_library(toob_core STATIC
 # toob_core MUSS zwingend warten, bis die generate.sh alle Header & Mocks abgeworfen hat.
 add_dependencies(toob_core generate_manifest)
 
-# Architektur-bedingter Ausschluss: In der Sandbox (x86 host) können wir 
-# keine Bare-Metal (ARM/Xtensa) Assembler-Anweisungen ausführen.
-if(NOT TOOB_ARCH STREQUAL "host")
-    target_sources(toob_core PRIVATE ${TOOB_CORE_DIR}/boot_secure_zeroize.S)
-else()
-    # M-BUILD GAP-Fix: Sandbox Host-Mock für Assembler-Dateien und Hardware Pointers!
-    target_sources(toob_core PRIVATE 
-        ${TOOB_CORE_DIR}/boot_secure_zeroize_host.c
-    )
+if(TOOB_ARCH STREQUAL "host")
     target_compile_definitions(toob_core PUBLIC TOOB_MOCK_TEST)
 endif()
 
@@ -144,12 +176,13 @@ endif()
 target_include_directories(toob_core PUBLIC 
     ${CMAKE_SOURCE_DIR}/common/include
     ${TOOB_CORE_DIR}/include 
+    ${TOOB_UTILS_DIR}/include
     ${CMAKE_BINARY_DIR}/generated
     ${TOOB_SDK_DIR}/libtoob/include
 )
 
-# Bindung an Third-Party Libs und dynamische Feature-Verwendung
-target_link_libraries(toob_core PRIVATE toob_zcbor toob_heatshrink)
+# Bindung an Third-Party Libs, Utilities und dynamische Feature-Verwendung
+target_link_libraries(toob_core PRIVATE toob_zcbor toob_heatshrink toob_utils)
 
 # P10 Härtung anwenden (TRUE: wir erlauben -fstack-protector-strong für den Core,
 # da hier Arrays bearbeitet werden, anders als in der winzigen Stage 0)

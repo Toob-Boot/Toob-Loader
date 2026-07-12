@@ -90,7 +90,7 @@ int main(void) {
     return 0;
 }
 
-#include "../../toobloader/core/boot_crc32.c"
+#include "../../toobloader/core/utils/boot_crc32.c"
 #include "../../toobloader/core/boot_effect.c"
 #include "../../internal/mocks/mocks/mock_flash.c"
 
@@ -308,8 +308,14 @@ void test_tbm1_layout(void) {
     assert(r3 == NULL);
     printf("    -> Region finder lookup verified (passed)\n");
 
-    /* 8. Signed length computation */
+    /* 8. Signed length computation (bounds-checking function) */
     hdr.total_len = 1024;
-    assert(TBM1_SIGNED_LEN(&hdr) == 960);
-    printf("    -> Signed length macro verified (passed)\n");
+    assert(tbm1_signed_len(&hdr) == 960);
+
+    /* 8b. Underflow guard: total_len too small must return 0 (reject) */
+    hdr.total_len = 100;  /* < TBM1_FIXED_LEN + TBM1_SIG_LEN (576) */
+    assert(tbm1_signed_len(&hdr) == 0);
+    hdr.total_len = 0;
+    assert(tbm1_signed_len(&hdr) == 0);
+    printf("    -> Signed length function verified (passed)\n");
 }
