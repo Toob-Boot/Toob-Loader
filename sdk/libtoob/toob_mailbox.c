@@ -27,10 +27,6 @@
 #include "toob_internal.h"
 #include <stddef.h>
 
-#ifndef CHIP_FLASH_WRITE_ALIGNMENT
-#define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
-#endif
-
 /* Geometry sanity: the writer erases exactly one slot sector at a time, so the
  * mailbox region must be TOOB_MAILBOX_SLOTS distinct erase sectors. */
 _Static_assert(CHIP_MAILBOX_SIZE == TOOB_MAILBOX_SLOTS * CHIP_MAILBOX_SLOT_SIZE,

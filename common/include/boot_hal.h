@@ -18,6 +18,7 @@
 #define TOOB_BOOT_HAL_H
 
 #include "boot_types.h"
+#include "toob_swap_event_wire.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -264,6 +265,13 @@ typedef struct {
   boot_status_t (*write_rtc_backup)(uint8_t slot, uint32_t value);
 
   uint32_t min_battery_mv;
+
+  /**
+   * @brief Optional swap progress notifier callback.
+   * Called by the Core swap loop when progress changes or state transitions.
+   * Contract: MUST be non-blocking (< 1ms execution budget) and fail-safe.
+   */
+  toob_swap_notify_fn swap_notify;
 } soc_hal_t;
 
 /* --- 8. Provisioning HAL (Factory & Lifecycle) --- */

@@ -130,6 +130,9 @@ static void upgrade_tmr_payload(wal_tmr_payload_t *tmr) {
   if (tmr->struct_version < WAL_TMR_VERSION_4) {
     tmr->last_mbx_request_id = 0;
   }
+  if (tmr->struct_version < WAL_TMR_VERSION_5) {
+    tmr->recovery_failure_counter = 0;
+  }
   tmr->struct_version = WAL_TMR_VERSION_CURRENT;
   tmr->populated_size = WAL_TMR_POPULATED_SIZE;
 }

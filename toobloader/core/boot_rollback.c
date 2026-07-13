@@ -169,16 +169,7 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
   *boot_recovery_os_out = false;
 
   uint32_t counter = tmr->boot_failure_counter;
-
-  /* P10 Safe Math: Overflow Verhindern für Limit Recovery */
   uint32_t limit_normal = BOOT_CONFIG_MAX_RETRIES;
-  uint32_t limit_rec = limit_normal;
-
-  if (UINT32_MAX - limit_rec >= BOOT_CONFIG_MAX_RECOVERY_RETRIES) {
-    limit_rec += BOOT_CONFIG_MAX_RECOVERY_RETRIES;
-  } else {
-    limit_rec = UINT32_MAX;
-  }
 
   /* Control Flow Integrity (CFI) Kaskaden-Auswertung */
   if (counter <= limit_normal) {
@@ -187,77 +178,27 @@ boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
     });
     *boot_recovery_os_out = false;
     return BOOT_OK;
-  } else if (counter <= limit_rec) {
-    BOOT_SECURE_REQUIRE(counter > limit_normal && counter <= limit_rec, {
+  }
+
+  /* Recovery OS active partition path */
+  uint32_t rec_counter = tmr->recovery_failure_counter;
+  uint32_t limit_rec = BOOT_CONFIG_MAX_RECOVERY_RETRIES;
+
+  if (rec_counter <= limit_rec) {
+    BOOT_SECURE_REQUIRE(rec_counter <= limit_rec, {
       boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
     });
     *boot_recovery_os_out = true;
     return BOOT_OK;
-  } else {
-    BOOT_SECURE_REQUIRE(counter > limit_rec, {
-      boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
-    });
-
-  /* CASE 3: Zero-Day Brick / Double Failure Terminal State */
-#if BOOT_CONFIG_EDGE_UNATTENDED_MODE
-  if (!platform->soc || !platform->soc->enter_low_power) {
-    /* Fallback Hardware-Limit: Panic / Serial Rescue falls SoC-Feature fehlt */
-    boot_panic(platform, BOOT_RECOVERY_REQUESTED);
   }
 
-  /* P10 Safe Math: Overflow- und Underflow-geschützte Exponential Backoff
-   * Berechnung. Nutzt Saturation Arithmetic, um Endlos-Loops bei extremen
-   * Fuzzing-Attacks abzusichern. */
-  uint32_t excess_fails = (counter > limit_rec) ? (counter - limit_rec) : 1;
-  uint32_t multiplier = 1;
+  /* CASE 3: Recovery OS Crashed too many times -> Terminal Local Rescue (E1-T2) */
+  BOOT_SECURE_REQUIRE(rec_counter > limit_rec, {
+    boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
+  });
 
-  if (excess_fails == 1)
-    multiplier = 4; /* 4h */
-  else if (excess_fails == 2)
-    multiplier = 12; /* 12h */
-  else
-    multiplier = 24; /* 24h MAX-CAP Limitierung */
-
-  uint32_t wakeup_s = BOOT_CONFIG_BACKOFF_BASE_S;
-
-  if (UINT32_MAX / multiplier < BOOT_CONFIG_BACKOFF_BASE_S) {
-    wakeup_s = UINT32_MAX; /* Saturate auf theoretisches Limit (136 Jahre) */
-  } else {
-    wakeup_s = BOOT_CONFIG_BACKOFF_BASE_S * multiplier;
-  }
-
-  /* TMR-State/Intent MUSS ins WAL, BEVOR wir den SoC physikalisch schlafen
-   * legen! Dadurch weiß das System nach dem Wakeup, dass es aus einem gezielten
-   * Penalty-Sleep kommt. */
-  wal_entry_payload_t sleep_intent __attribute__((aligned(8)));
-  boot_secure_zeroize(&sleep_intent, sizeof(sleep_intent));
-  sleep_intent.magic = WAL_ENTRY_MAGIC;
-  sleep_intent.intent = WAL_INTENT_SLEEP_BACKOFF;
-  sleep_intent.offset = wakeup_s;
-
-  if (boot_journal_append(platform, &sleep_intent) != BOOT_OK) {
-    boot_secure_zeroize(&sleep_intent, sizeof(sleep_intent));
-    /* Falls Flash defekt/WAL voll: Blockiere System mit Hard-Panic, um Akku-Tod
-     * durch Reboots zu verhindern */
-    boot_panic(platform, BOOT_ERR_WAL_FULL);
-  }
-  boot_secure_zeroize(&sleep_intent, sizeof(sleep_intent));
-
-  /* System einfrieren - Hardware-Watchdog sollte hiervon entkoppelt sein laut
-   * HAL-Config */
-  platform->soc->enter_low_power(wakeup_s);
-
-  /* Halt-Guard: Wenn die Hardware aufwacht oder enter_low_power fehlschlägt,
-   * erzwingen wir einen echten Reset via terminal halt. */
-  boot_terminal_halt(platform, BOOT_ERR_WAL_FULL, SITE_ROLLBACK_CONFUSION);
-#else
-  /* Attended Mode (FALSE): Bootloader blockiert. Springe in die Schicht 4a
-   * Serial Rescue */
   boot_panic(platform, BOOT_RECOVERY_REQUESTED);
-#endif
-
-    return BOOT_OK; /* Unreachable */
-  }
+  return BOOT_OK;
 }
 
 /*

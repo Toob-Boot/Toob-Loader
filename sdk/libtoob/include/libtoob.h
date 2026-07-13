@@ -37,6 +37,7 @@
 #include <stddef.h>
 
 #include "libtoob_types.h"
+#include "toob_swap_event_wire.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -200,6 +201,12 @@ typedef struct __attribute__((aligned(8))) {
 } toob_ota_ctx_t;
 
 _Static_assert(sizeof(toob_ota_ctx_t) == 440, "toob_ota_ctx_t ABI size drift");
+
+/**
+ * @brief Registers a manufacturer-supplied notifier callback for update progress events.
+ * @param cb Manufacturer callback function pointer (NULL to disable).
+ */
+void toob_set_swap_notifier(toob_swap_notify_fn cb);
 
 /**
  * @brief Initializes a toob_ota_ctx_t to a clean idle state.

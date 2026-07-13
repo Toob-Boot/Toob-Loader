@@ -26,6 +26,7 @@ add_library(toob_libtoob STATIC
     ${TOOB_SDK_DIR}/libtoob/toob_diag.c
     ${TOOB_SDK_DIR}/libtoob/toob_handoff.c
     ${TOOB_SDK_DIR}/libtoob/toob_ota.c
+    ${TOOB_SDK_DIR}/libtoob/toob_crc32.c
     # GAP-Integration: Die Datei `toob_telemetry_encode.c` wird durch CBOR CodeGen aus `cli/cbor/` generiert.
     ${CMAKE_BINARY_DIR}/generated/toob_telemetry_encode.c
 )

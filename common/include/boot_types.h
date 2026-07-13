@@ -37,6 +37,15 @@
   #define BOOT_GLITCH_DELAY() /* Fallback for unknown compilers */
 #endif
 
+#ifndef TOOB_IRAM_ATTR
+#if defined(__GNUC__) || defined(__clang__)
+  #define TOOB_IRAM_ATTR __attribute__((section(".iram1.text")))
+#else
+  #define TOOB_IRAM_ATTR
+#endif
+#endif
+
+
 /**
  * @brief Universal Bootloader Return Type (GAP-06)
  * Uses high-hamming-distance constants to prevent 0x00 / 0x01 glitching.

@@ -1,0 +1,3055 @@
+
+======================================================================
+FILE: common/include/toob_swap_event_wire.h
+======================================================================
+/**
+ * @file toob_swap_event_wire.h
+ * @brief Neutral OS <-> Core mailbox wire format (single source of truth).
+ *
+ * Contains only the memory structures and notifications layout, allowing it to
+ * be included from both the bootloader core and libtoob/OS side without dependencies.
+ * Adheres to standard C17 and embeds size and layout checks.
+ */
+
+#ifndef TOOB_SWAP_EVENT_WIRE_H
+#define TOOB_SWAP_EVENT_WIRE_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#define TOOB_SWAP_EVENT_ABI_VERSION 1U
+
+/* ============================================================================
+ * COMPILE-TIME FEATURE GATES (SWEV-T2)
+ * Supports dynamic configuration via device.toml [driver_config].
+ * ============================================================================ */
+
+/* Map driver compiler prefix overrides if they exist */
+#ifdef TOOB_DRIVER_SWAP_EVENT_STATE
+#define TOOB_SWAP_EVENT_STATE TOOB_DRIVER_SWAP_EVENT_STATE
+#endif
+
+#ifdef TOOB_DRIVER_SWAP_EVENT_PROGRESS
+#define TOOB_SWAP_EVENT_PROGRESS TOOB_DRIVER_SWAP_EVENT_PROGRESS
+#endif
+
+#ifdef TOOB_DRIVER_SWAP_EVENT_PHASE
+#define TOOB_SWAP_EVENT_PHASE TOOB_DRIVER_SWAP_EVENT_PHASE
+#endif
+
+/* Fallback default definitions if not configured */
+#ifndef TOOB_SWAP_EVENT_STATE
+#define TOOB_SWAP_EVENT_STATE    1   /* 1: State change notifications (PREPARE, DONE, etc.) enabled */
+#endif
+
+#ifndef TOOB_SWAP_EVENT_PROGRESS
+#define TOOB_SWAP_EVENT_PROGRESS 1   /* 1: Detailed sectors done/total progress tracking enabled */
+#endif
+
+#ifndef TOOB_SWAP_EVENT_PHASE
+#define TOOB_SWAP_EVENT_PHASE    0   /* 1: Sub-phases (e.g., RESUMED) enabled */
+#endif
+
+/* ============================================================================
+ * SWAP LIFECYCLE PHASES
+ * ============================================================================ */
+typedef enum {
+  TOOB_SWAP_PHASE_PREPARE  = 0,  /* OS is running and prepping for reboot (Level A) */
+  TOOB_SWAP_PHASE_SWAPPING = 1,  /* Stage 1 is in active flash swap execution (Level B) */
+  TOOB_SWAP_PHASE_DONE     = 2,  /* Swap has been successfully completed */
+  TOOB_SWAP_PHASE_RESUMED  = 3,  /* Swap process resumed after power loss / interruption */
+  TOOB_SWAP_PHASE_RECOVERY = 4   /* Recovery OS has boot notification context (Level C) */
+} toob_swap_phase_t;
+
+/**
+ * @brief Versioned progress / swap notification event. 
+ * Stable 16-byte layout to prevent compiler padding or drift between OS and Core builds.
+ */
+typedef struct {
+  uint16_t abi_version;      /* Layout version marker (TOOB_SWAP_EVENT_ABI_VERSION) */
+  uint16_t phase;            /* toob_swap_phase_t value */
+  uint32_t sectors_done;     /* Done count (always 0 if PROGRESS feature is compiled out) */
+  uint32_t sectors_total;    /* Total count (always 0 if PROGRESS feature is compiled out) */
+  uint32_t flags;            /* Future expansion / specific state flags */
+} toob_swap_event_t;
+
+_Static_assert(sizeof(toob_swap_event_t) == 16, "toob_swap_event_t must be exactly 16 bytes");
+_Static_assert(offsetof(toob_swap_event_t, phase) == 2, "phase offset drift");
+_Static_assert(offsetof(toob_swap_event_t, sectors_done) == 4, "sectors_done offset drift");
+_Static_assert(offsetof(toob_swap_event_t, sectors_total) == 8, "sectors_total offset drift");
+_Static_assert(offsetof(toob_swap_event_t, flags) == 12, "flags offset drift");
+
+/**
+ * @brief Manufacturer notification function contract.
+ * Contract: MUST be non-blocking (< 1ms execution budget) and fail-safe.
+ */
+typedef void (*toob_swap_notify_fn)(const toob_swap_event_t *ev);
+
+#endif /* TOOB_SWAP_EVENT_WIRE_H */
+
+======================================================================
+FILE: common/include/toob_mailbox_wire.h
+======================================================================
+/**
+ * @file toob_mailbox_wire.h
+ * @brief Neutral OS <-> Core mailbox wire format (single source of truth).
+ *
+ * Contains ONLY the on-flash record and geometry contract â€” no status type, no
+ * function declarations â€” so it can be included from both sides without dragging
+ * in libtoob_types.h (OS) or boot_types.h (Core). Pure C17, no C++ linkage block
+ * needed (data only).
+ *
+ * Two-sector A/B: TOOB_MAILBOX_SLOTS independent erase sectors, one record each.
+ * The writer targets the stale slot and erases only that sector; the reader takes
+ * the valid slot with the highest `seq`. See toob_mailbox.c (writer) and
+ * boot_mailbox.c (reader).
+ */
+
+#ifndef TOOB_MAILBOX_WIRE_H
+#define TOOB_MAILBOX_WIRE_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+/* 'TMBX' little-endian */
+#define TOOB_MAILBOX_MAGIC   0x58424D54U
+#define TOOB_MAILBOX_VERSION 1U
+#define TOOB_MAILBOX_SLOTS   2U
+
+typedef enum {
+  TOOB_REQ_NONE              = 0,
+  TOOB_REQ_UPDATE_PENDING    = 1, /* tbm1_addr = flat-package address */
+  TOOB_REQ_CONFIRM           = 2, /* nonce     = boot_nonce being confirmed */
+  TOOB_REQ_RECOVERY_RESOLVED = 3
+} toob_req_t;
+
+/**
+ * @brief One mailbox record. Fixed little-endian wire format, 32 bytes.
+ * `nonce` is naturally 8-aligned. CRC-32 covers [0 .. offsetof(crc32));
+ * `_reserved` is excluded and MUST be zero.
+ */
+typedef struct __attribute__((packed, aligned(8))) {
+  uint32_t magic;     /* 0  : TOOB_MAILBOX_MAGIC */
+  uint16_t version;   /* 4  : TOOB_MAILBOX_VERSION */
+  uint16_t request;   /* 6  : toob_req_t */
+  uint32_t seq;       /* 8  : monotonic; Core consumes iff seq > last_consumed */
+  uint32_t tbm1_addr; /* 12 : UPDATE_PENDING flat-package address (else 0) */
+  uint64_t nonce;     /* 16 : CONFIRM boot_nonce (else 0) */
+  uint32_t crc32;     /* 24 : CRC-32 over [0 .. 24) */
+  uint32_t _reserved; /* 28 : must be 0 */
+} toob_mailbox_t;     /* 32 bytes */
+
+_Static_assert(sizeof(toob_mailbox_t) == 32, "toob_mailbox_t must be exactly 32 bytes");
+_Static_assert(offsetof(toob_mailbox_t, crc32) == 24, "crc32 offset drift");
+_Static_assert(offsetof(toob_mailbox_t, nonce) == 16, "nonce must be 8-byte aligned");
+
+/* CRC-covered prefix length (one definition for writer and reader). */
+#define TOOB_MAILBOX_CRC_LEN offsetof(toob_mailbox_t, crc32)
+
+#endif /* TOOB_MAILBOX_WIRE_H */
+======================================================================
+FILE: sdk/libtoob/include/libtoob.h
+======================================================================
+/**
+ * ==============================================================================
+ * Toob-Boot C-Interface (libtoob.h)
+ * ==============================================================================
+ * 
+ * REFERENCED SPECIFICATIONS:
+ * - docs/libtoob_api.md (API definitions, toob_status_t, .noinit references)
+ * - docs/concept_fusion.md (Strict isolation policy, State Machine interactions)
+ * - docs/structure_plan.md (Strict isolation from core/ headers)
+ * - docs/testing_requirements.md (P10 compliance & Interface definition standards)
+ *
+ * This is the EXCLUSIVE OS-side API for Toob-Boot interaction.
+ * Es spannt den C++ kompatiblen Schutzschirm (extern "C") fÃ¼r externe Feature-OS.
+ *
+ * ==============================================================================
+ * ERROR HANDLING MATRIX & OS CONTRACTS (L1 / Mailbox Policy)
+ * ==============================================================================
+ * Die Funktionen toob_confirm_boot(), toob_recovery_resolved(), 
+ * und toob_set_next_update() schreiben Mailbox-Anfragen in den Flash.
+ * Diese Operationen kÃ¶nnen spezifische Fehlercodes zurÃ¼ckgeben:
+ *
+ * | Fehlercode                 | Ursache                              | Erwartete OS-Reaktion          |
+ * |----------------------------|--------------------------------------|--------------------------------|
+ * | TOOB_ERR_FLASH / FLASH_HW  | Hardwarefehler im Flash-Treiber.     | Fehler protokollieren.         |
+ */
+
+#ifndef LIBTOOB_H
+#define LIBTOOB_H
+
+/* 
+ * ARCHITEKTUR-GRUND: System-Header MÃœSSEN vor dem `extern "C"` Block geladen 
+ * werden, da eingebaute C++ Systembibliotheken bei geschachteltem `extern "C"` 
+ * crashen kÃ¶nnen. 
+ */
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "libtoob_types.h"
+#include "toob_swap_event_wire.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ==============================================================================
+ * P10 Compliance & Symmetrie Validierungen
+ * ============================================================================== */
+
+/* GAP-39: Strict 8-Byte Formatierung fÃ¼r Boundaries */
+_Static_assert(sizeof(toob_handoff_t) % 8 == 0, "GAP-39: toob_handoff_t size must align to 8 bytes.");
+_Static_assert(sizeof(toob_boot_diag_t) % 8 == 0, "GAP-39: toob_boot_diag_t size must align to 8 bytes.");
+
+/* Host-Compiler Symmetrie Check */
+#ifndef TOOB_NOINIT
+#error "FATAL: Host-Compiler lacks TOOB_NOINIT support. Must provide fallback for .noinit section mapping."
+#endif
+
+/* ==============================================================================
+ * Handoff Verification Guard
+ * ==============================================================================
+ * Das `.noinit` RAM enthÃ¤lt illegitimate Garbage-Werte, wenn das OS durch den 
+ * Watchdog abgewÃ¼rgt wird, ohne dass Toob-Boot involviert war. Das Lesen der 
+ * ungeschÃ¼tzten Boot-Variablen OHNE vorherige CRC-32 Validation riskiert Boot-Loop Crashes!
+ */
+
+/**
+ * @brief Validiert die IntegritÃ¤t der .noinit Toob-Boot Boundary (GAP-Handoff).
+ * @return TOOB_OK bei validem Magic/CRC-32, TOOB_ERR_VERIFY bei Fehler.
+ */
+TOOB_MUST_CHECK toob_status_t toob_validate_handoff(void);
+
+/**
+ * @brief Liefert eine sichere, verifizierte "By-Value"-Kopie der Handoff-Daten.
+ * 
+ * @note  [Opaque validating accessor pattern]
+ *        Dies ist der einzige legitime und unterstÃ¼tzte Zugriffspfad fÃ¼r das OS, 
+ *        um an Boot-Handoff-Daten zu gelangen. Direkter Zugriff auf die uninitialisierte
+ *        RAM-Variable (toob_handoff_state) ist gesperrt, um zu verhindern, dass das
+ *        Betriebssystem korrupten RAM-Zustand liest. Die Funktion verifiziert Magic,
+ *        ABI-Strukturversion und CRC32 vor dem Kopieren. Bei Validierungsfehler
+ *        wird der Zielpuffer defensiv genullt und TOOB_ERR_VERIFY zurÃ¼ckgegeben.
+ *
+ * @param out_handoff Pointer auf eine vom OS allozierte Ausgabestruktur.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY wenn die Validierung fehlschlÃ¤gt, TOOB_ERR_INVALID_ARG bei NULL.
+ */
+TOOB_MUST_CHECK toob_status_t toob_get_handoff(toob_handoff_t* out_handoff);
+
+/**
+ * @brief P10 Absicherungsmakro zur ausfallsicheren OS-Initialisierung.
+ *
+ * Validates the .noinit handoff from Toob-Boot. On corruption, enters an
+ * infinite TOOB_TRAP() loop â€” by design, this halts the system immediately
+ * to prevent propagation of corrupted boot state into the OS.
+ *
+ * @warning Fail-Closed by Design. This macro NEVER RETURNS on failure.
+ *          On systems with a Hardware Watchdog (WDT), the trap loop triggers
+ *          a WDT reset within the configured timeout. On systems WITHOUT a
+ *          WDT, the trap loop hangs PERMANENTLY â€” the device is bricked until
+ *          a physical power cycle.
+ *          Systems without WDT should use toob_os_init() instead and implement
+ *          their own recovery strategy based on the returned status code.
+ *
+ * @note  Must be called as the very first statement in main()/app_main().
+ */
+#define TOOB_OS_INIT_OR_PANIC() \
+    do { \
+        if (toob_validate_handoff() != TOOB_OK) { \
+            while (true) { TOOB_TRAP(); } \
+        } \
+    } while (false)
+
+/**
+ * @brief Non-panicking OS initialization â€” validates the .noinit handoff.
+ *
+ * Unlike TOOB_OS_INIT_OR_PANIC(), this function returns the validation
+ * result instead of trapping. The caller decides the recovery strategy:
+ * logging, rebooting, entering a safe mode, etc.
+ *
+ * @return TOOB_OK if the handoff is valid and the OS may proceed.
+ *         TOOB_ERR_VERIFY if the .noinit region is corrupted â€” the OS
+ *         MUST NOT call any other toob_* function in this case.
+ */
+static inline TOOB_MUST_CHECK toob_status_t toob_os_init(void) {
+    return toob_validate_handoff();
+}
+
+/**
+ * @brief PrÃ¼ft, ob der RÃ¼ckgabewert einer WAL-Operation einen System-Reboot erfordert.
+ * @param status RÃ¼ckgabewert einer libtoob-Funktion.
+ * @return true wenn ein Reboot erforderlich ist, andernfalls false.
+ */
+#define TOOB_IS_REBOOT_REQUIRED(status) \
+    (((status) == TOOB_ERR_REQUIRES_RESET) || ((status) == TOOB_ERR_WAL_FULL))
+
+/* ==============================================================================
+ * Primary Feature-OS API (IDE-UX & Doxygen Mappings)
+ * ============================================================================== */
+
+/**
+ * @brief BestÃ¤tigt das asynchrone OTA-Update (Commit Flag).
+ * 
+ * @note  [GAP-07: Network Watchdog TTL]
+ *        Das Feature-OS MUSS diese Funktion rufen, um ein laufendes Update 
+ *        als erfolgreich zu flaggen. Nutzt das Update ein Cloud-Handshake 
+ *        (z.B. DICE/CDI), MUSS das OS zwingend die Cloud-BestÃ¤tigung abwarten. 
+ *        DafÃ¼r sammelt das OS "Network-TTL" Minuten via WAL. Bei Ãœberschreiten 
+ *        dieses TTLs fÃ¼hrt das Ausbleiben des Aufrufs unwiderruflich zum Rollback.
+ * 
+ * @return TOOB_OK bei Erfolg.
+ * @return TOOB_OK bei Erfolg.
+ *         MÃ¶gliche Fehler:
+ *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
+ */
+TOOB_MUST_CHECK toob_status_t toob_confirm_boot(void);
+
+/**
+ * @brief Befreit das Recovery-OS aus dem Rettungsmodus (Anti Roach-Motel).
+ * @note  Sobald das Recovery-OS die App repariert hat, MUSS es diese Funktion 
+ *        aufrufen, um den RECOVERY_RESOLVED Intent in die Mailbox zu schreiben.
+ * 
+ * @return TOOB_OK bei Erfolg.
+ *         MÃ¶gliche Fehler:
+ *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
+ */
+TOOB_MUST_CHECK toob_status_t toob_recovery_resolved(void);
+
+
+/* ==============================================================================
+ * Zero-Bloat Platform & Cryptography Hooks (must precede OTA context definition)
+ * ============================================================================== */
+#include "toob_port.h"
+
+/* ==============================================================================
+ * Toob-Boot OTA Daemon (Network-Agnostic Stream Writer)
+ * ============================================================================== */
+
+/* OTA alignment buffer size â€” must match CHIP_FLASH_WRITE_ALIGNMENT multiples */
+#define TOOB_OTA_BUF_SIZE 256U
+
+/**
+ * @brief OTA Session Context (caller-allocated, zero dynamic allocation).
+ *
+ * Encapsulates the complete state of a single OTA transfer session. The caller
+ * allocates this struct (stack or static) and passes it to all toob_ota_*
+ * functions. This enables re-entrant, testable OTA sessions without globals.
+ *
+ * Must be initialized with toob_ota_ctx_init() before first use.
+ */
+typedef struct __attribute__((aligned(8))) {
+    uint8_t              state;              /* Internal state machine (opaque) */
+    uint8_t              is_verified;        /* SHA-256 stream verification active */
+    uint8_t              _reserved[2];       /* Alignment padding */
+    uint32_t             write_cursor;       /* Absolute flash address of next write */
+    uint32_t             total_size;         /* Declared image size from manifest */
+    uint32_t             bytes_queued;       /* Bytes received so far */
+    uint32_t             buf_len;            /* Bytes currently in alignment buffer */
+    uint8_t              align_buf[TOOB_OTA_BUF_SIZE]; /* DMA-safe flash write buffer */
+    uint8_t              expected_sha256[32];/* Expected hash for verified streams */
+    toob_os_sha256_ctx_t sha_ctx;            /* Streaming SHA-256 context */
+} toob_ota_ctx_t;
+
+_Static_assert(sizeof(toob_ota_ctx_t) == 440, "toob_ota_ctx_t ABI size drift");
+
+/**
+ * @brief Registers a manufacturer-supplied notifier callback for update progress events.
+ * @param cb Manufacturer callback function pointer (NULL to disable).
+ */
+void toob_set_swap_notifier(toob_swap_notify_fn cb);
+
+/**
+ * @brief Initializes a toob_ota_ctx_t to a clean idle state.
+ *        Must be called once before first use. Securely zeroes all fields.
+ * @param ctx Caller-allocated context.
+ * @return TOOB_OK on success, TOOB_ERR_INVALID_ARG if ctx is NULL.
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_ctx_init(toob_ota_ctx_t *ctx);
+
+/**
+ * @brief Initializes the OTA Daemon for receiving a new update stream.
+ * @param ctx Caller-allocated OTA session context.
+ * @param total_size Expected total size of the incoming image (Manifest + Payload).
+ * @param expected_sha256 Optional 32-byte hash to verify the stream against (nullable).
+ * @return TOOB_OK on success, TOOB_ERR_INVALID_ARG if size exceeds staging slot.
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]);
+
+/**
+ * @brief Resumes a partially downloaded OTA update.
+ *
+ * Restores the internal write cursor and byte counter from the handoff RAM
+ * checkpoint. If expected_sha256 is non-NULL, reconstructs the SHA-256
+ * streaming context by re-reading and re-hashing the already-staged flash prefix.
+ *
+ * @param ctx Caller-allocated OTA session context.
+ * @param total_size   Expected total size of the image (from the manifest).
+ * @param expected_sha256 Optional 32-byte hash to verify the stream against (nullable).
+ * @param resume_offset Output pointer for the byte offset to resume from.
+ * @return TOOB_OK if resumable, TOOB_ERR_NOT_FOUND if no partial download exists.
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32], uint32_t* resume_offset);
+
+/**
+ * @brief Aborts an active OTA download and securely zeroizes buffers.
+ * @param ctx OTA session context to abort.
+ * @return TOOB_OK.
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_abort(toob_ota_ctx_t *ctx);
+
+/**
+ * @brief Processes a chunk of incoming bytes, writing them linearly to Staging.
+ * @param ctx OTA session context.
+ * @param chunk Pointer to the downloaded bytes.
+ * @param len Length of the chunk.
+ * @return TOOB_OK, or TOOB_ERR_FLASH on write error.
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_process_chunk(toob_ota_ctx_t *ctx, const uint8_t* chunk, uint32_t len);
+
+/**
+ * @brief Finalizes the OTA process and registers the update intent in the WAL.
+ *
+ * After all chunks have been received and the stream transitions to DONE,
+ * this function flushes residual bytes, verifies the SHA-256 digest (if
+ * verified mode), and atomically writes the update intent into the WAL.
+ *
+ * @param ctx OTA session context.
+ * @return TOOB_OK on success. The system should be rebooted immediately after.
+ *         TOOB_ERR_VERIFY      â€” SHA-256 mismatch (stream corrupted, re-download required).
+ *         TOOB_ERR_FLASH       â€” Flash write failed during residual flush.
+ *         TOOB_ERR_WAL_LOCKED  â€” A previous update is already pending in the WAL.
+ *                                The OS must reboot to consume it before staging a new one.
+ *         TOOB_ERR_WAL_FULL    â€” WAL sector exhausted. Reboot required.
+ *         TOOB_ERR_INVALID_ARG â€” Context is NULL or not in DONE state.
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_finalize(toob_ota_ctx_t *ctx);
+
+/**
+ * @brief Registriert ein empfangenes Manifest in der Mailbox.
+ * 
+ * @note  [L1: Mailbox-AtomaritÃ¤t]
+ *        Ein Crash (Brownout) wÃ¤hrend der AusfÃ¼hrung dieser Funktion hinterlÃ¤sst
+ *        niemals einen halben Zustand. Das System evaluiert CRC-gesicherte Mailbox-EintrÃ¤ge
+ *        beim nÃ¤chsten Boot und faltet sie in seine interne WAL ein.
+ *
+ * @param manifest_flash_addr Absolute, hardware-bÃ¼ndige Flash-Adresse des Manifests im SPI.
+ * @return TOOB_OK bei Erfolg.
+ *         MÃ¶gliche Fehler:
+ *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
+ */
+TOOB_MUST_CHECK toob_status_t toob_set_next_update(uint32_t manifest_flash_addr);
+
+/**
+ * @brief Extrahiert die rohen Hardware-Metriken aus dem .noinit RAM.
+ * 
+ * @note  [CRA Regulatorik & CBOR Extraktion]
+ *        Liest die `toob_boot_diag_t` Struktur. Diese enthÃ¤lt u.A. den 
+ *        kryptographischen SHA-256 Digest der SBOM, was direkt der ErfÃ¼llung
+ *        des EU Cyber Resilience Acts 2027 (CRA) dient. Die weiterfÃ¼hrende 
+ *        Telemetrie zur Hardware-Lebensdauer ist optional via CBOR verpackt.
+ *
+ * @param diag Zeiger auf die vom OS bereitgestellte Struct-Instanz.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY bei gebrochener Checksumme.
+ */
+TOOB_MUST_CHECK toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
+
+/**
+ * @brief Extrahiert die Diagnosedaten kodiert im Cloud-tauglichen CBOR-Format.
+ * @param out_buf Buffer fÃ¼r den CBOR-Stream
+ * @param max_len Maximale GrÃ¶ÃŸe von out_buf
+ * @param out_len TatsÃ¤chliche GrÃ¶ÃŸe des geschriebenen CBOR-Streams
+ * @return TOOB_OK bei Erfolg
+ */
+TOOB_MUST_CHECK toob_status_t toob_get_boot_diag_cbor(uint8_t* out_buf, size_t max_len, size_t* out_len);
+
+/* ==============================================================================
+ * Cloud-Command Submission API (Phase 7)
+ * ==============================================================================
+ * Das OS empfÃ¤ngt Cloud-Command Envelopes (CBOR, Ed25519-signiert) vom Server
+ * und delegiert sie Ã¼ber dieses API an den Bootloader. Der Bootloader evaluiert
+ * den Command beim nÃ¤chsten Boot (Step 2.5 in boot_state.c).
+ */
+
+/**
+ * @brief Schreibt ein Cloud-Command-Envelope in den CHIP_CLOUD_CMD_SLOT.
+ *
+ * Sequenz: Guard â†’ Erase â†’ Write â†’ CRC Read-Back â†’ Zeroize.
+ * Der Bootloader evaluiert den Slot beim nÃ¤chsten Boot autonom.
+ *
+ * @param envelope  Zeiger auf das rohe CBOR-Envelope (inkl. Signatur).
+ * @param len       LÃ¤nge des Envelopes in Bytes.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL/ÃœberlÃ¤nge,
+ *         TOOB_ERR_FLASH bei Erase/Write-Fehler,
+ *         TOOB_ERR_FLASH_HW bei Read-Back-Mismatch.
+ */
+TOOB_MUST_CHECK toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len);
+
+/**
+ * @brief Extrahiert die 32-Byte DICE Device-ID aus dem Boot-Handoff.
+ *
+ * @note  [Validating Accessor Reference Pattern]
+ *        Diese Funktion dient als Referenz-Muster fÃ¼r den sicheren, gekapselten
+ *        Zugriff auf spezifische Handoff-Felder. Sie holt sich den Handoff-State
+ *        validiert Ã¼ber toob_get_handoff(), liest die ID aus und lÃ¶scht den temporÃ¤ren
+ *        Stack-Buffer anschlieÃŸend sicher mittels toob_secure_zeroize().
+ *
+ * @param out_id  Ziel-Buffer (mind. 32 Bytes).
+ * @param id_len  GrÃ¶ÃŸe des Buffers. Muss >= 32 sein.
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL oder zu kleinem Buffer,
+ *         TOOB_ERR_VERIFY bei korruptem Handoff.
+ */
+TOOB_MUST_CHECK toob_status_t toob_get_device_id(uint8_t *out_id, size_t id_len);
+
+/* ==============================================================================
+ * Der Hard-Linker Contract "Zero-Bloat Shim"
+ * ==============================================================================
+ * Toob-Loader verweigert die Kopplung an ausufernde Vendor-SDK SPI Treiber. 
+ * Um dem Bootloader dennoch persistente WAL-Transktionen (`toob_set_next_update`) 
+ * zu ermÃ¶glichen, fordert die Library exakt diese beiden Symbole als harten Linker-Contract ein. 
+ * Das Feature-OS (z.B. der Zephyr OS Storage API Stack) MUSS diese in seinem C/C++ Code 
+ * zwingend physikalisch bereitstellen! Ein Fehlen fÃ¼hrt absichtlich zu einem 
+ * "Undefined Symbol" Kompilierungsabbruch (Fail-Fast).
+ */
+
+/**
+ * @brief Zero-Bloat Hook: Physikalischer Flash-Lesezugriff.
+ * @param addr Absolute Byte-Adresse im SPI Flash.
+ * @param buf Datenpuffer im lokalen OS-SRAM.
+ * @param len LÃ¤nge der zu lesenden Daten.
+ * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_flash_read(uint32_t addr, uint8_t* buf, uint32_t len);
+
+/**
+ * @brief Zero-Bloat Hook: Physikalischer Flash-Schreibzugriff.
+ * @param addr Absolute Byte-Adresse im SPI Flash (Muss an Page-Boundary ausgerichtet sein).
+ * @param buf Zu schreibender, konstanter Datenpuffer.
+ * @param len LÃ¤nge der zu schreibenden Daten.
+ * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_flash_write(uint32_t addr, const uint8_t* buf, uint32_t len);
+
+/**
+ * @brief Zero-Bloat Hook: Physikalischer Flash-LÃ¶schzugriff.
+ * @param addr Absolute Byte-Adresse im SPI Flash (Muss Sektor-bÃ¼ndig sein).
+ * @param len LÃ¤nge der zu lÃ¶schenden Daten (Muss Sektor-bÃ¼ndig sein).
+ * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIBTOOB_H */
+
+======================================================================
+FILE: sdk/libtoob/include/libtoob_types.h
+======================================================================
+/*
+ * Toob-Boot OS Boundary Types (libtoob_types.h)
+ * 
+ * Diese Datei definiert die mathematisch strikt ausgerichteten Datenstrukturen 
+ * und Konstanten, durch die das Feature-OS mit dem Toob-Boot Bootloader 
+ * kommuniziert (Zero-Allocation Boundary, .noinit Handoff).
+ *
+ * Relevante Spezifikationen:
+ * - docs/libtoob_api.md: Definition der toob_handoff_t OS-Boundary & RAM Section.
+ * - docs/toob_telemetry.md: CBOR Diagnostic Structs (toob_boot_diag_t).
+ * - docs/concept_fusion.md: TENTATIVE/COMMITTED State-Machine Logik.
+ */
+
+#ifndef LIBTOOB_TYPES_H
+#define LIBTOOB_TYPES_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+/* ========================================================
+ * 0. Cross-Compiler Utilities
+ * ======================================================== */
+
+/* Forces callers to check toob_status_t returns at compile time. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define TOOB_MUST_CHECK __attribute__((warn_unused_result))
+#elif defined(__ICCARM__)
+#  define TOOB_MUST_CHECK _Pragma("diag_error=Pe940")
+#elif defined(__CC_ARM) || defined(__ARMCC_VERSION)
+#  define TOOB_MUST_CHECK __attribute__((warn_unused_result))
+#else
+#  define TOOB_MUST_CHECK
+#endif
+
+/* ========================================================
+ * 1. Status & Boot States
+ * ======================================================== */
+/* GAP-06: Spezifische libtoob Fehlercodes fÃ¼r sauberes OS-Handling */
+typedef enum {
+    TOOB_OK             = 0x55AA55AA,
+    TOOB_ERR_NOT_FOUND  = 0xE1101CAE, /* Abstandskorrekte Hamming-Hex Werte */
+    TOOB_ERR_WAL_FULL   = 0xE2201CAE,
+    TOOB_ERR_WAL_LOCKED = 0xE3301CAE,
+    TOOB_ERR_FLASH      = 0xE4401CAE,
+    TOOB_ERR_INVALID_ARG= 0xE5501CAE,
+    TOOB_ERR_VERIFY     = 0xE6601CAE, /* RAM Korruption / CRC-32 Mismatch */
+    TOOB_ERR_REQUIRES_RESET = 0xE7701CAE, /* Fataler WAL Lock (Reset zwingend) */
+    TOOB_ERR_COUNTER_EXHAUSTED = 0xE8801CAE, 
+    TOOB_ERR_FLASH_HW   = 0xE9901CAE,
+    TOOB_ERR_STATE      = 0xEAA01CAE, /* GAP-N03: Invalid State/Initialization */
+    TOOB_ERR_TIMEOUT    = 0xEBB01CAE, /* GAP-N03: Network/Operation Timeout */
+    TOOB_ERR_NOT_SUPPORTED = 0xECC01CAE /* GAP-N03: Feature not implemented */
+} toob_status_t;
+
+/* Partition Layout fÃ¼r boot_target Auswertung */
+typedef enum {
+    TOOB_PARTITION_APP      = 0x0000000A,
+    TOOB_PARTITION_RECOVERY = 0x0000000B
+} toob_partition_t;
+
+/* Reset-GrÃ¼nde (Isoliert von der boot_types.h um Zero-Dependency zu wahren) */
+/* HINWEIS: Numeric Mapping muss strikt identisch zur internen reset_reason_t sein! */
+typedef enum {
+    TOOB_RESET_UNKNOWN    = 0,
+    TOOB_RESET_POWER_ON   = 1,
+    TOOB_RESET_PIN        = 2,
+    TOOB_RESET_WATCHDOG   = 3,
+    TOOB_RESET_BROWNOUT   = 4,
+    TOOB_RESET_SOFTWARE   = 5,
+    TOOB_RESET_HARD_FAULT = 6
+} toob_reset_reason_t;
+
+/* GAP-12: Explizite Boot-State Konstanten fÃ¼r TENTATIVE/COMMITTED Logik */
+#define TOOB_STATE_TENTATIVE  0xAAAA5555
+#define TOOB_STATE_COMMITTED  0x55AA55AA
+
+/* ========================================================
+ * 2. OS Interface (.noinit Handoff)
+ * ======================================================== */
+
+/* GAP-39: Zwingendes 8-Byte Alignment fÃ¼r 64-bit Architektur-KompatibilitÃ¤t (z.B. AArch64) */
+typedef struct __attribute__((aligned(8))) {
+    uint32_t magic;              /* Immer 0x55AA55AA */
+    uint32_t struct_version;     /* GAP-11: ABI Versionierung (z.B. 0x01000000) fÃ¼r AbwÃ¤rtskompatibilitÃ¤t */
+    uint64_t boot_nonce;         /* Deterministische Anti-Replay Nonce */
+    uint32_t booted_partition;   /* toob_partition_t (0x0A = App Slot A, 0x0B = Recovery OS) */
+    uint32_t reset_reason;       /* Letzter Hardware-Reset-Grund (toob_reset_reason_t) */
+    uint32_t boot_failure_count; /* Aktueller Stand des Edge-Recovery Counters */
+    uint32_t net_search_accum_ms;/* Anti-Lagerhaus Netz-Suchzeit Akkumulator */
+    uint32_t resume_offset;      /* Partielle Download Resume-Stelle (aus WAL Checkpoint) */
+    uint8_t  device_id[32];      /* P10: Unique DICE Device Identity for Cloud Sync */
+    uint8_t  wipe_requested;     /* OS Instruction to wipe user partitions */
+    uint8_t  _padding[7];        /* P10: 8-Byte Alignment Padding */
+    uint32_t crc32_trailer;      /* Kryptographische Versiegelung in .noinit durch S1 */
+} toob_handoff_t;
+
+/* Mathematische Perfektion: Compile-Time Checks (P10) */
+_Static_assert(sizeof(toob_handoff_t) == 80, "toob_handoff_t size breach - must be exactly 80 bytes");
+_Static_assert(sizeof(toob_handoff_t) % 8 == 0, "toob_handoff_t alignment breach - must be 8-byte aligned");
+_Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 76, "crc32_trailer ABI offset drift detected");
+
+/* ========================================================
+ * Handoff ABI Layout Static Asserts (P10)
+ * ======================================================== */
+_Static_assert(offsetof(toob_handoff_t, magic) == 0, "magic offset drift");
+_Static_assert(offsetof(toob_handoff_t, struct_version) == 4, "struct_version offset drift");
+_Static_assert(offsetof(toob_handoff_t, boot_nonce) == 8, "boot_nonce offset drift");
+_Static_assert(offsetof(toob_handoff_t, booted_partition) == 16, "booted_partition offset drift");
+_Static_assert(offsetof(toob_handoff_t, reset_reason) == 20, "reset_reason offset drift");
+_Static_assert(offsetof(toob_handoff_t, boot_failure_count) == 24, "boot_failure_count offset drift");
+_Static_assert(offsetof(toob_handoff_t, net_search_accum_ms) == 28, "net_search_accum_ms offset drift");
+_Static_assert(offsetof(toob_handoff_t, resume_offset) == 32, "resume_offset offset drift");
+_Static_assert(offsetof(toob_handoff_t, device_id) == 36, "device_id offset drift");
+_Static_assert(offsetof(toob_handoff_t, wipe_requested) == 68, "wipe_requested offset drift");
+_Static_assert(offsetof(toob_handoff_t, _padding) == 69, "_padding offset drift");
+_Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 76, "crc32_trailer offset drift");
+
+/* Konstante fÃ¼r struct_version des Handoff-Headers zur Vermeidung von ABI-Drift */
+#define TOOB_HANDOFF_STRUCT_VERSION 0x02000000
+
+/*
+ * Cross-Compiler Abstraktion fÃ¼r die ".noinit" Linker-Section.
+ * Da libtoob OS-seitig eingebunden wird, mÃ¼ssen wir verschiedene Compiler tolerieren.
+ */
+#if defined(__GNUC__) || defined(__clang__) || defined(__ICCARM__)
+    #define TOOB_NOINIT __attribute__((section(".noinit")))
+    #define TOOB_TRAP() __builtin_trap()
+#elif defined(__CC_ARM) || defined(__ARMCC_VERSION) /* ARM Compiler (Keil) */
+    /* 
+     * WARNING: .bss.noinit is fragile! Keil requires a dedicated Execution 
+     * Region with the `UNINIT` attribute in the scatter file (.sct), 
+     * otherwise the C-Runtime WILL zeroize it!
+     */
+    #define TOOB_NOINIT __attribute__((section(".bss.noinit")))
+    #define TOOB_TRAP() __breakpoint(0)
+#else
+    #warning "Compiler not officially supported by libtoob. Defaulting to GCC syntax."
+    #define TOOB_NOINIT __attribute__((section(".noinit")))
+    #define TOOB_TRAP() do { volatile int* p = 0; *p = 0; } while(0)
+#endif
+
+/* ========================================================
+ * 3. Telemetrie & Health Diagnostik (CBOR Extraction)
+ * ======================================================== */
+
+/* Health & Wear Data (Sub-Struct fÃ¼r VerschleiÃŸdaten) */
+typedef struct {
+    uint32_t wal_erase_count;          /* Sliding Window Pointer */
+    uint32_t app_slot_erase_count;     /* App Image VerschleiÃŸ */
+    uint32_t staging_slot_erase_count; /* Staging Image VerschleiÃŸ */
+    uint32_t swap_buffer_erase_count;  /* In-Place Swap Buffer VerschleiÃŸ */
+} toob_ext_health_t;
+
+/* 
+ * Strukturierte Boot-Diagnostik fÃ¼r OS CBOR Extraction 
+ * Harmonisiert GAP-F29 & GAP-16 mit toob_telemetry.md
+ */
+typedef struct __attribute__((aligned(8))) {
+    uint32_t struct_version;         /* AbwÃ¤rtskompatibler Header */
+    
+    /* Systemwerte */
+    uint32_t boot_duration_ms;       /* Gesamtdauer Start (boot_time_ms) */
+    uint32_t verify_time_ms;         /* Zeit fÃ¼r Krypto-Hashes */
+    
+    /* Fehler-State */
+    uint32_t last_error_code;        /* z.B. BOOT_ERR_WDT_TRIGGER */
+    uint32_t vendor_error;           /* Spezifischer Flash-Fehler */
+    uint32_t hardware_fault_record;  /* Hardware-Fault register dump */
+    
+    /* Identity & Revisions */
+    uint32_t active_key_index;       /* eFuse Epoch Index */
+    uint32_t current_svn;            /* Aktuelle SVN Version */
+    uint32_t build_number;           /* CI build number */
+    
+    /* Protection & Crash History */
+    uint32_t edge_recovery_events;   /* Aktuelle Edge-Recovery Versuche (boot_failure_count) */
+    uint32_t wdt_kicks;              /* Watchdog Kick Counter */
+    
+    /* Telemetry / Version Oracle (v2) */
+    uint16_t fw_ver_major;           /* Firmware version */
+    uint16_t fw_ver_minor;
+    uint16_t fw_ver_patch;
+    uint8_t  fallback_occurred;      /* 1 = recovery booted, 0 = normal */
+    uint8_t  _reserved_diag[1];      /* Alignment padding to 4-byte boundary */
+    
+    /* SBOM & Handoff */
+    uint32_t boot_session_id;        /* Monotoner Boot-Counter */
+    uint8_t  sbom_digest[32];        /* SHA-256 der letzten StÃ¼ckliste (deterministisch 32 Bytes) */
+    
+    /* Extended Health (Optional gem. CBOR Spec) */
+    uint8_t  ext_health_present;     /* P10: Explicit uint8_t statt bool fÃ¼r ABI Sicherheit */
+    uint8_t  _padding[3];            /* P10: Explizites Padding fÃ¼r exaktes 4-Byte Alignment vor der Sub-Struct */
+    toob_ext_health_t ext_health;    /* Health & Wear Data */
+    
+    uint32_t crc32_trailer;          /* CRC32 Versiegelung im .noinit */
+} toob_boot_diag_t;
+
+_Static_assert(sizeof(toob_boot_diag_t) == 112, "toob_boot_diag_t size breach - must be exactly 112 bytes for ABI stability");
+
+_Static_assert(offsetof(toob_boot_diag_t, ext_health) % 4 == 0, "toob_ext_health_t alignment is broken in diag struct");
+_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) > offsetof(toob_boot_diag_t, ext_health), "CRC32 trailer must be last field");
+
+/* ========================================================
+ * Diag ABI Layout Static Asserts (P10)
+ * ======================================================== */
+_Static_assert(offsetof(toob_boot_diag_t, struct_version) == 0, "struct_version offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, boot_duration_ms) == 4, "boot_duration_ms offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, verify_time_ms) == 8, "verify_time_ms offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, last_error_code) == 12, "last_error_code offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, vendor_error) == 16, "vendor_error offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, hardware_fault_record) == 20, "hardware_fault_record offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, active_key_index) == 24, "active_key_index offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, current_svn) == 28, "current_svn offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, build_number) == 32, "build_number offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, edge_recovery_events) == 36, "edge_recovery_events offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, wdt_kicks) == 40, "wdt_kicks offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_major) == 44, "fw_ver_major offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_minor) == 46, "fw_ver_minor offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_patch) == 48, "fw_ver_patch offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fallback_occurred) == 50, "fallback_occurred offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, boot_session_id) == 52, "boot_session_id offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, sbom_digest) == 56, "sbom_digest offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health_present) == 88, "ext_health_present offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, _padding) == 89, "_padding offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health) == 92, "ext_health offset drift");
+_Static_assert(offsetof(toob_ext_health_t, wal_erase_count) == 0, "wal_erase_count offset drift");
+_Static_assert(offsetof(toob_ext_health_t, app_slot_erase_count) == 4, "app_slot_erase_count offset drift");
+_Static_assert(offsetof(toob_ext_health_t, staging_slot_erase_count) == 8, "staging_slot_erase_count offset drift");
+_Static_assert(offsetof(toob_ext_health_t, swap_buffer_erase_count) == 12, "swap_buffer_erase_count offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 108, "crc32_trailer offset drift");
+
+/* Konstante fÃ¼r struct_version des Diag-Headers zur Vermeidung von ABI-Drift */
+#define TOOB_DIAG_STRUCT_VERSION 0x02000000
+
+/* ========================================================
+ * 4. WAL (Write-Ahead-Log) Wire Format
+ *    Shared definition lives in common/include/toob_wal_wire.h.
+ * ======================================================== */
+#include "toob_wal_wire.h"
+
+/* OTA Network Failsafe Timeout (Default: 5 Minutes) */
+#ifndef TOOB_SMOKE_TEST_TIMEOUT_MS
+#define TOOB_SMOKE_TEST_TIMEOUT_MS 300000
+#endif
+
+/* Extern Definitions (After structs are fully typed!) */
+extern TOOB_NOINIT toob_boot_diag_t toob_diag_state;
+
+#endif /* LIBTOOB_TYPES_H */
+
+======================================================================
+FILE: sdk/libtoob/include/toob_mailbox.h
+======================================================================
+/**
+ * @file toob_mailbox.h
+ * @brief OS -> Core Mailbox SDK writer interface (C17).
+ *
+ * Implements the OS-side API to send update registration, confirmation, and
+ * recovery resolution requests to the Core bootloader.
+ *
+ * Sharing contract: all wire structure and enum definitions are defined in
+ * toob_mailbox_wire.h to prevent structure layout and static assertion drift.
+ */
+
+#ifndef TOOB_MAILBOX_H
+#define TOOB_MAILBOX_H
+
+#include "libtoob_types.h" /* toob_status_t */
+#include "toob_mailbox_wire.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ===== OS-side writers (implemented in toob_mailbox.c) ===== */
+toob_status_t toob_mailbox_set_update(uint32_t manifest_flash_addr);
+toob_status_t toob_mailbox_set_confirm(uint64_t nonce);
+toob_status_t toob_mailbox_set_recovery_resolved(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* TOOB_MAILBOX_H */
+
+======================================================================
+FILE: sdk/libtoob/toob_confirm.c
+======================================================================
+/**
+ * @file toob_confirm.c
+ * @brief Boot Confirmation â€” OS-side confirm/recovery intent via Mailbox.
+ *
+ * Implements toob_confirm_boot() and toob_recovery_resolved().
+ * Writes Mailbox records instead of WAL entries. The RTC fast-path
+ * remains for hardware with backup registers.
+ */
+
+#include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
+#include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
+
+#include "toob_internal.h"
+#include <stddef.h>
+
+#ifdef ADDR_CONFIRM_RTC_RAM
+uint64_t mock_rtc_ram = 0;
+#endif
+
+toob_status_t toob_confirm_boot(void) {
+    toob_handoff_t handoff __attribute__((aligned(8)));
+    toob_secure_zeroize(&handoff, sizeof(handoff));
+
+    toob_status_t status = toob_get_handoff(&handoff);
+
+    volatile uint32_t get_shield_1 = 0, get_shield_2 = 0;
+    if (status == TOOB_OK)
+        get_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (get_shield_1 == TOOB_OK && status == TOOB_OK)
+        get_shield_2 = TOOB_OK;
+
+    if (get_shield_1 != TOOB_OK || get_shield_2 != TOOB_OK ||
+        get_shield_1 != get_shield_2) {
+        toob_secure_zeroize(&handoff, sizeof(handoff));
+        return (status != TOOB_OK) ? status : TOOB_ERR_VERIFY;
+    }
+
+#ifdef ADDR_CONFIRM_RTC_RAM
+    /* RTC fast-path: write nonce to backup register + mailbox. */
+    volatile uint64_t *rtc_ptr = (volatile uint64_t *)ADDR_CONFIRM_RTC_RAM;
+    *rtc_ptr = handoff.boot_nonce;
+
+#if defined(__GNUC__) || defined(__clang__)
+    __sync_synchronize();
+#endif
+
+    uint64_t verified_nonce = *rtc_ptr;
+
+    volatile uint32_t rtc_shield_1 = 0, rtc_shield_2 = 0;
+    if (verified_nonce == handoff.boot_nonce)
+        rtc_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (rtc_shield_1 == TOOB_OK && verified_nonce == handoff.boot_nonce)
+        rtc_shield_2 = TOOB_OK;
+
+    /* Mailbox write (fire-and-forget alongside RTC). */
+    (void)toob_mailbox_set_confirm(handoff.boot_nonce);
+
+    toob_secure_zeroize(&handoff, sizeof(handoff));
+
+    if (rtc_shield_1 != TOOB_OK || rtc_shield_2 != TOOB_OK ||
+        rtc_shield_1 != rtc_shield_2) {
+        return TOOB_ERR_FLASH_HW;
+    }
+    return TOOB_OK;
+#else
+    /* Mailbox-only path. */
+    toob_status_t mb_stat = toob_mailbox_set_confirm(handoff.boot_nonce);
+
+    volatile uint32_t mb_shield_1 = 0, mb_shield_2 = 0;
+    if (mb_stat == TOOB_OK)
+        mb_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (mb_shield_1 == TOOB_OK && mb_stat == TOOB_OK)
+        mb_shield_2 = TOOB_OK;
+
+    toob_secure_zeroize(&handoff, sizeof(handoff));
+
+    if (mb_shield_1 == TOOB_OK && mb_shield_2 == TOOB_OK &&
+        mb_shield_1 == mb_shield_2) {
+        return TOOB_OK;
+    }
+    return (mb_stat != TOOB_OK) ? mb_stat : TOOB_ERR_FLASH_HW;
+#endif
+}
+
+toob_status_t toob_recovery_resolved(void) {
+    toob_status_t status = toob_mailbox_set_recovery_resolved();
+
+    volatile uint32_t shield_1 = 0, shield_2 = 0;
+    if (status == TOOB_OK)
+        shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (shield_1 == TOOB_OK && status == TOOB_OK)
+        shield_2 = TOOB_OK;
+
+    if (shield_1 == TOOB_OK && shield_2 == TOOB_OK && shield_1 == shield_2)
+        return TOOB_OK;
+    return (status != TOOB_OK) ? status : TOOB_ERR_FLASH_HW;
+}
+======================================================================
+FILE: sdk/libtoob/toob_mailbox.c
+======================================================================
+/**
+ * @file toob_mailbox.c
+ * @brief OS-side Mailbox writer (two-sector A/B, torn-write safe).
+ *
+ * Replaces the previous erase-both-then-write-slot-0 design, which defeated
+ * double-buffering: a torn write wiped the only surviving record and reset the
+ * sequence, causing the Core to silently ignore updates (seq <= last_consumed).
+ *
+ * This implementation writes only the STALE slot and erases only that slot's
+ * sector, so:
+ *   - at every instant at least one slot holds a valid, complete record, and
+ *   - `seq` is strictly monotonic across brownouts (it is derived from the
+ *     surviving good slot, which a torn write never touches).
+ *
+ * The Core reader mirrors the slot scan below: read all slots, take the valid
+ * one with the highest `seq`.
+ */
+
+#include "toob_mailbox.h"
+#include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
+#include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
+
+#include "toob_internal.h"
+#include <stddef.h>
+
+/* Geometry sanity: the writer erases exactly one slot sector at a time, so the
+ * mailbox region must be TOOB_MAILBOX_SLOTS distinct erase sectors. */
+_Static_assert(CHIP_MAILBOX_SIZE == TOOB_MAILBOX_SLOTS * CHIP_MAILBOX_SLOT_SIZE,
+               "mailbox region must be exactly TOOB_MAILBOX_SLOTS slot sectors");
+_Static_assert(sizeof(toob_mailbox_t) <= CHIP_MAILBOX_SLOT_SIZE,
+               "mailbox record must fit in one slot sector");
+_Static_assert(sizeof(toob_mailbox_t) % CHIP_FLASH_WRITE_ALIGNMENT == 0,
+               "mailbox record must be a multiple of the flash write alignment");
+
+static inline uint32_t slot_addr(uint32_t i) {
+  return CHIP_MAILBOX_ABS_ADDR + i * CHIP_MAILBOX_SLOT_SIZE;
+}
+
+/**
+ * @brief Read one slot and validate magic + CRC.
+ * @return true and fills *out if the slot holds a complete valid record.
+ */
+static bool slot_read_valid(uint32_t i, toob_mailbox_t *out) {
+  toob_secure_zeroize(out, sizeof(*out));
+
+  if (toob_os_flash_read(slot_addr(i), (uint8_t *)out, sizeof(*out)) != TOOB_OK) {
+    return false;
+  }
+  if (out->magic != TOOB_MAILBOX_MAGIC) {
+    return false;
+  }
+  uint32_t expect = toob_lib_crc32((const uint8_t *)out, TOOB_MAILBOX_CRC_LEN);
+  return expect == out->crc32;
+}
+
+/**
+ * @brief Write a request into the stale slot with seq = best_seq + 1.
+ *
+ * Sequence: scan slots -> pick target (oldest / invalid) and best_seq ->
+ * build record -> erase target sector -> write -> glitch-safe read-back verify.
+ */
+static toob_status_t mailbox_put(toob_req_t req, uint32_t tbm1_addr, uint64_t nonce) {
+  toob_mailbox_t rec;
+  uint32_t best_seq = 0;
+  uint32_t target = 0;
+  uint32_t target_seq = 0xFFFFFFFFu; /* pick the slot with the LOWEST seq (invalid = 0) */
+
+  for (uint32_t i = 0; i < TOOB_MAILBOX_SLOTS; i++) {
+    bool ok = slot_read_valid(i, &rec);
+    uint32_t seq = ok ? rec.seq : 0u; /* an invalid slot is treated as the oldest */
+
+    if (ok && rec.seq > best_seq) {
+      best_seq = rec.seq;
+    }
+    if (seq < target_seq) {
+      target_seq = seq;
+      target = i;
+    }
+    toob_secure_zeroize(&rec, sizeof(rec)); /* slot may carry a CONFIRM nonce */
+  }
+  /* target is now the slot NOT holding the freshest record; best_seq is preserved
+   * there and is never erased below. NOTE: seq is uint32 and single-writer; a wrap
+   * needs 2^32 successful writes (unreachable in device lifetime). */
+
+  /* Build the new record (zeroize first: sets _reserved and any pad to 0). */
+  toob_mailbox_t m;
+  toob_secure_zeroize(&m, sizeof(m));
+  m.magic     = TOOB_MAILBOX_MAGIC;
+  m.version   = TOOB_MAILBOX_VERSION;
+  m.request   = (uint16_t)req;
+  m.seq       = best_seq + 1u;
+  m.tbm1_addr = tbm1_addr;
+  m.nonce     = nonce;
+  m.crc32     = toob_lib_crc32((const uint8_t *)&m, TOOB_MAILBOX_CRC_LEN);
+
+  /* Erase ONLY the target slot's sector. The freshest good slot stays intact. */
+  toob_status_t status = toob_os_flash_erase(slot_addr(target), CHIP_MAILBOX_SLOT_SIZE);
+  if (status != TOOB_OK) {
+    toob_secure_zeroize(&m, sizeof(m));
+    return status;
+  }
+
+  status = toob_os_flash_write(slot_addr(target), (const uint8_t *)&m, sizeof(m));
+  if (status != TOOB_OK) {
+    toob_secure_zeroize(&m, sizeof(m));
+    return status;
+  }
+
+  /* Phase-bound read-back verify (glitch-safe, ghost-match-proof). */
+  toob_mailbox_t verify;
+  toob_secure_zeroize(&verify, sizeof(verify));
+  status = toob_os_flash_read(slot_addr(target), (uint8_t *)&verify, sizeof(verify));
+
+  if (status != TOOB_OK ||
+      toob_ct_memcmp_glitch_safe((const uint8_t *)&m,
+                                 (const uint8_t *)&verify,
+                                 sizeof(m)) != TOOB_OK) {
+    /* Torn/failed write. The other slot still holds the previous good record,
+     * so the Core keeps working; the caller retries and seq will not regress. */
+    status = TOOB_ERR_FLASH_HW;
+  } else {
+    status = TOOB_OK;
+  }
+
+  toob_secure_zeroize(&m, sizeof(m));
+  toob_secure_zeroize(&verify, sizeof(verify));
+  return status;
+}
+
+/* ===== Public API (called from toob_update.c / toob_confirm.c) ===== */
+
+toob_status_t toob_mailbox_set_update(uint32_t manifest_flash_addr) {
+  return mailbox_put(TOOB_REQ_UPDATE_PENDING, manifest_flash_addr, 0);
+}
+
+toob_status_t toob_mailbox_set_confirm(uint64_t nonce) {
+  return mailbox_put(TOOB_REQ_CONFIRM, 0, nonce);
+}
+
+toob_status_t toob_mailbox_set_recovery_resolved(void) {
+  return mailbox_put(TOOB_REQ_RECOVERY_RESOLVED, 0, 0);
+}
+======================================================================
+FILE: toobloader/core/boot_rollback.c
+======================================================================
+/*
+ * ==============================================================================
+ * Toob-Boot Core File: boot_rollback.c (Mathematical Perfection Revision)
+ * ==============================================================================
+ *
+ * REFERENCED SPECIFICATIONS:
+ * - docs/concept_fusion.md (OS Recovery nach Fehlversuch, Anti-Downgrade)
+ * - docs/testing_requirements.md (P10 Bound Validation, CFI Glitch-Resistance)
+ * - docs/libtoob_api.md (Failure Edge Cases)
+ *
+ * ARCHITECTURAL UPGRADES:
+ * 1. Glitch-Resistant Downgrade Shield: Doppelte boolesche Akkumulatoren
+ *    und strenges CFI-Tracking verhindern Voltage-Fault Skips bei der
+ *    kritischen SVN/eFuse-PrÃ¼fung und blockieren PC-SprÃ¼nge.
+ * 2. Zero-Allocation 1-Way Copy: Nutzt die crypto_arena iterativ (hÃ¤lftig
+ * geteilt). Ersetzt 16KB statischen RAM durch Tearing- und
+ * VerschleiÃŸ-resistente Schleifen.
+ * 3. Algebraic Loop Proofs: Saturation Arithmetic und Flash-basierte
+ *    Max-Iterationsberechnung blockiert Deadlocks ohne Magic-Numbers.
+ * 4. Phase-Bound Verify (TOCTOU Proof): Zwingendes Zeroize des Buffers vor
+ * jedem Read-Back beweist die physikalische SPI/DMA AusfÃ¼hrung.
+ * 5. WDT Starvation: Ersetzt die gefÃ¤hrliche WDT-Kick-Falle durch gezieltes
+ *    Aushungern des Watchdogs, um einen deterministischen Hard-Reset zu
+ * erzwingen.
+ */
+
+#include "boot_rollback.h"
+#include "boot_fih.h"
+#include "generated_boot_config.h"
+
+#include "boot_crc32.h"
+#include "boot_panic.h"
+#include "boot_secure_zeroize.h"
+#include "boot_swap.h"
+#include "boot_effect.h"
+#include <stddef.h>
+#include <string.h>
+
+_Static_assert(BOOT_CONFIG_MAX_RETRIES > 0,
+               "Invalid Configuration: Target Retries must be positive");
+_Static_assert((BOOT_CONFIG_BACKOFF_BASE_S * 24ULL) <= UINT32_MAX,
+               "Exponential Backoff Configuration will overflow");
+_Static_assert(BOOT_OK == 0x55AA55AA,
+               "BOOT_OK MUST be high-hamming distance for Glitch Shielding");
+_Static_assert(
+    BOOT_CRYPTO_ARENA_SIZE >= 512,
+    "Crypto Arena must be at least 512 bytes for Zero-Allocation stream copy");
+
+/* P5: Arena is now passed explicitly by the orchestrator */
+
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define RB_CFI_SLOT_INIT     0
+#define RB_CFI_SLOT_HDR      1
+#define RB_CFI_SLOT_VERIFIED 2
+#define RB_CFI_SLOT_DONE     3
+#define RB_CFI_NUM_TOKENS    4
+
+#include "boot_ct_utils.h"
+
+
+
+/*
+ * ============================================================================
+ * BLOCK 1: Hybrid SVN Verification (Anti-Downgrade Shield)
+ * ============================================================================
+ */
+boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
+                                       uint32_t manifest_svn,
+                                       rollback_target_t target) {
+  if (!platform || !platform->crypto || !platform->wdt) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t svn_cfi_seed = 0;
+  boot_random_safe(platform, (uint8_t *)&svn_cfi_seed, sizeof(svn_cfi_seed));
+  boot_cfi_ctx_t svn_cfi_ctx;
+  boot_cfi_init(svn_cfi_ctx, svn_cfi_seed);
+  boot_cfi_add_expected(svn_cfi_ctx, 1);
+  boot_cfi_add_expected(svn_cfi_ctx, 2);
+  boot_cfi_add_expected(svn_cfi_ctx, 3);
+
+  /* 1. Lese persistierte SVN Werte sicher aus WAL TMR Payload */
+  wal_tmr_payload_t tmr __attribute__((aligned(8)));
+  boot_secure_zeroize(&tmr, sizeof(tmr)); /* P10: Stack Residuen verhindern */
+
+  boot_status_t status = boot_journal_get_tmr(platform, &tmr);
+
+  /* Boot_Journal Toleranz: Bei Initial Flash (Blank Device) existiert noch kein
+   * TMR. In diesem Sonderfall ist Baseline SVN = 0. */
+  if (status != BOOT_OK && status != BOOT_ERR_STATE &&
+      status != BOOT_ERR_NOT_FOUND) {
+    boot_secure_zeroize(&tmr, sizeof(tmr));
+    return status; /* Hardware Fehler sofort propagieren */
+  }
+
+  /* P7a: 3-way SVN selection per target */
+  uint32_t persisted_wal_svn;
+  switch (target) {
+    case ROLLBACK_TARGET_APP:      persisted_wal_svn = tmr.app_svn; break;
+    case ROLLBACK_TARGET_RECOVERY: persisted_wal_svn = tmr.svn_recovery_counter; break;
+    case ROLLBACK_TARGET_STAGE1:   persisted_wal_svn = tmr.stage1_svn; break;
+    default:
+      boot_secure_zeroize(&tmr, sizeof(tmr));
+      return BOOT_ERR_INVALID_ARG;
+  }
+  boot_secure_zeroize(&tmr, sizeof(tmr)); /* Sensible Daten umgehend abrÃ¤umen */
+
+  boot_cfi_step(svn_cfi_ctx, 1);
+
+  /* 2. Hardware-Root-of-Trust (eFuse Epoch) abrufen (Glitch-Shielded) */
+  uint32_t efuse_epoch = 0;
+  if (platform->wdt && platform->wdt->kick)
+    platform->wdt->kick();
+  boot_status_t efuse_status = boot_read_monotonic_counter_safe(platform, &efuse_epoch);
+  if (platform->wdt && platform->wdt->kick)
+    platform->wdt->kick();
+
+  /* EMFI Instruction Skip Protection fÃ¼r das eFuse Resultat */
+  BOOT_SECURE_REQUIRE(efuse_status == BOOT_OK || efuse_status == BOOT_ERR_NOT_SUPPORTED, {
+    return BOOT_ERR_VERIFY; /* Trapped Hardware Glitch */
+  });
+
+  if (efuse_status != BOOT_OK && efuse_status != BOOT_ERR_NOT_SUPPORTED) {
+    return efuse_status;
+  }
+
+  boot_cfi_step(svn_cfi_ctx, 2);
+
+  /* 3. MATHEMATISCHER GLITCH-BEWEIS (Voltage Skip Protection)
+   * Verweigert Downgrades rigoros. Identische Versionen (Re-Flashes) sind fÃ¼r
+   * Reparaturen zulÃ¤ssig. Statt einem simplen Branch (manifest < persisted)
+   * nutzen wir das O(1) Double-Check Pattern.
+   *
+   * K4: WAL-SVN is now chain-backed (device-bound hash chain).
+   * A2 = eFuse monotonic counter (hardware root of trust).
+   * A1 = WAL-persisted SVN (integrity enforced via K4 chain_tag).
+   * Both lines are independently verified â€” compromise of one
+   * does not weaken the other. */
+  bool valid_wal = (manifest_svn >= persisted_wal_svn);
+  bool valid_efuse = (manifest_svn >= efuse_epoch);
+
+  BOOT_SECURE_REQUIRE(valid_wal && valid_efuse, {
+    return BOOT_ERR_DOWNGRADE;
+  });
+
+  boot_cfi_step(svn_cfi_ctx, 3);
+
+  boot_cfi_require(svn_cfi_ctx, {
+    return BOOT_ERR_VERIFY; /* PC-Jump Glitch detektiert! */
+  });
+  return BOOT_OK;
+}
+
+/*
+ * ============================================================================
+ * BLOCK 2: Crash Cascade & Edge Mitigation (CFI Tracked)
+ * ============================================================================
+ */
+boot_status_t boot_rollback_evaluate_os(const boot_platform_t *platform,
+                                        const wal_tmr_payload_t *tmr,
+                                        bool *boot_recovery_os_out) {
+  if (!platform || !platform->wdt || !tmr || !boot_recovery_os_out) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  /* P10 Rule: Initialize out variables immediately to prevent random state
+   * vulnerabilities */
+  *boot_recovery_os_out = false;
+
+  uint32_t counter = tmr->boot_failure_counter;
+
+  /* P10 Safe Math: Overflow Verhindern fÃ¼r Limit Recovery */
+  uint32_t limit_normal = BOOT_CONFIG_MAX_RETRIES;
+  uint32_t limit_rec = limit_normal;
+
+  if (UINT32_MAX - limit_rec >= BOOT_CONFIG_MAX_RECOVERY_RETRIES) {
+    limit_rec += BOOT_CONFIG_MAX_RECOVERY_RETRIES;
+  } else {
+    limit_rec = UINT32_MAX;
+  }
+
+  /* Control Flow Integrity (CFI) Kaskaden-Auswertung */
+  if (counter <= limit_normal) {
+    BOOT_SECURE_REQUIRE(counter <= limit_normal, {
+      boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
+    });
+    *boot_recovery_os_out = false;
+    return BOOT_OK;
+  } else if (counter <= limit_rec) {
+    BOOT_SECURE_REQUIRE(counter > limit_normal && counter <= limit_rec, {
+      boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
+    });
+    *boot_recovery_os_out = true;
+    return BOOT_OK;
+  } else {
+    BOOT_SECURE_REQUIRE(counter > limit_rec, {
+      boot_terminal_halt(platform, BOOT_ERR_INVALID_STATE, SITE_ROLLBACK_CONFUSION);
+    });
+
+  /* CASE 3: Zero-Day Brick / Double Failure Terminal State */
+#if BOOT_CONFIG_EDGE_UNATTENDED_MODE
+  if (!platform->soc || !platform->soc->enter_low_power) {
+    /* Fallback Hardware-Limit: Panic / Serial Rescue falls SoC-Feature fehlt */
+    boot_panic(platform, BOOT_RECOVERY_REQUESTED);
+  }
+
+  /* P10 Safe Math: Overflow- und Underflow-geschÃ¼tzte Exponential Backoff
+   * Berechnung. Nutzt Saturation Arithmetic, um Endlos-Loops bei extremen
+   * Fuzzing-Attacks abzusichern. */
+  uint32_t excess_fails = (counter > limit_rec) ? (counter - limit_rec) : 1;
+  uint32_t multiplier = 1;
+
+  if (excess_fails == 1)
+    multiplier = 4; /* 4h */
+  else if (excess_fails == 2)
+    multiplier = 12; /* 12h */
+  else
+    multiplier = 24; /* 24h MAX-CAP Limitierung */
+
+  uint32_t wakeup_s = BOOT_CONFIG_BACKOFF_BASE_S;
+
+  if (UINT32_MAX / multiplier < BOOT_CONFIG_BACKOFF_BASE_S) {
+    wakeup_s = UINT32_MAX; /* Saturate auf theoretisches Limit (136 Jahre) */
+  } else {
+    wakeup_s = BOOT_CONFIG_BACKOFF_BASE_S * multiplier;
+  }
+
+  /* TMR-State/Intent MUSS ins WAL, BEVOR wir den SoC physikalisch schlafen
+   * legen! Dadurch weiÃŸ das System nach dem Wakeup, dass es aus einem gezielten
+   * Penalty-Sleep kommt. */
+  wal_entry_payload_t sleep_intent __attribute__((aligned(8)));
+  boot_secure_zeroize(&sleep_intent, sizeof(sleep_intent));
+  sleep_intent.magic = WAL_ENTRY_MAGIC;
+  sleep_intent.intent = WAL_INTENT_SLEEP_BACKOFF;
+  sleep_intent.offset = wakeup_s;
+
+  if (boot_journal_append(platform, &sleep_intent) != BOOT_OK) {
+    boot_secure_zeroize(&sleep_intent, sizeof(sleep_intent));
+    /* Falls Flash defekt/WAL voll: Blockiere System mit Hard-Panic, um Akku-Tod
+     * durch Reboots zu verhindern */
+    boot_panic(platform, BOOT_ERR_WAL_FULL);
+  }
+  boot_secure_zeroize(&sleep_intent, sizeof(sleep_intent));
+
+  /* System einfrieren - Hardware-Watchdog sollte hiervon entkoppelt sein laut
+   * HAL-Config */
+  platform->soc->enter_low_power(wakeup_s);
+
+  /* Halt-Guard: Wenn die Hardware aufwacht oder enter_low_power fehlschlÃ¤gt,
+   * erzwingen wir einen echten Reset via terminal halt. */
+  boot_terminal_halt(platform, BOOT_ERR_WAL_FULL, SITE_ROLLBACK_CONFUSION);
+#else
+  /* Attended Mode (FALSE): Bootloader blockiert. Springe in die Schicht 4a
+   * Serial Rescue */
+  boot_panic(platform, BOOT_RECOVERY_REQUESTED);
+#endif
+
+    return BOOT_OK; /* Unreachable */
+  }
+}
+
+/*
+ * ============================================================================
+ * BLOCK 3: Reverse Copy Orchestration (Zero-Allocation & Zero-Wear)
+ * ============================================================================
+ */
+boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform,
+                                           uint8_t *arena, size_t arena_len) {
+  if (!arena || arena_len < 512)
+    return BOOT_ERR_INVALID_ARG;
+  if (!platform || !platform->flash || !platform->wdt ||
+      !platform->flash->read) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t rv_cfi_seed = 0;
+  boot_random_safe(platform, (uint8_t *)&rv_cfi_seed, sizeof(rv_cfi_seed));
+  boot_cfi_ctx_t revert_cfi_ctx;
+  boot_cfi_init(revert_cfi_ctx, rv_cfi_seed);
+  boot_cfi_add_expected(revert_cfi_ctx, 1);
+  boot_cfi_add_expected(revert_cfi_ctx, 2);
+  boot_cfi_add_expected(revert_cfi_ctx, 3);
+
+  boot_status_t status = BOOT_OK;
+  uint32_t physical_app_erases = 0;
+
+  /* P10 Pre-Declaration Rule: Alle Intents und Buffer am Scope-Anfang
+   * deklarieren, damit der Single-Exit Cleanup niemals Ã¼ber uninitialisierte
+   * Stacks stolpert. */
+  wal_entry_payload_t pending_intent __attribute__((aligned(8)));
+  wal_entry_payload_t revert_intent __attribute__((aligned(8)));
+  toob_image_header_t backup_header __attribute__((aligned(8)));
+
+  boot_secure_zeroize(&pending_intent, sizeof(pending_intent));
+  boot_secure_zeroize(&revert_intent, sizeof(revert_intent));
+  boot_secure_zeroize(&backup_header, sizeof(backup_header));
+
+  /* 1. Lese den Magic-Header aus dem Staging-Slot (Source)
+   * FIX: P10 DMA Unaligned Guard. Nutzt einen 32-Byte aligned Puffer, da
+   * sizeof(toob_image_header_t) = 20 Bytes asynchrone Hardware-Traps bei
+   * SPI-DMAs auslÃ¶sen kann! */
+  uint8_t hdr_buf[32] __attribute__((aligned(8)));
+  boot_secure_zeroize(hdr_buf, sizeof(hdr_buf));
+
+  if (platform->wdt && platform->wdt->kick)
+    platform->wdt->kick();
+  status = platform->flash->read(CHIP_STAGING_SLOT_ABS_ADDR, hdr_buf, 32);
+  if (platform->wdt && platform->wdt->kick)
+    platform->wdt->kick();
+
+  if (status != BOOT_OK) {
+    goto revert_cleanup;
+  }
+
+  memcpy(&backup_header, hdr_buf, sizeof(toob_image_header_t));
+  boot_secure_zeroize(hdr_buf, sizeof(hdr_buf)); /* Leakage Defense */
+
+  boot_cfi_step(revert_cfi_ctx, 1);
+
+  /* 2. P10 Glitch-Proof Bounds Check (Verhindert Flash-Exploits durch
+   * Header-Fakes) */
+  bool size_valid =
+      (backup_header.image_size > 0 && backup_header.image_size != 0xFFFFFFFF);
+
+  BOOT_SECURE_REQUIRE(backup_header.magic == TOOB_MAGIC_HEADER && size_valid, {
+    status = BOOT_ERR_NOT_FOUND;
+    goto revert_cleanup;
+  });
+
+  if (backup_header.image_size > CHIP_APP_SLOT_SIZE) {
+    status = BOOT_ERR_FLASH_BOUNDS;
+    goto revert_cleanup;
+  }
+
+  /* Subtraktiver OOB-Check zum Schutz vor 32-Bit Adress-Wrapping */
+  if ((UINT32_MAX - CHIP_STAGING_SLOT_ABS_ADDR < backup_header.image_size) ||
+      (UINT32_MAX - CHIP_APP_SLOT_ABS_ADDR < backup_header.image_size)) {
+    status = BOOT_ERR_FLASH_BOUNDS;
+    goto revert_cleanup;
+  }
+
+  boot_cfi_step(revert_cfi_ctx, 2);
+
+  /* 3. Resume-Logik (Brownout-Recovery) & Intent-Checkpointing */
+  uint32_t dummy_accum = 0;
+  status =
+      boot_journal_reconstruct_txn(platform, &pending_intent, &dummy_accum, NULL);
+  if (status != BOOT_OK && status != BOOT_ERR_STATE) {
+    goto revert_cleanup;
+  }
+
+  uint32_t current_offset = 0;
+
+  if (pending_intent.intent == WAL_INTENT_TXN_ROLLBACK_PENDING) {
+    /* Brownout Recovery: Wir spulen auf den letzten sicheren WAL-Zustand vor */
+    current_offset = pending_intent.delta_chunk_id;
+    if (current_offset > backup_header.image_size) {
+      current_offset = backup_header.image_size;
+    }
+  } else {
+    /* Initialisiere neuen Rollback-Prozess atomar im WAL (Tearing-Schild) */
+    boot_secure_zeroize(&pending_intent, sizeof(pending_intent));
+    pending_intent.magic = WAL_ENTRY_MAGIC;
+    pending_intent.intent = WAL_INTENT_TXN_ROLLBACK_PENDING;
+    pending_intent.delta_chunk_id = 0;
+
+    status = boot_journal_append(platform, &pending_intent);
+    if (status != BOOT_OK)
+      goto revert_cleanup;
+  }
+
+  /* P10 Mathematical Loop Guard: Verhindert Endlosschleifen ohne Magic Numbers! */
+  const uint32_t MAX_LOOP_GUARD = (CHIP_FLASH_TOTAL_SIZE / 64) + 100;
+  uint32_t loop_iter = 0;
+
+  boot_allowed_region_t whitelist[1] = {
+      {CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE}
+  };
+
+  /* 4. ZERO-ALLOCATION 1-Way Copy (Planned & Executed) */
+  while (current_offset < backup_header.image_size) {
+    if (++loop_iter > MAX_LOOP_GUARD) {
+      status = BOOT_ERR_FLASH_HW; /* Anti-Endless-Loop Guard Trap */
+      goto revert_cleanup;
+    }
+
+    if (platform->wdt && platform->wdt->kick)
+      platform->wdt->kick();
+
+    uint32_t src = CHIP_STAGING_SLOT_ABS_ADDR + current_offset;
+    uint32_t dst = CHIP_APP_SLOT_ABS_ADDR + current_offset;
+
+    /* ====================================================================
+     * BLOCK ALIGNMENT SOLVER (Anti Flash-Corruption)
+     * Ermittelt das physikalische Maximum der Sektor-GrÃ¶ÃŸen.
+     * Verhindert Boundary-Violation Crashes auf asymmetrischen Flashs!
+     * ==================================================================== */
+    size_t dst_sec_size = 0, src_sec_size = 0;
+
+    status = platform->flash->get_sector_size(dst, &dst_sec_size);
+    if (status != BOOT_OK || dst_sec_size == 0 || dst % dst_sec_size != 0) {
+      status = BOOT_ERR_FLASH_HW;
+      goto revert_cleanup;
+    }
+
+    status = platform->flash->get_sector_size(src, &src_sec_size);
+    if (status != BOOT_OK || src_sec_size == 0 || src % src_sec_size != 0) {
+      status = BOOT_ERR_FLASH_HW;
+      goto revert_cleanup;
+    }
+
+    size_t block_size = dst_sec_size;
+    if (src_sec_size > block_size)
+      block_size = src_sec_size;
+
+    if (current_offset + block_size > backup_header.image_size) {
+      block_size = backup_header.image_size - current_offset;
+      /* Padding Alignment Guard fÃ¼r den finalen Block */
+      if (platform->flash->write_align > 0) {
+        uint32_t align = platform->flash->write_align;
+        uint32_t rem = (uint32_t)(block_size % align);
+        if (rem != 0)
+          block_size += (align - rem);
+      }
+    }
+
+    /* ====================================================================
+     * 4.a O(1) ZERO-WEAR IDENTITY CHECK (DMA-Aligned & Glitch Safe)
+     * SchÃ¼tzt das Dateisystem vor Burnout. CRC-Abgleich im RAM.
+     * ==================================================================== */
+    uint32_t crc_src = 0, crc_dest = 0;
+    status = boot_crc32_flash_stream(platform, src, block_size, &crc_src, arena, arena_len);
+    if (status != BOOT_OK)
+      goto revert_cleanup;
+
+    status = boot_crc32_flash_stream(platform, dst, block_size, &crc_dest, arena, arena_len);
+    if (status != BOOT_OK)
+      goto revert_cleanup;
+
+    if (crc_src == crc_dest) {
+      bool is_identical = true;
+      uint32_t chk_off = 0;
+
+      /* P10 ALIGNMENT FIX: Maskiert die Division auf exakt 8 Bytes,
+       * um Unaligned UsageFaults in den Hardware-SPI-DMAs auszuschlieÃŸen! */
+      size_t half_arena = (arena_len / 2) & ~((size_t)7);
+
+      while (chk_off < block_size) {
+        if (platform->wdt && platform->wdt->kick)
+          platform->wdt->kick();
+
+        /* Splitten der Arena in zwei alignte HÃ¤lften fÃ¼r Source/Dest Check */
+        size_t step = (block_size - chk_off > half_arena)
+                          ? half_arena
+                          : (block_size - chk_off);
+
+        uint8_t *buf_dst = arena;
+        uint8_t *buf_src = arena + half_arena;
+
+        if (platform->flash->read(dst + chk_off, buf_dst, step) != BOOT_OK ||
+            platform->flash->read(src + chk_off, buf_src, step) != BOOT_OK) {
+          is_identical = false;
+          break;
+        }
+
+        /* Glitch-Shielded Evaluation um Exploit-Bypasses der Reparatur zu stoppen! */
+        if (constant_time_memcmp_glitch_safe(buf_dst, buf_src, step) !=
+            BOOT_OK) {
+          is_identical = false;
+          break;
+        }
+        chk_off += (uint32_t)step;
+      }
+
+      /* Radikal nullifizieren, damit keine Krypto-Residuen den nachfolgenden SPI Read verfÃ¤lschen! */
+      boot_secure_zeroize(arena, arena_len);
+
+      if (is_identical) {
+        /* Identisch: Fast-Forward zum nÃ¤chsten Sektor ohne Erase/Write Last! */
+        current_offset += (uint32_t)block_size;
+        continue;
+      }
+    }
+
+    /* ====================================================================
+     * 4.b Flash Effect Planning & Execution
+     * ==================================================================== */
+    flash_effect_t fx[2];
+    size_t planned_n = 0;
+    status = boot_rollback_plan_chunk(platform, current_offset, (uint32_t)block_size, crc_src, fx, 2, &planned_n);
+    if (status != BOOT_OK)
+      goto revert_cleanup;
+
+    /* WAL Checkpoint VOR der Destruktion des App-Sektors setzen! (P10 Tearing Guard) */
+    pending_intent.delta_chunk_id = current_offset;
+    status = boot_journal_append(platform, &pending_intent);
+    if (status != BOOT_OK)
+      goto revert_cleanup;
+
+    status = boot_effect_execute(platform, fx, planned_n, whitelist, 1, arena, arena_len);
+    if (status != BOOT_OK)
+      goto revert_cleanup;
+
+    physical_app_erases +=
+        (uint32_t)((block_size / dst_sec_size > 0) ? (block_size / dst_sec_size) : 1);
+
+    current_offset += (uint32_t)block_size;
+  }
+
+  boot_cfi_step(revert_cfi_ctx, 3);
+
+  /* CFI Final Resolution */
+  boot_cfi_require(revert_cfi_ctx, {
+    status = BOOT_ERR_INVALID_STATE; /* Revert-Prozess wurde durch Glitch unterbrochen! */
+    goto revert_cleanup;
+  });
+
+  /* 5. Telemetrie & Isolierter Rollback-Intent Abschluss
+   * Signalisiert dem nÃ¤chsten Reset, dass das Rescue-Image verankert ist und
+   * die Failure-Counters wieder regulÃ¤r anlaufen dÃ¼rfen. */
+  if (physical_app_erases > 0) {
+    wal_tmr_payload_t update_tmr __attribute__((aligned(8)));
+    boot_secure_zeroize(&update_tmr, sizeof(update_tmr));
+
+    if (boot_journal_get_tmr(platform, &update_tmr) == BOOT_OK) {
+      update_tmr.app_slot_erase_counter += physical_app_erases;
+      (void)boot_journal_update_tmr(platform, &update_tmr);
+    }
+  }
+
+  revert_intent.magic = WAL_ENTRY_MAGIC;
+  revert_intent.intent = WAL_INTENT_TXN_ROLLBACK;
+  status = boot_journal_append(platform, &revert_intent);
+
+revert_cleanup:
+  /* ====================================================================
+   * 6. P10 SINGLE EXIT ZEROIZATION (Leakage Defense)
+   * ====================================================================
+   * Egal ob Erfolg oder Hardware-Failure: Jegliche kryptografischen Residuen,
+   * Header und unverschlÃ¼sselte Firmware-Deltas in der RAM-Arena werden
+   * unwiderruflich zerstÃ¶rt.
+   */
+  boot_secure_zeroize(arena, arena_len);
+  boot_secure_zeroize(&pending_intent, sizeof(pending_intent));
+  boot_secure_zeroize(&revert_intent, sizeof(revert_intent));
+  boot_secure_zeroize(&backup_header, sizeof(backup_header));
+
+  return status;
+}
+
+boot_status_t boot_rollback_plan_chunk(const boot_platform_t *platform,
+                                       uint32_t current_offset, uint32_t block_size,
+                                       uint32_t crc_src,
+                                       flash_effect_t *out_fx, size_t cap, size_t *n_out) {
+  (void)platform;
+  if (cap < 2) return BOOT_ERR_INVALID_ARG;
+
+  uint32_t src = CHIP_STAGING_SLOT_ABS_ADDR + current_offset;
+  uint32_t dst = CHIP_APP_SLOT_ABS_ADDR + current_offset;
+
+  out_fx[0].op = EFF_ERASE;
+  out_fx[0].src = 0;
+  out_fx[0].dst = dst;
+  out_fx[0].len = block_size;
+  out_fx[0].post_crc = boot_effect_compute_erased_crc(block_size);
+
+  out_fx[1].op = EFF_COPY;
+  out_fx[1].src = src;
+  out_fx[1].dst = dst;
+  out_fx[1].len = block_size;
+  out_fx[1].post_crc = crc_src;
+
+  *n_out = 2;
+  return BOOT_OK;
+}
+======================================================================
+FILE: toobloader/core/boot_state.c
+======================================================================
+/**
+ * @file boot_state.c
+ * @brief Core State-Machine Logic (K2: TBM1 Fixed-Format Manifest)
+ *
+ * Implements the lifecycle orchestration for the update state machine
+ * bridging M-JOURNAL, M-VERIFY, M-SWAP, and M-ROLLBACK.
+ *
+ * ARCHITECTURAL UPGRADES:
+ * 1. Global CFI (Control Flow Integrity): Ein XOR-Akkumulator beweist
+ * mathematisch, dass JEDER Schritt der State-Machine ausgefÃ¼hrt wurde.
+ * Verhindert PC-Glitches!
+ * 2. Glitch-Resistant Auth-Gating: Nonce-Verifizierung und Handoff-Checks sind
+ *    durch Double-Check Patterns gegen Voltage Faults abgesichert.
+ * 3. TBM1 Fixed-Format Manifest (K2): Replaces zcbor/SUIT grammar parser with
+ *    constant-offset field reads. No recursive structures, no state machine,
+ *    no pointer sandboxing â€” all bounds checked at parse time.
+ * 4. Zero-Allocation Streaming: Verzicht auf BSS-Bloat durch dynamische
+ *    sichere 8-Byte-aligned Partitionierung der bestehenden crypto_arena.
+ * 5. P10 Stack Security: Alle Crypto-Sub-Buffer und C-Structs werden vor dem
+ *    Return via boot_secure_zeroize restlos vernichtet.
+ */
+
+#include "boot_state.h"
+#include "boot_fih.h"
+#include "generated_boot_config.h"
+
+#include "boot_cloud_cmd.h"
+#include "boot_ct_utils.h"
+#include "boot_delta.h"
+#include "boot_diag.h"
+#include "boot_journal.h"
+#include "boot_mailbox.h"
+#include "boot_merkle.h"
+#include "boot_multiimage.h"
+#include "boot_panic.h"
+#include "boot_rollback.h"
+#include "boot_secure_zeroize.h"
+#include "boot_tbm1.h"
+#include "boot_swap.h"
+#include "boot_effect.h"
+#include "boot_types.h"
+#include "boot_verify.h"
+#include <string.h>
+
+/* K6-T2: Events und Aktionen fÃ¼r die Intent-Algebra */
+typedef enum {
+    EV_NONE,
+    EV_CONFIRM_OK,       /* Erfolgreiche OS-BestÃ¤tigung (RTC oder Nonce) */
+    EV_CRASH,            /* Watchdog/Hardfault oder unresolved CONFIRM_COMMIT */
+    EV_CLOUD_UNLOCK,     /* TOOB_CMD_UNLOCK */
+    EV_CLOUD_LOCK,       /* TOOB_CMD_KILLSWITCH */
+    EV_CLOUD_UPDATE      /* TOOB_CMD_FORCE_UPDATE */
+} boot_event_t;
+
+typedef enum {
+    ACT_NONE,
+    ACT_HEAL_COUNTER,    /* Reset failure_counter, append NONE, erase Staging Slot */
+    ACT_APPEND,          /* Schreibe open_txn->intent = next in den WAL */
+    ACT_PANIC_LOCKED,    /* Trigger boot_panic mit BOOT_ERR_DEVICE_LOCKED */
+    ACT_CRASH_ACCUM      /* Failure counter++, update TMR */
+} intent_action_t;
+
+typedef struct {
+    wal_intent_t    cur;
+    boot_event_t    ev;
+    wal_intent_t    next;
+    intent_action_t action;
+} intent_row_t;
+
+/* Transition table mapped according to design spec */
+static const intent_row_t INTENT_TABLE[] = {
+    { WAL_INTENT_DEVICE_LOCKED, EV_CONFIRM_OK,    WAL_INTENT_DEVICE_LOCKED, ACT_PANIC_LOCKED },
+    { WAL_INTENT_DEVICE_LOCKED, EV_CLOUD_UNLOCK,  WAL_INTENT_NONE,          ACT_APPEND       },
+    
+    { WAL_INTENT_CONFIRM_COMMIT,EV_CONFIRM_OK,    WAL_INTENT_NONE,          ACT_HEAL_COUNTER },
+    { WAL_INTENT_CONFIRM_COMMIT,EV_CRASH,         WAL_INTENT_CONFIRM_COMMIT, ACT_CRASH_ACCUM  },
+    
+    { WAL_INTENT_RECOVERY_RESOLVED, EV_CONFIRM_OK,WAL_INTENT_NONE,          ACT_HEAL_COUNTER },
+    { WAL_INTENT_RECOVERY_RESOLVED, EV_CRASH,     WAL_INTENT_RECOVERY_RESOLVED, ACT_CRASH_ACCUM},
+
+    { WAL_INTENT_NONE,          EV_CLOUD_LOCK,    WAL_INTENT_DEVICE_LOCKED, ACT_APPEND       },
+    { WAL_INTENT_NONE,          EV_CLOUD_UPDATE,  WAL_INTENT_UPDATE_PENDING,ACT_APPEND       },
+    { WAL_INTENT_NONE,          EV_CRASH,         WAL_INTENT_NONE,          ACT_CRASH_ACCUM  },
+    { WAL_INTENT_TXN_COMMIT,    EV_CRASH,         WAL_INTENT_TXN_COMMIT,    ACT_CRASH_ACCUM  },
+    { WAL_INTENT_TXN_ROLLBACK_PENDING, EV_CRASH,  WAL_INTENT_TXN_ROLLBACK_PENDING, ACT_CRASH_ACCUM }
+};
+
+/* P10 CFI Token Slots (Randomized per boot via TRNG) */
+#define STATE_CFI_SLOT_INIT   0
+#define STATE_CFI_SLOT_1      1
+#define STATE_CFI_SLOT_1_5    2 /* OS Mailbox Fold-In */
+#define STATE_CFI_SLOT_2      3
+#define STATE_CFI_SLOT_2_5    4 /* Cloud-Command Evaluation */
+#define STATE_CFI_SLOT_2_7    5 /* Lock-State Gate */
+#define STATE_CFI_SLOT_3      6
+#define STATE_CFI_SLOT_4      7
+#define STATE_CFI_SLOT_5      8
+#define STATE_CFI_NUM_TOKENS  9
+
+/* K6-T3: Pipeline Sub-CFI slots */
+#define STATE_CFI_SLOT_P1     9
+#define STATE_CFI_SLOT_P1B    10  /* CRC32 pre-check (v2) */
+#define STATE_CFI_SLOT_P2     11
+#define STATE_CFI_SLOT_P3     12
+#define STATE_CFI_SLOT_P3B    13  /* Hardware compatibility check (v2) */
+#define STATE_CFI_SLOT_P4     14
+#define STATE_CFI_SLOT_P5     15
+#define STATE_CFI_SLOT_P6     16
+#define STATE_CFI_SLOT_P7     17
+#define STATE_CFI_SLOT_P8     18
+
+/* P5: Arena is now passed explicitly through the call graph */
+
+/* ==============================================================================
+ * STATIC HELPERS (Single Responsibility & Glitch Shielded)
+ * ==============================================================================
+ */
+
+
+
+/**
+ * @brief Step 2.5: Evaluates the Cloud-Command Flash Slot.
+ *
+ * Reads CHIP_CLOUD_CMD_SLOT exactly once into the crypto_arena (TOCTOU-safe),
+ * verifies the envelope, and dispatches the command intent into the WAL.
+ * On empty/invalid slot: Skip-Pfad (no side effect, CFI token still applied).
+ */
+static boot_status_t _handle_cloud_cmd(const boot_platform_t *platform,
+                                       wal_entry_payload_t *open_txn,
+                                       boot_target_config_t *target_out,
+                                       boot_cfi_ctx_t *cfi_ctx,
+                                       uint32_t slot,
+                                       uint8_t *arena, size_t arena_len) {
+  (void)arena_len;
+  toob_cloud_cmd_t cmd_intent = TOOB_CMD_NOP;
+
+  boot_status_t eval_stat =
+      boot_cloud_cmd_evaluate_flash(platform, arena, &cmd_intent);
+
+  if (eval_stat != BOOT_OK) {
+    /* Kein gÃ¼ltiger Command im Slot (leerer Slot, Parse-Error, Replay, etc.).
+     * Das ist der Normalfall beim Boot ohne Cloud-Interaktion.
+     * Kein Seiteneffekt. Skip-Pfad. */
+    boot_cfi_step(*cfi_ctx, slot);
+    return BOOT_OK;
+  }
+
+  /* GÃ¼ltiger, kryptografisch verifizierter Command. Dispatch. */
+  boot_status_t dispatch_stat = BOOT_OK;
+
+  switch (cmd_intent) {
+  case TOOB_CMD_KILLSWITCH: {
+    wal_entry_payload_t lock_txn = *open_txn;
+    lock_txn.intent = WAL_INTENT_DEVICE_LOCKED;
+    dispatch_stat = boot_journal_append(platform, &lock_txn);
+    if (dispatch_stat == BOOT_OK)
+      open_txn->intent = WAL_INTENT_DEVICE_LOCKED;
+    break;
+  }
+  case TOOB_CMD_UNLOCK: {
+    wal_entry_payload_t unlock_txn = *open_txn;
+    unlock_txn.intent = WAL_INTENT_NONE;
+    dispatch_stat = boot_journal_append(platform, &unlock_txn);
+    if (dispatch_stat == BOOT_OK)
+      open_txn->intent = WAL_INTENT_NONE;
+    break;
+  }
+  case TOOB_CMD_FORCE_UPDATE: {
+    wal_entry_payload_t update_txn = *open_txn;
+    update_txn.intent = WAL_INTENT_UPDATE_PENDING;
+    dispatch_stat = boot_journal_append(platform, &update_txn);
+    if (dispatch_stat == BOOT_OK)
+      open_txn->intent = WAL_INTENT_UPDATE_PENDING;
+    break;
+  }
+  case TOOB_CMD_REVOKE: {
+    /* Irreversibel: DSLC â†’ 0xFF. GerÃ¤t ist danach physisch tot. */
+    if (!platform->crypto->write_dslc) {
+      dispatch_stat = BOOT_ERR_NOT_SUPPORTED;
+      break;
+    }
+    uint8_t revoke_val = 0xFF;
+    boot_status_t burn_stat = platform->crypto->write_dslc(&revoke_val, 1);
+    if (burn_stat != BOOT_OK) {
+      dispatch_stat = burn_stat;
+      break;
+    }
+    /* eFuse gebrannt. GerÃ¤t ist permanent revoked. dead_halt. */
+    boot_terminal_halt(platform, BOOT_ERR_NOT_SUPPORTED, SITE_STATE_LOCK_FAIL);
+  }
+  case TOOB_CMD_WIPE: {
+    wal_entry_payload_t wipe_txn = *open_txn;
+    wipe_txn.intent = WAL_INTENT_NONE;
+    dispatch_stat = boot_journal_append(platform, &wipe_txn);
+    /* Das OS liest wipe_requested aus dem Handoff und fÃ¼hrt den Factory-Reset
+     * durch */
+    if (dispatch_stat == BOOT_OK && target_out != NULL)
+      target_out->wipe_requested = true;
+    break;
+  }
+  case TOOB_CMD_ROTATE_KEY:
+  case TOOB_CMD_NOP:
+  default:
+    break;
+  }
+
+  if (dispatch_stat != BOOT_OK) {
+    return dispatch_stat;
+  }
+
+  /* Cloud-Command Slot lÃ¶schen (Fire-and-Forget), damit er beim nÃ¤chsten
+   * Boot nicht nochmal evaluiert wird. Fehler hier sind nicht fatal. */
+  if (platform->flash->erase_sector) {
+    (void)platform->flash->erase_sector(CHIP_CLOUD_CMD_SLOT_ABS_ADDR);
+  }
+
+  boot_cfi_step(*cfi_ctx, slot);
+  return BOOT_OK;
+}
+
+static boot_status_t _handle_rollback_flow(const boot_platform_t *platform,
+                                           wal_tmr_payload_t *current_tmr,
+                                           wal_entry_payload_t *open_txn,
+                                           boot_target_config_t *target_out,
+                                           boot_cfi_ctx_t *cfi_ctx,
+                                           uint32_t slot,
+                                           uint8_t *arena, size_t arena_len) {
+  boot_status_t status = BOOT_OK;
+
+  /* P10 Glitch Protection: Evaluierung des Counter-Status */
+  bool has_failures = false;
+  if (current_tmr->boot_failure_counter > 0) {
+    BOOT_SECURE_REQUIRE(current_tmr->boot_failure_counter > 0, {
+      return BOOT_ERR_VERIFY;
+    });
+    has_failures = true;
+  }
+
+  if (has_failures) {
+
+    /* CASE A: Crash happened exactly after TXN_COMMIT. Revert Staging! */
+    if (open_txn->intent == WAL_INTENT_TXN_COMMIT ||
+        open_txn->intent == WAL_INTENT_TXN_ROLLBACK_PENDING) {
+      status = boot_rollback_trigger_revert(platform, arena, arena_len);
+      if (status != BOOT_OK)
+        return status; /* FATAL: Cannot revert Staging image */
+
+      target_out->boot_recovery_os =
+          false; /* We will boot the restored Staging OS instead */
+      open_txn->intent = WAL_INTENT_NONE; /* Old firmware is stable baseline.
+                                             Drop trial constraints. */
+
+      /* Heal the system completely: Set counter to 0 and persist NONE append */
+      current_tmr->boot_failure_counter = 0;
+      status = boot_journal_update_tmr(platform, current_tmr);
+      if (status != BOOT_OK)
+        return status;
+
+      status = boot_journal_append(platform, open_txn);
+      if (status != BOOT_OK)
+        return status;
+
+    } else {
+      /* CASE B: Normal OS run with persistent crashes. Evaluate Backoff or
+       * Recovery OS. */
+      status = boot_rollback_evaluate_os(platform, current_tmr,
+                                         &target_out->boot_recovery_os);
+      if (status != BOOT_OK)
+        return status;
+    }
+  }
+
+  /* Logik-Bombe gefixt: Bei erfolgreicher AusfÃ¼hrung wird der CFI-Token exakt
+   * verrechnet */
+  boot_cfi_step(*cfi_ctx, slot);
+  return BOOT_OK;
+}
+
+/* ==============================================================================
+ * P6 UPDATE PIPELINE â€” Stage-Decomposition of _handle_update_flow
+ *
+ * Jede Stage hat EINE Aufgabe, nimmt update_ctx_t*, gibt boot_status_t.
+ * KEINE Function-Pointer-Tabelle â€” statisch inline verkettete Sequenz.
+ * CFI-Token werden vom Treiber vergeben, nicht von den Stages.
+ * ==============================================================================
+ */
+
+typedef struct {
+  const boot_platform_t *platform;
+  uint8_t *arena;
+  size_t arena_len;
+  wal_entry_payload_t *open_txn;
+
+  /* stage_parse output (TBM1 v2 fixed-format) */
+  const tbm1_header_t *tbm1;     /* Pointer into arena (read-only after parse) */
+  uint32_t tbm1_total_len;       /* == tbm1->total_len */
+  uint32_t chunk_hash_offs[TBM1_MAX_IMAGES]; /* Per-image chunk-hash offsets from tbm1_validate */
+
+  /* stage_check_svn output */
+  uint32_t extracted_svn;
+
+  /* stage_swap output (P7a) */
+  uint32_t extracted_stage1_svn;
+
+  /* stage_route output */
+  bool requires_swap;
+  bool is_delta;
+  uint32_t swap_src_addr;
+  toob_image_header_t staging_header;
+  const tbm1_image_desc_t *primary_image; /* Pointer to images[0] in TBM1 */
+  const uint8_t *chunk_hash_ptr;          /* Pointer into arena */
+  uint32_t chunk_hash_len;
+  uint32_t num_chunks;
+  uint32_t chunk_size;
+} update_ctx_t;
+
+/* --------------------------------------------------------------------------
+ * Stage PARSE: Flash-Read â†’ TBM1 v2 Validation via boot_tbm1.c
+ *
+ * Delegates all structural validation (magic, version, CRC, bounds, regions,
+ * images, chunk-hash partitioning) to tbm1_validate(). This stage only handles
+ * flash I/O and maps reject codes to boot_status_t.
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_parse(update_ctx_t *ctx) {
+#ifdef TOOB_MOCK_TEST
+  ctx->tbm1_total_len = 600;
+  return BOOT_OK;
+#else
+  ctx->platform->wdt->kick();
+  boot_status_t read_stat = ctx->platform->flash->read(
+      ctx->open_txn->offset, ctx->arena, ctx->arena_len);
+  ctx->platform->wdt->kick();
+
+  if (read_stat != BOOT_OK)
+    return read_stat;
+
+  tbm1_reject_t rc = tbm1_validate(ctx->arena, ctx->arena_len, CHIP_STAGING_SLOT_SIZE, ctx->chunk_hash_offs);
+  if (rc != TBM1_OK)
+    return tbm1_reject_to_boot_status(rc);
+
+  ctx->tbm1 = (const tbm1_header_t *)ctx->arena;
+  ctx->tbm1_total_len = ctx->tbm1->total_len;
+  return BOOT_OK;
+#endif
+}
+
+/* --------------------------------------------------------------------------
+ * Stage VERIFY ENVELOPE: Ed25519/PQC Signaturverifikation (Glitch-gehÃ¤rtet)
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_verify_envelope(update_ctx_t *ctx) {
+#ifdef TOOB_MOCK_TEST
+  boot_verify_envelope_t mock_envelope = {
+      .manifest_flash_addr = ctx->open_txn->offset,
+      .manifest_size = 600,
+      .signature_ed25519 = (const uint8_t *)"DUMMYSIG",
+      .key_index = 0,
+#if TOOB_PQC_ENABLED
+      .pqc_hybrid_active = false
+#endif
+  };
+  return boot_verify_manifest_envelope(
+      ctx->platform, &mock_envelope, ctx->arena, ctx->arena_len);
+#else
+  /* Ed25519 signature is located at the very end of the total block */
+  const uint8_t *sig_ptr = ctx->arena + ctx->tbm1_total_len - TBM1_SIG_LEN;
+
+#if TOOB_PQC_ENABLED
+  const tbm1_region_t *pqc_sig = tbm1_find_region(ctx->tbm1, TBM1_REGION_PQC_SIGNATURE);
+  const tbm1_region_t *pqc_key = tbm1_find_region(ctx->tbm1, TBM1_REGION_PQC_PUBKEY);
+#endif
+
+  boot_verify_envelope_t envelope = {
+      .manifest_flash_addr = ctx->open_txn->offset,
+      .manifest_size = tbm1_signed_len(ctx->tbm1),
+      .signature_ed25519 = sig_ptr,
+      .key_index = ctx->tbm1->key_index,
+#if TOOB_PQC_ENABLED
+      .pqc_hybrid_active = (pqc_sig != NULL && pqc_key != NULL),
+      .signature_pqc = (pqc_sig != NULL) ? ctx->arena + pqc_sig->off : NULL,
+      .signature_pqc_len = (pqc_sig != NULL) ? pqc_sig->len : 0,
+      .pubkey_pqc = (pqc_key != NULL) ? ctx->arena + pqc_key->off : NULL,
+      .pubkey_pqc_len = (pqc_key != NULL) ? pqc_key->len : 0,
+#endif
+  };
+
+  boot_status_t verify_status = boot_verify_manifest_envelope(
+      ctx->platform, &envelope, ctx->arena, ctx->arena_len);
+
+  /* CFI Glitch-Guard: Krypto-Resultat doppelt absichern */
+  bool envelope_ok = (verify_status == BOOT_OK);
+  if (!envelope_ok)
+    return BOOT_ERR_VERIFY;
+
+  BOOT_SECURE_REQUIRE(verify_status == BOOT_OK, {
+    boot_terminal_halt(ctx->platform, BOOT_ERR_VERIFY, SITE_STATE_CFI_MISMATCH);
+  });
+
+  return BOOT_OK;
+#endif
+}
+
+/* --------------------------------------------------------------------------
+ * Stage CHECK SVN: Anti-Rollback Verifikation gegen eFuse-Epoch
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_check_svn(update_ctx_t *ctx) {
+  ctx->extracted_svn = ctx->tbm1->svn;
+  return boot_rollback_verify_svn(ctx->platform, ctx->extracted_svn, ROLLBACK_TARGET_APP);
+}
+
+/* stage_check_compat removed â€” HW compatibility is now part of
+ * tbm1_validate_images() in boot_tbm1.c (compile-time device identity). */
+
+/* --------------------------------------------------------------------------
+ * Stage CHECK BINDING: Device-ID DSLC Match + EU-CRA SBOM Extraction
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_check_binding(update_ctx_t *ctx) {
+  /* Device-ID Binding (only if flag is set and binding region exists) */
+  if (ctx->tbm1->flags_info & TBM1_INFO_DEVICE_BIND) {
+    const tbm1_region_t *bind_reg = tbm1_find_region(ctx->tbm1, TBM1_REGION_DEVICE_BIND);
+    if (!bind_reg || bind_reg->len != 32)
+      return BOOT_ERR_INVALID_ARG;
+
+    uint8_t dslc_buf[32] __attribute__((aligned(8)));
+    size_t dslc_len = 32;
+    if (!ctx->platform->crypto->read_dslc ||
+        ctx->platform->crypto->read_dslc(dslc_buf, &dslc_len) != BOOT_OK)
+      return BOOT_ERR_NOT_SUPPORTED;
+
+    const uint8_t *bind_ptr = ctx->arena + bind_reg->off;
+    if (constant_time_memcmp_glitch_safe(bind_ptr, dslc_buf, 32) != BOOT_OK)
+      return BOOT_ERR_VERIFY;
+  }
+
+  /* EU-CRA SBOM Extraction (in .noinit Diagnostics Areal) */
+  boot_diag_set_security_meta(
+      ctx->extracted_svn,
+      ctx->tbm1->key_index,
+      ctx->tbm1->sbom_digest,
+      ctx->tbm1->build_number,
+      ctx->tbm1->fw_ver_major,
+      ctx->tbm1->fw_ver_minor,
+      ctx->tbm1->fw_ver_patch);
+
+  return BOOT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage ROUTE: Staging Header â†’ Raw/Delta Branching â†’ Chunk-Hash Extraction
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_route(update_ctx_t *ctx) {
+  ctx->requires_swap = true;
+  ctx->swap_src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+  boot_secure_zeroize(&ctx->staging_header, sizeof(ctx->staging_header));
+
+  /* Double Check Gating: Redundanter Verify-Guard */
+  boot_status_t head_status = ctx->platform->flash->read(
+      CHIP_STAGING_SLOT_ABS_ADDR, (uint8_t *)&ctx->staging_header,
+      sizeof(toob_image_header_t));
+
+  if (head_status != BOOT_OK ||
+      ctx->staging_header.magic != TOOB_MAGIC_HEADER)
+    return BOOT_ERR_INVALID_STATE;
+
+  if (ctx->staging_header.image_size > CHIP_APP_SLOT_SIZE)
+    return BOOT_ERR_FLASH_BOUNDS;
+
+#ifdef TOOB_MOCK_TEST
+  return BOOT_OK;
+#endif
+
+  if (ctx->staging_header.image_size <= sizeof(toob_image_header_t))
+    return BOOT_ERR_INVALID_ARG;
+
+  ctx->primary_image = &ctx->tbm1->images[0];
+
+  /* Chunk-hash pointer from pre-computed tbm1_validate offsets */
+  ctx->chunk_hash_ptr = ctx->arena + ctx->chunk_hash_offs[0];
+  const tbm1_region_t *hash_reg = tbm1_find_region(ctx->tbm1, TBM1_REGION_CHUNK_HASHES);
+  ctx->chunk_hash_len = hash_reg ? hash_reg->len : 0;
+
+  /* Primary image fields */
+  ctx->num_chunks = ctx->primary_image->num_chunks;
+  ctx->chunk_size = ctx->primary_image->chunk_size;
+  ctx->is_delta = (ctx->primary_image->delta_alg != TBM1_DELTA_NONE);
+
+  return BOOT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage APPLY DELTA: Arena-Slicing + SDVM + Merkle-Verify des Outputs
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_apply_delta(update_ctx_t *ctx) {
+  /* Delta SVN Gating: verify installed base SVN matches expected delta base */
+  if (ctx->primary_image->base_svn > 0) {
+    boot_status_t base_svn_st = boot_rollback_verify_svn(
+        ctx->platform, ctx->primary_image->base_svn, ROLLBACK_TARGET_APP);
+    if (base_svn_st != BOOT_OK) {
+      return BOOT_ERR_INVALID_STATE; /* Base version mismatch */
+    }
+  }
+
+  size_t hash_slice_size = (ctx->chunk_hash_len + 7) & ~((size_t)7);
+  if (hash_slice_size >= ctx->arena_len)
+    return BOOT_ERR_INVALID_ARG;
+
+  uint8_t *hash_arena = ctx->arena;
+  uint8_t *delta_arena = ctx->arena + hash_slice_size;
+  size_t delta_arena_len = ctx->arena_len - hash_slice_size;
+
+  memcpy(hash_arena, ctx->chunk_hash_ptr, ctx->chunk_hash_len);
+
+  boot_status_t delta_stat = boot_delta_apply(
+      ctx->platform, ctx->open_txn->offset + ctx->tbm1_total_len,
+      CHIP_STAGING_SLOT_ABS_ADDR + CHIP_APP_SLOT_SIZE -
+          (ctx->open_txn->offset + ctx->tbm1_total_len),
+      CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,
+      CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,
+      ctx->open_txn, delta_arena, delta_arena_len);
+
+  if (delta_stat != BOOT_OK) {
+    boot_secure_zeroize(hash_arena, hash_slice_size);
+    return delta_stat;
+  }
+
+  boot_status_t hash_stat = boot_merkle_verify_stream(
+      ctx->platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
+      ctx->primary_image->installed_size,
+      ctx->primary_image->chunk_size,
+      hash_arena, ctx->chunk_hash_len, ctx->num_chunks,
+      delta_arena, delta_arena_len);
+
+  boot_secure_zeroize(hash_arena, hash_slice_size);
+
+  if (hash_stat != BOOT_OK)
+    return BOOT_ERR_VERIFY;
+
+  /* Delta erfolgreich: Swap-Quelle ist Scratch, Image-Size ist ZielgrÃ¶ÃŸe */
+  ctx->staging_header.image_size = ctx->primary_image->installed_size;
+  ctx->swap_src_addr = CHIP_SCRATCH_SLOT_ABS_ADDR;
+
+  return BOOT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage APPLY RAW: Merkle-Verify des Staging-Slots
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_apply_raw(update_ctx_t *ctx) {
+  ctx->swap_src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+  size_t aligned_offset =
+      (ctx->tbm1_total_len + 7) & ~((size_t)7);
+
+  if (aligned_offset >= ctx->arena_len)
+    return BOOT_ERR_INVALID_ARG;
+
+  uint8_t *scratch = ctx->arena + aligned_offset;
+  size_t scratch_size = ctx->arena_len - aligned_offset;
+
+  if (scratch_size < ctx->chunk_size)
+    return BOOT_ERR_INVALID_ARG;
+
+  boot_secure_zeroize(scratch, scratch_size);
+  boot_status_t hash_stat = boot_merkle_verify_stream(
+      ctx->platform, CHIP_STAGING_SLOT_ABS_ADDR,
+      ctx->staging_header.image_size, ctx->chunk_size,
+      ctx->chunk_hash_ptr, ctx->chunk_hash_len,
+      ctx->num_chunks, scratch, scratch_size);
+  boot_secure_zeroize(scratch, scratch_size);
+
+  return hash_stat;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage SWAP: boot_swap_apply + Multi-Image Deployment
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_swap(update_ctx_t *ctx) {
+  boot_status_t swap_status = BOOT_OK;
+
+  /* 1. Parse components from TBM1 image descriptors */
+  boot_component_t components[3];
+  uint32_t comp_count = 0;
+  uint32_t current_staging_offset = ctx->staging_header.image_size;
+
+  if (ctx->tbm1->image_count > 1) {
+    for (uint8_t i = 1; i < ctx->tbm1->image_count && i < TBM1_MAX_IMAGES; i++) {
+      const tbm1_image_desc_t *sub_img = &ctx->tbm1->images[i];
+      boot_secure_zeroize(&components[comp_count], sizeof(boot_component_t));
+      components[comp_count].component_id = (uint32_t)i;
+      components[comp_count].image_size = sub_img->installed_size;
+      components[comp_count].staging_offset = current_staging_offset;
+      current_staging_offset += sub_img->stored_size;
+
+      if (sub_img->target_slot == TBM1_SLOT_NETCORE) {
+        components[comp_count].target_addr = CHIP_NETCORE_SLOT_ABS_ADDR;
+      } else if (sub_img->target_slot == TBM1_SLOT_RECOVERY) {
+        components[comp_count].target_addr = CHIP_RECOVERY_OS_ABS_ADDR;
+      } else if (sub_img->target_slot == TBM1_SLOT_STAGE1) {
+        /* P7a: Stage-1 Anti-Rollback Gate â€” enforce before any flash write */
+        if (ctx->tbm1->stage1_svn == 0)
+          return BOOT_ERR_INVALID_ARG; /* Stage-1 manifest without stage1_svn */
+
+        boot_status_t svn_st = boot_rollback_verify_svn(
+            ctx->platform, ctx->tbm1->stage1_svn, ROLLBACK_TARGET_STAGE1);
+        if (svn_st != BOOT_OK) return svn_st;
+        ctx->extracted_stage1_svn = ctx->tbm1->stage1_svn;
+
+        wal_tmr_payload_t temp_tmr;
+        boot_secure_zeroize(&temp_tmr, sizeof(temp_tmr));
+        if (boot_journal_get_tmr(ctx->platform, &temp_tmr) == BOOT_OK) {
+          components[comp_count].target_addr =
+              (temp_tmr.active_stage1_bank == 0) ? CHIP_STAGE1B_ABS_ADDR
+                                                 : CHIP_STAGE1A_ABS_ADDR;
+        } else {
+          return BOOT_ERR_INVALID_ARG;
+        }
+      } else {
+        return BOOT_ERR_INVALID_ARG;
+      }
+
+      comp_count++;
+    }
+  }
+
+  /* 2. Run the energy and wear admission verification */
+  wal_tmr_payload_t current_tmr;
+  boot_secure_zeroize(&current_tmr, sizeof(current_tmr));
+  if (boot_journal_get_tmr(ctx->platform, &current_tmr) != BOOT_OK) {
+    return BOOT_ERR_STATE;
+  }
+
+  boot_status_t admit_status = boot_effect_admit_or_defer(
+      ctx->platform, &current_tmr, ctx->staging_header.image_size,
+      components, comp_count, ctx->requires_swap);
+  if (admit_status != BOOT_OK) {
+    return admit_status; /* Defer/Counter Exhausted */
+  }
+
+  /* 3. Perform the actual physical swap if admitted */
+  if (ctx->requires_swap) {
+    swap_status = boot_swap_apply(
+        ctx->platform, ctx->swap_src_addr, CHIP_APP_SLOT_ABS_ADDR,
+        ctx->staging_header.image_size, BOOT_DEST_SLOT_APP, ctx->open_txn,
+        ctx->arena, ctx->arena_len);
+  }
+
+  /* 4. Perform the actual physical multi-image write if admitted */
+  if (swap_status == BOOT_OK && comp_count > 0) {
+    boot_allowed_region_t whitelist[4] = {
+        {CHIP_NETCORE_SLOT_ABS_ADDR, CHIP_NETCORE_SLOT_SIZE},
+        {CHIP_RECOVERY_OS_ABS_ADDR, CHIP_RECOVERY_OS_SIZE},
+        {CHIP_STAGE1A_ABS_ADDR, CHIP_STAGE1A_SIZE},
+        {CHIP_STAGE1B_ABS_ADDR, CHIP_STAGE1B_SIZE}};
+    swap_status = boot_multiimage_apply(
+        ctx->platform, CHIP_STAGING_SLOT_ABS_ADDR, components, comp_count,
+        whitelist, 4, ctx->open_txn, ctx->arena, ctx->arena_len);
+  }
+
+  return swap_status;
+}
+
+/* --------------------------------------------------------------------------
+ * Stage COMMIT: WAL TXN_COMMIT + SVN-Ãœbergabe an den TMR
+ * -------------------------------------------------------------------------- */
+static boot_status_t stage_commit(update_ctx_t *ctx) {
+  wal_entry_payload_t commit_txn = *ctx->open_txn;
+  commit_txn.intent = WAL_INTENT_TXN_COMMIT;
+
+  boot_status_t status = boot_journal_append(ctx->platform, &commit_txn);
+  if (status != BOOT_OK)
+    return status;
+
+  ctx->open_txn->intent = WAL_INTENT_TXN_COMMIT;
+  return BOOT_OK;
+}
+
+static boot_status_t stage_apply_unified(update_ctx_t *ctx) {
+  if (ctx->is_delta) {
+    return stage_apply_delta(ctx);
+  } else {
+    return stage_apply_raw(ctx);
+  }
+}
+
+typedef boot_status_t (*stage_fn_t)(update_ctx_t *ctx);
+
+typedef struct {
+  stage_fn_t fn;
+  uint8_t    cfi_slot;
+  bool       skippable;
+} stage_row_t;
+
+/* K6-T3: Pipeline-Stages als statische Tabelle (R-Block v2: CRC + HW-compat
+ * sind jetzt Teil von tbm1_validate in stage_parse â€” P1B/P3B entfallen) */
+static const stage_row_t PIPELINE[] = {
+  { stage_parse,            STATE_CFI_SLOT_P1,  false },
+  { stage_verify_envelope,  STATE_CFI_SLOT_P2,  false },
+  { stage_check_svn,        STATE_CFI_SLOT_P3,  false },
+  { stage_check_binding,    STATE_CFI_SLOT_P4,  true  },
+  { stage_route,            STATE_CFI_SLOT_P5,  false },
+  { stage_apply_unified,    STATE_CFI_SLOT_P6,  false },
+  { stage_swap,             STATE_CFI_SLOT_P7,  false },
+  { stage_commit,           STATE_CFI_SLOT_P8,  false }
+};
+
+#define PIPELINE_SIZE (sizeof(PIPELINE) / sizeof(PIPELINE[0]))
+
+static boot_status_t run_pipeline(update_ctx_t *ctx, boot_cfi_ctx_t *cfi) {
+  /* CFI Sollmenge dynamisch initialisieren */
+  for (size_t i = 0; i < PIPELINE_SIZE; i++) {
+    boot_cfi_add_expected(*cfi, PIPELINE[i].cfi_slot);
+  }
+
+  for (size_t i = 0; i < PIPELINE_SIZE; i++) {
+    boot_status_t status = PIPELINE[i].fn(ctx);
+    if (status != BOOT_OK) {
+      if (PIPELINE[i].skippable) {
+        boot_cfi_step(*cfi, PIPELINE[i].cfi_slot);
+        continue;
+      }
+      return status;
+    }
+    boot_cfi_step(*cfi, PIPELINE[i].cfi_slot);
+  }
+  return BOOT_OK;
+}
+
+/* --------------------------------------------------------------------------
+ * Error Handler: Smart Error Topology (Reject vs. Propagate)
+ * -------------------------------------------------------------------------- */
+typedef struct {
+  boot_status_t in_error;     /* Eingangsfehler */
+  boot_status_t out_status;   /* RÃ¼ckgabewert des Flows */
+  wal_intent_t  reject_to;    /* Folge-Intent nach Reject */
+} err_row_t;
+
+/* K6-T1: Fehlertopologie als Tabelle (erweitert fÃ¼r K2 v2 Fehler-Taxonomie) */
+static const err_row_t ERR_TABLE[] = {
+  { BOOT_ERR_VERIFY,            BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_DOWNGRADE,         BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_INVALID_ARG,       BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_FLASH_BOUNDS,      BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_INVALID_STATE,     BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_NOT_FOUND,         BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_MANIFEST_CORRUPT,  BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_MANIFEST_VERSION,  BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_MANIFEST_PRODUCT,  BOOT_OK, WAL_INTENT_NONE },
+  { BOOT_ERR_DEFER,             BOOT_OK, WAL_INTENT_SLEEP_BACKOFF }
+};
+
+static boot_status_t _handle_update_result(
+    const boot_platform_t *platform, wal_entry_payload_t *open_txn,
+    update_ctx_t *ctx, boot_status_t pipeline_status,
+    boot_cfi_ctx_t *cfi_ctx, uint32_t slot) {
+
+  boot_status_t flow_final_status = pipeline_status;
+
+  if (pipeline_status == BOOT_OK) {
+    flow_final_status = BOOT_OK;
+  } else {
+    /* Suche den Fehler in der ERR_TABLE */
+    bool found = false;
+    for (size_t i = 0; i < sizeof(ERR_TABLE)/sizeof(ERR_TABLE[0]); i++) {
+      if (ERR_TABLE[i].in_error == pipeline_status) {
+        /* Kontrollierte Ablehnung: Update verwerfen, kein Bootloop */
+        wal_entry_payload_t reject_txn = *open_txn;
+        reject_txn.intent = ERR_TABLE[i].reject_to;
+
+        boot_status_t rej_stat = boot_journal_append(platform, &reject_txn);
+        if (rej_stat != BOOT_OK) {
+          flow_final_status = rej_stat;
+        } else {
+          open_txn->intent = ERR_TABLE[i].reject_to;
+          flow_final_status = ERR_TABLE[i].out_status;
+        }
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      /* Hardware-Fehler -> Propagieren fÃ¼r Panic */
+      flow_final_status = pipeline_status;
+    }
+  }
+
+#ifndef TOOB_MOCK_TEST
+  /* K2: TBM1 lives in the arena â€” zeroize covers all sensitive manifest data */
+  if (ctx->tbm1_total_len > 0 && ctx->tbm1_total_len <= ctx->arena_len) {
+    boot_secure_zeroize(ctx->arena, ctx->tbm1_total_len);
+  }
+  ctx->tbm1 = NULL;
+#endif
+
+  if (flow_final_status == BOOT_OK)
+    boot_cfi_step(*cfi_ctx, slot);
+
+  return flow_final_status;
+}
+
+/* --------------------------------------------------------------------------
+ * Pipeline Driver: Flache Sequenz, ein Cleanup-Pfad
+ * -------------------------------------------------------------------------- */
+static boot_status_t _handle_update_flow(const boot_platform_t *platform,
+                                         wal_entry_payload_t *open_txn,
+                                         uint32_t *extracted_svn,
+                                         uint32_t *extracted_stage1_svn,
+                                         boot_cfi_ctx_t *cfi_ctx,
+                                         uint32_t slot,
+                                         uint8_t *arena, size_t arena_len) {
+  if (open_txn->intent != WAL_INTENT_UPDATE_PENDING) {
+    boot_cfi_step(*cfi_ctx, slot);
+    return BOOT_OK;
+  }
+
+  update_ctx_t ctx;
+  boot_secure_zeroize(&ctx, sizeof(ctx));
+  ctx.platform = platform;
+  ctx.arena = arena;
+  ctx.arena_len = arena_len;
+  ctx.open_txn = open_txn;
+  ctx.requires_swap = true;
+
+  boot_cfi_ctx_t pipeline_cfi_ctx;
+  boot_cfi_init(pipeline_cfi_ctx, 0x5a5a5a5a);
+
+  boot_status_t status = run_pipeline(&ctx, &pipeline_cfi_ctx);
+
+  if (status == BOOT_OK) {
+    boot_cfi_require(pipeline_cfi_ctx, {
+      status = BOOT_ERR_INVALID_STATE; /* CFI Failure - Attack Trapped! */
+    });
+  }
+
+  if (status == BOOT_OK) {
+    if (extracted_svn != NULL) {
+      *extracted_svn = ctx.extracted_svn;
+    }
+    if (extracted_stage1_svn != NULL) {
+      *extracted_stage1_svn = ctx.extracted_stage1_svn;
+    }
+  }
+
+  return _handle_update_result(platform, open_txn, &ctx, status, cfi_ctx, slot);
+}
+
+static boot_status_t evaluate_transition(
+    const boot_platform_t *platform,
+    wal_entry_payload_t *open_txn,
+    wal_tmr_payload_t *current_tmr,
+    boot_event_t event,
+    boot_target_config_t *target_cfg,
+    uint8_t *arena,
+    size_t arena_len) {
+
+  (void)target_cfg;
+  const intent_row_t *match = NULL;
+  for (size_t i = 0; i < sizeof(INTENT_TABLE)/sizeof(INTENT_TABLE[0]); i++) {
+    if (INTENT_TABLE[i].cur == open_txn->intent && INTENT_TABLE[i].ev == event) {
+      match = &INTENT_TABLE[i];
+      break;
+    }
+  }
+
+  if (!match) {
+    return BOOT_OK; /* No matching transition defined: keep current state, no-op */
+  }
+
+  boot_status_t status = BOOT_OK;
+  switch (match->action) {
+    case ACT_NONE:
+      break;
+    case ACT_HEAL_COUNTER: {
+      if (current_tmr->boot_failure_counter > 0) {
+        current_tmr->boot_failure_counter = 0;
+        status = boot_journal_update_tmr(platform, current_tmr);
+        if (status != BOOT_OK) return status;
+      }
+      open_txn->intent = match->next;
+      status = boot_journal_append(platform, open_txn);
+      if (status != BOOT_OK) return status;
+
+      /* Datenhygiene: Erase des Staging-Slots */
+      (void)boot_swap_erase_safe(platform, CHIP_STAGING_SLOT_ABS_ADDR,
+                                 CHIP_STAGING_SLOT_SIZE, arena, arena_len);
+      break;
+    }
+    case ACT_APPEND: {
+      wal_entry_payload_t next_txn = *open_txn;
+      next_txn.intent = match->next;
+      status = boot_journal_append(platform, &next_txn);
+      if (status == BOOT_OK) {
+        open_txn->intent = match->next;
+      }
+      break;
+    }
+    case ACT_PANIC_LOCKED: {
+      boot_panic(platform, BOOT_ERR_DEVICE_LOCKED);
+      return BOOT_ERR_DEVICE_LOCKED;
+    }
+    case ACT_CRASH_ACCUM: {
+      current_tmr->boot_failure_counter++;
+      status = boot_journal_update_tmr(platform, current_tmr);
+      break;
+    }
+  }
+  return status;
+}
+
+/* ==============================================================================
+ * MAIN BOOT STATE MACHINE (CFI-ORCHESTRATOR)
+ * ==============================================================================
+ */
+
+boot_status_t boot_state_run(const boot_platform_t *platform,
+                             boot_target_config_t *target_out,
+                             const uint32_t seal_key[4],
+                             uint8_t *arena, size_t arena_len) {
+  if (!arena || arena_len < 512)
+    return BOOT_ERR_INVALID_ARG;
+  /* P10 Pointer-Guard (Zero-Trust HAL Assumption) */
+  if (!platform || !platform->clock || !platform->flash || !platform->crypto ||
+      !platform->wdt || !target_out || !seal_key) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  if (!platform->clock->get_reset_reason || !platform->flash->read ||
+      !platform->crypto->random || !platform->wdt->kick) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  /* Initialize Output Struct entirely to prevent uninitialized memory attacks
+   */
+  boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+
+  /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
+  uint32_t state_cfi_seed = 0;
+  boot_random_safe(platform, (uint8_t *)&state_cfi_seed, sizeof(state_cfi_seed));
+  boot_cfi_ctx_t state_cfi_ctx;
+  boot_cfi_init(state_cfi_ctx, state_cfi_seed);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_1);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_1_5);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2_5);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_2_7);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_3);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_4);
+  boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_5);
+
+  wal_entry_payload_t open_txn;
+  wal_tmr_payload_t current_tmr;
+  boot_secure_zeroize(&open_txn, sizeof(open_txn));
+  boot_secure_zeroize(&current_tmr, sizeof(current_tmr));
+
+  toob_image_header_t app_header;
+  boot_secure_zeroize(&app_header, sizeof(app_header));
+
+  boot_status_t core_status = BOOT_OK;
+
+  /*
+   * ==============================================================================
+   * STEP 1 - Journal Initialization, TMR State Retrieval & WAL Reconstruction
+   * ==============================================================================
+   */
+  core_status = boot_journal_init(platform);
+  if (core_status != BOOT_OK)
+    goto state_cleanup;
+
+  /* Consume OS Mailbox requests and append folded intents to WAL before reconstruction */
+  core_status = boot_mailbox_consume(platform);
+  if (core_status != BOOT_OK)
+    goto state_cleanup;
+
+  core_status = boot_journal_get_tmr(platform, &current_tmr);
+  if (core_status != BOOT_OK)
+    goto state_cleanup;
+
+  uint32_t active_net_accum = 0;
+  uint32_t resume_offset = 0;
+  core_status = boot_journal_reconstruct_txn(platform, &open_txn,
+                                             &active_net_accum, &resume_offset);
+
+  if (core_status != BOOT_OK && core_status != BOOT_ERR_STATE) {
+    goto state_cleanup;
+  }
+
+  if (core_status == BOOT_ERR_STATE) {
+    open_txn.intent = WAL_INTENT_NONE;
+    core_status = BOOT_OK; /* Normalize clean state */
+  }
+
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_1); /* Proof Step 1 */
+  platform->wdt->kick();
+
+  /*
+   * ==============================================================================
+   * STEP 2 - Clean-Up / Confirmation Check (Auth Protected)
+   * ==============================================================================
+   */
+  uint64_t combined_nonce = ((uint64_t)current_tmr.active_nonce_hi << 32) |
+                            current_tmr.active_nonce_lo;
+  bool rtc_confirmed = false;
+
+  if (platform->confirm && platform->confirm->check_ok) {
+    rtc_confirmed = platform->confirm->check_ok(combined_nonce);
+  }
+
+  /* Sticky Lock: DEVICE_LOCKED Ã¼berspringt den Confirm-Check komplett.
+   * Ein gelocktes GerÃ¤t darf seinen Lock-Intent niemals durch eine normale
+   * OS-Confirmation aufheben. Nur TOOB_CMD_UNLOCK (Step 2.5) kann das. */
+  if (open_txn.intent != WAL_INTENT_DEVICE_LOCKED &&
+      (open_txn.intent == WAL_INTENT_CONFIRM_COMMIT ||
+       open_txn.intent == WAL_INTENT_RECOVERY_RESOLVED || rtc_confirmed)) {
+
+    /* P10 Security: Glitch-Resistente Nonce-Autorisation */
+    bool intent_is_confirm = (open_txn.intent == WAL_INTENT_CONFIRM_COMMIT);
+    bool intent_is_recovery = (open_txn.intent == WAL_INTENT_RECOVERY_RESOLVED);
+
+    /* P7b: WAL-Intent ist die Autorisierung, nicht der Reset-Reason.
+     * RECOVERY_RESOLVED wird nur durch das Recovery-OS selbst in den WAL
+     * geschrieben â€” das Vorhandensein des Intents beweist, dass Recovery lief. */
+    bool auth_ok = rtc_confirmed ||
+                   (intent_is_confirm && (open_txn.expected_nonce ^ combined_nonce) == 0) ||
+                   intent_is_recovery;
+
+    volatile uint32_t auth_verdict = BOOT_OK;
+    BOOT_SECURE_REQUIRE(auth_ok, {
+      auth_verdict = BOOT_ERR_VERIFY;
+    });
+
+    if (auth_verdict != BOOT_OK) {
+      /* MALICIOUS OR CORRUPT AUTHORIZATION! Discard silently. */
+      open_txn.intent = WAL_INTENT_NONE;
+    } else {
+      if (rtc_confirmed && open_txn.intent == WAL_INTENT_NONE) {
+        open_txn.intent = WAL_INTENT_CONFIRM_COMMIT;
+      }
+      core_status = evaluate_transition(platform, &open_txn, &current_tmr, EV_CONFIRM_OK, target_out, arena, arena_len);
+      if (core_status != BOOT_OK)
+        goto state_cleanup;
+    }
+  }
+
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_2); /* Proof Step 2 */
+
+  /*
+   * ==============================================================================
+   * STEP 2.5 - Cloud-Command Evaluation (Phase 6)
+   * ==============================================================================
+   * Evaluiert den CHIP_CLOUD_CMD_SLOT. Muss VOR dem Lock-Gate (Step 2.7)
+   * laufen, damit ein TOOB_CMD_UNLOCK den Lock aufheben kann.
+   */
+  core_status = _handle_cloud_cmd(platform, &open_txn, target_out, &state_cfi_ctx,
+                                   STATE_CFI_SLOT_2_5, arena, arena_len);
+  if (core_status != BOOT_OK)
+    goto state_cleanup;
+
+  platform->wdt->kick();
+
+  /*
+   * ==============================================================================
+   * STEP 2.7 - Lock-State Gate (Phase 6)
+   * ==============================================================================
+   * Wenn das GerÃ¤t im Soft-Lock (WAL_INTENT_DEVICE_LOCKED) ist, darf die
+   * State-Machine NICHT weiterlaufen. Nur boot_panic mit BOOT_ERR_DEVICE_LOCKED
+   * ist erlaubt. Dort wartet Block 3A auf ein UART-Unlock-Envelope.
+   */
+  BOOT_SECURE_REQUIRE(open_txn.intent != WAL_INTENT_DEVICE_LOCKED, {
+    boot_panic(platform, BOOT_ERR_DEVICE_LOCKED);
+    return BOOT_ERR_DEVICE_LOCKED;
+  });
+
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_2_7); /* Proof: Device is NOT locked */
+
+  /*
+   * ==============================================================================
+   * STEP 3 - Failure Counter & Recovery Evaluation (M-ROLLBACK)
+   * ==============================================================================
+   */
+  reset_reason_t rst_reason = platform->clock->get_reset_reason();
+
+  /* P7b: WAL-Primary Crash Detection.
+   * Ein un-aufgelÃ¶ster CONFIRM_COMMIT ist das stÃ¤rkste Crash-Signal:
+   * Das OS hatte die Chance zu confirmen, hat aber nicht.
+   * Reset-Reason korroboriert nur â€” Brownout ist kein Crash-Signal mehr,
+   * da ein leerer Akku nach Monaten kein App-Bug ist. */
+  bool wal_indicates_crash = (open_txn.intent == WAL_INTENT_CONFIRM_COMMIT);
+  bool rst_indicates_crash = (rst_reason == RESET_REASON_WATCHDOG ||
+                              rst_reason == RESET_REASON_HARD_FAULT);
+
+  bool is_app_crash = wal_indicates_crash ||
+                      (rst_indicates_crash &&
+                       open_txn.intent != WAL_INTENT_UPDATE_PENDING &&
+                       open_txn.intent != WAL_INTENT_TXN_BEGIN);
+
+  if (is_app_crash) {
+    core_status = evaluate_transition(platform, &open_txn, &current_tmr, EV_CRASH, target_out, arena, arena_len);
+    if (core_status != BOOT_OK)
+      goto state_cleanup;
+  }
+
+  core_status = _handle_rollback_flow(platform, &current_tmr, &open_txn,
+                                      target_out, &state_cfi_ctx,
+                                      STATE_CFI_SLOT_3, arena, arena_len);
+  if (core_status != BOOT_OK)
+    goto state_cleanup;
+
+  platform->wdt->kick();
+
+  /*
+   * ==============================================================================
+   * STEP 4 - Update Pipeline (STAGING -> TESTING -> SWAP)
+   * ==============================================================================
+   */
+  uint32_t extracted_svn = 0;
+  uint32_t extracted_stage1_svn = 0;
+
+  core_status =
+      _handle_update_flow(platform, &open_txn, &extracted_svn,
+                          &extracted_stage1_svn, &state_cfi_ctx,
+                          STATE_CFI_SLOT_4, arena, arena_len);
+  if (core_status != BOOT_OK)
+    goto state_cleanup;
+
+  if (extracted_svn > current_tmr.app_svn) {
+    current_tmr.app_svn = extracted_svn;
+  }
+  /* P7a: Persist Stage-1 SVN (last-confirmed) to TMR */
+  if (extracted_stage1_svn > current_tmr.stage1_svn) {
+    current_tmr.stage1_svn = extracted_stage1_svn;
+  }
+
+  /*
+   * ==============================================================================
+   * STEP 5 - Handoff Preparation / Nonce Registration
+   * ==============================================================================
+   */
+
+  uint32_t slot_addr = target_out->boot_recovery_os ? CHIP_RECOVERY_OS_ABS_ADDR
+                                                    : CHIP_APP_SLOT_ABS_ADDR;
+
+  core_status = platform->flash->read(slot_addr, (uint8_t *)&app_header,
+                                      sizeof(toob_image_header_t));
+  if (core_status != BOOT_OK)
+    goto state_cleanup;
+
+  /* Glitch-Proof Magic Header Boundary */
+  BOOT_SECURE_REQUIRE(app_header.magic == TOOB_MAGIC_HEADER, {
+    core_status = BOOT_ERR_NOT_FOUND;
+    goto state_cleanup;
+  });
+
+  target_out->proof.image_addr = slot_addr;
+  target_out->proof.image_size = app_header.image_size;
+  target_out->proof.entry_point = app_header.entry_point;
+  target_out->proof.svn = current_tmr.stage1_svn;
+  boot_proof_seal(&target_out->proof, seal_key);
+
+  /* Glitch-Shielded Evaluation for Nonce Generation */
+  bool requires_confirmation = false;
+  if (open_txn.intent == WAL_INTENT_TXN_COMMIT) {
+    BOOT_SECURE_REQUIRE(open_txn.intent == WAL_INTENT_TXN_COMMIT, {
+      core_status = BOOT_ERR_VERIFY;
+      goto state_cleanup;
+    });
+    requires_confirmation = true;
+  }
+  target_out->is_tentative_boot = requires_confirmation;
+
+  platform->wdt->kick();
+
+  if (requires_confirmation) {
+    core_status = boot_random_safe(
+        platform, (uint8_t *)&target_out->generated_nonce, sizeof(uint64_t));
+    if (core_status != BOOT_OK)
+      goto state_cleanup;
+
+    current_tmr.active_nonce_lo =
+        (uint32_t)(target_out->generated_nonce & 0xFFFFFFFF);
+    current_tmr.active_nonce_hi = (uint32_t)(target_out->generated_nonce >> 32);
+    core_status = boot_journal_update_tmr(platform, &current_tmr);
+    if (core_status != BOOT_OK)
+      goto state_cleanup;
+
+    /* Stateful Slide Abandonment Fix */
+    if (open_txn.intent != WAL_INTENT_NONE) {
+      core_status = boot_journal_append(platform, &open_txn);
+      if (core_status != BOOT_OK)
+        goto state_cleanup;
+    }
+  } else {
+    target_out->generated_nonce = 0;
+  }
+
+  target_out->net_search_accum_ms = active_net_accum;
+  target_out->resume_offset = resume_offset;
+  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_5);
+
+state_cleanup:
+  /* ==============================================================================
+   * FINAL GLITCH-DEFENSE GATE (CFI VALIDATION)
+   * ==============================================================================
+   * Nur wenn der Status bisher legitimerweise OK war, prÃ¼fen wir, ob die
+   * Pipeline physisch lÃ¼ckenlos bewiesen wurde! Ist sie das nicht, liegt ein
+   * Fault-Injection Angriff (PC-Glitch) vor. Hardware-Fehler aus frÃ¼heren
+   * Schritten dÃ¼rfen durch diesen Check nicht mit BOOT_ERR_INVALID_STATE
+   * Ã¼berschrieben werden!
+   */
+  if (core_status == BOOT_OK) {
+    boot_cfi_require(state_cfi_ctx, {
+      core_status = BOOT_ERR_INVALID_STATE; /* CFI Failure - Attack Trapped! */
+    });
+  }
+
+  /* Secure Fallback: Nulle den Target Output bei Fehlern, damit niemand den PC
+   * verbiegt! */
+  if (core_status != BOOT_OK) {
+    boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+  }
+
+  /* P10 Single-Exit: Vernichte kritische Runtime-Secrets (TMR/WAL-Payloads) vom
+   * C-Stack */
+  boot_secure_zeroize(&open_txn, sizeof(open_txn));
+  boot_secure_zeroize(&current_tmr, sizeof(current_tmr));
+  boot_secure_zeroize(&app_header, sizeof(app_header));
+
+  return core_status;
+}
+======================================================================
+FILE: toobloader/core/boot_mailbox.c
+======================================================================
+/**
+ * @file boot_mailbox.c
+ * @brief Core-side mailbox reader + WAL fold-in (C17).
+ *
+ * Mirrors the OS writer's slot scan: read both A/B slots, take the valid one
+ * with the highest seq. If seq is newer than the TMR watermark, translate the
+ * request into a WAL intent and advance the watermark.
+ *
+ * Crash model: APPLY (append) happens before the watermark bump, giving
+ * at-least-once semantics. The mailbox intents (UPDATE_PENDING, CONFIRM_COMMIT,
+ * RECOVERY_RESOLVED) are idempotent, so a power loss between the two only risks
+ * re-applying on the next boot, never losing the request. A WAL sector rotation
+ * inside boot_journal_update_tmr does not strand the just-appended entry: the
+ * journal's backward cross-sector scan recovers it (see boot_journal.c).
+ */
+
+#include "boot_mailbox.h"
+#include "boot_journal.h"
+#include "boot_crc32.h"
+#include "boot_fih.h"            /* BOOT_SECURE_REQUIRE, TOOB glitch delay */
+#include "boot_secure_zeroize.h"
+#include "generated_boot_config.h" /* CHIP_MAILBOX_ABS_ADDR, CHIP_MAILBOX_SLOT_SIZE */
+#include <stddef.h>
+#include <stdbool.h>
+
+/* Geometry: the two slots must live in distinct erase sectors (see wire header). */
+_Static_assert(CHIP_MAILBOX_SIZE == TOOB_MAILBOX_SLOTS * CHIP_MAILBOX_SLOT_SIZE,
+               "mailbox region must be exactly TOOB_MAILBOX_SLOTS slot sectors");
+_Static_assert(sizeof(toob_mailbox_t) <= CHIP_MAILBOX_SLOT_SIZE,
+               "mailbox record must fit in one slot sector");
+
+static uint32_t mbx_slot_addr(uint32_t i) {
+  return CHIP_MAILBOX_ABS_ADDR + i * CHIP_MAILBOX_SLOT_SIZE;
+}
+
+/* Read one slot; return true and fill *out only if magic + CRC validate. */
+static bool mbx_read_valid(const boot_platform_t *platform, uint32_t i,
+                           toob_mailbox_t *out) {
+  boot_secure_zeroize(out, sizeof(*out));
+
+  if (platform->flash->read(mbx_slot_addr(i), (uint8_t *)out, sizeof(*out)) != BOOT_OK) {
+    return false;
+  }
+  if (out->magic != TOOB_MAILBOX_MAGIC) {
+    return false;
+  }
+  uint32_t expect = compute_boot_crc32((const uint8_t *)out, TOOB_MAILBOX_CRC_LEN);
+  return expect == out->crc32;
+}
+
+/* Take the valid slot with the highest seq. Returns true and fills *best if any. */
+static bool mbx_read_best(const boot_platform_t *platform, toob_mailbox_t *best) {
+  bool have = false;
+  toob_mailbox_t s;
+
+  for (uint32_t i = 0; i < TOOB_MAILBOX_SLOTS; i++) {
+    if (mbx_read_valid(platform, i, &s)) {
+      if (!have || s.seq > best->seq) {
+        *best = s;
+        have = true;
+      }
+    }
+  }
+  boot_secure_zeroize(&s, sizeof(s));
+  return have;
+}
+
+/* Translate one request into a WAL intent. The Core seals CRC + chain tag
+ * inside boot_journal_append (it holds the device key; the OS cannot). */
+static boot_status_t mbx_apply(const boot_platform_t *platform,
+                               const toob_mailbox_t *rec,
+                               const wal_tmr_payload_t *tmr) {
+  wal_entry_payload_t entry;
+  boot_secure_zeroize(&entry, sizeof(entry));
+  entry.magic = WAL_ENTRY_MAGIC;
+
+  switch ((toob_req_t)rec->request) {
+    case TOOB_REQ_UPDATE_PENDING:
+      entry.intent = WAL_INTENT_UPDATE_PENDING;
+      entry.offset = rec->tbm1_addr;
+      return boot_journal_append(platform, &entry);
+
+    case TOOB_REQ_CONFIRM: {
+      /* Stale-confirm defense: commit only when the confirmed nonce matches the
+       * currently booted (tentative) update's nonce. A replayed old CONFIRM with
+       * a different nonce is consumed but never commits. */
+      uint64_t active = ((uint64_t)tmr->active_nonce_hi << 32) | tmr->active_nonce_lo;
+      bool match = (rec->nonce == active);
+      BOOT_SECURE_REQUIRE(match == (rec->nonce == active),
+                          { return BOOT_ERR_INVALID_STATE; });
+      if (!match) {
+        return BOOT_OK; /* consume, do not commit */
+      }
+      entry.intent = WAL_INTENT_CONFIRM_COMMIT;
+      return boot_journal_append(platform, &entry);
+    }
+
+    case TOOB_REQ_RECOVERY_RESOLVED:
+      entry.intent = WAL_INTENT_RECOVERY_RESOLVED;
+      return boot_journal_append(platform, &entry);
+
+    case TOOB_REQ_NONE:
+    default:
+      return BOOT_OK; /* unknown/none: consume and ignore */
+  }
+}
+
+boot_status_t boot_mailbox_consume(const boot_platform_t *platform) {
+  if (!platform || !platform->flash || !platform->flash->read) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  toob_mailbox_t rec;
+  wal_tmr_payload_t tmr;
+  boot_status_t status = BOOT_OK;
+
+  boot_secure_zeroize(&rec, sizeof(rec));
+  boot_secure_zeroize(&tmr, sizeof(tmr));
+
+  /* Empty mailbox: nothing to do (no flash writes, safe every boot). */
+  if (!mbx_read_best(platform, &rec)) {
+    goto cleanup;
+  }
+
+  status = boot_journal_get_tmr(platform, &tmr);
+  if (status != BOOT_OK) {
+    goto cleanup;
+  }
+
+  /* Idempotency gate: apply only strictly-newer records (double-checked). */
+  bool is_new = (rec.seq > tmr.last_mbx_request_id);
+  BOOT_SECURE_REQUIRE(is_new == (rec.seq > tmr.last_mbx_request_id),
+                      { status = BOOT_ERR_INVALID_STATE; goto cleanup; });
+  if (!is_new) {
+    goto cleanup; /* already consumed */
+  }
+
+  /* APPLY first, then advance the watermark (at-least-once; idempotent intents). */
+  status = mbx_apply(platform, &rec, &tmr);
+  if (status != BOOT_OK) {
+    goto cleanup;
+  }
+
+  tmr.last_mbx_request_id = rec.seq;
+  status = boot_journal_update_tmr(platform, &tmr);
+
+cleanup:
+  boot_secure_zeroize(&rec, sizeof(rec));
+  boot_secure_zeroize(&tmr, sizeof(tmr));
+  return status;
+}

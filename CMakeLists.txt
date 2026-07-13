@@ -103,6 +103,7 @@ include(cmake/toob_core.cmake)
 include(cmake/toob_crypto.cmake)
 include(cmake/toob_stage0.cmake)
 include(cmake/toob_libtoob.cmake)
+include(cmake/toob_recovery.cmake)
 
 # ------------------------------------------------------------------------------
 # 5. Final Executable & Post-Build Hooks
@@ -204,17 +205,45 @@ if(TOOB_ARCH STREQUAL "host")
 
     # K6-T4: Totality Check Target
     add_executable(intent-total
-        test/host/intent_total.c
+      test/host/intent_total.c
     )
     target_include_directories(intent-total PUBLIC
-        ${CMAKE_SOURCE_DIR}/common/include
-        ${CMAKE_SOURCE_DIR}/toobloader/core/include
-        ${CMAKE_BINARY_DIR}/generated
-        ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
-        ${CMAKE_SOURCE_DIR}/internal/mocks/mocks
+      ${CMAKE_SOURCE_DIR}/common/include
+      ${CMAKE_SOURCE_DIR}/toobloader/core/include
+      ${CMAKE_BINARY_DIR}/generated
+      ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
+      ${CMAKE_SOURCE_DIR}/internal/mocks/mocks
     )
     target_link_libraries(intent-total PRIVATE toob_zcbor toob_heatshrink)
     if(TARGET toob_crypto)
-        target_link_libraries(intent-total PRIVATE toob_crypto)
+      target_link_libraries(intent-total PRIVATE toob_crypto)
+    endif()
+
+    # Recovery Roach-Motel Integration Test Target
+    add_executable(test-recovery
+      test/host/test_recovery.c
+      test/host/flash_model.c
+      test/host/hal_tape.c
+      test/host/invariants.c
+      test/host/sandbox_platform.c
+      internal/mocks/mocks/mock_clock.c
+      internal/mocks/mocks/mock_console.c
+      internal/mocks/mocks/mock_crypto_policy.c
+      internal/mocks/mocks/mock_efuses.c
+      internal/mocks/mocks/mock_flash.c
+      internal/mocks/mocks/mock_rtc_ram.c
+      internal/mocks/mocks/mock_soc.c
+      internal/mocks/mocks/mock_wdt.c
+    )
+    target_include_directories(test-recovery PUBLIC
+      ${CMAKE_SOURCE_DIR}/common/include
+      ${CMAKE_SOURCE_DIR}/toobloader/core/include
+      ${CMAKE_BINARY_DIR}/generated
+      ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
+      ${CMAKE_SOURCE_DIR}/internal/mocks/mocks
+    )
+    target_link_libraries(test-recovery PRIVATE toob_core toob_zcbor toob_heatshrink)
+    if(TARGET toob_crypto)
+      target_link_libraries(test-recovery PRIVATE toob_crypto)
     endif()
 endif()

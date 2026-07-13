@@ -592,7 +592,8 @@ static boot_status_t stage_swap(update_ctx_t *ctx) {
       if (sub_img->target_slot == TBM1_SLOT_NETCORE) {
         components[comp_count].target_addr = CHIP_NETCORE_SLOT_ABS_ADDR;
       } else if (sub_img->target_slot == TBM1_SLOT_RECOVERY) {
-        components[comp_count].target_addr = CHIP_RECOVERY_OS_ABS_ADDR;
+        /* D0-B: Recovery OS is Immutable (Factory-Locked). Rejects any updates. */
+        return BOOT_ERR_NOT_SUPPORTED;
       } else if (sub_img->target_slot == TBM1_SLOT_STAGE1) {
         /* P7a: Stage-1 Anti-Rollback Gate — enforce before any flash write */
         if (ctx->tbm1->stage1_svn == 0)
@@ -634,12 +635,44 @@ static boot_status_t stage_swap(update_ctx_t *ctx) {
     return admit_status; /* Defer/Counter Exhausted */
   }
 
-  /* 3. Perform the actual physical swap if admitted */
+  /* 3. Perform the actual physical swap or copy if admitted */
   if (ctx->requires_swap) {
-    swap_status = boot_swap_apply(
-        ctx->platform, ctx->swap_src_addr, CHIP_APP_SLOT_ABS_ADDR,
-        ctx->staging_header.image_size, BOOT_DEST_SLOT_APP, ctx->open_txn,
-        ctx->arena, ctx->arena_len);
+    if (ctx->is_delta) {
+      /* Two-Phase One-Way Copy for Delta path:
+       * Phase 1 (0x11111111): App (old) -> Staging (making it rollback-resilient)
+       * Phase 2 (0x22222222): Scratch (new) -> App (deploying update)
+       */
+      bool run_phase1 = true;
+      if (ctx->open_txn != NULL && ctx->open_txn->intent == WAL_INTENT_UPDATE_PENDING) {
+        if (ctx->open_txn->transfer_bitmap[0] == 0x22222222) {
+          run_phase1 = false;
+        }
+      }
+
+      if (run_phase1) {
+        swap_status = boot_copy_apply(
+            ctx->platform, CHIP_APP_SLOT_ABS_ADDR, CHIP_STAGING_SLOT_ABS_ADDR,
+            ctx->staging_header.image_size, 0x11111111, ctx->open_txn,
+            ctx->arena, ctx->arena_len);
+        if (swap_status == BOOT_OK && ctx->open_txn != NULL) {
+          ctx->open_txn->delta_chunk_id = 0;
+          ctx->open_txn->transfer_bitmap[0] = 0x22222222;
+          swap_status = boot_journal_append(ctx->platform, ctx->open_txn);
+        }
+      }
+
+      if (swap_status == BOOT_OK) {
+        swap_status = boot_copy_apply(
+            ctx->platform, CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_APP_SLOT_ABS_ADDR,
+            ctx->staging_header.image_size, 0x22222222, ctx->open_txn,
+            ctx->arena, ctx->arena_len);
+      }
+    } else {
+      swap_status = boot_swap_apply(
+          ctx->platform, ctx->swap_src_addr, CHIP_APP_SLOT_ABS_ADDR,
+          ctx->staging_header.image_size, BOOT_DEST_SLOT_APP, ctx->open_txn,
+          ctx->arena, ctx->arena_len);
+    }
   }
 
   /* 4. Perform the actual physical multi-image write if admitted */
@@ -868,8 +901,9 @@ static boot_status_t evaluate_transition(
     case ACT_NONE:
       break;
     case ACT_HEAL_COUNTER: {
-      if (current_tmr->boot_failure_counter > 0) {
+      if (current_tmr->boot_failure_counter > 0 || current_tmr->recovery_failure_counter > 0) {
         current_tmr->boot_failure_counter = 0;
+        current_tmr->recovery_failure_counter = 0;
         status = boot_journal_update_tmr(platform, current_tmr);
         if (status != BOOT_OK) return status;
       }
@@ -896,7 +930,11 @@ static boot_status_t evaluate_transition(
       return BOOT_ERR_DEVICE_LOCKED;
     }
     case ACT_CRASH_ACCUM: {
-      current_tmr->boot_failure_counter++;
+      if (current_tmr->boot_failure_counter > BOOT_CONFIG_MAX_RETRIES) {
+        current_tmr->recovery_failure_counter++;
+      } else {
+        current_tmr->boot_failure_counter++;
+      }
       status = boot_journal_update_tmr(platform, current_tmr);
       break;
     }
@@ -953,6 +991,11 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   boot_secure_zeroize(&app_header, sizeof(app_header));
 
   boot_status_t core_status = BOOT_OK;
+
+  /* Wurde der Failure-Counter in DIESEM Boot geheilt (Confirm/Recovery)?
+   * Verhindert, dass Step 3 den bereits aufgelösten (vergangenen) Crash aus dem
+   * reset_reason erneut als frischen EV_CRASH wertet. */
+  bool healed_this_boot = false;
 
   /*
    * ==============================================================================
@@ -1035,6 +1078,10 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
       core_status = evaluate_transition(platform, &open_txn, &current_tmr, EV_CONFIRM_OK, target_out, arena, arena_len);
       if (core_status != BOOT_OK)
         goto state_cleanup;
+
+      /* Heilung fand statt (CONFIRM_COMMIT/RECOVERY_RESOLVED -> ACT_HEAL_COUNTER).
+       * reset_reason in Step 3 beschreibt den bereits aufgelösten Crash. */
+      healed_this_boot = true;
     }
   }
 
@@ -1089,6 +1136,12 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
                       (rst_indicates_crash &&
                        open_txn.intent != WAL_INTENT_UPDATE_PENDING &&
                        open_txn.intent != WAL_INTENT_TXN_BEGIN);
+
+  /* Fix Heal-then-Crash: Wurde in diesem Boot geheilt (Confirm/Recovery), beschreibt
+   * der reset_reason den bereits aufgelösten Crash — nicht erneut als frisch werten. */
+  if (healed_this_boot) {
+    is_app_crash = false;
+  }
 
   if (is_app_crash) {
     core_status = evaluate_transition(platform, &open_txn, &current_tmr, EV_CRASH, target_out, arena, arena_len);
@@ -1160,6 +1213,8 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
       core_status = BOOT_ERR_VERIFY;
       goto state_cleanup;
     });
+    requires_confirmation = true;
+  } else if (healed_this_boot) {
     requires_confirmation = true;
   }
   target_out->is_tentative_boot = requires_confirmation;

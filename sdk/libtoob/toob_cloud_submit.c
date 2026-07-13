@@ -17,7 +17,12 @@
  */
 
 #include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
 #include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
+
 #include "toob_internal.h"
 #include <stddef.h>
 #include <string.h>
@@ -27,13 +32,13 @@
  * ============================================================================== */
 
 toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len) {
-  if (!envelope || len == 0 || len > TOOB_CLOUD_CMD_SLOT_SIZE) {
+  if (!envelope || len == 0 || len > CHIP_CLOUD_CMD_SLOT_SIZE) {
     return TOOB_ERR_INVALID_ARG;
   }
 
   /* Step 1: Erase the Cloud-Command Slot */
   toob_status_t erase_stat =
-      toob_os_flash_erase(TOOB_CLOUD_CMD_SLOT_ADDR, TOOB_CLOUD_CMD_SLOT_SIZE);
+      toob_os_flash_erase(CHIP_CLOUD_CMD_SLOT_ABS_ADDR, CHIP_CLOUD_CMD_SLOT_SIZE);
 
   volatile uint32_t erase_shield_1 = 0, erase_shield_2 = 0;
   if (erase_stat == TOOB_OK)
@@ -49,7 +54,7 @@ toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len) {
 
   /* Step 2: Write the Envelope */
   toob_status_t write_stat =
-      toob_os_flash_write(TOOB_CLOUD_CMD_SLOT_ADDR, envelope, len);
+      toob_os_flash_write(CHIP_CLOUD_CMD_SLOT_ABS_ADDR, envelope, len);
 
   if (write_stat != TOOB_OK) {
     return write_stat;
@@ -69,7 +74,7 @@ toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len) {
       toob_secure_zeroize(chunk_buf, sizeof(chunk_buf));
 
       toob_status_t read_stat = toob_os_flash_read(
-          TOOB_CLOUD_CMD_SLOT_ADDR + pos, chunk_buf, chunk_len);
+          CHIP_CLOUD_CMD_SLOT_ABS_ADDR + pos, chunk_buf, chunk_len);
 
       if (read_stat != TOOB_OK) {
         toob_secure_zeroize(chunk_buf, sizeof(chunk_buf));

@@ -172,7 +172,7 @@ boot_swap_check_eol_survival(const boot_platform_t *platform) {
  * ==============================================================================
  */
 
-boot_status_t boot_swap_apply(const boot_platform_t *platform,
+TOOB_IRAM_ATTR boot_status_t boot_swap_apply(const boot_platform_t *platform,
                               uint32_t src_base, uint32_t dest_base,
                               uint32_t length, boot_dest_slot_t dest_slot,
                               wal_entry_payload_t *open_txn,
@@ -213,6 +213,53 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     if (current_offset > length)
       current_offset = length;
   }
+
+#if TOOB_SWAP_EVENT_STATE
+  size_t standard_sec_size = 4096;
+  if (platform->flash->get_sector_size(dest_base, &standard_sec_size) != BOOT_OK || standard_sec_size == 0) {
+    standard_sec_size = 4096;
+  }
+
+  bool notify_disabled = false;
+  const uint32_t NOTIFY_TIMEOUT_MS = 50;
+
+  if (platform->soc && platform->soc->swap_notify) {
+    toob_swap_event_t ev = {
+      .abi_version = TOOB_SWAP_EVENT_ABI_VERSION,
+      .phase = (current_offset > 0) ?
+#if TOOB_SWAP_EVENT_PHASE
+               TOOB_SWAP_PHASE_RESUMED :
+#else
+               TOOB_SWAP_PHASE_SWAPPING :
+#endif
+               TOOB_SWAP_PHASE_SWAPPING,
+      .sectors_done = 0,
+      .sectors_total = 0,
+      .flags = (current_offset > 0) ? 1U : 0U
+    };
+
+#if TOOB_SWAP_EVENT_PROGRESS
+    ev.sectors_total = (uint32_t)((length + standard_sec_size - 1) / standard_sec_size);
+    ev.sectors_done = (uint32_t)(current_offset / standard_sec_size);
+    if (ev.sectors_done > ev.sectors_total) {
+      ev.sectors_done = ev.sectors_total;
+    }
+#endif
+
+    if (platform->wdt && platform->wdt->kick) {
+      platform->wdt->kick();
+    }
+    uint32_t start_time = platform->clock->get_tick_ms();
+    platform->soc->swap_notify(&ev);
+    uint32_t duration = platform->clock->get_tick_ms() - start_time;
+    if (platform->wdt && platform->wdt->kick) {
+      platform->wdt->kick();
+    }
+    if (duration > NOTIFY_TIMEOUT_MS) {
+      notify_disabled = true;
+    }
+  }
+#endif
 
   const uint32_t MAX_ERASE_LOOPS = 100000;
   uint32_t loop_guard = 0;
@@ -460,6 +507,39 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     }
 
     current_offset += (uint32_t)block_size;
+
+#if TOOB_SWAP_EVENT_STATE
+    if (!notify_disabled && platform->soc && platform->soc->swap_notify) {
+      toob_swap_event_t ev = {
+        .abi_version = TOOB_SWAP_EVENT_ABI_VERSION,
+        .phase = TOOB_SWAP_PHASE_SWAPPING,
+        .sectors_done = 0,
+        .sectors_total = 0,
+        .flags = 0
+      };
+
+#if TOOB_SWAP_EVENT_PROGRESS
+      ev.sectors_total = (uint32_t)((length + standard_sec_size - 1) / standard_sec_size);
+      ev.sectors_done = (uint32_t)(current_offset / standard_sec_size);
+      if (ev.sectors_done > ev.sectors_total) {
+        ev.sectors_done = ev.sectors_total;
+      }
+#endif
+
+      if (platform->wdt && platform->wdt->kick) {
+        platform->wdt->kick();
+      }
+      uint32_t start_time = platform->clock->get_tick_ms();
+      platform->soc->swap_notify(&ev);
+      uint32_t duration = platform->clock->get_tick_ms() - start_time;
+      if (platform->wdt && platform->wdt->kick) {
+        platform->wdt->kick();
+      }
+      if (duration > NOTIFY_TIMEOUT_MS) {
+        notify_disabled = true;
+      }
+    }
+#endif
   }
 
   /* 4. ACCURATE TELEMETRY WRAP-UP */
@@ -481,13 +561,38 @@ boot_status_t boot_swap_apply(const boot_platform_t *platform,
     }
   }
 
+#if TOOB_SWAP_EVENT_STATE
+  if (status == BOOT_OK && !notify_disabled && platform->soc && platform->soc->swap_notify) {
+    toob_swap_event_t ev = {
+      .abi_version = TOOB_SWAP_EVENT_ABI_VERSION,
+      .phase = TOOB_SWAP_PHASE_DONE,
+      .sectors_done = 0,
+      .sectors_total = 0,
+      .flags = 0
+    };
+
+#if TOOB_SWAP_EVENT_PROGRESS
+    ev.sectors_total = (uint32_t)((length + standard_sec_size - 1) / standard_sec_size);
+    ev.sectors_done = ev.sectors_total;
+#endif
+
+    if (platform->wdt && platform->wdt->kick) {
+      platform->wdt->kick();
+    }
+    platform->soc->swap_notify(&ev);
+    if (platform->wdt && platform->wdt->kick) {
+      platform->wdt->kick();
+    }
+  }
+#endif
+
 swap_cleanup:
   /* P10 Single Exit: Zerstöre unverschlüsselte Firmware-Residuen aus der Arena */
   boot_secure_zeroize(arena, arena_len);
   return status;
 }
 
-boot_status_t boot_swap_plan_chunk(const boot_platform_t *platform,
+TOOB_IRAM_ATTR boot_status_t boot_swap_plan_chunk(const boot_platform_t *platform,
                                    uint32_t current_src, uint32_t current_dest,
                                    uint32_t block_size,
                                    uint32_t crc_src, uint32_t crc_dest,
@@ -549,4 +654,230 @@ boot_status_t boot_swap_plan_chunk(const boot_platform_t *platform,
 
   *n_out = count;
   return BOOT_OK;
+}
+
+boot_status_t boot_splash_verify(const boot_platform_t *platform,
+                                 uint32_t splash_addr, uint32_t max_size,
+                                 uint8_t *arena, size_t arena_len) {
+  if (!platform || !platform->flash || !platform->flash->read) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  if (max_size < sizeof(toob_splash_header_t)) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  toob_splash_header_t header;
+  boot_status_t status = platform->flash->read(splash_addr, &header, sizeof(toob_splash_header_t));
+  if (status != BOOT_OK) {
+    return status;
+  }
+
+  if (header.magic != 0x534C5053) { /* 'SPLS' magic */
+    return BOOT_ERR_NOT_FOUND;
+  }
+
+  /* Bounds safety check */
+  if (header.data_size > max_size - sizeof(toob_splash_header_t)) {
+    return BOOT_ERR_FLASH_BOUNDS;
+  }
+
+  /* contiguous checksum pass starting at width field (offset 8) */
+  uint32_t computed_crc = 0;
+  status = boot_crc32_flash_stream(platform, splash_addr + 8,
+                                   (sizeof(toob_splash_header_t) - 8) + header.data_size,
+                                   &computed_crc, arena, arena_len);
+  if (status != BOOT_OK) {
+    return status;
+  }
+
+  if (computed_crc != header.crc32) {
+    return BOOT_ERR_VERIFY;
+  }
+
+  return BOOT_OK;
+}
+
+TOOB_IRAM_ATTR boot_status_t boot_copy_apply(const boot_platform_t *platform,
+                                             uint32_t src_base, uint32_t dest_base,
+                                             uint32_t length, uint32_t phase_id,
+                                             wal_entry_payload_t *open_txn,
+                                             uint8_t *arena, size_t arena_len) {
+  if (!arena || arena_len < 512)
+    return BOOT_ERR_INVALID_ARG;
+  if (!platform || !platform->flash || !platform->flash->read ||
+      !platform->flash->write || !platform->flash->get_sector_size) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  if (length > UINT32_MAX - src_base || length > UINT32_MAX - dest_base) {
+    return BOOT_ERR_FLASH_BOUNDS;
+  }
+  if (length == 0)
+    return BOOT_OK;
+
+  if (platform->flash->write_align > 0) {
+    if ((src_base % platform->flash->write_align != 0) ||
+        (dest_base % platform->flash->write_align != 0) ||
+        (length % platform->flash->write_align != 0)) {
+      return BOOT_ERR_FLASH_ALIGN;
+    }
+  }
+
+  boot_status_t eol_status = boot_swap_check_eol_survival(platform);
+  if (eol_status != BOOT_OK)
+    return eol_status;
+
+  uint32_t current_offset = 0;
+
+  /* Fast-Forward Recovery Logic via WAL Checkpoint */
+  if (open_txn != NULL && open_txn->intent == WAL_INTENT_UPDATE_PENDING) {
+    if (open_txn->transfer_bitmap[0] == phase_id) {
+      current_offset = open_txn->delta_chunk_id;
+      if (current_offset > length) {
+        current_offset = length;
+      }
+    }
+  }
+
+  const uint32_t MAX_ERASE_LOOPS = 100000;
+  uint32_t loop_guard = 0;
+  uint32_t physical_erases = 0;
+  boot_status_t status = BOOT_OK;
+
+  while (current_offset < length) {
+    if (++loop_guard >= MAX_ERASE_LOOPS) {
+      status = BOOT_ERR_FLASH_HW;
+      goto copy_cleanup;
+    }
+
+    uint32_t current_src = src_base + current_offset;
+    uint32_t current_dest = dest_base + current_offset;
+
+    size_t dest_sec_size = 0, src_sec_size = 0;
+    if (platform->flash->get_sector_size(current_dest, &dest_sec_size) != BOOT_OK ||
+        dest_sec_size == 0 || current_dest % dest_sec_size != 0) {
+      status = BOOT_ERR_FLASH_HW;
+      goto copy_cleanup;
+    }
+    if (platform->flash->get_sector_size(current_src, &src_sec_size) != BOOT_OK ||
+        src_sec_size == 0 || current_src % src_sec_size != 0) {
+      status = BOOT_ERR_FLASH_HW;
+      goto copy_cleanup;
+    }
+
+    size_t block_size = dest_sec_size;
+    if (src_sec_size > block_size) {
+      block_size = src_sec_size;
+    }
+
+    if (current_offset + block_size > length) {
+      block_size = length - current_offset;
+      if (platform->flash->write_align > 0) {
+        uint32_t align = platform->flash->write_align;
+        uint32_t rem = (uint32_t)(block_size % align);
+        if (rem != 0) {
+          block_size += (align - rem);
+        }
+      }
+    }
+
+    /* 1. O(1) Identity Check */
+    uint32_t crc_src = 0;
+    uint32_t crc_dest = 0;
+    status = boot_crc32_flash_stream(platform, current_src, (uint32_t)block_size, &crc_src, arena, arena_len);
+    if (status != BOOT_OK)
+      goto copy_cleanup;
+
+    status = boot_crc32_flash_stream(platform, current_dest, (uint32_t)block_size, &crc_dest, arena, arena_len);
+    if (status != BOOT_OK)
+      goto copy_cleanup;
+
+    if (crc_src == crc_dest) {
+      bool is_identical = true;
+      uint32_t chk_off = 0;
+      size_t half_arena = arena_len / 2;
+
+      while (chk_off < block_size) {
+        if (platform->wdt && platform->wdt->kick)
+          platform->wdt->kick();
+        size_t step = (block_size - chk_off > half_arena) ? half_arena : (block_size - chk_off);
+        uint8_t *buf_dst = arena;
+        uint8_t *buf_src = arena + half_arena;
+
+        if (platform->flash->read(current_dest + chk_off, buf_dst, (uint32_t)step) != BOOT_OK ||
+            platform->flash->read(current_src + chk_off, buf_src, (uint32_t)step) != BOOT_OK) {
+          is_identical = false;
+          break;
+        }
+
+        if (constant_time_memcmp_glitch_safe(buf_dst, buf_src, step) != BOOT_OK) {
+          is_identical = false;
+          break;
+        }
+        chk_off += (uint32_t)step;
+      }
+
+      boot_secure_zeroize(arena, arena_len);
+
+      if (is_identical) {
+        current_offset += (uint32_t)block_size;
+        continue;
+      }
+    }
+
+    /* 2. Log WAL checkpoint BEFORE erase/write */
+    if (open_txn != NULL) {
+      open_txn->delta_chunk_id = current_offset;
+      open_txn->transfer_bitmap[0] = phase_id;
+      boot_status_t log_stat = boot_journal_append(platform, open_txn);
+      if (log_stat != BOOT_OK) {
+        status = log_stat;
+        goto copy_cleanup;
+      }
+    }
+
+    /* 3. Plan and execute copy */
+    boot_allowed_region_t whitelist[3] = {
+        {CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE},
+        {CHIP_STAGING_SLOT_ABS_ADDR, CHIP_STAGING_SLOT_SIZE},
+        {CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_SCRATCH_SLOT_SIZE}
+    };
+
+    flash_effect_t fx[2];
+    fx[0].op = EFF_ERASE;
+    fx[0].src = 0;
+    fx[0].dst = current_dest;
+    fx[0].len = (uint32_t)block_size;
+    fx[0].post_crc = boot_effect_compute_erased_crc(block_size);
+
+    fx[1].op = EFF_COPY;
+    fx[1].src = current_src;
+    fx[1].dst = current_dest;
+    fx[1].len = (uint32_t)block_size;
+    fx[1].post_crc = crc_src;
+
+    status = boot_effect_execute(platform, fx, 2, whitelist, 3, arena, arena_len);
+    if (status != BOOT_OK)
+      goto copy_cleanup;
+
+    physical_erases += (uint32_t)((block_size / dest_sec_size > 0) ? (block_size / dest_sec_size) : 1);
+    current_offset += (uint32_t)block_size;
+  }
+
+  /* 4. Telemetry Update */
+  if (physical_erases > 0) {
+    wal_tmr_payload_t tmr;
+    if (boot_journal_get_tmr(platform, &tmr) == BOOT_OK) {
+      if (dest_base == CHIP_APP_SLOT_ABS_ADDR) {
+        tmr.app_slot_erase_counter += physical_erases;
+      } else if (dest_base == CHIP_STAGING_SLOT_ABS_ADDR) {
+        tmr.staging_slot_erase_counter += physical_erases;
+      }
+      (void)boot_journal_update_tmr(platform, &tmr);
+    }
+  }
+
+copy_cleanup:
+  boot_secure_zeroize(arena, arena_len);
+  return status;
 }

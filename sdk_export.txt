@@ -21,7 +21,12 @@ FILE: sdk/libtoob/toob_cloud_submit.c
  */
 
 #include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
 #include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
+
 #include "toob_internal.h"
 #include <stddef.h>
 #include <string.h>
@@ -31,13 +36,13 @@ FILE: sdk/libtoob/toob_cloud_submit.c
  * ============================================================================== */
 
 toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len) {
-  if (!envelope || len == 0 || len > TOOB_CLOUD_CMD_SLOT_SIZE) {
+  if (!envelope || len == 0 || len > CHIP_CLOUD_CMD_SLOT_SIZE) {
     return TOOB_ERR_INVALID_ARG;
   }
 
   /* Step 1: Erase the Cloud-Command Slot */
   toob_status_t erase_stat =
-      toob_os_flash_erase(TOOB_CLOUD_CMD_SLOT_ADDR, TOOB_CLOUD_CMD_SLOT_SIZE);
+      toob_os_flash_erase(CHIP_CLOUD_CMD_SLOT_ABS_ADDR, CHIP_CLOUD_CMD_SLOT_SIZE);
 
   volatile uint32_t erase_shield_1 = 0, erase_shield_2 = 0;
   if (erase_stat == TOOB_OK)
@@ -53,7 +58,7 @@ toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len) {
 
   /* Step 2: Write the Envelope */
   toob_status_t write_stat =
-      toob_os_flash_write(TOOB_CLOUD_CMD_SLOT_ADDR, envelope, len);
+      toob_os_flash_write(CHIP_CLOUD_CMD_SLOT_ABS_ADDR, envelope, len);
 
   if (write_stat != TOOB_OK) {
     return write_stat;
@@ -73,7 +78,7 @@ toob_status_t toob_submit_cloud_command(const uint8_t *envelope, uint32_t len) {
       toob_secure_zeroize(chunk_buf, sizeof(chunk_buf));
 
       toob_status_t read_stat = toob_os_flash_read(
-          TOOB_CLOUD_CMD_SLOT_ADDR + pos, chunk_buf, chunk_len);
+          CHIP_CLOUD_CMD_SLOT_ABS_ADDR + pos, chunk_buf, chunk_len);
 
       if (read_stat != TOOB_OK) {
         toob_secure_zeroize(chunk_buf, sizeof(chunk_buf));
@@ -132,11 +137,16 @@ FILE: sdk/libtoob/toob_confirm.c
  */
 
 #include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
 #include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
+
 #include "toob_internal.h"
 #include <stddef.h>
 
-#if TOOB_MOCK_CONFIRM_BACKEND == TOOB_MOCK_CONFIRM_BACKEND_RTC
+#ifdef ADDR_CONFIRM_RTC_RAM
 uint64_t mock_rtc_ram = 0;
 #endif
 
@@ -810,10 +820,6 @@ FILE: sdk/libtoob/toob_mailbox.c
 #include "toob_internal.h"
 #include <stddef.h>
 
-#ifndef CHIP_FLASH_WRITE_ALIGNMENT
-#define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
-#endif
-
 /* Geometry sanity: the writer erases exactly one slot sector at a time, so the
  * mailbox region must be TOOB_MAILBOX_SLOTS distinct erase sectors. */
 _Static_assert(CHIP_MAILBOX_SIZE == TOOB_MAILBOX_SLOTS * CHIP_MAILBOX_SLOT_SIZE,
@@ -960,21 +966,24 @@ FILE: sdk/libtoob/toob_ota.c
  */
 
 #include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
 #include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
 #include "toob_internal.h"
 #include <string.h>
 
-#ifndef CHIP_STAGING_SLOT_ABS_ADDR
-#define CHIP_STAGING_SLOT_ABS_ADDR 0x0
-#endif
-#ifndef CHIP_STAGING_SLOT_SIZE
-#define CHIP_STAGING_SLOT_SIZE 0x0
-#endif
-#ifndef CHIP_FLASH_WRITE_ALIGNMENT
-#define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
-#endif
+/* SWEV-T3 Notifier Registration */
+static toob_swap_notify_fn g_swap_notifier = NULL;
 
-
+void toob_set_swap_notifier(toob_swap_notify_fn cb) {
+#if TOOB_SWAP_EVENT_STATE
+  g_swap_notifier = cb;
+#else
+  (void)cb;
+#endif
+}
 
 /* ==============================================================================
  * Internal State Machine Constants
@@ -1328,6 +1337,20 @@ toob_status_t toob_ota_finalize(toob_ota_ctx_t *ctx) {
   /* Reset state machine BEFORE WAL write (prevents re-entry on partial failure) */
   _ctx_reset(ctx);
 
+#if TOOB_SWAP_EVENT_STATE
+  /* Trigger the optional swap progress notification (Level A) before writing to mailbox & rebooting */
+  if (g_swap_notifier != NULL) {
+    toob_swap_event_t ev = {
+      .abi_version = TOOB_SWAP_EVENT_ABI_VERSION,
+      .phase = TOOB_SWAP_PHASE_PREPARE,
+      .sectors_done = 0,
+      .sectors_total = 0,
+      .flags = 0
+    };
+    g_swap_notifier(&ev);
+  }
+#endif
+
   /* Atomically register the update intent in the WAL */
   return toob_set_next_update(CHIP_STAGING_SLOT_ABS_ADDR);
 }
@@ -1346,10 +1369,6 @@ FILE: sdk/libtoob/toob_update.c
 #include "libtoob_config_sandbox.h"
 #else
 #include "generated_boot_config.h"
-#endif
-
-#ifndef CHIP_FLASH_WRITE_ALIGNMENT
-#define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
 #endif
 
 toob_status_t toob_set_next_update(uint32_t manifest_flash_addr) {
@@ -1402,6 +1421,7 @@ FILE: sdk/libtoob/include/libtoob.h
 #include <stddef.h>
 
 #include "libtoob_types.h"
+#include "toob_swap_event_wire.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -1565,6 +1585,12 @@ typedef struct __attribute__((aligned(8))) {
 } toob_ota_ctx_t;
 
 _Static_assert(sizeof(toob_ota_ctx_t) == 440, "toob_ota_ctx_t ABI size drift");
+
+/**
+ * @brief Registers a manufacturer-supplied notifier callback for update progress events.
+ * @param cb Manufacturer callback function pointer (NULL to disable).
+ */
+void toob_set_swap_notifier(toob_swap_notify_fn cb);
 
 /**
  * @brief Initializes a toob_ota_ctx_t to a clean idle state.
@@ -1759,12 +1785,8 @@ FILE: sdk/libtoob/include/libtoob_config_sandbox.h
  * Toob-Boot libtoob_config_sandbox.h (Mock Generiert Phase 3)
  * ==============================================================================
  * 
- * REFERENCED SPECIFICATIONS:
- * - docs/dev_plan.md (Mandates a Phase 3 mock header for sandbox tests)
- * - docs/toobfuzzer_integration.md (Blueprint mapping for flash offsets and limits)
- * - docs/sandbox_setup.md (POSIX mapping limitations for the test environment)
- *
  * TemporÃ¤rer Header zur Bereitstellung fiktiver Adressen fÃ¼r Phase 3 M-SANDBOX Tests.
+ * Harmonisiert mit den Namen des Manifest-Compilers, um Fallback-Makros zu vermeiden.
  */
 
 #ifndef LIBTOOB_CONFIG_SANDBOX_H
@@ -1772,42 +1794,28 @@ FILE: sdk/libtoob/include/libtoob_config_sandbox.h
 
 #include <stdint.h>
 
-/* M-SANDBOX Fuzzer Mock Values 
- * (In Produktion werden diese durch den Manifest Compiler injiziert) */
-/* ==============================================================================
- * 2. Flash Memory Map (Asymmetric Flash Support)
- * ==============================================================================
- *
- * Um asymmetrische Flash-Architekturen (STM32, ESP32) nativ zu unterstÃ¼tzen,
- * generiert der Manifest_Compiler hier feste Sektor-Adressen, statt von einer
- * globalen BlockgrÃ¶ÃŸe auszugehen. Die OS-Seite (libtoob) nutzt nur Target-Nodes.
- */
+/* M-SANDBOX Fuzzer Mock Values */
 #define CHIP_WAL_SECTORS 4
 #define TOOB_WAL_SECTOR_ADDRS {0x4000, 0x5000, 0x6000, 0x10000}
 #define TOOB_WAL_SECTOR_SIZES {4096,   4096,   4096,   16384}
 
-#define CHIP_FLASH_WRITE_ALIGN 8
+#define CHIP_FLASH_WRITE_ALIGNMENT 8
 #define CHIP_FLASH_MAX_SECTOR_SIZE 16384
 #define CHIP_FLASH_ERASURE_MAPPING 0xFFFFFFFF
 
-/* Steering Macros (gem. TODO Spezifikation)
- * 1: TOOB_MOCK_CONFIRM_BACKEND_RTC
- * 2: TOOB_MOCK_CONFIRM_BACKEND_WAL
- */
-#define TOOB_MOCK_CONFIRM_BACKEND_RTC 1
-#define TOOB_MOCK_CONFIRM_BACKEND_WAL 2
-
-#define TOOB_MOCK_CONFIRM_BACKEND TOOB_MOCK_CONFIRM_BACKEND_RTC
-
-#if TOOB_MOCK_CONFIRM_BACKEND == TOOB_MOCK_CONFIRM_BACKEND_RTC
+#ifdef TOOB_HOST_FUZZING
     /* Fake pointer for RTC testing in Host-Sandbox */
     extern uint64_t mock_rtc_ram;
     #define ADDR_CONFIRM_RTC_RAM ((volatile uint64_t*)(&mock_rtc_ram))
 #endif
 
 /* Cloud-Command Envelope Slot (1 Sektor, Bootloader evaluiert bei jedem Boot) */
-#define TOOB_CLOUD_CMD_SLOT_ADDR  0x000F0000
-#define TOOB_CLOUD_CMD_SLOT_SIZE  0x1000
+#define CHIP_CLOUD_CMD_SLOT_ABS_ADDR  0x000F0000
+#define CHIP_CLOUD_CMD_SLOT_SIZE      0x1000
+
+/* App Slots for Sandbox Fuzzing */
+#define CHIP_STAGING_SLOT_ABS_ADDR    0x00080000
+#define CHIP_STAGING_SLOT_SIZE        0x00060000
 
 /* KDM Quorum Store (Phase 4: 3 sectors for quorum-protected KDM) */
 #define TOOB_KDM_QUORUM_ADDR     0x000F1000

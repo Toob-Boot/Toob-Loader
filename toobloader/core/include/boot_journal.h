@@ -58,7 +58,8 @@ static inline bool wal_intent_is_security_bearing(uint32_t intent) {
 #define WAL_TMR_VERSION_2 2
 #define WAL_TMR_VERSION_3 3
 #define WAL_TMR_VERSION_4 4
-#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_4
+#define WAL_TMR_VERSION_5 5
+#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_5
 
 #define WAL_CHAIN_TAG_BYTES 16
 
@@ -126,8 +127,11 @@ typedef struct {
   /* --- v4-Felder (L1: OS Mailbox Integration) --- */
   uint32_t last_mbx_request_id;            /* Last processed seq number from OS Mailbox */
 
+  /* --- v5-Felder (Recovery Counter Entkopplung) --- */
+  uint32_t recovery_failure_counter;       /* Crashes during recovery OS boots */
+
   /* --- reserved tail (for future versions) --- */
-  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4 - 4];
+  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4 - 4 - 4];
 } wal_tmr_payload_t;
 
 /** Canonical populated-size: all fields before the reserved tail.
@@ -167,8 +171,8 @@ _Static_assert(sizeof(wal_sector_header_t) <= 128,
                "ABI Drift: WAL Header exceeds slot size!");
 _Static_assert(sizeof(wal_sector_header_aligned_t) == 128,
                "ABI Drift: Aligned WAL Header must be exactly 128 bytes!");
-_Static_assert(WAL_TMR_POPULATED_SIZE == 80,
-               "ABI Drift: populated_size must match hand-computed 80!");
+_Static_assert(WAL_TMR_POPULATED_SIZE == 84,
+               "ABI Drift: populated_size must match hand-computed 84!");
 
 /* Cross-check: Core's typed sector header must match the wire format's opaque version */
 _Static_assert(sizeof(wal_sector_header_t) == sizeof(toob_wal_sector_header_t),

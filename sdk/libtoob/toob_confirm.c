@@ -8,11 +8,16 @@
  */
 
 #include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
 #include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
+
 #include "toob_internal.h"
 #include <stddef.h>
 
-#if TOOB_MOCK_CONFIRM_BACKEND == TOOB_MOCK_CONFIRM_BACKEND_RTC
+#ifdef ADDR_CONFIRM_RTC_RAM
 uint64_t mock_rtc_ram = 0;
 #endif
 

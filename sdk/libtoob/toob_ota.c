@@ -24,21 +24,24 @@
  */
 
 #include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
 #include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
 #include "toob_internal.h"
 #include <string.h>
 
-#ifndef CHIP_STAGING_SLOT_ABS_ADDR
-#define CHIP_STAGING_SLOT_ABS_ADDR 0x0
-#endif
-#ifndef CHIP_STAGING_SLOT_SIZE
-#define CHIP_STAGING_SLOT_SIZE 0x0
-#endif
-#ifndef CHIP_FLASH_WRITE_ALIGNMENT
-#define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
-#endif
+/* SWEV-T3 Notifier Registration */
+static toob_swap_notify_fn g_swap_notifier = NULL;
 
-
+void toob_set_swap_notifier(toob_swap_notify_fn cb) {
+#if TOOB_SWAP_EVENT_STATE
+  g_swap_notifier = cb;
+#else
+  (void)cb;
+#endif
+}
 
 /* ==============================================================================
  * Internal State Machine Constants
@@ -391,6 +394,20 @@ toob_status_t toob_ota_finalize(toob_ota_ctx_t *ctx) {
 
   /* Reset state machine BEFORE WAL write (prevents re-entry on partial failure) */
   _ctx_reset(ctx);
+
+#if TOOB_SWAP_EVENT_STATE
+  /* Trigger the optional swap progress notification (Level A) before writing to mailbox & rebooting */
+  if (g_swap_notifier != NULL) {
+    toob_swap_event_t ev = {
+      .abi_version = TOOB_SWAP_EVENT_ABI_VERSION,
+      .phase = TOOB_SWAP_PHASE_PREPARE,
+      .sectors_done = 0,
+      .sectors_total = 0,
+      .flags = 0
+    };
+    g_swap_notifier(&ev);
+  }
+#endif
 
   /* Atomically register the update intent in the WAL */
   return toob_set_next_update(CHIP_STAGING_SLOT_ABS_ADDR);

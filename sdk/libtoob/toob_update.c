@@ -11,10 +11,6 @@
 #include "generated_boot_config.h"
 #endif
 
-#ifndef CHIP_FLASH_WRITE_ALIGNMENT
-#define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
-#endif
-
 toob_status_t toob_set_next_update(uint32_t manifest_flash_addr) {
     if (manifest_flash_addr == 0xFFFFFFFF ||
         (manifest_flash_addr % CHIP_FLASH_WRITE_ALIGNMENT) != 0) {

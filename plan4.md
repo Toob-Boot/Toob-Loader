@@ -1,366 +1,191 @@
-# boot_journal.c — Größen- & Code-Optimierung
+# Recovery-OS — Backlog (v2)
 
-Ziel: Quelltext **und** finale Bytes (Flash `.text` + RAM `.bss`/Peak-Stack) verkleinern, ohne
-Funktionalität zu verlieren. Alle Vorschläge sind verhaltensneutral; die eine gefundene
-Verhaltensänderung ist ein **Bugfix**, kein Feature-Verlust.
+Ziel: Den Core-seitigen Recovery-*Vertrag* dichtmachen und danach den `recovery/`-Source-Tree als
+dumme OTA-only-App bauen. Grundprinzip aus der Analyse: **Recovery bleibt dumm** — kein eigenes
+Krypto, keine zweite Root-of-Trust. Es streamt Bytes ins Staging, schreibt einen Mailbox-Request,
+rebootet; **Stage 1 verifiziert.** Auflösung läuft über `RECOVERY_RESOLVED`, das der Core idempotent
+faltet.
 
-Eure Vorüberlegungen sind zu ~90 % korrekt und übernommen. Ergänzt: eine RAM-Einsparung, die noch
-nicht drinstand, eine mathematisch verifizierte Vereinfachung, und eine latente Inkonsistenz, die
-eher ein Bug als eine Größenfrage ist.
+**Voraussetzung:** Der Patch `PATCH_boot_state_heal_then_crash.md` (Lücke 1, Heal-then-Crash) ist
+eingearbeitet. Dieser Backlog deckt die verbleibenden drei Vertragslücken (E1–E3) und den
+Source-Tree (E4) ab.
 
-## Einsparungs-Überblick (grobe Schätzung)
-
-| # | Maßnahme | `.text` | RAM | Risiko |
-|---|---|---:|---:|---|
-| R1 | Sektor-Adress-/Größen-Arrays → `const` (rodata) | ~40 B | **−64 B .bss** | 🟢 |
-| R2 | Transiente Header-Stack-Puffer → 1 geteilter Scratch | ~120 B | **−200 B Peak-Stack** (+96 .bss) | 🟡 |
-| C1 | `rotate_to_sector()` — 3–4 Kopien → 1 | **~200 B** | −Stack | 🟢 |
-| C2 | `hash_chain_compute()` — 2 Hash-Skelette → 1 | **~200 B** | — | 🟢 |
-| C3 | `read_header()` + `find_sector_by_seq()` | ~120 B | — | 🟢 |
-| C4 | `classify_entry()` — geteilte Entry-Validierung | ~60 B | — | 🟢 |
-| C5 | Nicht-inline CRC-Helfer (2×) | ~40 B | — | 🟢 |
-| M1 | Modulare Wear-Protection (verifiziert) | ~50 B | — | 🟡 |
-| X1 | `populated_size` als `#define` (**+ Bugfix**) | ~10 B | — | 🔴 |
-| X2 | Majority-Vote gibt Index statt Struct | ~40 B | −152 B Stack | 🟢 |
-| X3 | Redundantes Pre-Read-`zeroize` entfernen | ~60 B | — | 🟡 |
-
-Summe grob: **~800–900 B `.text`**, **~260 B RAM/Peak-Stack** — bei unveränderter Funktion.
-Die Zahlen sind Richtwerte (`-Os`, Cortex-M0); der strukturelle Gewinn an Lesbarkeit ist der
-eigentliche Wert.
+**Ticket-Schema** — ID · Ziel · Berührt · Skizze · Fertig-wenn · Aufwand · Risiko · Hängt-an.
+**Aufwand** S ≤0,5 T · M 1–2 T · L 3–5 T. **Risiko** 🟢 mechanisch · 🟡 kritischer Pfad/RoT · 🔴 Design-Entscheidung.
 
 ---
 
-## 1. RAM-Einsparungen
+## D0 — Scope-Entscheidungen (zuerst treffen, sie steuern den Aufwand aller Tickets)
 
-### R1 — Sektor-Arrays gehören in `.rodata`, nicht `.bss` (neu)
+Diese drei Fragen sind keine Tickets, sondern Weichen. Jede ist im zugehörigen Epic als Entscheidung
+verankert; hier gebündelt, weil sie sich gegenseitig beeinflussen.
 
-```c
-static uint32_t wal_sector_addrs[MAX_WAL_SECTORS];
-static size_t   wal_sector_sizes[MAX_WAL_SECTORS];
-```
-
-Diese werden in `boot_journal_init` aus `TOOB_WAL_SECTOR_ADDRS`/`_SIZES` **kopiert** — also aus
-compile-time-Konstanten. Nach der Init werden sie ausschließlich **gelesen** (jeder Zugriff ist ein
-Read). Damit sind die veränderlichen Arrays plus die Kopierschleife reine Verschwendung: Sie
-duplizieren rodata in RAM.
-
-Fix: als file-scope `static const` deklarieren und direkt indizieren.
-
-```c
-static const uint32_t wal_sector_addrs[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_ADDRS;
-static const size_t   wal_sector_sizes[TOOB_WAL_SECTORS] = TOOB_WAL_SECTOR_SIZES;
-```
-
-Spart ~64 B `.bss` (bei 8 Sektoren × 2×4 B) **und** die Init-Kopierschleife. Voraussetzung
-verifiziert: nirgends wird in die Arrays geschrieben. Der `sizeof()`-Sanity-Check in der Init bleibt,
-liest nur jetzt die Konstante.
-
-### R2 — Transiente Header-Puffer zu einem Scratch zusammenführen
-
-Über das Modul verteilt liegen ~8 Instanzen von
-`wal_sector_header_aligned_t hdr __attribute__((aligned(8)))` auf dem Stack (je ~96 B), teils
-mehrere pro Funktion, plus verschachtelt über Aufrufe (`update_tmr` → `get_best_wear_leveling_sector`
-hat beide gleichzeitig live). Der **Peak-Stack** ist die Summe entlang der Aufrufkette — für einen
-M0 mit knappem RAM die kritische Größe.
-
-Da das Modul single-threaded und nicht-reentrant ist, kann **ein** modul-statischer Lese-Scratch
-alle transienten Read-and-Inspect-Stellen bedienen:
-
-```c
-static wal_sector_header_aligned_t g_hdr_scratch __attribute__((aligned(8)));
-```
-
-**Wichtige Aliasing-Analyse (sonst Bug):** Ein geteilter Scratch ist nur sicher, wenn keine Funktion
-Daten darin über einen Aufruf hält, der ihn ebenfalls beschreibt. Ich habe die Aufrufkette geprüft:
-`append` und `update_tmr` lesen ihren `tg_hdr` **nach** dem `get_best_wear_leveling_sector`-Aufruf
-(Reihenfolge: erst `new_idx` holen, dann Header lesen) — kein Overlap. Deshalb ist der geteilte
-Scratch hier korrekt. Weil das aber fragil gegen künftige Edits ist, ist die **sichere Variante**,
-den Scratch als Parameter an die Leaf-Helfer (`read_header`, `get_best_wear_leveling_sector`)
-durchzureichen, sodass der Eigentümer sichtbar ist und der Compiler das Sharing sieht. Der
-Write-Puffer (`write_hdr`, muss während des Schreibens leben) bleibt getrennt — davon gibt es nur
-wenige und sie überlappen nicht, ein zweiter Static reicht.
-
-Trade: +~96–192 B `.bss`, −~200–300 B Peak-Stack. Netto meist ein klarer Gewinn, weil die
-Verschachtelung den Peak-Stack größer macht als den Static-Bedarf. Als bewusste Design-Entscheidung
-dokumentieren.
+- **D0-A — Recovery-Kanal.** Lokal (USB-DFU/seriell/BLE) vs. netzfähig (WiFi+TLS). *Empfehlung:
+  lokal zuerst.* Netzfähiges Recovery ist fast app-groß, erbt jeden Netz-Fehlermodus und verbrennt
+  bei Netzfehlern still das Recovery-Fenster (siehe E1). Netz nur, wenn „unbeaufsichtigte Heilung
+  ohne physischen Zugriff" hartes Requirement ist. → steuert E4-T2.
+- **D0-B — Recovery updatebar?** Immutable (factory-locked) vs. zweistufig (winziges immutables
+  Minimal-Recovery reflasht größeres) vs. eigenes A/B. *Empfehlung: immutable + klein für den
+  Start.* → steuert E3.
+- **D0-C — Was heißt „resolved"?** „Neues App-Image gestaged" (Standard, vom Code so gelebt) vs.
+  „gibt auf, App nochmal versuchen". *Empfehlung: „gestaged", und der Folge-App-Boot ist tentative*
+  (E2). → steuert E2 + E4-T4.
 
 ---
 
-## 2. Code-Deduplizierung (der Hauptteil der `.text`-Ersparnis)
+# E1 — Recovery-Erschöpfung entkoppeln (Vertragslücke 2)
 
-### C1 — `rotate_to_sector()` (größter Einzelgewinn)
+Problem: `boot_rollback_evaluate_os` nutzt einen einzigen `boot_failure_counter` für App *und*
+Recovery. Ein Recovery-OS, das selbst wiederholt crasht (kaputtes Image, Netzfehler in Schleife),
+zählt denselben Counter hoch, überschreitet `limit_rec` und fällt in den **Unattended-Backoff oder
+Panic** — ohne dass je eine lokale Rescue-Schnittstelle drankam. Das grobe Sicherheitsnetz kann die
+Rettung selbst aussperren.
 
-Das Muster „prev_erase lesen → smart-erase → Header bauen (seq/erase/tmr) → schreiben" steht
-**vier Mal**: einmal in `append` (Rotation), dreimal in der `update_tmr`-Quorum-Schleife, plus eine
-Variante im Factory-Blank-Pfad der Init.
+### E1-T1 — App- und Recovery-Fehlversuche trennen                             [M · 🔴]
+Ziel        Ein separater `recovery_failure_counter` in der TMR, damit Recovery-Crashes nicht das
+            App-Fenster verbrennen und umgekehrt.
+Berührt     `boot_journal.h` (`wal_tmr_payload_t`, neues Feld aus `reserved`-Tail; `struct_version`
+            bump; `WAL_TMR_POPULATED_SIZE`), `boot_rollback.c`, `boot_state.c`.
+Skizze      Beim Recovery-Boot (`booted_partition == RECOVERY`) inkrementiert ein Crash den
+            `recovery_failure_counter`, nicht den App-Counter. `boot_rollback_evaluate_os` liest
+            beide.
+Fertig wenn Recovery-Crashes lassen den App-Counter unberührt (Test); ein reparierter App-Boot
+            heilt den App-Counter, nicht den Recovery-Counter.
+Hängt an    D0-B (Zählerlogik hängt an updatebar/immutable)
 
-```c
-static boot_status_t rotate_to_sector(const boot_platform_t *p, uint32_t idx,
-                                      uint32_t seq, const wal_tmr_payload_t *tmr,
-                                      uint32_t *out_erase) {
-  uint32_t prev = 0;
-  if (read_header(p, idx) && verify_header_crc_glitch_safe(&g_hdr_scratch))
-    prev = g_hdr_scratch.data.erase_count;
-
-  boot_status_t s = smart_erase_sector(p, idx);
-  if (s != BOOT_OK) return s;
-
-  wal_sector_header_aligned_t wh __attribute__((aligned(8)));
-  memset(&wh, p->flash->erased_value, sizeof(wh));
-  wh.data.sector_magic = WAL_ABI_VERSION_MAGIC;
-  wh.data.sequence_id  = seq;
-  wh.data.erase_count  = prev + 1;
-  wh.data.tmr_data     = *tmr;
-  wh.data.header_crc32 = sector_hdr_crc(&wh.data);
-
-  if (p->wdt && p->wdt->kick) p->wdt->kick();
-  s = p->flash->write(wal_sector_addrs[idx], (const uint8_t *)&wh, sizeof(wh));
-  boot_secure_zeroize(&wh, sizeof(wh));
-  if (s == BOOT_OK && out_erase) *out_erase = prev + 1;
-  return s;
-}
-```
-
-`append` ruft es einmal, `update_tmr` in der Schleife dreimal. Der Rumpf verschwindet aus beiden.
-Geschätzt ~200 B `.text` plus deutlich weniger Stack (nur noch ein `wh` pro Aufruf statt pro
-Kopie).
-
-### C2 — `hash_chain_compute()` als Segment-Liste
-
-`compute_chain_tag` hasht `(key ‖ entry_bytes ‖ prev_tag)`; `update_tmr` codiert offen
-`(key ‖ tmr_bytes ‖ epoch ‖ prev_tag)` — unterschiedliche Eingaben, **identisches Skelett**
-(init → update× → finish → truncate, plus Fehlerpfad mit Dummy-Finish und `zeroize`). Ein
-generischer Helfer über eine Segment-Liste vereint beide:
-
-```c
-typedef struct { const uint8_t *p; size_t n; } hash_seg_t;
-
-static boot_status_t hash_chain_compute(const boot_platform_t *pf,
-                                        const hash_seg_t *seg, size_t nseg,
-                                        uint8_t out[WAL_CHAIN_TAG_BYTES]) {
-  uint8_t ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
-  boot_secure_zeroize(ctx, sizeof(ctx));
-  boot_secure_zeroize(out, WAL_CHAIN_TAG_BYTES);
-
-  boot_status_t s = pf->crypto->hash_init(ctx, sizeof(ctx));
-  for (size_t i = 0; s == BOOT_OK && i < nseg; i++)
-    s = pf->crypto->hash_update(ctx, seg[i].p, seg[i].n);
-
-  uint8_t digest[32]; size_t dl = 32;
-  if (s == BOOT_OK) {
-    s = pf->crypto->hash_finish(ctx, digest, &dl);
-    if (s == BOOT_OK) memcpy(out, digest, WAL_CHAIN_TAG_BYTES);
-  } else {
-    (void)pf->crypto->hash_finish(ctx, digest, &dl); /* Kontext sauber schließen */
-  }
-  boot_secure_zeroize(digest, sizeof(digest));
-  boot_secure_zeroize(ctx, sizeof(ctx));
-  return s;
-}
-```
-
-Aufrufseiten:
-
-```c
-/* compute_chain_tag: */
-hash_seg_t seg[] = {{key,WAL_CHAIN_TAG_BYTES},
-                    {(const uint8_t*)entry, offsetof(wal_entry_payload_t,crc32_trailer)},
-                    {prev_tag,WAL_CHAIN_TAG_BYTES}};
-return hash_chain_compute(platform, seg, 3, out_tag);
-
-/* update_tmr Epoch-Anker (prev_tag steckt implizit in den tmr-Bytes — Reihenfolge bewahrt!): */
-hash_seg_t seg[] = {{journal_key,WAL_CHAIN_TAG_BYTES},
-                    {(const uint8_t*)&tmr_to_write, sizeof(wal_tmr_payload_t)},
-                    {(const uint8_t*)&efuse_epoch, sizeof(efuse_epoch)}};
-hash_chain_compute(platform, seg, 3, tmr_to_write.chain_tag);
-```
-
-Die subtile Ordnung bleibt erhalten: Im Epoch-Anker enthalten die `tmr_to_write`-Bytes noch den
-**alten** `chain_tag`; er wird erst danach vom Digest überschrieben. Geschätzt ~200 B.
-
-### C3 — `read_header()` + `find_sector_by_seq()`
-
-Das „read + zeroize"-Muster für Sektor-Header steht ~8×; die „Sektor mit passender sequence_id
-finden"-Schleife 2× (`reconstruct_txn`, Init-Quorum).
-
-```c
-static bool read_header(const boot_platform_t *p, uint32_t idx) {
-  return p->flash->read(wal_sector_addrs[idx], (uint8_t *)&g_hdr_scratch,
-                        sizeof(g_hdr_scratch)) == BOOT_OK;
-}
-static int32_t find_sector_by_seq(const boot_platform_t *p, uint32_t seq) {
-  for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++)
-    if (read_header(p, i) && verify_header_crc_glitch_safe(&g_hdr_scratch) &&
-        g_hdr_scratch.data.sequence_id == seq)
-      return (int32_t)i;
-  return -1;
-}
-```
-
-Beide Suchschleifen kollabieren auf einen Aufruf. ~120 B plus weniger Stack.
-
-### C4 — `classify_entry()`
-
-Read + CRC + Magic + `BOOT_SECURE_REQUIRE` steht in `scan_for_frontier_linear` **und**
-`reconstruct_txn`. Ein Klassifikator vereinheitlicht die Prüfung (der Frontier-Scan braucht die
-Unterscheidung ERASED vs. CORRUPT, die Rekonstruktion nur VALID vs. nicht):
-
-```c
-typedef enum { WAL_E_ERASED, WAL_E_VALID, WAL_E_CORRUPT } wal_entry_state_t;
-
-static wal_entry_state_t classify_entry(const wal_entry_aligned_t *e, uint8_t ev) {
-  if (is_fully_erased_constant_time((const uint8_t*)e, sizeof(*e), ev)) return WAL_E_ERASED;
-  bool ok = (e->data.magic == WAL_ENTRY_MAGIC) &&
-            (entry_crc(&e->data) == e->data.crc32_trailer);
-  return ok ? WAL_E_VALID : WAL_E_CORRUPT;
-}
-```
-
-~60 B, und die doppelte CRC-Berechnungslogik verschwindet.
-
-### C5 — Nicht-inline CRC-Helfer
-
-`compute_boot_crc32(&X, offsetof(wal_sector_header_t, header_crc32))` steht 5×, das Entry-Pendant
-4×. Als **nicht-inline** `static`-Funktionen (bewusst nicht `inline` — für Größe zählt eine Kopie
-statt fünf):
-
-```c
-static uint32_t sector_hdr_crc(const wal_sector_header_t *h) {
-  return compute_boot_crc32((const uint8_t *)h, offsetof(wal_sector_header_t, header_crc32));
-}
-static uint32_t entry_crc(const wal_entry_payload_t *e) {
-  return compute_boot_crc32((const uint8_t *)e, offsetof(wal_entry_payload_t, crc32_trailer));
-}
-```
-
-Kostet je einen Call, spart die wiederholten Immediate-Ladungen und die Textkopien.
+### E1-T2 — Recovery eskaliert nie terminal, sondern in lokale Rescue          [M · 🟡]
+Ziel        Aus dem Recovery-Kontext heraus wird **nie** in den Unattended-Backoff-Sleep oder Panic
+            eskaliert. Erschöpftes Recovery → definierte lokale Rescue (UART/DFU-Warteschleife),
+            damit ein Mensch/Tool immer eine Chance hat.
+Berührt     `boot_rollback.c` (`boot_rollback_evaluate_os`, Terminal-Zweig).
+Skizze      Wenn `recovery_failure_counter` erschöpft: statt `enter_low_power`/`boot_panic` gezielt
+            `boot_panic(BOOT_RECOVERY_REQUESTED)` (Serial-Rescue) — nie der stille Akku-Backoff.
+Fertig wenn Ein dauerhaft crashendes Recovery landet in der Rescue-Schleife, nicht im
+            136-Jahre-Backoff; App-seitiger Backoff bleibt unverändert.
+Hängt an    E1-T1
 
 ---
 
-## 3. Mathematische Vereinfachung
+# E2 — Reparierter Boot wird tentative (Vertragslücke 3)
 
-### M1 — Modulare Wear-Protection (verifiziert)
+Problem: In Step 5 wird `requires_confirmation`/`is_tentative_boot` nur bei
+`open_txn.intent == WAL_INTENT_TXN_COMMIT` gesetzt. Nach einer Recovery-Reparatur heilt der Core den
+Counter und bootet die App — aber **ohne Tentative-Nonce**, also ohne Confirm-Zwang. Eine schlechte
+Reparatur wird erst über die normale Crash-Kaskade wieder gefangen; der schnelle Sicherheitsgurt
+fehlt genau nach der Reparatur.
 
-`get_best_wear_leveling_sector` schützt die letzten 4 Sequenzen mit einem verschachtelten
-Konstrukt aus `is_newer_sequence()`, einer zusammengesetzten Bedingung und einer
-Spezialfall-Wrap-Heuristik (`seq > 0xFFFFFFF0 && highest < 10`). Das gesamte Konstrukt ist durch
-**eine** modulare Subtraktion ersetzbar:
-
-```c
-/* highest_seq - seq wrappt mod 2^32; Fenster = 4 */
-if ((uint32_t)(highest_seq - hdr.data.sequence_id) < WAL_PROTECT_WINDOW)
-  continue;   /* schütze diesen Sektor */
-```
-
-Ich habe die Äquivalenz über alle Rand- und Wrap-Fälle numerisch geprüft (Innen-/Außenrand des
-Fensters, „seq neuer als highest" = Korruption, und vier Wrap-Konstellationen um 0 herum). Die
-modulare Version ist nicht nur äquivalent, sie behandelt den Sequenz-Wrap **sauberer** — genau den
-Fall, den die alte Heuristik nur halb abdeckte. Ergebnis:
-
-```
-seq==highest        -> schützt     highest-4           -> frei
-highest-3 (Rand)    -> schützt     seq neuer (Korrupt) -> frei (huge diff)
-wrap highest=2,     seq=2^32-1     -> schützt (== highest-3)
-wrap highest=0,     seq=2^32-3     -> schützt (== highest-3)
-```
-
-Entfernt ~10 Zeilen, den `is_newer_sequence`-Aufruf an dieser Stelle und die Wrap-Sonderlogik.
-🟡, weil es den Schutzpfad berührt — deshalb der Enumerator/Test aus dem K5-Netz darüber.
+### E2-T1 — Recovery-reparierten App-Boot als tentative markieren              [M · 🟡]
+Ziel        Ein App-Boot, der aus `RECOVERY_RESOLVED`-Heilung hervorgeht, bekommt eine
+            Tentative-Nonce und muss confirmen — sonst schneller Rückfall statt stiller
+            Crash-Kaskade.
+Berührt     `boot_state.c` (Step 2 Heilungszweig setzt Marker; Step 5
+            `requires_confirmation`-Bedingung erweitern).
+Skizze      Neben `TXN_COMMIT` auch „geheilt aus Recovery in diesem Boot" als
+            `requires_confirmation`-Auslöser; nutzt denselben `healed_this_boot`-Kontext wie der
+            Heal-then-Crash-Patch.
+Fertig wenn Nach Recovery-Reparatur ist `is_tentative_boot == true`, Nonce registriert; bleibt der
+            Confirm der reparierten App aus, folgt zügiger Rückfall (Test).
+Hängt an    D0-C, Patch (Heal-then-Crash, für `healed_this_boot`)
 
 ---
 
-## 4. Latente Inkonsistenz (Bugfix, kein reiner Cleanup)
+# E3 — Recovery-Update brownout-sicher (Vertragslücke 4, gefährlichste)
 
-### X1 — `populated_size` widerspricht sich (52 vs. 76)
+Problem: Der Recovery-Slot wird via Multi-Image **in-place** aktualisiert
+(`TBM1_SLOT_RECOVERY` → `CHIP_RECOVERY_OS_ABS_ADDR`). Ein Stromausfall mitten im Recovery-Update
+hinterlässt ein halb-geschriebenes Recovery — **die Rückfallebene selbst ist beim eigenen Update
+angreifbar.** Wenn Recovery kaputt ist, ist das letzte Sicherheitsnetz weg.
 
-`migrate_v1_tmr` setzt `populated_size = 76` mit expliziter Herleitung
-(4 + 48 + 4 stage1_svn + 16 chain_tag + 4 chain_entry_count). Der Factory-Blank-Pfad in
-`boot_journal_init` setzt aber:
+Die Umsetzung hängt an **D0-B**:
 
-```c
-current_active_header.tmr_data.populated_size = 52;
-```
+### E3-T1a — Variante immutable: Recovery-Update abweisen                      [S · 🔴]
+Ziel        Wenn D0-B = immutable: `TBM1_SLOT_RECOVERY` wird aus der Multi-Image-Whitelist entfernt;
+            ein Manifest mit Recovery-Sub-Image wird sauber abgelehnt (kein in-place-Risiko).
+Berührt     `boot_state.c` (`stage_swap` Whitelist + Slot-Mapping), Manifest-Compiler (Slot
+            verbieten).
+Fertig wenn Ein Recovery-Sub-Image führt zu definiertem Reject, nie zu einem in-place-Write;
+            Recovery bleibt factory-locked.
+Hängt an    D0-B
 
-76 − 52 = 24 = genau `stage1_svn (4) + chain_tag (16) + chain_entry_count (4)`. Ein **migriertes**
-Gerät deklariert also, diese Felder seien populated; ein **fabrikneues** Gerät deklariert das
-Gegenteil — für dieselbe `struct_version`. Wenn `populated_size` je von einem Forward-Compat-Reader
-als memcpy-/Gültigkeitsgrenze benutzt wird, unterschätzt ein fabrikneues Gerät seine populated
-Region und die Chain-Felder gelten fälschlich als „nicht vorhanden".
-
-Fix an einer Stelle, der zugleich die Magic-Zahlen beseitigt:
-
-```c
-/* boot_journal.h — eine Quelle der Wahrheit, offsetof-verankert */
-#define WAL_TMR_POPULATED_SIZE  offsetof(wal_tmr_payload_t, _reserved_after_populated)
-/* bzw. ein #define, das genau die belegten Felder abdeckt */
-```
-
-Beide Setzstellen nutzen `WAL_TMR_POPULATED_SIZE`. Damit können sie nicht mehr auseinanderlaufen,
-und der `struct_version`/`populated_size`-Vertrag ist konsistent. Das ist die einzige Änderung mit
-Verhaltenswirkung — und sie behebt einen Bug, statt Funktionalität zu entfernen.
-
----
-
-## 5. Mikro-Optimierungen
-
-### X2 — Majority-Vote gibt Index statt Struct-Wert
-
-`tmr_majority_vote` gibt `wal_tmr_payload_t` **by value** zurück (≥76 B). Der große Struct-Return
-läuft über einen versteckten Pointer (memcpy), und der Aufrufer kopiert nochmal in
-`current_active_header.tmr_data` — zwei Kopien. Ein Index-Rückgabewert lässt genau eine Kopie übrig:
-
-```c
-static int tmr_majority_vote_idx(const wal_tmr_payload_t *c, int n); /* 0..2 */
-/* Aufrufer: */
-current_active_header.tmr_data = tmr_candidates[tmr_majority_vote_idx(cands, n)];
-```
-
-Die drei `constant_time_memcmp`-Vergleiche bleiben (sie sind das mathematische Minimum für einen
-3-fach-Mehrheitsentscheid, C(3,2)=3 — nicht weiter reduzierbar). Nur der Rückgabeweg wird billiger:
-~40 B `.text`, −152 B Stack (zwei 76-B-Kopien gespart).
-
-### X3 — Redundantes Pre-Read-`zeroize` entfernen
-
-Viele Stellen tun `boot_secure_zeroize(&hdr, …)` **vor** einem `flash->read`, das den Puffer
-vollständig überschreibt. Ist der Read-Rückgabewert geprüft (ist er überall), ist das Pre-Zeroize
-totes Werk — der Read füllt alles. Die *Leakage*-Sorge (Nonce-Bytes im Puffer nach Gebrauch)
-adressiert nur ein **Post**-Use-`zeroize`, das an einigen Stellen fehlt. Also: Pre-Read-Zeroize
-streichen, Post-Use-Zeroize für nonce-tragende Puffer beibehalten/ergänzen. Sicherheitsneutral bis
-leicht besser, ~60 B über alle Stellen. 🟡 nur, weil es Zeroize berührt — die Regel ist klar:
-*einmal nach Gebrauch, nie vor einem vollständigen Read.*
-
-### X4 — Init: Doppel-Read des Highest-Headers vermeiden
-
-`boot_journal_init` scannt alle Sektoren für `highest_idx` und liest danach denselben Sektor
-erneut. Cacht man den Gewinner-Header während des Scans (Kopie beim Finden eines neuen Maximums),
-entfällt der zweite Flash-Read plus etwas Code. Klein, aber sauber.
+### E3-T1b — Variante zweistufig/A-B: brownout-sicheres Recovery-Update        [L · 🔴]
+Ziel        Wenn D0-B = updatebar: Recovery-Update erhält dieselbe WAL-journaled, resume-fähige
+            Semantik wie der App-Swap — entweder eigenes A/B oder ein winziges immutables
+            Minimal-Recovery, das das größere reflasht und dabei einen halben Schreibvorgang beim
+            nächsten Boot fortsetzt.
+Berührt     `boot_state.c`, `boot_swap.c`/`boot_multiimage.c`, Flash-Map (zweiter Recovery-Slot bzw.
+            Minimal-Recovery-Region), `boot_rollback.c` (`ROLLBACK_TARGET_RECOVERY`-SVN-Persistenz).
+Fertig wenn Power-Cut mitten im Recovery-Update → beim nächsten Boot existiert immer ein bootbares
+            Recovery (das alte oder das fertige neue), nie ein halbes.
+Hängt an    D0-B
 
 ---
 
-## 6. Bewusst NICHT anfassen
+# E4 — `recovery/` Source-Tree (die dumme OTA-only-App)
 
-- **Whole-Struct-Vergleich im TMR-Vote**: vergleicht bereits nur `wal_tmr_payload_t` (die TMR,
-  nicht den ganzen Header). Kein Gewinn durch „nur TMR-Bytes".
-- **`memset(&wh, erased_value, …)` vor `memcpy`**: setzt Padding auf 0xFF, damit ungeschriebene
-  Bits 1 bleiben (flash-konform). Bleibt — wandert in `rotate_to_sector`.
-- **CRC vs. Chain-Tag zusammenlegen**: unterschiedliche Domänen (Fehlererkennung vs.
-  geräte­gebundene Kette). Nicht mergen.
-- **Intent-Klassifikation → Tabelle** (`reconstruct_txn`): die Handler schreiben in verschiedene
-  Out-Parameter; eine Tabelle + `switch` spart im Binary kaum etwas gegenüber der if-Kette und kann
-  die Lesbarkeit senken. Niedrige Priorität — nur mitnehmen, wenn K6 die Intent-Algebra ohnehin
-  tabellarisiert.
+Erst bauen, wenn E1–E3 den Vertrag dichtgemacht haben — sonst baut Recovery auf einer Heilung/einem
+Update-Pfad, der nicht hält.
+
+### E4-T1 — Recovery-Grundgerüst: Handoff lesen, Modus erkennen                [M · 🟢]
+Ziel        Minimal-App, die via `toob_get_handoff()` prüft `booted_partition == RECOVERY`,
+            `TOOB_OS_INIT_OR_PANIC()` läuft, sonst nichts tut. Kein Krypto, kein Netz.
+Berührt     neu `recovery/main.c`, bindet libtoob + `toob_port.h`.
+Fertig wenn Recovery bootet, erkennt seinen Modus, ist ein eigenständiges, verifizierbares Image
+            (eigenes TBM1-Header, `TBM1_SLOT_RECOVERY`).
+Hängt an    —
+
+### E4-T2 — Reparatur-Kanal (gemäß D0-A)                                       [L · 🔴]
+Ziel        Recovery bezieht ein funktionierendes App-Image und streamt es via
+            `toob_ota_begin/process_chunk/finalize` ins Staging — Kanal je nach D0-A.
+Berührt     `recovery/`; bei lokal: DFU/seriell-Empfang; bei Netz: `os_client`-Wiederverwendung.
+Skizze      Kein Verify im Recovery — `finalize` schreibt `MBX_CMD_UPDATE_PENDING`; Stage 1
+            verifiziert beim nächsten Boot. Recovery bleibt damit ohne Root-of-Trust.
+Fertig wenn Recovery lädt ein App-Image in Staging und registriert es; ein absichtlich korruptes
+            Image wird von Stage 1 (nicht von Recovery) abgelehnt.
+Hängt an    D0-A, E4-T1
+
+### E4-T3 — Auflösung: `toob_recovery_resolved()` sauber aufrufen              [S · 🟡]
+Ziel        Nach erfolgreichem Staging ruft Recovery `toob_recovery_resolved()` (Mailbox
+            `RECOVERY_RESOLVED`) und rebootet. Der Core heilt (mit dem Patch: korrekt auf 0) und
+            bootet die reparierte App.
+Berührt     `recovery/main.c`.
+Fertig wenn End-to-End: Crash-Kaskade → Recovery-Boot → Reparatur → resolved → App bootet,
+            App-Counter = 0 (Patch), reparierte App ist tentative (E2-T1).
+Hängt an    E4-T2, E2-T1, Patch
+
+### E4-T4 — Status-/Anzeige-Integration (SWEV-T9)                              [S · 🟢]
+Ziel        Recovery bindet denselben `toob_swap_notify_fn`-Herstellertreiber wie die App ein und
+            zeichnet `phase = TOOB_SWAP_PHASE_RECOVERY` — reiche Anzeige trivial, weil volles OS.
+Berührt     `recovery/main.c`; Wiederverwendung der Swap-Event-Naht.
+Fertig wenn Recovery zeigt „Firmware wird neu geladen" über denselben Treibercode wie die App
+            (Ebene C aus dem Swap-Display-Backlog).
+Hängt an    E4-T1
+
+### E4-T5 — Roach-Motel-Test: Recovery kann sich nicht selbst einsperren       [M · 🟡]
+Ziel        Der Integrationstest, der beweist, dass Recovery immer einen Ausweg hat — die zentrale
+            Garantie des ganzen Epics.
+Berührt     Test-Harness.
+Skizze      Szenarien: (a) Recovery repariert erfolgreich → App bootet, Counter 0; (b) Recovery
+            crasht wiederholt → landet in lokaler Rescue (E1-T2), nie im stillen Backoff;
+            (c) Power-Cut während Recovery-Update → bootbares Recovery bleibt (E3).
+Fertig wenn Alle drei Szenarien grün; kein Pfad führt in einen Zustand ohne
+            Mensch-/Tool-Eingriffsmöglichkeit.
+Hängt an    E1-T2, E3, E4-T3
 
 ---
 
-## 7. Reihenfolge
+## Reihenfolge
 
-1. **X1** zuerst — es ist der Bugfix; alles andere baut auf konsistentem `populated_size` auf.
-2. **R1** (const-Arrays) und **C5** (CRC-Helfer) — rein mechanisch, sofort grün.
-3. **C3** (`read_header`/`find_sector_by_seq`) legt den geteilten Scratch an → Voraussetzung für R2.
-4. **C1** (`rotate_to_sector`) und **C2** (`hash_chain_compute`) — die zwei großen Text-Gewinne.
-5. **R2** (Scratch-Zusammenführung) mit der dokumentierten Aliasing-Begründung.
-6. **M1** (modulare Wear-Protection) und **X2/X3/X4** — verifiziert bzw. mikro.
+1. **D0-A/B/C** entscheiden — sie bestimmen E2/E3/E4-Aufwand.
+2. **E1** (Erschöpfung entkoppeln) + **E2** (tentative Reparatur) — die zwei restlichen
+   Vertragslücken im Boot-Pfad; unabhängig voneinander, beide bauen auf dem Heal-then-Crash-Patch.
+3. **E3** (brownout-sicheres Recovery-Update) — Variante nach D0-B; die gefährlichste Lücke, aber
+   erst relevant, wenn Recovery überhaupt updatebar sein soll.
+4. **E4** (Source-Tree) — zuletzt, gegen den dann dichten Vertrag.
+5. **E4-T5** als Abschluss-Gate.
 
-Jeder Schritt einzeln committen und gegen den K5-Enumerator (Stromausfall an jeder
-Schreibgrenze) fahren — besonders C1, R2 und M1, weil sie Rotations- und Schutzpfade berühren.
-Das Netz beweist, dass die Verkleinerung die Crash-Konsistenz nicht antastet.
+## Kern-Garantie, die am Ende grün sein muss
+
+**Kein Pfad sperrt die Rettung aus.** Nach erfolgreichem Recovery ist der App-Counter sauber 0
+(Patch), die reparierte App ist tentative (E2), ein crashendes Recovery landet in lokaler Rescue
+statt im stillen Backoff (E1), und ein Power-Cut im Recovery-Update lässt immer ein bootbares
+Recovery zurück (E3). Recovery ist dumm (kein eigenes Krypto), Stage 1 verifiziert (E4).
