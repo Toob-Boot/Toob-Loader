@@ -127,8 +127,8 @@ static void upgrade_tmr_payload(wal_tmr_payload_t *tmr) {
   if (tmr->struct_version < WAL_TMR_VERSION_2) {
     tmr->stage1_svn = BOOT_STAGE1_SVN;
   }
-  if (tmr->struct_version < WAL_TMR_VERSION_3) {
-    tmr->last_consumed_mailbox_seq = 0;
+  if (tmr->struct_version < WAL_TMR_VERSION_4) {
+    tmr->last_mbx_request_id = 0;
   }
   tmr->struct_version = WAL_TMR_VERSION_CURRENT;
   tmr->populated_size = WAL_TMR_POPULATED_SIZE;

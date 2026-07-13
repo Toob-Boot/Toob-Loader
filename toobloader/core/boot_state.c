@@ -963,6 +963,11 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   if (core_status != BOOT_OK)
     goto state_cleanup;
 
+  /* Consume OS Mailbox requests and append folded intents to WAL before reconstruction */
+  core_status = boot_mailbox_consume(platform);
+  if (core_status != BOOT_OK)
+    goto state_cleanup;
+
   core_status = boot_journal_get_tmr(platform, &current_tmr);
   if (core_status != BOOT_OK)
     goto state_cleanup;
@@ -982,20 +987,6 @@ boot_status_t boot_state_run(const boot_platform_t *platform,
   }
 
   boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_1); /* Proof Step 1 */
-  platform->wdt->kick();
-
-  /*
-   * ==============================================================================
-   * STEP 1.5 - OS Mailbox Fold-In
-   * ==============================================================================
-   */
-  core_status = boot_mailbox_fold_in(platform, &open_txn, &current_tmr);
-  if (core_status != BOOT_OK && core_status != BOOT_ERR_NOT_FOUND) {
-    goto state_cleanup;
-  }
-  core_status = BOOT_OK;
-
-  boot_cfi_step(state_cfi_ctx, STATE_CFI_SLOT_1_5); /* Proof Step 1.5 */
   platform->wdt->kick();
 
   /*

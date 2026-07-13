@@ -86,9 +86,17 @@ pub struct BootDiagnostics {
     pub verify_time_ms: u32,
     pub last_error_code: u32,
     pub vendor_error: u32,
+    pub hardware_fault_record: u32,
     pub active_key_index: u32,
     pub current_svn: u32,
+    pub build_number: u32,
     pub edge_recovery_events: u32,
+    pub wdt_kicks: u32,
+    pub fw_ver_major: u16,
+    pub fw_ver_minor: u16,
+    pub fw_ver_patch: u16,
+    pub fallback_occurred: bool,
+    pub boot_session_id: u32,
     pub sbom_digest: [u8; 32],
     pub ext_health: Option<ExtHealth>,
 }
@@ -139,11 +147,6 @@ pub fn recovery_resolved() -> Result<()> {
     unsafe { sys::toob_recovery_resolved().to_result() }
 }
 
-/// Accumulates net search time.
-pub fn accumulate_net_search(active_search_ms: u32) -> Result<()> {
-    unsafe { sys::toob_accumulate_net_search(active_search_ms).to_result() }
-}
-
 /// Extracts raw hardware metrics.
 pub fn get_boot_diag() -> Result<BootDiagnostics> {
     let mut diag = unsafe { core::mem::zeroed() };
@@ -156,9 +159,17 @@ pub fn get_boot_diag() -> Result<BootDiagnostics> {
         verify_time_ms: diag.verify_time_ms,
         last_error_code: diag.last_error_code,
         vendor_error: diag.vendor_error,
+        hardware_fault_record: diag.hardware_fault_record,
         active_key_index: diag.active_key_index,
         current_svn: diag.current_svn,
+        build_number: diag.build_number,
         edge_recovery_events: diag.edge_recovery_events,
+        wdt_kicks: diag.wdt_kicks,
+        fw_ver_major: diag.fw_ver_major,
+        fw_ver_minor: diag.fw_ver_minor,
+        fw_ver_patch: diag.fw_ver_patch,
+        fallback_occurred: diag.fallback_occurred != 0,
+        boot_session_id: diag.boot_session_id,
         sbom_digest: diag.sbom_digest,
         ext_health: if diag.ext_health_present != 0 {
             Some(ExtHealth {

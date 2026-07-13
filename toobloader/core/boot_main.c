@@ -451,8 +451,10 @@ init_success:
 
   wal_tmr_payload_t tmr __attribute__((aligned(8)));
   boot_secure_zeroize(&tmr, sizeof(tmr));
+  uint32_t session_id = 0;
   if (boot_journal_get_tmr(platform, &tmr) == BOOT_OK) {
     boot_diag_set_recovery_events(tmr.boot_failure_counter);
+    session_id = tmr.chain_entry_count;
 
     toob_ext_health_t wear = {
         .wal_erase_count = 0, /* TMR has no aggregated WAL wear counter */
@@ -464,6 +466,7 @@ init_success:
   }
   boot_secure_zeroize(&tmr, sizeof(tmr));
 
+  boot_diag_set_system_status(0, target_out->boot_recovery_os, session_id);
   boot_diag_seal(); /* Kapselt CRC & Padding-Nulling perfekt ein */
 
   /* Handoff Struct Population */

@@ -143,8 +143,8 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 		return err
 	}
 
-	// Allocate OS→Core Mailbox (1 sector, Double-Slot: 2×32 Bytes)
-	mailboxSize := alloc.maxSectorSize
+	// Allocate OS→Core Mailbox (2 sectors, Double-Slot: 2×SectorSize)
+	mailboxSize := 2 * alloc.maxSectorSize
 	mailboxAddr, mailboxBudget, err := alloc.Allocate(mailboxSize, 0, "Mailbox")
 	if err != nil {
 		return err

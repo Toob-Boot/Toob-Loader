@@ -57,8 +57,9 @@
 #define TOOB_KDM_QUORUM_ADDR     0x000F1000
 #define TOOB_KDM_QUORUM_SIZE     0x3000
 
-/* OS→Core Mailbox (1 sector, Double-Slot: 2×32 Bytes) */
+/* OS→Core Mailbox (2 sectors, Double-Slot: 2×SectorSize, torn-write safe) */
 #define CHIP_MAILBOX_ABS_ADDR    0x000F4000
-#define CHIP_MAILBOX_SIZE        0x1000
+#define CHIP_MAILBOX_SLOT_SIZE   0x1000
+#define CHIP_MAILBOX_SIZE        0x2000
 
 #endif /* LIBTOOB_CONFIG_SANDBOX_H */

@@ -26,6 +26,13 @@ void boot_diag_set_boot_time(uint32_t time_ms) {
 void boot_diag_set_error(boot_status_t error, uint32_t vendor_fault) {
     toob_diag_state.last_error_code = (uint32_t)error;
     toob_diag_state.vendor_error = vendor_fault;
+    toob_diag_state.hardware_fault_record = vendor_fault;
+}
+
+void boot_diag_set_system_status(uint32_t wdt_kicks, bool fallback, uint32_t session_id) {
+    toob_diag_state.wdt_kicks = wdt_kicks;
+    toob_diag_state.fallback_occurred = fallback ? 1 : 0;
+    toob_diag_state.boot_session_id = session_id;
 }
 
 void boot_diag_set_security_meta(uint32_t svn, uint32_t key_idx, const uint8_t *sbom_hash,

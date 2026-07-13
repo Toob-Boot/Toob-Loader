@@ -184,21 +184,18 @@ static toob_status_t _ota_begin_core(toob_ota_ctx_t *ctx, uint32_t total_size) {
   return TOOB_OK;
 }
 
-toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size) {
-    return _ota_begin_core(ctx, total_size);
-}
-
-toob_status_t toob_ota_begin_verified(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]) {
+toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]) {
     toob_status_t res = _ota_begin_core(ctx, total_size);
     if (res != TOOB_OK) return res;
 
-    if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
-        _ctx_reset(ctx);
-        return TOOB_ERR_NOT_SUPPORTED;
+    if (expected_sha256 != NULL) {
+        if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
+            _ctx_reset(ctx);
+            return TOOB_ERR_NOT_SUPPORTED;
+        }
+        memcpy(ctx->expected_sha256, expected_sha256, 32);
+        ctx->is_verified = 1;
     }
-
-    memcpy(ctx->expected_sha256, expected_sha256, 32);
-    ctx->is_verified = 1;
     return TOOB_OK;
 }
 
@@ -208,7 +205,9 @@ toob_status_t toob_ota_abort(toob_ota_ctx_t *ctx) {
     return TOOB_OK;
 }
 
-toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, uint32_t* resume_offset) {
+toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size,
+                              const uint8_t expected_sha256[32],
+                              uint32_t *resume_offset) {
     if (!ctx || !resume_offset) return TOOB_ERR_INVALID_ARG;
     if (total_size == 0 || total_size > CHIP_STAGING_SLOT_SIZE) return TOOB_ERR_INVALID_ARG;
 
@@ -225,63 +224,53 @@ toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, uint32_t
             ctx->total_size = total_size;
             ctx->state = TOOB_OTA_STATE_RECEIVING;
             *resume_offset = ctx->bytes_queued;
+
+            if (expected_sha256 != NULL) {
+                uint32_t prefix_len = *resume_offset;
+                if (prefix_len > 0) {
+                    /* Initialize SHA-256 streaming context */
+                    if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
+                        _ctx_reset(ctx);
+                        return TOOB_ERR_NOT_SUPPORTED;
+                    }
+                    memcpy(ctx->expected_sha256, expected_sha256, 32);
+                    ctx->is_verified = 1;
+
+                    /* Re-hash the already-staged prefix by reading it back from flash.
+                     * Reuses ctx->align_buf as temporary read buffer — zero additional allocation. */
+                    uint32_t rehashed = 0;
+                    while (rehashed < prefix_len) {
+                        uint32_t chunk_len = TOOB_OTA_BUF_SIZE;
+                        if (rehashed + chunk_len > prefix_len) {
+                            chunk_len = prefix_len - rehashed;
+                        }
+
+                        toob_status_t rd = toob_os_flash_read(
+                            CHIP_STAGING_SLOT_ABS_ADDR + rehashed,
+                            ctx->align_buf,
+                            chunk_len);
+                        if (rd != TOOB_OK) {
+                            _ctx_reset(ctx);
+                            return rd;
+                        }
+
+                        if (toob_os_sha256_update(&ctx->sha_ctx, ctx->align_buf, chunk_len) != TOOB_OK) {
+                            _ctx_reset(ctx);
+                            return TOOB_ERR_NOT_SUPPORTED;
+                        }
+
+                        rehashed += chunk_len;
+                    }
+
+                    toob_secure_zeroize(ctx->align_buf, TOOB_OTA_BUF_SIZE);
+                }
+            }
+
             return TOOB_OK;
         }
     }
 
     return TOOB_ERR_NOT_FOUND;
-}
-
-toob_status_t toob_ota_resume_verified(toob_ota_ctx_t *ctx, uint32_t total_size,
-                                       const uint8_t expected_sha256[32],
-                                       uint32_t *resume_offset) {
-    if (!ctx || !resume_offset || !expected_sha256) return TOOB_ERR_INVALID_ARG;
-
-    /* Delegate core resume logic (validates handoff, restores cursors & total_size) */
-    toob_status_t stat = toob_ota_resume(ctx, total_size, resume_offset);
-    if (stat != TOOB_OK) return stat;
-
-    uint32_t prefix_len = *resume_offset;
-    if (prefix_len == 0) return TOOB_OK; /* Nothing to re-hash */
-
-    /* Initialize SHA-256 streaming context */
-    if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
-        _ctx_reset(ctx);
-        return TOOB_ERR_NOT_SUPPORTED;
-    }
-
-    /* Re-hash the already-staged prefix by reading it back from flash.
-     * Reuses ctx->align_buf as temporary read buffer — zero additional allocation. */
-    uint32_t rehashed = 0;
-    while (rehashed < prefix_len) {
-        uint32_t chunk_len = TOOB_OTA_BUF_SIZE;
-        if (rehashed + chunk_len > prefix_len) {
-            chunk_len = prefix_len - rehashed;
-        }
-
-        toob_status_t rd = toob_os_flash_read(
-            CHIP_STAGING_SLOT_ABS_ADDR + rehashed,
-            ctx->align_buf,
-            chunk_len);
-        if (rd != TOOB_OK) {
-            _ctx_reset(ctx);
-            return rd;
-        }
-
-        if (toob_os_sha256_update(&ctx->sha_ctx, ctx->align_buf, chunk_len) != TOOB_OK) {
-            _ctx_reset(ctx);
-            return TOOB_ERR_NOT_SUPPORTED;
-        }
-
-        rehashed += chunk_len;
-    }
-
-    toob_secure_zeroize(ctx->align_buf, TOOB_OTA_BUF_SIZE);
-
-    memcpy(ctx->expected_sha256, expected_sha256, 32);
-    ctx->is_verified = 1;
-
-    return TOOB_OK;
 }
 
 toob_status_t toob_ota_process_chunk(toob_ota_ctx_t *ctx, const uint8_t *chunk, uint32_t len) {

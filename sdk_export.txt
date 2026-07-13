@@ -123,28 +123,12 @@ toob_status_t toob_get_device_id(uint8_t *out_id, size_t id_len) {
 FILE: sdk/libtoob/toob_confirm.c
 ======================================================================
 /**
- * ==============================================================================
- * Toob-Boot libtoob: Update Confirmation Implementation (toob_confirm.c)
- * (Mathematical Perfection Revision)
- * ==============================================================================
+ * @file toob_confirm.c
+ * @brief Boot Confirmation â€” OS-side confirm/recovery intent via Mailbox.
  *
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (toob_confirm_boot API behavior and COMMITTED flag
- * specification)
- * - docs/concept_fusion.md (TENTATIVE -> COMMITTED state transition logic)
- * - docs/hals.md (Confirm abstracting - RTC RAM vs. WAL Append)
- * - docs/structure_plan.md (Zero-dependency policy: No access to
- * boot_journal.h)
- *
- * ARCHITECTURAL UPGRADES:
- * 1. Blind-Write Elimination: Hardware RTC Register Writes werden nun durch
- *    ein striktes Phase-Bound Read-Back Verify gesichert.
- * 2. Glitch-Resistant Verification: Der Register-Check ist via Double-Check
- *    und Cross-Compiler Delay-Barrieren vor Voltage Faults geschÃ¼tzt.
- * 3. Stack Leakage Defense: Kryptografische Nonces und WAL Intents werden
- *    zwingend via toob_secure_zeroize vom OS-C-Stack radiert (P10 Single-Exit).
- * 4. P10 Memory Alignment: Zwingt alle Payload-Structs auf 8-Byte Boundaries,
- *    um SPI-DMA UsageFaults (Unaligned Access) in der Feature-OS HAL zu meiden.
+ * Implements toob_confirm_boot() and toob_recovery_resolved().
+ * Writes Mailbox records instead of WAL entries. The RTC fast-path
+ * remains for hardware with backup registers.
  */
 
 #include "libtoob.h"
@@ -153,221 +137,100 @@ FILE: sdk/libtoob/toob_confirm.c
 #include <stddef.h>
 
 #if TOOB_MOCK_CONFIRM_BACKEND == TOOB_MOCK_CONFIRM_BACKEND_RTC
-/* Instanziiert den x86 Dummy-Pointer zur Laufzeit, um Segfaults auf dem OS-Host
- * zu verhindern */
 uint64_t mock_rtc_ram = 0;
 #endif
 
-/* ==============================================================================
- * PUBLIC API IMPLEMENTATION
- * ==============================================================================
- */
-
 toob_status_t toob_confirm_boot(void) {
-  /* P10 8-Byte Alignment fÃ¼r DMA/Cortex-M Safety */
-  toob_handoff_t handoff __attribute__((aligned(8)));
-  toob_secure_zeroize(&handoff,
-                      sizeof(handoff)); /* P10 Uninitialized Mem Trap */
-
-  /* Schritt 1: Hole verifizierte Nonce Ã¼ber Handoff-API (Anti-Replay) */
-  toob_status_t status = toob_get_handoff(&handoff);
-
-  /* P10 Glitch Protection: Fehler-Propagation absichern */
-  volatile uint32_t get_shield_1 = 0, get_shield_2 = 0;
-  if (status == TOOB_OK)
-    get_shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (get_shield_1 == TOOB_OK && status == TOOB_OK)
-    get_shield_2 = TOOB_OK;
-
-  if (get_shield_1 != TOOB_OK || get_shield_2 != TOOB_OK ||
-      get_shield_1 != get_shield_2) {
+    toob_handoff_t handoff __attribute__((aligned(8)));
     toob_secure_zeroize(&handoff, sizeof(handoff));
-    return (status != TOOB_OK) ? status : TOOB_ERR_VERIFY;
-  }
+
+    toob_status_t status = toob_get_handoff(&handoff);
+
+    volatile uint32_t get_shield_1 = 0, get_shield_2 = 0;
+    if (status == TOOB_OK)
+        get_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (get_shield_1 == TOOB_OK && status == TOOB_OK)
+        get_shield_2 = TOOB_OK;
+
+    if (get_shield_1 != TOOB_OK || get_shield_2 != TOOB_OK ||
+        get_shield_1 != get_shield_2) {
+        toob_secure_zeroize(&handoff, sizeof(handoff));
+        return (status != TOOB_OK) ? status : TOOB_ERR_VERIFY;
+    }
 
 #ifdef ADDR_CONFIRM_RTC_RAM
-  /* ====================================================================
-   * Pfad A: Direkter Write bei Hardware mit Backup-Registern/RTC
-   * ====================================================================
-   * Zwingendes Volatile-Casting, um C-Optimizer (z.B. GCC -O3) beim
-   * Hardware-Write zu blockieren!
-   */
-  volatile uint64_t *rtc_ptr = (volatile uint64_t *)ADDR_CONFIRM_RTC_RAM;
+    /* RTC fast-path: write nonce to backup register + mailbox. */
+    volatile uint64_t *rtc_ptr = (volatile uint64_t *)ADDR_CONFIRM_RTC_RAM;
+    *rtc_ptr = handoff.boot_nonce;
 
-  /* Hardware Write */
-  *rtc_ptr = handoff.boot_nonce;
-
-  /* Memory Barrier: Erzwingt das Flushen der CPU-Write-Buffer auf den
-   * Systembus, BEVOR wir den Read-Back initiieren! */
 #if defined(__GNUC__) || defined(__clang__)
-  __sync_synchronize();
+    __sync_synchronize();
 #endif
 
-  /* PHASE-BOUND READ-BACK VERIFY (Tearing / Hardware-Fault Defense)
-   * Verhindert OS-Lockouts durch stille SPI/Bus Write-Fehler in die RTC
-   * Peripherie! */
-  uint64_t verified_nonce = *rtc_ptr;
+    uint64_t verified_nonce = *rtc_ptr;
 
-  volatile uint32_t rtc_shield_1 = 0;
-  volatile uint32_t rtc_shield_2 = 0;
+    volatile uint32_t rtc_shield_1 = 0, rtc_shield_2 = 0;
+    if (verified_nonce == handoff.boot_nonce)
+        rtc_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (rtc_shield_1 == TOOB_OK && verified_nonce == handoff.boot_nonce)
+        rtc_shield_2 = TOOB_OK;
 
-  if (verified_nonce == handoff.boot_nonce) {
-    rtc_shield_1 = TOOB_OK;
-  }
+    /* Mailbox write (fire-and-forget alongside RTC). */
+    (void)toob_mailbox_set_confirm(handoff.boot_nonce);
 
-  TOOB_GLITCH_DELAY(); /* Branch-Skip Mitigation */
+    toob_secure_zeroize(&handoff, sizeof(handoff));
 
-  if (rtc_shield_1 == TOOB_OK && verified_nonce == handoff.boot_nonce) {
-    rtc_shield_2 = TOOB_OK;
-  }
-
-  /* Fire-and-forget WAL append to ensure transaction log coherence (P7b alignment) */
-  {
-    toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-    toob_secure_zeroize(&intent, sizeof(intent));
-
-    intent.magic = TOOB_WAL_ENTRY_MAGIC;
-    intent.intent = TOOB_WAL_INTENT_CONFIRM_COMMIT;
-    intent.expected_nonce = handoff.boot_nonce;
-
-    (void)toob_wal_naive_append(&intent);
-    toob_secure_zeroize(&intent, sizeof(intent));
-  }
-
-  /* Data-Privacy: Nonce sofort vernichten, bevor wir returnen! */
-  toob_secure_zeroize(&handoff, sizeof(handoff));
-
-  if (rtc_shield_1 != TOOB_OK || rtc_shield_2 != TOOB_OK ||
-      rtc_shield_1 != rtc_shield_2) {
-    return TOOB_ERR_FLASH_HW; /* Hardware Backup Domain Failed (Bus Error /
-                                 Glitch) */
-  }
-
-  return TOOB_OK;
+    if (rtc_shield_1 != TOOB_OK || rtc_shield_2 != TOOB_OK ||
+        rtc_shield_1 != rtc_shield_2) {
+        return TOOB_ERR_FLASH_HW;
+    }
+    return TOOB_OK;
 #else
-  toob_status_t final_stat = TOOB_ERR_VERIFY;
-  /* ====================================================================
-   * Pfad B: Naive WAL Append
-   * ====================================================================
-   */
-  toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-  toob_secure_zeroize(&intent, sizeof(intent));
+    /* Mailbox-only path. */
+    toob_status_t mb_stat = toob_mailbox_set_confirm(handoff.boot_nonce);
 
-  intent.magic = TOOB_WAL_ENTRY_MAGIC;
-  intent.intent = TOOB_WAL_INTENT_CONFIRM_COMMIT;
-  intent.expected_nonce = handoff.boot_nonce;
+    volatile uint32_t mb_shield_1 = 0, mb_shield_2 = 0;
+    if (mb_stat == TOOB_OK)
+        mb_shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (mb_shield_1 == TOOB_OK && mb_stat == TOOB_OK)
+        mb_shield_2 = TOOB_OK;
 
-  /* Naive Delegation (schÃ¼tzt vor Duplikation und Erase-Komplexitaet) */
-  toob_status_t app_stat = toob_wal_naive_append(&intent);
+    toob_secure_zeroize(&handoff, sizeof(handoff));
 
-  volatile uint32_t wal_shield_1 = 0, wal_shield_2 = 0;
-  if (app_stat == TOOB_OK)
-    wal_shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (wal_shield_1 == TOOB_OK && app_stat == TOOB_OK)
-    wal_shield_2 = TOOB_OK;
-
-  if (wal_shield_1 == TOOB_OK && wal_shield_2 == TOOB_OK &&
-      wal_shield_1 == wal_shield_2) {
-    final_stat = TOOB_OK;
-  } else {
-    final_stat = (app_stat != TOOB_OK) ? app_stat : TOOB_ERR_FLASH_HW;
-  }
-
-  /* P10 Leakage Defense */
-  toob_secure_zeroize(&handoff, sizeof(handoff));
-  toob_secure_zeroize(&intent, sizeof(intent));
-
-  return final_stat;
+    if (mb_shield_1 == TOOB_OK && mb_shield_2 == TOOB_OK &&
+        mb_shield_1 == mb_shield_2) {
+        return TOOB_OK;
+    }
+    return (mb_stat != TOOB_OK) ? mb_stat : TOOB_ERR_FLASH_HW;
 #endif
 }
 
 toob_status_t toob_recovery_resolved(void) {
-  toob_status_t final_stat = TOOB_ERR_VERIFY;
+    toob_status_t status = toob_mailbox_set_recovery_resolved();
 
-  toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-  toob_secure_zeroize(&intent, sizeof(intent));
+    volatile uint32_t shield_1 = 0, shield_2 = 0;
+    if (status == TOOB_OK)
+        shield_1 = TOOB_OK;
+    TOOB_GLITCH_DELAY();
+    if (shield_1 == TOOB_OK && status == TOOB_OK)
+        shield_2 = TOOB_OK;
 
-  intent.magic = TOOB_WAL_ENTRY_MAGIC;
-  intent.intent = TOOB_WAL_INTENT_RECOVERY_RESOLVED;
-
-  toob_status_t append_stat = toob_wal_naive_append(&intent);
-
-  volatile uint32_t wal_shield_1 = 0, wal_shield_2 = 0;
-  if (append_stat == TOOB_OK)
-    wal_shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (wal_shield_1 == TOOB_OK && append_stat == TOOB_OK)
-    wal_shield_2 = TOOB_OK;
-
-  if (wal_shield_1 == TOOB_OK && wal_shield_2 == TOOB_OK &&
-      wal_shield_1 == wal_shield_2) {
-    final_stat = TOOB_OK;
-  } else {
-    final_stat = (append_stat != TOOB_OK) ? append_stat : TOOB_ERR_FLASH_HW;
-  }
-
-  toob_secure_zeroize(&intent, sizeof(intent)); /* Stack Clean */
-  return final_stat;
-}
-
-toob_status_t toob_accumulate_net_search(uint32_t active_search_ms) {
-  toob_status_t final_stat = TOOB_ERR_VERIFY;
-
-  toob_wal_entry_payload_t intent __attribute__((aligned(8)));
-  toob_secure_zeroize(&intent, sizeof(intent));
-
-  intent.magic = TOOB_WAL_ENTRY_MAGIC;
-  intent.intent = TOOB_WAL_INTENT_NET_SEARCH_ACCUM;
-
-  /* P10 Spec: Das OS sammelt kontinuierlich und schickt das Delta oder den
-   * Totalwert. Wir casten via offset fÃ¼r den dynamischen Accumulator State. */
-  intent.offset = active_search_ms;
-
-  toob_status_t append_stat = toob_wal_naive_append(&intent);
-
-  volatile uint32_t wal_shield_1 = 0, wal_shield_2 = 0;
-  if (append_stat == TOOB_OK)
-    wal_shield_1 = TOOB_OK;
-  TOOB_GLITCH_DELAY();
-  if (wal_shield_1 == TOOB_OK && append_stat == TOOB_OK)
-    wal_shield_2 = TOOB_OK;
-
-  if (wal_shield_1 == TOOB_OK && wal_shield_2 == TOOB_OK &&
-      wal_shield_1 == wal_shield_2) {
-    final_stat = TOOB_OK;
-  } else {
-    final_stat = (append_stat != TOOB_OK) ? append_stat : TOOB_ERR_FLASH_HW;
-  }
-
-  toob_secure_zeroize(&intent, sizeof(intent)); /* Stack Clean */
-  return final_stat;
+    if (shield_1 == TOOB_OK && shield_2 == TOOB_OK && shield_1 == shield_2)
+        return TOOB_OK;
+    return (status != TOOB_OK) ? status : TOOB_ERR_FLASH_HW;
 }
 ======================================================================
 FILE: sdk/libtoob/toob_crc32.c
 ======================================================================
 #include "toob_internal.h"
+#include "toob_crc32_contract.h"
 
-/* ==============================================================================
- * Toob-Boot libtoob: IEEE 802.3 CRC-32 (toob_crc32.c)
- * ==============================================================================
- *
- * ARCHITECTURAL CONTRACT (Zero-Dependency Sync):
- * This function guarantees absolute mathematical equivalence with the Bootloader's
- * `compute_boot_crc32()` implementation, ensuring stable `.noinit` validation.
- * 
- * Polynomial: 0xEDB88320
- * Initial Value: 0xFFFFFFFF
- * Final XOR: 0xFFFFFFFF
- * Test-Vector: "IEEE_802.3" -> 0xE0DFD6DA
- * 
- * PERFORMANCE TRADE-OFF:
- * The OS-side library uses a precomputed 1KB lookup table for maximal runtime performance.
- * The Bootloader core (Stage 1) strictly delegates to a table-less (loop-based) calculation
- * to brutally minimize SRAM BSS consumption, favoring Code-Size over speed.
- * Both implementations are mathematically strictly equivalent.
- */
+/* IEEE 802.3 CRC-32 â€” 1KB lookup table variant for OS-side throughput.
+ * Core (boot_crc32.c) uses a table-less byte-at-a-time variant for minimal BSS.
+ * Both produce identical results per toob_crc32_contract.h. */
 
 static const uint32_t toob_crc32_table[256] = {
     0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F,
@@ -415,47 +278,30 @@ static const uint32_t toob_crc32_table[256] = {
     0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D
 };
 
-_Static_assert(sizeof(toob_crc32_table) / sizeof(toob_crc32_table[0]) == 256, 
-               "FATAL: CRC-32 algorithm table size drift detected. Must strictly contain 256 words.");
+/* table[128] == poly proves the table was generated from the contract polynomial */
+_Static_assert(sizeof(toob_crc32_table) / sizeof(toob_crc32_table[0]) == 256,
+               "CRC-32 table must contain exactly 256 entries");
 
 uint32_t toob_lib_crc32(const uint8_t *data, size_t length) {
-    /* P10 / Architecture: No defensive `if (!data) return 0;` mask here! 
-     * Returning 0 for a NULL pointer mimics a valid 0-byte CRC and hides 
-     * critical OS boundary bugs. A hardware page fault is the correct mitigation. */
-
-    uint32_t crc = 0xFFFFFFFF;
+    /* No NULL-guard: a page fault on NULL is the correct failure mode.
+     * Returning 0 would mimic a valid empty-buffer CRC and mask caller bugs. */
+    uint32_t crc = TOOB_CRC32_INIT;
     for (size_t i = 0; i < length; i++) {
         crc = toob_crc32_table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
     }
-    return ~crc;
+    return crc ^ TOOB_CRC32_FINAL_XOR;
 }
+
 
 ======================================================================
 FILE: sdk/libtoob/toob_diag.c
 ======================================================================
 /**
- * ==============================================================================
- * Toob-Boot libtoob: Diagnostics Extraktions Implementation (toob_diag.c)
- * (Mathematical Perfection Revision)
- * ==============================================================================
+ * @file toob_diag.c
+ * @brief Boot Diagnostics â€” telemetry extraction and diag struct management.
  *
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (toob_get_boot_diag function definition)
- * - docs/toob_telemetry.md (Boot diagnostic data model, CBOR readiness)
- * - docs/concept_fusion.md (Fleet insight extraction without static buffer
- * dependencies)
- *
- * ARCHITECTURAL UPGRADES:
- * 1. TOCTOU Defense: Verhindert asynchrone RTOS-Interrupt Korruptionen wÃ¤hrend
- *    des Reads. Die Payload wird erst isoliert geklont und dann mathematisch
- *    auf dem sicheren Thread-Stack verifiziert.
- * 2. P10 Leakage Prevention: Das Ziel-Struct des OS wird prÃ¤emptiv genullt.
- *    Ignoriert das OS fahrlÃ¤ssig den Return-Code, liest es Nullen statt
- *    kryptografischem RAM-Garbage (verhindert Heuristik-Leaks).
- * 3. Glitch-Resistant OS Boundary: Cross-Compiler-kompatible Delay-Injections
- *    und Double-Check Patterns blockieren Voltage-Glitches bei der CRC-PrÃ¼fung.
- * 4. ABI Versioning Shield & Padding Sanitization: Blockiert Daten-Drifts und
- *    Informationslecks bei der Serialisierung fÃ¼r das Cloud-Backend.
+ * Extracts toob_boot_diag_t from .noinit shared RAM with TOCTOU defense,
+ * CRC-32 validation, and CBOR telemetry encoding for cloud submission.
  */
 
 #include "libtoob.h"
@@ -603,33 +449,19 @@ toob_status_t toob_get_boot_diag_cbor(uint8_t *out_buf, size_t max_len, size_t *
   tel.toob_telemetry_uint1uint = diag.boot_duration_ms;
   tel.toob_telemetry_uint2uint = diag.edge_recovery_events;
 
-  /* CDDL uint3 = vendor_error, uint4 = hardware_fault_record.
-   * TODO(TELEMETRY-SPEC): C-Struct hat kein separates hardware_fault_record.
-   * Beide Felder werden identisch mit vendor_error befÃ¼llt, bis das
-   * Telemetrie-Schema ein eigenes Feld definiert. */
-  tel.toob_telemetry_uint3uint = diag.vendor_error;
+  tel.toob_telemetry_uint3uint = diag.hardware_fault_record;
   tel.toob_telemetry_uint4uint = diag.vendor_error;
-
-  /* CDDL uint5 = reserved_counter (unused).
-   * TODO(TELEMETRY-SPEC): Feld existiert im CDDL-Schema, aber nicht in
-   * toob_boot_diag_t. Genullt bis Schema-Alignment stattfindet. */
-  tel.toob_telemetry_uint5uint = 0;
+  tel.toob_telemetry_uint5uint = diag.wdt_kicks;
 
   tel.toob_telemetry_uint6uint = diag.current_svn;
   tel.toob_telemetry_uint7uint = (uint8_t)diag.active_key_index;
 
-  /* CDDL uint8 = provisioning_complete (bool).
-   * TODO(TELEMETRY-SPEC): Bootloader setzt diesen Wert nicht in diag_t.
-   * Hardcoded false bis Provisioning-Status ins Handoff integriert wird. */
-  tel.toob_telemetry_uint8bool = false;
+  tel.toob_telemetry_uint8bool = (diag.fallback_occurred != 0);
 
   tel.toob_telemetry_uint9bstr.value = diag.sbom_digest;
   tel.toob_telemetry_uint9bstr.len = sizeof(diag.sbom_digest);
 
-  /* CDDL uint11 = firmware_bank_index.
-   * TODO(TELEMETRY-SPEC): A/B-Bank-Tracking ist noch nicht im diag_t.
-   * Genullt bis Multi-Bank-Support implementiert ist. */
-  tel.toob_telemetry_uint11uint = 0;
+  tel.toob_telemetry_uint11uint = diag.boot_session_id;
 
   /* P10 Fix: Akkurates C-Struct Mapping auf das CDDL Element */
   if (diag.ext_health_present) {
@@ -657,30 +489,12 @@ toob_status_t toob_get_boot_diag_cbor(uint8_t *out_buf, size_t max_len, size_t *
 FILE: sdk/libtoob/toob_handoff.c
 ======================================================================
 /**
- * ==============================================================================
- * Toob-Boot libtoob: Handoff-RAM (.noinit) Validierung (toob_handoff.c)
- * (Mathematical Perfection Revision)
- * ==============================================================================
+ * @file toob_handoff.c
+ * @brief Handoff Reader â€” reads bootloader diagnostic state from shared RAM.
  *
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (toob_handoff_t structure definition and Magic values)
- * - docs/concept_fusion.md (P10 CRC-32 validation requirements across ABI
- * boundaries)
- * - docs/testing_requirements.md (RAM bound checks to prevent .noinit arbitrary
- * read vulnerabilities)
- *
- * ARCHITECTURAL UPGRADES:
- * 1. Tentative Boot Enablement: Magic-Validation akzeptiert nun
- * TOOB_STATE_TENTATIVE, damit das OS Probe-Updates testen und via
- * toob_confirm_boot() besiegeln kann.
- * 2. ABI Versioning Shield: Explizite PrÃ¼fung der struct_version gegen
- * Memory-Drifts.
- * 3. Glitch-Resistant OS Boundary: Cross-Compiler-kompatible Delay-Injections
- *    und Double-Check Patterns verhindern Voltage-Glitches in der
- * RAM-Validierung.
- * 4. TOCTOU Defense: Verhindert asynchrone RTOS-Interrupt Korruptionen wÃ¤hrend
- * des Reads.
- * 5. P10 Leakage Defense: PrÃ¤emptive Nullifizierung des OS-Buffers vor Output.
+ * Validates and extracts the toob_handoff_t struct from the .noinit RAM
+ * section. CRC-32 + magic verification with TOCTOU defense (local copy)
+ * and glitch-resistant double-check patterns.
  */
 
 #include "libtoob.h"
@@ -850,7 +664,7 @@ FILE: sdk/libtoob/toob_internal.h
  * - boot_secure_zeroize.h  â†’  toob_secure_zeroize()
  * - boot_ct_utils.h        â†’  toob_ct_memcmp_glitch_safe()
  * - boot_types.h (GLITCH)  â†’  TOOB_GLITCH_DELAY()
- * - boot_crc32.h           â†’  toob_lib_crc32()
+ * - boot_crc32.h           â†’  toob_lib_crc32() (contract: toob_crc32_contract.h)
  *
  * ARCHITECTURE: libtoob must NEVER include bootloader-internal headers.
  * These are independent re-implementations that maintain Zero-Dependency
@@ -896,9 +710,11 @@ FILE: sdk/libtoob/toob_internal.h
 /* ==============================================================================
  * 2. Secure Memory Zeroization (Anti-DCE)
  *
- * OS-side equivalent of boot_secure_zeroize() from boot_secure_zeroize.h.
- * Prevents modern compilers from eliminating security-critical memset(0)
- * calls via Dead Code Elimination (DCE).
+ * ABI-CONTRACT: Intentionally separate implementations exist:
+ *   Core:  Assembly (boot_secure_zeroize.S) â€” DCE-proof by ISA guarantee.
+ *   OS:    volatile + compiler barrier (below) â€” sufficient for RTOS guest
+ *          context where the compiler is not cross-TU aware.
+ * Both MUST zero exactly len bytes at ptr. Neither may return before completion.
  * ============================================================================== */
 static inline void toob_secure_zeroize(void *ptr, size_t len) {
   volatile uint8_t *p = (volatile uint8_t *)ptr;
@@ -955,23 +771,166 @@ static inline toob_status_t toob_ct_memcmp_glitch_safe(const uint8_t *a,
  * ============================================================================== */
 uint32_t toob_lib_crc32(const uint8_t *data, size_t length);
 
-/* ==============================================================================
- * 5. WAL Naive Append
- * ============================================================================== */
-
-/**
- * @brief O(1) WAL Append without sector rotation or TMR healing.
- *
- * Those lifecycle tasks are strictly reserved for the Bootloader (S1)
- * upon reset to prevent OS-induced Wear-Suicide.
- */
-toob_status_t toob_wal_naive_append(const toob_wal_entry_payload_t *intent);
+#include "toob_mailbox.h"
 
 /* Private SDK Linkage: Hidden from public API to prevent unvalidated memory access */
 extern TOOB_NOINIT toob_handoff_t toob_handoff_state;
 
 #endif /* TOOB_INTERNAL_H */
 
+======================================================================
+FILE: sdk/libtoob/toob_mailbox.c
+======================================================================
+/**
+ * @file toob_mailbox.c
+ * @brief OS-side Mailbox writer (two-sector A/B, torn-write safe).
+ *
+ * Replaces the previous erase-both-then-write-slot-0 design, which defeated
+ * double-buffering: a torn write wiped the only surviving record and reset the
+ * sequence, causing the Core to silently ignore updates (seq <= last_consumed).
+ *
+ * This implementation writes only the STALE slot and erases only that slot's
+ * sector, so:
+ *   - at every instant at least one slot holds a valid, complete record, and
+ *   - `seq` is strictly monotonic across brownouts (it is derived from the
+ *     surviving good slot, which a torn write never touches).
+ *
+ * The Core reader mirrors the slot scan below: read all slots, take the valid
+ * one with the highest `seq`.
+ */
+
+#include "toob_mailbox.h"
+#include "libtoob.h"
+#ifdef TOOB_HOST_FUZZING
+#include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
+
+#include "toob_internal.h"
+#include <stddef.h>
+
+#ifndef CHIP_FLASH_WRITE_ALIGNMENT
+#define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
+#endif
+
+/* Geometry sanity: the writer erases exactly one slot sector at a time, so the
+ * mailbox region must be TOOB_MAILBOX_SLOTS distinct erase sectors. */
+_Static_assert(CHIP_MAILBOX_SIZE == TOOB_MAILBOX_SLOTS * CHIP_MAILBOX_SLOT_SIZE,
+               "mailbox region must be exactly TOOB_MAILBOX_SLOTS slot sectors");
+_Static_assert(sizeof(toob_mailbox_t) <= CHIP_MAILBOX_SLOT_SIZE,
+               "mailbox record must fit in one slot sector");
+_Static_assert(sizeof(toob_mailbox_t) % CHIP_FLASH_WRITE_ALIGNMENT == 0,
+               "mailbox record must be a multiple of the flash write alignment");
+
+static inline uint32_t slot_addr(uint32_t i) {
+  return CHIP_MAILBOX_ABS_ADDR + i * CHIP_MAILBOX_SLOT_SIZE;
+}
+
+/**
+ * @brief Read one slot and validate magic + CRC.
+ * @return true and fills *out if the slot holds a complete valid record.
+ */
+static bool slot_read_valid(uint32_t i, toob_mailbox_t *out) {
+  toob_secure_zeroize(out, sizeof(*out));
+
+  if (toob_os_flash_read(slot_addr(i), (uint8_t *)out, sizeof(*out)) != TOOB_OK) {
+    return false;
+  }
+  if (out->magic != TOOB_MAILBOX_MAGIC) {
+    return false;
+  }
+  uint32_t expect = toob_lib_crc32((const uint8_t *)out, TOOB_MAILBOX_CRC_LEN);
+  return expect == out->crc32;
+}
+
+/**
+ * @brief Write a request into the stale slot with seq = best_seq + 1.
+ *
+ * Sequence: scan slots -> pick target (oldest / invalid) and best_seq ->
+ * build record -> erase target sector -> write -> glitch-safe read-back verify.
+ */
+static toob_status_t mailbox_put(toob_req_t req, uint32_t tbm1_addr, uint64_t nonce) {
+  toob_mailbox_t rec;
+  uint32_t best_seq = 0;
+  uint32_t target = 0;
+  uint32_t target_seq = 0xFFFFFFFFu; /* pick the slot with the LOWEST seq (invalid = 0) */
+
+  for (uint32_t i = 0; i < TOOB_MAILBOX_SLOTS; i++) {
+    bool ok = slot_read_valid(i, &rec);
+    uint32_t seq = ok ? rec.seq : 0u; /* an invalid slot is treated as the oldest */
+
+    if (ok && rec.seq > best_seq) {
+      best_seq = rec.seq;
+    }
+    if (seq < target_seq) {
+      target_seq = seq;
+      target = i;
+    }
+    toob_secure_zeroize(&rec, sizeof(rec)); /* slot may carry a CONFIRM nonce */
+  }
+  /* target is now the slot NOT holding the freshest record; best_seq is preserved
+   * there and is never erased below. NOTE: seq is uint32 and single-writer; a wrap
+   * needs 2^32 successful writes (unreachable in device lifetime). */
+
+  /* Build the new record (zeroize first: sets _reserved and any pad to 0). */
+  toob_mailbox_t m;
+  toob_secure_zeroize(&m, sizeof(m));
+  m.magic     = TOOB_MAILBOX_MAGIC;
+  m.version   = TOOB_MAILBOX_VERSION;
+  m.request   = (uint16_t)req;
+  m.seq       = best_seq + 1u;
+  m.tbm1_addr = tbm1_addr;
+  m.nonce     = nonce;
+  m.crc32     = toob_lib_crc32((const uint8_t *)&m, TOOB_MAILBOX_CRC_LEN);
+
+  /* Erase ONLY the target slot's sector. The freshest good slot stays intact. */
+  toob_status_t status = toob_os_flash_erase(slot_addr(target), CHIP_MAILBOX_SLOT_SIZE);
+  if (status != TOOB_OK) {
+    toob_secure_zeroize(&m, sizeof(m));
+    return status;
+  }
+
+  status = toob_os_flash_write(slot_addr(target), (const uint8_t *)&m, sizeof(m));
+  if (status != TOOB_OK) {
+    toob_secure_zeroize(&m, sizeof(m));
+    return status;
+  }
+
+  /* Phase-bound read-back verify (glitch-safe, ghost-match-proof). */
+  toob_mailbox_t verify;
+  toob_secure_zeroize(&verify, sizeof(verify));
+  status = toob_os_flash_read(slot_addr(target), (uint8_t *)&verify, sizeof(verify));
+
+  if (status != TOOB_OK ||
+      toob_ct_memcmp_glitch_safe((const uint8_t *)&m,
+                                 (const uint8_t *)&verify,
+                                 sizeof(m)) != TOOB_OK) {
+    /* Torn/failed write. The other slot still holds the previous good record,
+     * so the Core keeps working; the caller retries and seq will not regress. */
+    status = TOOB_ERR_FLASH_HW;
+  } else {
+    status = TOOB_OK;
+  }
+
+  toob_secure_zeroize(&m, sizeof(m));
+  toob_secure_zeroize(&verify, sizeof(verify));
+  return status;
+}
+
+/* ===== Public API (called from toob_update.c / toob_confirm.c) ===== */
+
+toob_status_t toob_mailbox_set_update(uint32_t manifest_flash_addr) {
+  return mailbox_put(TOOB_REQ_UPDATE_PENDING, manifest_flash_addr, 0);
+}
+
+toob_status_t toob_mailbox_set_confirm(uint64_t nonce) {
+  return mailbox_put(TOOB_REQ_CONFIRM, 0, nonce);
+}
+
+toob_status_t toob_mailbox_set_recovery_resolved(void) {
+  return mailbox_put(TOOB_REQ_RECOVERY_RESOLVED, 0, 0);
+}
 ======================================================================
 FILE: sdk/libtoob/toob_ota.c
 ======================================================================
@@ -1015,10 +974,6 @@ FILE: sdk/libtoob/toob_ota.c
 #define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
 #endif
 
-/* OTA Checkpoint Intervall: 64 KB (Konfigurierbar fÃ¼r stark abnutzende Flashs) */
-#ifndef TOOB_OTA_CHECKPOINT_INTERVAL
-#define TOOB_OTA_CHECKPOINT_INTERVAL 65536
-#endif
 
 
 /* ==============================================================================
@@ -1165,21 +1120,18 @@ static toob_status_t _ota_begin_core(toob_ota_ctx_t *ctx, uint32_t total_size) {
   return TOOB_OK;
 }
 
-toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size) {
-    return _ota_begin_core(ctx, total_size);
-}
-
-toob_status_t toob_ota_begin_verified(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]) {
+toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]) {
     toob_status_t res = _ota_begin_core(ctx, total_size);
     if (res != TOOB_OK) return res;
 
-    if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
-        _ctx_reset(ctx);
-        return TOOB_ERR_NOT_SUPPORTED;
+    if (expected_sha256 != NULL) {
+        if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
+            _ctx_reset(ctx);
+            return TOOB_ERR_NOT_SUPPORTED;
+        }
+        memcpy(ctx->expected_sha256, expected_sha256, 32);
+        ctx->is_verified = 1;
     }
-
-    memcpy(ctx->expected_sha256, expected_sha256, 32);
-    ctx->is_verified = 1;
     return TOOB_OK;
 }
 
@@ -1189,7 +1141,9 @@ toob_status_t toob_ota_abort(toob_ota_ctx_t *ctx) {
     return TOOB_OK;
 }
 
-toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, uint32_t* resume_offset) {
+toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size,
+                              const uint8_t expected_sha256[32],
+                              uint32_t *resume_offset) {
     if (!ctx || !resume_offset) return TOOB_ERR_INVALID_ARG;
     if (total_size == 0 || total_size > CHIP_STAGING_SLOT_SIZE) return TOOB_ERR_INVALID_ARG;
 
@@ -1206,63 +1160,53 @@ toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, uint32_t
             ctx->total_size = total_size;
             ctx->state = TOOB_OTA_STATE_RECEIVING;
             *resume_offset = ctx->bytes_queued;
+
+            if (expected_sha256 != NULL) {
+                uint32_t prefix_len = *resume_offset;
+                if (prefix_len > 0) {
+                    /* Initialize SHA-256 streaming context */
+                    if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
+                        _ctx_reset(ctx);
+                        return TOOB_ERR_NOT_SUPPORTED;
+                    }
+                    memcpy(ctx->expected_sha256, expected_sha256, 32);
+                    ctx->is_verified = 1;
+
+                    /* Re-hash the already-staged prefix by reading it back from flash.
+                     * Reuses ctx->align_buf as temporary read buffer â€” zero additional allocation. */
+                    uint32_t rehashed = 0;
+                    while (rehashed < prefix_len) {
+                        uint32_t chunk_len = TOOB_OTA_BUF_SIZE;
+                        if (rehashed + chunk_len > prefix_len) {
+                            chunk_len = prefix_len - rehashed;
+                        }
+
+                        toob_status_t rd = toob_os_flash_read(
+                            CHIP_STAGING_SLOT_ABS_ADDR + rehashed,
+                            ctx->align_buf,
+                            chunk_len);
+                        if (rd != TOOB_OK) {
+                            _ctx_reset(ctx);
+                            return rd;
+                        }
+
+                        if (toob_os_sha256_update(&ctx->sha_ctx, ctx->align_buf, chunk_len) != TOOB_OK) {
+                            _ctx_reset(ctx);
+                            return TOOB_ERR_NOT_SUPPORTED;
+                        }
+
+                        rehashed += chunk_len;
+                    }
+
+                    toob_secure_zeroize(ctx->align_buf, TOOB_OTA_BUF_SIZE);
+                }
+            }
+
             return TOOB_OK;
         }
     }
 
     return TOOB_ERR_NOT_FOUND;
-}
-
-toob_status_t toob_ota_resume_verified(toob_ota_ctx_t *ctx, uint32_t total_size,
-                                       const uint8_t expected_sha256[32],
-                                       uint32_t *resume_offset) {
-    if (!ctx || !resume_offset || !expected_sha256) return TOOB_ERR_INVALID_ARG;
-
-    /* Delegate core resume logic (validates handoff, restores cursors & total_size) */
-    toob_status_t stat = toob_ota_resume(ctx, total_size, resume_offset);
-    if (stat != TOOB_OK) return stat;
-
-    uint32_t prefix_len = *resume_offset;
-    if (prefix_len == 0) return TOOB_OK; /* Nothing to re-hash */
-
-    /* Initialize SHA-256 streaming context */
-    if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
-        _ctx_reset(ctx);
-        return TOOB_ERR_NOT_SUPPORTED;
-    }
-
-    /* Re-hash the already-staged prefix by reading it back from flash.
-     * Reuses ctx->align_buf as temporary read buffer â€” zero additional allocation. */
-    uint32_t rehashed = 0;
-    while (rehashed < prefix_len) {
-        uint32_t chunk_len = TOOB_OTA_BUF_SIZE;
-        if (rehashed + chunk_len > prefix_len) {
-            chunk_len = prefix_len - rehashed;
-        }
-
-        toob_status_t rd = toob_os_flash_read(
-            CHIP_STAGING_SLOT_ABS_ADDR + rehashed,
-            ctx->align_buf,
-            chunk_len);
-        if (rd != TOOB_OK) {
-            _ctx_reset(ctx);
-            return rd;
-        }
-
-        if (toob_os_sha256_update(&ctx->sha_ctx, ctx->align_buf, chunk_len) != TOOB_OK) {
-            _ctx_reset(ctx);
-            return TOOB_ERR_NOT_SUPPORTED;
-        }
-
-        rehashed += chunk_len;
-    }
-
-    toob_secure_zeroize(ctx->align_buf, TOOB_OTA_BUF_SIZE);
-
-    memcpy(ctx->expected_sha256, expected_sha256, 32);
-    ctx->is_verified = 1;
-
-    return TOOB_OK;
 }
 
 toob_status_t toob_ota_process_chunk(toob_ota_ctx_t *ctx, const uint8_t *chunk, uint32_t len) {
@@ -1315,15 +1259,7 @@ toob_status_t toob_ota_process_chunk(toob_ota_ctx_t *ctx, const uint8_t *chunk, 
       ctx->buf_len = 0;
       toob_secure_zeroize(ctx->align_buf, TOOB_OTA_BUF_SIZE);
 
-      /* Write Resume Checkpoint basierend auf konfiguriertem Makro */
-      if ((ctx->bytes_queued % TOOB_OTA_CHECKPOINT_INTERVAL) == 0) {
-          toob_wal_entry_payload_t ckpt;
-          toob_secure_zeroize(&ckpt, sizeof(ckpt));
-          ckpt.magic = TOOB_WAL_ENTRY_MAGIC;
-          ckpt.intent = TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT;
-          ckpt.delta_chunk_id = ctx->bytes_queued;
-          (void)toob_wal_naive_append(&ckpt); /* Fire-and-forget, non-critical */
-      }
+
     }
   }
 
@@ -1400,324 +1336,30 @@ toob_status_t toob_ota_finalize(toob_ota_ctx_t *ctx) {
 FILE: sdk/libtoob/toob_update.c
 ======================================================================
 /**
- * ==============================================================================
- * Toob-Boot libtoob: Update Registration Implementation (toob_update.c)
- * ==============================================================================
- * 
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (toob_set_next_update signature and WAL interaction requirements)
- * - docs/concept_fusion.md (WAL transaction architecture, TXN_UPDATE_READY state)
- * - docs/structure_plan.md (GAP-C03 WAL union alignment constraints for bare C)
- * - docs/testing_requirements.md (Atomic operations over untrusted OS hooks)
+ * @file toob_update.c
+ * @brief Update Registration â€” writes a Mailbox request for the Bootloader.
  */
 
 #include "libtoob.h"
 #include "toob_internal.h"
-#include "libtoob_config_sandbox.h" 
-#include <string.h>
+#ifdef TOOB_HOST_FUZZING
+#include "libtoob_config_sandbox.h"
+#else
+#include "generated_boot_config.h"
+#endif
+
+#ifndef CHIP_FLASH_WRITE_ALIGNMENT
+#define CHIP_FLASH_WRITE_ALIGNMENT CHIP_FLASH_WRITE_ALIGN
+#endif
 
 toob_status_t toob_set_next_update(uint32_t manifest_flash_addr) {
-    /* Schritt 1: Basic Sanity-Checks fÃ¼r die Flash-Adresse (0 ist ein valider Memory Space!) */
-    if (manifest_flash_addr == 0xFFFFFFFF || (manifest_flash_addr % CHIP_FLASH_WRITE_ALIGN) != 0) {
+    if (manifest_flash_addr == 0xFFFFFFFF ||
+        (manifest_flash_addr % CHIP_FLASH_WRITE_ALIGNMENT) != 0) {
         return TOOB_ERR_INVALID_ARG;
     }
-    
-    /* Schritt 2: Frame WAL Payload assembeln */
-    toob_wal_entry_payload_t intent;
-    memset(&intent, 0, sizeof(toob_wal_entry_payload_t));
-    
-    intent.magic = TOOB_WAL_ENTRY_MAGIC;
-    intent.intent = TOOB_WAL_INTENT_UPDATE_PENDING;
-    
-    /* Der Bootloader wertet fuer UPDATE_PENDING das offset aus */
-    intent.offset = manifest_flash_addr;
-    
-    /* Schritt 3: Naive Delegation an den Shared Appender */
-    return toob_wal_naive_append(&intent);
+    return toob_mailbox_set_update(manifest_flash_addr);
 }
 
-======================================================================
-FILE: sdk/libtoob/toob_wal_naive.c
-======================================================================
-/**
- * ==============================================================================
- * Toob-Boot OS Boundary: toob_wal_naive.c (Mathematical Perfection Revision)
- * ==============================================================================
- *
- * REFERENCED SPECIFICATIONS:
- * - docs/libtoob_api.md (WAL Append Boundary)
- * - docs/wal_internals.md (Sequence Wrapping, Torn-Write Defense)
- * - docs/concept_fusion.md (Phase-Bound Verification, Glitch Defense)
- *
- * ARCHITECTURAL UPGRADES:
- * 1. Wraparound Proof: RFC 1982 Serial Number Arithmetic verhindert
- *    End-of-Life Deadlocks bei Sequence-ID ÃœberlÃ¤ufen (0xFFFFFFFF -> 0).
- * 2. Phase-Bound Verify: Sichert OS-Flash Writes unmittelbar per ECC-Read-Back.
- * 3. Torn-Write Protection: Valider Erase-State erfordert 100% Block-Coverage.
- * 4. P10 Leakage Prevention: SÃ¤mtliche Puffer werden via Zeroize am Ende des
- *    Scopes radiert, um Nonce-Leaking im Feature-OS zu blockieren.
- * 5. DMA Alignment: Structs sind nativ auf 8-Byte Boundaries fixiert.
- */
-
-#include "libtoob.h"
-#include "libtoob_config_sandbox.h"
-#include "toob_internal.h"
-#include <stddef.h>
-#include <string.h>
-
-static const uint32_t wal_sector_addrs[CHIP_WAL_SECTORS] =
-    TOOB_WAL_SECTOR_ADDRS;
-static const uint32_t wal_sector_sizes[CHIP_WAL_SECTORS] =
-    TOOB_WAL_SECTOR_SIZES;
-
-/* ==============================================================================
- * INTERNAL MATHEMATICS & HELPERS
- * ==============================================================================
- */
-
-/**
- * @brief RFC 1982 Serial Number Arithmetic (100% Wrap-Around Safe).
- * Verhindert den finalen OS-Lockout, wenn der Journal Counter iteriert.
- */
-static inline bool toob_is_newer_sequence(uint32_t new_seq, uint32_t old_seq) {
-  if (new_seq == old_seq)
-    return false;
-  return ((new_seq > old_seq) && (new_seq - old_seq <= (1U << 31))) ||
-         ((new_seq < old_seq) && (old_seq - new_seq > (1U << 31)));
-}
-
-/**
- * @brief Beweist mathematisch, ob ein Buffer komplett den Erased-Status
- * aufweist.
- */
-static inline bool is_fully_erased(const uint8_t *buf, size_t len,
-                                   uint8_t erased_val) {
-  for (size_t i = 0; i < len; i++) {
-    if (buf[i] != erased_val)
-      return false;
-  }
-  return true;
-}
-
-/* ==============================================================================
- * MAIN OS-API: NAIVE APPEND
- * ==============================================================================
- */
-
-/**
- * @brief O(1) WAL Append without sector rotation or TMR healing.
- *
- * Scans the active WAL sector sequentially to find an erased slot and write the intent.
- *
- * @param intent Payload of the intent to append to the log.
- * @return TOOB_OK on successful write and read-back verification.
- *         - TOOB_ERR_INVALID_ARG: Null pointer passed.
- *         - TOOB_ERR_NOT_FOUND: No active WAL sector discovered.
- *         - TOOB_ERR_WAL_FULL: No free slot in the active sector (Stage 1 must rotate).
- *         - TOOB_ERR_WAL_LOCKED: Duplicate UPDATE_PENDING intent when one is active.
- *         - TOOB_ERR_REQUIRES_RESET: Torn write / sector corruption found (Stage 1 must repair).
- *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash write/read hardware errors.
- */
-toob_status_t toob_wal_naive_append(const toob_wal_entry_payload_t *intent) {
-  toob_status_t final_status = TOOB_OK;
-
-  /* P10 Pointer Guarding */
-  if (!intent) {
-    return TOOB_ERR_INVALID_ARG;
-  }
-
-  /* P10: Garantierte 8-Byte Alignments fÃ¼r sicheres OS-Hardware-DMA */
-  toob_wal_entry_aligned_t aligned_buf __attribute__((aligned(8)));
-  toob_wal_sector_header_aligned_t sector_header __attribute__((aligned(8)));
-  toob_wal_entry_aligned_t flash_entry __attribute__((aligned(8)));
-
-  /* Zeroization Initialisierung (Sicherheit gegen uninitialisierten Stack
-   * Garbage) */
-  toob_secure_zeroize(&aligned_buf, sizeof(aligned_buf));
-  toob_secure_zeroize(&sector_header, sizeof(sector_header));
-  toob_secure_zeroize(&flash_entry, sizeof(flash_entry));
-
-  /* Prepare Payload (Padding mit Flash-Erased State fÃ¼llen) */
-  uint8_t erased_byte = (uint8_t)(CHIP_FLASH_ERASURE_MAPPING & 0xFF);
-  memset(&aligned_buf, erased_byte, sizeof(aligned_buf));
-  memcpy(&aligned_buf.data, intent, sizeof(toob_wal_entry_payload_t));
-
-  /* Robustness: Force MAGIC incase the calling OS logic forgot it */
-  aligned_buf.data.magic = TOOB_WAL_ENTRY_MAGIC;
-
-  /* P10 Robustness: Calculate CRC32 via offsetof to eliminate ABI drift */
-  size_t payload_len = offsetof(toob_wal_entry_payload_t, crc32_trailer);
-  aligned_buf.data.crc32_trailer =
-      toob_lib_crc32((const uint8_t *)&aligned_buf.data, payload_len);
-
-  uint32_t active_sector_addr = 0;
-  uint32_t active_sector_size = 0;
-  uint32_t max_seq = 0;
-  bool found_active = false;
-
-  /* ====================================================================
-   * Schritt 1: O(1) Discovery - Finde den aktiven Sektor
-   * ==================================================================== */
-  for (uint32_t i = 0; i < CHIP_WAL_SECTORS; i++) {
-    uint32_t sector_addr = wal_sector_addrs[i];
-
-    toob_secure_zeroize(&sector_header, sizeof(sector_header));
-
-    if (toob_os_flash_read(sector_addr, (uint8_t *)&sector_header,
-                           TOOB_WAL_HEADER_SIZE) != TOOB_OK) {
-      continue;
-    }
-
-    /* CRC-32 und Magic-Header Evaluation (Glitch Protected) */
-    size_t head_crc_len = offsetof(toob_wal_sector_header_t, header_crc32);
-    uint32_t calc_head_crc =
-        toob_lib_crc32((const uint8_t *)&sector_header.head, head_crc_len);
-
-    volatile uint32_t shield_1 = 0, shield_2 = 0;
-    bool magic_ok = (sector_header.head.sector_magic == TOOB_WAL_SECTOR_MAGIC);
-    bool crc_ok = (calc_head_crc == sector_header.head.header_crc32);
-
-    if (magic_ok && crc_ok)
-      shield_1 = TOOB_OK;
-    TOOB_GLITCH_DELAY();
-    if (shield_1 == TOOB_OK && magic_ok && crc_ok)
-      shield_2 = TOOB_OK;
-
-    if (shield_1 == TOOB_OK && shield_2 == TOOB_OK && shield_1 == shield_2) {
-      uint32_t seq_id = sector_header.head.sequence_id;
-
-      /* Wraparound-Sichere O(1) Sliding-Window Bestimmung */
-      if (!found_active || toob_is_newer_sequence(seq_id, max_seq)) {
-        max_seq = seq_id;
-        active_sector_addr = sector_addr;
-        active_sector_size = wal_sector_sizes[i];
-        found_active = true;
-      }
-    }
-  }
-
-  toob_secure_zeroize(&sector_header, sizeof(sector_header));
-
-  if (!found_active) {
-    final_status = TOOB_ERR_NOT_FOUND;
-    goto cleanup;
-  }
-
-  /* Sanitycheck gegen Underflow bei extremen Sektorgroessen (P10) */
-  if (active_sector_size <
-      sizeof(toob_wal_entry_aligned_t) + TOOB_WAL_HEADER_SIZE) {
-    final_status = TOOB_ERR_FLASH;
-    goto cleanup;
-  }
-
-  uint32_t last_intent = TOOB_WAL_INTENT_NONE;
-  final_status = TOOB_ERR_WAL_FULL;
-
-  /* ====================================================================
-   * Schritt 2: Aktiven Sektor scannen nach dem freien Slot (Erased State)
-   * ==================================================================== */
-  for (uint32_t offset = TOOB_WAL_HEADER_SIZE;
-       offset <= active_sector_size - sizeof(toob_wal_entry_aligned_t);
-       offset += sizeof(toob_wal_entry_aligned_t)) {
-
-    toob_secure_zeroize(&flash_entry, sizeof(flash_entry));
-
-    if (toob_os_flash_read(active_sector_addr + offset, (uint8_t *)&flash_entry,
-                           sizeof(toob_wal_entry_aligned_t)) != TOOB_OK) {
-      final_status = TOOB_ERR_FLASH;
-      goto cleanup;
-    }
-
-    /* FULL-CHUNK ERASE PROOF:
-     * Wir prÃ¼fen das gesamte 64-Byte Padding, nicht nur die Magic.
-     * Das verhindert unwiderruflich, dass wir unsere Bytes in einen
-     * durch Brownouts partiell korrumpierten Slot schreiben! */
-    if (is_fully_erased((const uint8_t *)&flash_entry,
-                        sizeof(toob_wal_entry_aligned_t), erased_byte)) {
-
-      /* OS-API Schutzschaltung (GAP-API): Verhindere, dass das OS ein zweites
-       * Update flusht, wenn der Journal-Ring bereits durch ein unfertiges
-       * Update blockiert ist. */
-      if (aligned_buf.data.intent == TOOB_WAL_INTENT_UPDATE_PENDING) {
-        if (last_intent == TOOB_WAL_INTENT_UPDATE_PENDING ||
-            last_intent == TOOB_WAL_INTENT_TXN_BEGIN) {
-          final_status = TOOB_ERR_WAL_LOCKED;
-          goto cleanup;
-        }
-      }
-
-      /* Freier Slot gefunden! Naive-Append ausfuehren. */
-      toob_status_t w_stat = toob_os_flash_write(
-          active_sector_addr + offset, (const uint8_t *)&aligned_buf,
-          sizeof(toob_wal_entry_aligned_t));
-
-      /* P10 Phase-Bound Read-Back Verify: Garantiert, dass der WAL Eintrag
-       * nicht durch SPI-Korruption oder defekte Vendor-Treiber des Feature-OS
-       * zerbrochen ins Flash ging! */
-      if (w_stat == TOOB_OK) {
-        toob_wal_entry_aligned_t verify_buf __attribute__((aligned(8)));
-        toob_secure_zeroize(&verify_buf, sizeof(verify_buf));
-
-        if (toob_os_flash_read(active_sector_addr + offset,
-                               (uint8_t *)&verify_buf,
-                               sizeof(verify_buf)) == TOOB_OK) {
-          if (toob_ct_memcmp_glitch_safe((const uint8_t *)&aligned_buf,
-                                               (const uint8_t *)&verify_buf,
-                                               sizeof(verify_buf)) != TOOB_OK) {
-            w_stat = TOOB_ERR_FLASH_HW; /* Bit-Rot / Tearing on write */
-          }
-        } else {
-          w_stat = TOOB_ERR_FLASH_HW; /* SPI / Flash failure during Read-Back */
-        }
-        toob_secure_zeroize(&verify_buf, sizeof(verify_buf));
-      }
-
-      final_status = w_stat;
-      goto cleanup;
-    }
-
-    /* ====================================================================
-     * 4. GLITCH RESISTANT INTEGRITY CHECK (Frontier Evaluation)
-     * ====================================================================
-     * Nicht leer -> PrÃ¼fe auf logische GÃ¼ltigkeit der historischen Entry.
-     */
-    uint32_t entry_crc =
-        toob_lib_crc32((const uint8_t *)&flash_entry.data, payload_len);
-    volatile uint32_t shield_1 = 0, shield_2 = 0;
-
-    bool magic_ok = (flash_entry.data.magic == TOOB_WAL_ENTRY_MAGIC);
-    bool crc_ok = (entry_crc == flash_entry.data.crc32_trailer);
-
-    if (magic_ok && crc_ok)
-      shield_1 = TOOB_OK;
-    TOOB_GLITCH_DELAY();
-    if (shield_1 == TOOB_OK && magic_ok && crc_ok)
-      shield_2 = TOOB_OK;
-
-    if (shield_1 == TOOB_OK && shield_2 == TOOB_OK && shield_1 == shield_2) {
-      last_intent = flash_entry.data.intent;
-    } else {
-      /* P10 RACE-CONDITION DEFENSE: Magic/CRC is neither valid NOR erased.
-       * This implies a partially written chunk or sector corruption where wir
-       * zuvor gecrasht sind. Halt operation! Bootloader S1 muss dies
-       * reparieren! */
-      final_status = TOOB_ERR_REQUIRES_RESET;
-      goto cleanup;
-    }
-  }
-
-cleanup:
-  /* ====================================================================
-   * 5. P10 SINGLE EXIT ZEROIZATION (Leakage Defense)
-   * ====================================================================
-   * Verhindert Nonce-Leakage oder State-Leakage aus dem OS-SRAM/Stack
-   * in nachfolgende C-Funktionen des Feature-OS.
-   */
-  toob_secure_zeroize(&aligned_buf, sizeof(aligned_buf));
-  toob_secure_zeroize(&flash_entry, sizeof(flash_entry));
-
-  return final_status;
-}
 ======================================================================
 FILE: sdk/libtoob/include/libtoob.h
 ======================================================================
@@ -1736,17 +1378,14 @@ FILE: sdk/libtoob/include/libtoob.h
  * Es spannt den C++ kompatiblen Schutzschirm (extern "C") fÃ¼r externe Feature-OS.
  *
  * ==============================================================================
- * ERROR HANDLING MATRIX & OS CONTRACTS (P7b / WAL Policy)
+ * ERROR HANDLING MATRIX & OS CONTRACTS (L1 / Mailbox Policy)
  * ==============================================================================
  * Die Funktionen toob_confirm_boot(), toob_recovery_resolved(), 
- * toob_accumulate_net_search() und toob_set_next_update() fÃ¼hren WAL-Appends aus.
+ * und toob_set_next_update() schreiben Mailbox-Anfragen in den Flash.
  * Diese Operationen kÃ¶nnen spezifische Fehlercodes zurÃ¼ckgeben:
  *
  * | Fehlercode                 | Ursache                              | Erwartete OS-Reaktion          |
  * |----------------------------|--------------------------------------|--------------------------------|
- * | TOOB_ERR_REQUIRES_RESET    | UnvollstÃ¤ndiger Write (torn write).  | System sofort neu starten.     |
- * | TOOB_ERR_WAL_FULL          | Aktiver Sektor ist voll.             | System sofort neu starten.     |
- * | TOOB_ERR_WAL_LOCKED        | Ein anderes Update steht aus/aktiv.  | Operation abbrechen/spÃ¤ter.    |
  * | TOOB_ERR_FLASH / FLASH_HW  | Hardwarefehler im Flash-Treiber.     | Fehler protokollieren.         |
  */
 
@@ -1873,9 +1512,8 @@ static inline TOOB_MUST_CHECK toob_status_t toob_os_init(void) {
  *        dieses TTLs fÃ¼hrt das Ausbleiben des Aufrufs unwiderruflich zum Rollback.
  * 
  * @return TOOB_OK bei Erfolg.
- *         MÃ¶gliche WAL-Fehler (erfordern OS-Handhabung):
- *         - TOOB_ERR_REQUIRES_RESET: Torn Write entdeckt. OS muss einen Reboot auslÃ¶sen.
- *         - TOOB_ERR_WAL_FULL: WAL-Sektor voll. OS muss einen Reboot auslÃ¶sen.
+ * @return TOOB_OK bei Erfolg.
+ *         MÃ¶gliche Fehler:
  *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
  */
 TOOB_MUST_CHECK toob_status_t toob_confirm_boot(void);
@@ -1883,36 +1521,19 @@ TOOB_MUST_CHECK toob_status_t toob_confirm_boot(void);
 /**
  * @brief Befreit das Recovery-OS aus dem Rettungsmodus (Anti Roach-Motel).
  * @note  Sobald das Recovery-OS die App repariert hat, MUSS es diese Funktion 
- *        aufrufen, um den RECOVERY_RESOLVED Intent ins WAL zu schreiben.
+ *        aufrufen, um den RECOVERY_RESOLVED Intent in die Mailbox zu schreiben.
  * 
  * @return TOOB_OK bei Erfolg.
- *         MÃ¶gliche WAL-Fehler (erfordern OS-Handhabung):
- *         - TOOB_ERR_REQUIRES_RESET: Sektor-Korruption. OS muss einen Reboot auslÃ¶sen.
- *         - TOOB_ERR_WAL_FULL: Sektor voll. OS muss einen Reboot auslÃ¶sen.
+ *         MÃ¶gliche Fehler:
  *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
  */
 TOOB_MUST_CHECK toob_status_t toob_recovery_resolved(void);
 
-/**
- * @brief Akkumuliert die aktive Cloud-Suchzeit (Anti-Lagerhaus Lockout).
- * @param active_search_ms Dauer der aktiven Netzwerk-Suche seit dem letzten Reset.
- * 
- * @return TOOB_OK bei Erfolg.
- *         MÃ¶gliche WAL-Fehler (erfordern OS-Handhabung):
- *         - TOOB_ERR_REQUIRES_RESET: Sektor-Korruption. OS muss einen Reboot auslÃ¶sen.
- *         - TOOB_ERR_WAL_FULL: Sektor voll. OS muss einen Reboot auslÃ¶sen.
- *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
- */
-TOOB_MUST_CHECK toob_status_t toob_accumulate_net_search(uint32_t active_search_ms);
-
 
 /* ==============================================================================
- * Zero-Bloat Cryptography Types (must precede OTA context definition)
+ * Zero-Bloat Platform & Cryptography Hooks (must precede OTA context definition)
  * ============================================================================== */
-
-typedef struct {
-    uint8_t opaque[128]; /* Context buffer for the OS hardware crypto driver */
-} toob_os_sha256_ctx_t;
+#include "toob_port.h"
 
 /* ==============================================================================
  * Toob-Boot OTA Daemon (Network-Agnostic Stream Writer)
@@ -1957,54 +1578,25 @@ TOOB_MUST_CHECK toob_status_t toob_ota_ctx_init(toob_ota_ctx_t *ctx);
  * @brief Initializes the OTA Daemon for receiving a new update stream.
  * @param ctx Caller-allocated OTA session context.
  * @param total_size Expected total size of the incoming image (Manifest + Payload).
+ * @param expected_sha256 Optional 32-byte hash to verify the stream against (nullable).
  * @return TOOB_OK on success, TOOB_ERR_INVALID_ARG if size exceeds staging slot.
  */
-TOOB_MUST_CHECK toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size);
+TOOB_MUST_CHECK toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]);
 
 /**
- * @brief Initializes the OTA Daemon with streaming SHA-256 verification (Zero-Bloat).
- * @param ctx Caller-allocated OTA session context.
- * @param total_size Expected total size.
- * @param expected_sha256 32-byte hash to verify the stream against.
- * @return TOOB_OK on success.
- */
-TOOB_MUST_CHECK toob_status_t toob_ota_begin_verified(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]);
-
-/**
- * @brief Resumes a partially downloaded OTA update (unverified).
+ * @brief Resumes a partially downloaded OTA update.
  *
  * Restores the internal write cursor and byte counter from the handoff RAM
- * checkpoint. Does NOT enable SHA-256 stream verification â€” use
- * toob_ota_resume_verified() if the stream must be integrity-checked.
+ * checkpoint. If expected_sha256 is non-NULL, reconstructs the SHA-256
+ * streaming context by re-reading and re-hashing the already-staged flash prefix.
  *
  * @param ctx Caller-allocated OTA session context.
  * @param total_size   Expected total size of the image (from the manifest).
+ * @param expected_sha256 Optional 32-byte hash to verify the stream against (nullable).
  * @param resume_offset Output pointer for the byte offset to resume from.
  * @return TOOB_OK if resumable, TOOB_ERR_NOT_FOUND if no partial download exists.
  */
-TOOB_MUST_CHECK toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, uint32_t* resume_offset);
-
-/**
- * @brief Resumes a partially downloaded OTA update with SHA-256 verification.
- *
- * Performs all steps of toob_ota_resume(), then reconstructs the SHA-256
- * streaming context by re-reading and re-hashing the already-staged flash
- * prefix ([CHIP_STAGING_SLOT_ABS_ADDR .. resume_offset]) via toob_os_flash_read.
- * After a successful return, toob_ota_process_chunk() will continue feeding the
- * hash, and toob_ota_finalize() will verify the full-image digest.
- *
- * @param ctx Caller-allocated OTA session context.
- * @param total_size       Expected total size of the image (from the manifest).
- * @param expected_sha256  32-byte hash to verify the complete stream against.
- * @param resume_offset    Output pointer for the byte offset to resume from.
- * @return TOOB_OK if resumable and SHA context reconstructed,
- *         TOOB_ERR_NOT_FOUND if no partial download exists,
- *         TOOB_ERR_NOT_SUPPORTED if SHA hardware init fails,
- *         TOOB_ERR_FLASH on flash read failure during re-hash.
- */
-TOOB_MUST_CHECK toob_status_t toob_ota_resume_verified(toob_ota_ctx_t *ctx, uint32_t total_size,
-                                       const uint8_t expected_sha256[32],
-                                       uint32_t *resume_offset);
+TOOB_MUST_CHECK toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32], uint32_t* resume_offset);
 
 /**
  * @brief Aborts an active OTA download and securely zeroizes buffers.
@@ -2041,20 +1633,16 @@ TOOB_MUST_CHECK toob_status_t toob_ota_process_chunk(toob_ota_ctx_t *ctx, const 
 TOOB_MUST_CHECK toob_status_t toob_ota_finalize(toob_ota_ctx_t *ctx);
 
 /**
- * @brief Registriert ein empfangenes SUIT-Manifest im Write-Ahead-Log (WAL).
+ * @brief Registriert ein empfangenes Manifest in der Mailbox.
  * 
- * @note  [GAP-37: P10 WAL-AtomaritÃ¤t]
- *        Toob-Loader stÃ¼tzt sich auf absolute P10-Resilienz. Ein Crash (Brownout) 
- *        wÃ¤hrend der AusfÃ¼hrung dieser Funktion hinterlÃ¤sst niemals einen halben
- *        Zustand! Das System evaluiert CRC-gesicherte 64-Byte WAL-Sektoren beim
- *        nÃ¤chsten Boot und schlieÃŸt das Update ab, oder verwirft das Rausch-Fragment.
+ * @note  [L1: Mailbox-AtomaritÃ¤t]
+ *        Ein Crash (Brownout) wÃ¤hrend der AusfÃ¼hrung dieser Funktion hinterlÃ¤sst
+ *        niemals einen halben Zustand. Das System evaluiert CRC-gesicherte Mailbox-EintrÃ¤ge
+ *        beim nÃ¤chsten Boot und faltet sie in seine interne WAL ein.
  *
  * @param manifest_flash_addr Absolute, hardware-bÃ¼ndige Flash-Adresse des Manifests im SPI.
  * @return TOOB_OK bei Erfolg.
- *         MÃ¶gliche WAL-Fehler (erfordern OS-Handhabung):
- *         - TOOB_ERR_REQUIRES_RESET: Sektor-Korruption. OS muss einen Reboot auslÃ¶sen.
- *         - TOOB_ERR_WAL_FULL: Sektor voll. OS muss einen Reboot auslÃ¶sen.
- *         - TOOB_ERR_WAL_LOCKED: Ein anderes Update steht bereits aus.
+ *         MÃ¶gliche Fehler:
  *         - TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW: Flash-Hardwarefehler.
  */
 TOOB_MUST_CHECK toob_status_t toob_set_next_update(uint32_t manifest_flash_addr);
@@ -2157,15 +1745,6 @@ TOOB_MUST_CHECK toob_status_t toob_os_flash_write(uint32_t addr, const uint8_t* 
  */
 TOOB_MUST_CHECK toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len);
 
-/* ==============================================================================
- * Zero-Bloat Cryptography Hooks (Hardware Acceleration OS-Side)
- * (toob_os_sha256_ctx_t is defined above, before the OTA section)
- * ============================================================================== */
-
-TOOB_MUST_CHECK toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx);
-TOOB_MUST_CHECK toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* data, uint32_t len);
-TOOB_MUST_CHECK toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]);
-
 #ifdef __cplusplus
 }
 #endif
@@ -2233,6 +1812,11 @@ FILE: sdk/libtoob/include/libtoob_config_sandbox.h
 /* KDM Quorum Store (Phase 4: 3 sectors for quorum-protected KDM) */
 #define TOOB_KDM_QUORUM_ADDR     0x000F1000
 #define TOOB_KDM_QUORUM_SIZE     0x3000
+
+/* OSâ†’Core Mailbox (2 sectors, Double-Slot: 2Ã—SectorSize, torn-write safe) */
+#define CHIP_MAILBOX_ABS_ADDR    0x000F4000
+#define CHIP_MAILBOX_SLOT_SIZE   0x1000
+#define CHIP_MAILBOX_SIZE        0x2000
 
 #endif /* LIBTOOB_CONFIG_SANDBOX_H */
 
@@ -2406,23 +1990,27 @@ typedef struct __attribute__((aligned(8))) {
     
     /* Fehler-State */
     uint32_t last_error_code;        /* z.B. BOOT_ERR_WDT_TRIGGER */
-    uint32_t vendor_error;           /* Spezifischer Flash-Fehler / hardware_fault_record */
+    uint32_t vendor_error;           /* Spezifischer Flash-Fehler */
+    uint32_t hardware_fault_record;  /* Hardware-Fault register dump */
     
     /* Identity & Revisions */
     uint32_t active_key_index;       /* eFuse Epoch Index */
     uint32_t current_svn;            /* Aktuelle SVN Version */
+    uint32_t build_number;           /* CI build number */
     
     /* Protection & Crash History */
     uint32_t edge_recovery_events;   /* Aktuelle Edge-Recovery Versuche (boot_failure_count) */
+    uint32_t wdt_kicks;              /* Watchdog Kick Counter */
     
     /* Telemetry / Version Oracle (v2) */
-    uint32_t build_number;           /* CI build number */
     uint16_t fw_ver_major;           /* Firmware version */
     uint16_t fw_ver_minor;
     uint16_t fw_ver_patch;
-    uint8_t  _reserved_diag[6];      /* Alignment padding */
+    uint8_t  fallback_occurred;      /* 1 = recovery booted, 0 = normal */
+    uint8_t  _reserved_diag[1];      /* Alignment padding to 4-byte boundary */
     
-    /* SBOM */
+    /* SBOM & Handoff */
+    uint32_t boot_session_id;        /* Monotoner Boot-Counter */
     uint8_t  sbom_digest[32];        /* SHA-256 der letzten StÃ¼ckliste (deterministisch 32 Bytes) */
     
     /* Extended Health (Optional gem. CBOR Spec) */
@@ -2433,7 +2021,7 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t crc32_trailer;          /* CRC32 Versiegelung im .noinit */
 } toob_boot_diag_t;
 
-_Static_assert(sizeof(toob_boot_diag_t) == 104, "toob_boot_diag_t size breach - must be exactly 104 bytes for ABI stability");
+_Static_assert(sizeof(toob_boot_diag_t) == 112, "toob_boot_diag_t size breach - must be exactly 112 bytes for ABI stability");
 
 _Static_assert(offsetof(toob_boot_diag_t, ext_health) % 4 == 0, "toob_ext_health_t alignment is broken in diag struct");
 _Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) > offsetof(toob_boot_diag_t, ext_health), "CRC32 trailer must be last field");
@@ -2446,109 +2034,171 @@ _Static_assert(offsetof(toob_boot_diag_t, boot_duration_ms) == 4, "boot_duration
 _Static_assert(offsetof(toob_boot_diag_t, verify_time_ms) == 8, "verify_time_ms offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, last_error_code) == 12, "last_error_code offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, vendor_error) == 16, "vendor_error offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, active_key_index) == 20, "active_key_index offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, current_svn) == 24, "current_svn offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, edge_recovery_events) == 28, "edge_recovery_events offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, hardware_fault_record) == 20, "hardware_fault_record offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, active_key_index) == 24, "active_key_index offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, current_svn) == 28, "current_svn offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, build_number) == 32, "build_number offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, fw_ver_major) == 36, "fw_ver_major offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, sbom_digest) == 48, "sbom_digest offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, ext_health_present) == 80, "ext_health_present offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, _padding) == 81, "_padding offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, ext_health) == 84, "ext_health offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, edge_recovery_events) == 36, "edge_recovery_events offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, wdt_kicks) == 40, "wdt_kicks offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_major) == 44, "fw_ver_major offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_minor) == 46, "fw_ver_minor offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_patch) == 48, "fw_ver_patch offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fallback_occurred) == 50, "fallback_occurred offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, boot_session_id) == 52, "boot_session_id offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, sbom_digest) == 56, "sbom_digest offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health_present) == 88, "ext_health_present offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, _padding) == 89, "_padding offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health) == 92, "ext_health offset drift");
 _Static_assert(offsetof(toob_ext_health_t, wal_erase_count) == 0, "wal_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, app_slot_erase_count) == 4, "app_slot_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, staging_slot_erase_count) == 8, "staging_slot_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, swap_buffer_erase_count) == 12, "swap_buffer_erase_count offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 100, "crc32_trailer offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 108, "crc32_trailer offset drift");
 
 /* Konstante fÃ¼r struct_version des Diag-Headers zur Vermeidung von ABI-Drift */
 #define TOOB_DIAG_STRUCT_VERSION 0x02000000
 
 /* ========================================================
- * 4. WAL (Write-Ahead-Log) OS Boundary (Zero-Dependency)
+ * 4. WAL (Write-Ahead-Log) Wire Format
+ *    Shared definition lives in common/include/toob_wal_wire.h.
  * ======================================================== */
-
-/* GAP-C03: Zero-Dependency WAL Payload Declaration fÃ¼r OS Hooks */
-#define TOOB_WAL_ENTRY_MAGIC  0xB007BEEF
-#define TOOB_WAL_SECTOR_MAGIC_LEGACY 0x57414C02
-#define TOOB_WAL_SECTOR_MAGIC_CURRENT 0x57414C03
-#define TOOB_WAL_SECTOR_MAGIC TOOB_WAL_SECTOR_MAGIC_CURRENT
-#define TOOB_WAL_HEADER_SIZE  128
+#include "toob_wal_wire.h"
 
 /* OTA Network Failsafe Timeout (Default: 5 Minutes) */
 #ifndef TOOB_SMOKE_TEST_TIMEOUT_MS
 #define TOOB_SMOKE_TEST_TIMEOUT_MS 300000
 #endif
 
-typedef enum {
-    TOOB_WAL_INTENT_NONE = 0,
-    TOOB_WAL_INTENT_TXN_BEGIN = 1,
-    TOOB_WAL_INTENT_UPDATE_PENDING = 2,
-    TOOB_WAL_INTENT_TXN_COMMIT = 3,
-    TOOB_WAL_INTENT_CONFIRM_COMMIT = 4,
-    TOOB_WAL_INTENT_RECOVERY_RESOLVED = 5,
-    TOOB_WAL_INTENT_TXN_ROLLBACK = 6,
-    TOOB_WAL_INTENT_DEPRECATED_NONCE = 7,  /**< Deprecated. Stored in TMR now */
-    TOOB_WAL_INTENT_NET_SEARCH_ACCUM = 8,
-    TOOB_WAL_INTENT_SLEEP_BACKOFF = 9,
-    TOOB_WAL_INTENT_TXN_ROLLBACK_PENDING = 10,
-    TOOB_WAL_INTENT_DOWNLOAD_CHECKPOINT = 11, /**< OS-Side Checkpoint for resumable OTA downloads */
-    TOOB_WAL_INTENT_CLOUD_CMD = 12,
-    TOOB_WAL_INTENT_DEVICE_LOCKED = 13
-} toob_wal_intent_t;
-
-/* 
- * Arch-Note (Zero-Dependency): This struct is a bit-perfect OS-safe duplicate 
- * of the internal `wal_entry_payload_t` from Stage 1. ABI safety is mathematically 
- * proven via _Static_assert rules over in boot_journal.h.
- */
-typedef struct {
-    uint32_t magic;           /**< Immer TOOB_WAL_ENTRY_MAGIC (0xBEEF) */
-    uint32_t intent;          /**< Der Transaction Intent (enum toob_wal_intent_t) fixiert auf 32-bit (ABI Safety) */
-    
-    uint64_t expected_nonce;  /**< Sichert EXPECTED_NONCE vor dem OS-Jump (Aligned nativ ohne Padding) */
-    
-    /* Transaktionale Daten fÃ¼r Resume/Checkpointing */
-    uint32_t update_deadline;
-    uint32_t transfer_bitmap[8]; /**< 1 Bit = 1 Chunk (256 Chunks max) */
-    uint32_t delta_chunk_id;     /**< Aktueller Checkpoint fÃ¼r Delta-Patches */
-    uint32_t offset;             /**< Generisches Offset (z.B. Net-Search Accumulator). \n @note Bei TOOB_WAL_INTENT_UPDATE_PENDING fungiert dies zwingend als manifest_flash_addr! */
-    
-    uint32_t crc32_trailer;   /**< CRC-32 Trailer Ã¼ber den Entry */
-} toob_wal_entry_payload_t;
-
-typedef union {
-    toob_wal_entry_payload_t data;
-    /* Festes 64-Byte Padding fÃ¼r Hardware-Alignment */
-    uint8_t padding[64]; 
-} toob_wal_entry_aligned_t;
-
-_Static_assert(sizeof(toob_wal_entry_aligned_t) % 8 == 0, "GAP-C03: WAL padding violates hardware alignment!");
-_Static_assert(sizeof(toob_wal_entry_payload_t) == 64, "GAP-C03: toob_wal_entry_payload_t ABI size drift (Tail Padding miscalc)!");
-
-/* ========================================================
- * Sektor Header Boundary Definition
- * ======================================================== */
-typedef struct {
-    uint32_t sector_magic;    /**< Immer TOOB_WAL_SECTOR_MAGIC */
-    uint32_t sequence_id;     /**< Fortlaufende ID fÃ¼r O(1) Sliding-Window Discovery */
-    uint32_t erase_count;     /**< Tracks sector wear leveling */
-    uint8_t  _reserved_tmr_space[112]; /**< TMR Payload vom Bootloader (OS greift nie darauf zu) */
-    uint32_t header_crc32;    /**< Sichert den Sector-Header */
-} toob_wal_sector_header_t;
-
-typedef union {
-    toob_wal_sector_header_t head;
-    uint8_t raw[TOOB_WAL_HEADER_SIZE];
-} toob_wal_sector_header_aligned_t;
-
-_Static_assert(sizeof(toob_wal_sector_header_aligned_t) == TOOB_WAL_HEADER_SIZE, "WAL Header Boundary breach!");
-_Static_assert(offsetof(toob_wal_sector_header_t, header_crc32) == 124, "Sector Header Layout Drift: CRC32 must be at offset 124");
-
 /* Extern Definitions (After structs are fully typed!) */
 extern TOOB_NOINIT toob_boot_diag_t toob_diag_state;
 
 #endif /* LIBTOOB_TYPES_H */
+
+======================================================================
+FILE: sdk/libtoob/include/toob_mailbox.h
+======================================================================
+/**
+ * @file toob_mailbox.h
+ * @brief OS -> Core Mailbox SDK writer interface (C17).
+ *
+ * Implements the OS-side API to send update registration, confirmation, and
+ * recovery resolution requests to the Core bootloader.
+ *
+ * Sharing contract: all wire structure and enum definitions are defined in
+ * toob_mailbox_wire.h to prevent structure layout and static assertion drift.
+ */
+
+#ifndef TOOB_MAILBOX_H
+#define TOOB_MAILBOX_H
+
+#include "libtoob_types.h" /* toob_status_t */
+#include "toob_mailbox_wire.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ===== OS-side writers (implemented in toob_mailbox.c) ===== */
+toob_status_t toob_mailbox_set_update(uint32_t manifest_flash_addr);
+toob_status_t toob_mailbox_set_confirm(uint64_t nonce);
+toob_status_t toob_mailbox_set_recovery_resolved(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* TOOB_MAILBOX_H */
+
+======================================================================
+FILE: sdk/libtoob/include/toob_port.h
+======================================================================
+/**
+ * @file toob_port.h
+ * @brief Platform Porting Hooks for libtoob.
+ *
+ * This header defines the structural contracts and interface hooks that the
+ * guest OS (e.g. Zephyr, FreeRTOS, baremetal) must physically implement to
+ * bridge libtoob with the vendor-specific hardware.
+ */
+
+#ifndef TOOB_PORT_H
+#define TOOB_PORT_H
+
+#include "libtoob_types.h"
+#include <stdint.h>
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ==============================================================================
+ * 1. Flash Porting Hooks
+ * ============================================================================== */
+
+/**
+ * @brief Hook: Physical Flash Read.
+ * @param addr Absolute byte address in SPI flash.
+ * @param buf Data buffer in local OS SRAM.
+ * @param len Length of the data to read in bytes.
+ * @return TOOB_OK on success, or TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW on hardware failure.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_flash_read(uint32_t addr, uint8_t* buf, uint32_t len);
+
+/**
+ * @brief Hook: Physical Flash Write.
+ * @param addr Absolute byte address in SPI flash (must be page-aligned).
+ * @param buf Constant data buffer containing payload to be written.
+ * @param len Length of the data to write in bytes.
+ * @return TOOB_OK on success, or TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW on hardware failure.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_flash_write(uint32_t addr, const uint8_t* buf, uint32_t len);
+
+/**
+ * @brief Hook: Physical Flash Sector Erase.
+ * @param addr Absolute byte address in SPI flash (must be sector-aligned).
+ * @param len Length of data to erase (must be sector-aligned).
+ * @return TOOB_OK on success, or TOOB_ERR_FLASH / TOOB_ERR_FLASH_HW on hardware failure.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len);
+
+/* ==============================================================================
+ * 2. Cryptography Porting Hooks (SHA-256 Stream acceleration OS-side)
+ * ============================================================================== */
+
+typedef struct {
+    uint8_t opaque[128]; /* Context buffer for the OS hardware crypto driver */
+} toob_os_sha256_ctx_t;
+
+/**
+ * @brief Hook: Initialize streaming SHA-256 context.
+ * @param ctx Context structure to initialize.
+ * @return TOOB_OK on success, or TOOB_ERR_NOT_SUPPORTED / TOOB_ERR_VERIFY.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx);
+
+/**
+ * @brief Hook: Feed data into the streaming SHA-256 engine.
+ * @param ctx Active context structure.
+ * @param data Chunk data pointer.
+ * @param len Length of the chunk in bytes.
+ * @return TOOB_OK on success, or TOOB_ERR_NOT_SUPPORTED / TOOB_ERR_VERIFY.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* data, uint32_t len);
+
+/**
+ * @brief Hook: Finalize streaming SHA-256 calculation and output hash.
+ * @param ctx Active context structure.
+ * @param out_hash Output buffer of exactly 32 bytes.
+ * @return TOOB_OK on success, or TOOB_ERR_NOT_SUPPORTED / TOOB_ERR_VERIFY.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* TOOB_PORT_H */
 
 ======================================================================
 FILE: sdk/os_client/CMakeLists.txt
@@ -2978,11 +2628,11 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
 
     /* Phase 2: Resume / Begin */
     uint32_t resume_offset = 0;
-    stat = toob_ota_resume_verified(&s_ota_ctx, info.total_size, info.sha256, &resume_offset);
+    stat = toob_ota_resume(&s_ota_ctx, info.total_size, info.sha256, &resume_offset);
     if (stat == TOOB_OK && resume_offset > 0) {
         TOOB_LOGI(TAG, "Resuming verified download from offset %u", resume_offset);
     } else {
-        stat = toob_ota_begin_verified(&s_ota_ctx, info.total_size, info.sha256);
+        stat = toob_ota_begin(&s_ota_ctx, info.total_size, info.sha256);
         if (stat != TOOB_OK) {
             TOOB_LOGE(TAG, "OTA begin failed: 0x%08X", (unsigned)stat);
             return stat;
@@ -3216,9 +2866,17 @@ pub struct BootDiagnostics {
     pub verify_time_ms: u32,
     pub last_error_code: u32,
     pub vendor_error: u32,
+    pub hardware_fault_record: u32,
     pub active_key_index: u32,
     pub current_svn: u32,
+    pub build_number: u32,
     pub edge_recovery_events: u32,
+    pub wdt_kicks: u32,
+    pub fw_ver_major: u16,
+    pub fw_ver_minor: u16,
+    pub fw_ver_patch: u16,
+    pub fallback_occurred: bool,
+    pub boot_session_id: u32,
     pub sbom_digest: [u8; 32],
     pub ext_health: Option<ExtHealth>,
 }
@@ -3269,11 +2927,6 @@ pub fn recovery_resolved() -> Result<()> {
     unsafe { sys::toob_recovery_resolved().to_result() }
 }
 
-/// Accumulates net search time.
-pub fn accumulate_net_search(active_search_ms: u32) -> Result<()> {
-    unsafe { sys::toob_accumulate_net_search(active_search_ms).to_result() }
-}
-
 /// Extracts raw hardware metrics.
 pub fn get_boot_diag() -> Result<BootDiagnostics> {
     let mut diag = unsafe { core::mem::zeroed() };
@@ -3286,9 +2939,17 @@ pub fn get_boot_diag() -> Result<BootDiagnostics> {
         verify_time_ms: diag.verify_time_ms,
         last_error_code: diag.last_error_code,
         vendor_error: diag.vendor_error,
+        hardware_fault_record: diag.hardware_fault_record,
         active_key_index: diag.active_key_index,
         current_svn: diag.current_svn,
+        build_number: diag.build_number,
         edge_recovery_events: diag.edge_recovery_events,
+        wdt_kicks: diag.wdt_kicks,
+        fw_ver_major: diag.fw_ver_major,
+        fw_ver_minor: diag.fw_ver_minor,
+        fw_ver_patch: diag.fw_ver_patch,
+        fallback_occurred: diag.fallback_occurred != 0,
+        boot_session_id: diag.boot_session_id,
         sbom_digest: diag.sbom_digest,
         ext_health: if diag.ext_health_present != 0 {
             Some(ExtHealth {
@@ -3433,7 +3094,7 @@ impl OtaSession<Idle> {
     /// Begin a new unverified OTA update.
     pub fn begin(mut self, total_size: u32) -> Result<OtaSession<Receiving>> {
         unsafe {
-            sys::toob_ota_begin(&mut self.ctx, total_size).to_result()?;
+            sys::toob_ota_begin(&mut self.ctx, total_size, core::ptr::null()).to_result()?;
         }
         Ok(OtaSession {
             ctx: self.ctx,
@@ -3444,7 +3105,7 @@ impl OtaSession<Idle> {
     /// Begin a new update verified by a streaming SHA-256 hash.
     pub fn begin_verified(mut self, total_size: u32, expected_hash: &[u8; 32]) -> Result<OtaSession<Receiving>> {
         unsafe {
-            sys::toob_ota_begin_verified(&mut self.ctx, total_size, expected_hash.as_ptr()).to_result()?;
+            sys::toob_ota_begin(&mut self.ctx, total_size, expected_hash.as_ptr()).to_result()?;
         }
         Ok(OtaSession {
             ctx: self.ctx,
@@ -3456,7 +3117,7 @@ impl OtaSession<Idle> {
     pub fn resume(mut self, total_size: u32) -> Result<(OtaSession<Receiving>, u32)> {
         let mut offset = 0u32;
         unsafe {
-            sys::toob_ota_resume(&mut self.ctx, total_size, &mut offset).to_result()?;
+            sys::toob_ota_resume(&mut self.ctx, total_size, core::ptr::null(), &mut offset).to_result()?;
         }
         Ok((
             OtaSession {
@@ -3471,7 +3132,7 @@ impl OtaSession<Idle> {
     pub fn resume_verified(mut self, total_size: u32, expected_hash: &[u8; 32]) -> Result<(OtaSession<Receiving>, u32)> {
         let mut offset = 0u32;
         unsafe {
-            sys::toob_ota_resume_verified(&mut self.ctx, total_size, expected_hash.as_ptr(), &mut offset).to_result()?;
+            sys::toob_ota_resume(&mut self.ctx, total_size, expected_hash.as_ptr(), &mut offset).to_result()?;
         }
         Ok((
             OtaSession {
@@ -3598,9 +3259,18 @@ pub struct toob_boot_diag_t {
     pub verify_time_ms: u32,
     pub last_error_code: u32,
     pub vendor_error: u32,
+    pub hardware_fault_record: u32,
     pub active_key_index: u32,
     pub current_svn: u32,
+    pub build_number: u32,
     pub edge_recovery_events: u32,
+    pub wdt_kicks: u32,
+    pub fw_ver_major: u16,
+    pub fw_ver_minor: u16,
+    pub fw_ver_patch: u16,
+    pub fallback_occurred: u8,
+    pub _reserved_diag: [u8; 1],
+    pub boot_session_id: u32,
     pub sbom_digest: [u8; 32],
     pub ext_health_present: u8,
     pub _padding: [u8; 3],
@@ -3633,7 +3303,7 @@ pub struct toob_ota_ctx_t {
 const _: () = {
     assert!(core::mem::size_of::<toob_handoff_t>() == 80);
     assert!(core::mem::align_of::<toob_handoff_t>() == 8);
-    assert!(core::mem::size_of::<toob_boot_diag_t>() == 88);
+    assert!(core::mem::size_of::<toob_boot_diag_t>() == 112);
     assert!(core::mem::align_of::<toob_boot_diag_t>() == 8);
     assert!(core::mem::size_of::<toob_ota_ctx_t>() == 440);
     assert!(core::mem::align_of::<toob_ota_ctx_t>() == 8);
@@ -3644,7 +3314,6 @@ extern "C" {
     pub fn toob_get_handoff(out_handoff: *mut toob_handoff_t) -> ToobStatus;
     pub fn toob_confirm_boot() -> ToobStatus;
     pub fn toob_recovery_resolved() -> ToobStatus;
-    pub fn toob_accumulate_net_search(active_search_ms: u32) -> ToobStatus;
     pub fn toob_get_boot_diag(diag: *mut toob_boot_diag_t) -> ToobStatus;
     pub fn toob_get_boot_diag_cbor(out_buf: *mut u8, max_len: usize, out_len: *mut usize) -> ToobStatus;
     pub fn toob_set_next_update(manifest_flash_addr: u32) -> ToobStatus;
@@ -3652,10 +3321,8 @@ extern "C" {
     pub fn toob_get_device_id(out_id: *mut u8, id_len: usize) -> ToobStatus;
     
     pub fn toob_ota_ctx_init(ctx: *mut toob_ota_ctx_t) -> ToobStatus;
-    pub fn toob_ota_begin(ctx: *mut toob_ota_ctx_t, total_size: u32) -> ToobStatus;
-    pub fn toob_ota_begin_verified(ctx: *mut toob_ota_ctx_t, total_size: u32, expected_sha256: *const u8) -> ToobStatus;
-    pub fn toob_ota_resume(ctx: *mut toob_ota_ctx_t, total_size: u32, resume_offset: *mut u32) -> ToobStatus;
-    pub fn toob_ota_resume_verified(ctx: *mut toob_ota_ctx_t, total_size: u32, expected_sha256: *const u8, resume_offset: *mut u32) -> ToobStatus;
+    pub fn toob_ota_begin(ctx: *mut toob_ota_ctx_t, total_size: u32, expected_sha256: *const u8) -> ToobStatus;
+    pub fn toob_ota_resume(ctx: *mut toob_ota_ctx_t, total_size: u32, expected_sha256: *const u8, resume_offset: *mut u32) -> ToobStatus;
     pub fn toob_ota_abort(ctx: *mut toob_ota_ctx_t) -> ToobStatus;
     pub fn toob_ota_process_chunk(ctx: *mut toob_ota_ctx_t, chunk: *const u8, len: u32) -> ToobStatus;
     pub fn toob_ota_finalize(ctx: *mut toob_ota_ctx_t) -> ToobStatus;

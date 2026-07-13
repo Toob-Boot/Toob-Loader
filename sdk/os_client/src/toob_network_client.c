@@ -244,11 +244,11 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
 
     /* Phase 2: Resume / Begin */
     uint32_t resume_offset = 0;
-    stat = toob_ota_resume_verified(&s_ota_ctx, info.total_size, info.sha256, &resume_offset);
+    stat = toob_ota_resume(&s_ota_ctx, info.total_size, info.sha256, &resume_offset);
     if (stat == TOOB_OK && resume_offset > 0) {
         TOOB_LOGI(TAG, "Resuming verified download from offset %u", resume_offset);
     } else {
-        stat = toob_ota_begin_verified(&s_ota_ctx, info.total_size, info.sha256);
+        stat = toob_ota_begin(&s_ota_ctx, info.total_size, info.sha256);
         if (stat != TOOB_OK) {
             TOOB_LOGE(TAG, "OTA begin failed: 0x%08X", (unsigned)stat);
             return stat;

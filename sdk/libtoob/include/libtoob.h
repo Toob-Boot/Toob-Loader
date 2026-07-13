@@ -166,12 +166,9 @@ TOOB_MUST_CHECK toob_status_t toob_recovery_resolved(void);
 
 
 /* ==============================================================================
- * Zero-Bloat Cryptography Types (must precede OTA context definition)
+ * Zero-Bloat Platform & Cryptography Hooks (must precede OTA context definition)
  * ============================================================================== */
-
-typedef struct {
-    uint8_t opaque[128]; /* Context buffer for the OS hardware crypto driver */
-} toob_os_sha256_ctx_t;
+#include "toob_port.h"
 
 /* ==============================================================================
  * Toob-Boot OTA Daemon (Network-Agnostic Stream Writer)
@@ -216,54 +213,25 @@ TOOB_MUST_CHECK toob_status_t toob_ota_ctx_init(toob_ota_ctx_t *ctx);
  * @brief Initializes the OTA Daemon for receiving a new update stream.
  * @param ctx Caller-allocated OTA session context.
  * @param total_size Expected total size of the incoming image (Manifest + Payload).
+ * @param expected_sha256 Optional 32-byte hash to verify the stream against (nullable).
  * @return TOOB_OK on success, TOOB_ERR_INVALID_ARG if size exceeds staging slot.
  */
-TOOB_MUST_CHECK toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size);
+TOOB_MUST_CHECK toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]);
 
 /**
- * @brief Initializes the OTA Daemon with streaming SHA-256 verification (Zero-Bloat).
- * @param ctx Caller-allocated OTA session context.
- * @param total_size Expected total size.
- * @param expected_sha256 32-byte hash to verify the stream against.
- * @return TOOB_OK on success.
- */
-TOOB_MUST_CHECK toob_status_t toob_ota_begin_verified(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]);
-
-/**
- * @brief Resumes a partially downloaded OTA update (unverified).
+ * @brief Resumes a partially downloaded OTA update.
  *
  * Restores the internal write cursor and byte counter from the handoff RAM
- * checkpoint. Does NOT enable SHA-256 stream verification — use
- * toob_ota_resume_verified() if the stream must be integrity-checked.
+ * checkpoint. If expected_sha256 is non-NULL, reconstructs the SHA-256
+ * streaming context by re-reading and re-hashing the already-staged flash prefix.
  *
  * @param ctx Caller-allocated OTA session context.
  * @param total_size   Expected total size of the image (from the manifest).
+ * @param expected_sha256 Optional 32-byte hash to verify the stream against (nullable).
  * @param resume_offset Output pointer for the byte offset to resume from.
  * @return TOOB_OK if resumable, TOOB_ERR_NOT_FOUND if no partial download exists.
  */
-TOOB_MUST_CHECK toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, uint32_t* resume_offset);
-
-/**
- * @brief Resumes a partially downloaded OTA update with SHA-256 verification.
- *
- * Performs all steps of toob_ota_resume(), then reconstructs the SHA-256
- * streaming context by re-reading and re-hashing the already-staged flash
- * prefix ([CHIP_STAGING_SLOT_ABS_ADDR .. resume_offset]) via toob_os_flash_read.
- * After a successful return, toob_ota_process_chunk() will continue feeding the
- * hash, and toob_ota_finalize() will verify the full-image digest.
- *
- * @param ctx Caller-allocated OTA session context.
- * @param total_size       Expected total size of the image (from the manifest).
- * @param expected_sha256  32-byte hash to verify the complete stream against.
- * @param resume_offset    Output pointer for the byte offset to resume from.
- * @return TOOB_OK if resumable and SHA context reconstructed,
- *         TOOB_ERR_NOT_FOUND if no partial download exists,
- *         TOOB_ERR_NOT_SUPPORTED if SHA hardware init fails,
- *         TOOB_ERR_FLASH on flash read failure during re-hash.
- */
-TOOB_MUST_CHECK toob_status_t toob_ota_resume_verified(toob_ota_ctx_t *ctx, uint32_t total_size,
-                                       const uint8_t expected_sha256[32],
-                                       uint32_t *resume_offset);
+TOOB_MUST_CHECK toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32], uint32_t* resume_offset);
 
 /**
  * @brief Aborts an active OTA download and securely zeroizes buffers.
@@ -411,15 +379,6 @@ TOOB_MUST_CHECK toob_status_t toob_os_flash_write(uint32_t addr, const uint8_t* 
  * @return TOOB_OK bei Erfolg. Bei Hardware-Fehler zwingend TOOB_ERR_FLASH!
  */
 TOOB_MUST_CHECK toob_status_t toob_os_flash_erase(uint32_t addr, uint32_t len);
-
-/* ==============================================================================
- * Zero-Bloat Cryptography Hooks (Hardware Acceleration OS-Side)
- * (toob_os_sha256_ctx_t is defined above, before the OTA section)
- * ============================================================================== */
-
-TOOB_MUST_CHECK toob_status_t toob_os_sha256_init(toob_os_sha256_ctx_t* ctx);
-TOOB_MUST_CHECK toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* data, uint32_t len);
-TOOB_MUST_CHECK toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]);
 
 #ifdef __cplusplus
 }

@@ -299,6 +299,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	lob.WriteString(fmt.Sprintf("#define CHIP_CLOUD_CMD_SLOT_ABS_ADDR 0x%08XU\n", cloudCmdAddr))
 	lob.WriteString(fmt.Sprintf("#define CHIP_CLOUD_CMD_SLOT_SIZE     0x%08XU\n\n", cloudCmdBudget))
 	lob.WriteString(fmt.Sprintf("#define CHIP_MAILBOX_ABS_ADDR        0x%08XU\n", mailboxAddr))
+	lob.WriteString(fmt.Sprintf("#define CHIP_MAILBOX_SLOT_SIZE       0x%08XU\n", mailboxBudget/2))
 	lob.WriteString(fmt.Sprintf("#define CHIP_MAILBOX_SIZE            0x%08XU\n\n", mailboxBudget))
 	lob.WriteString(fmt.Sprintf("#define CHIP_FORENSIC_SLOT_ABS_ADDR  0x%08XU\n", forensicAddr))
 	lob.WriteString(fmt.Sprintf("#define CHIP_FORENSIC_SLOT_SIZE      0x%08XU\n\n", forensicBudget))

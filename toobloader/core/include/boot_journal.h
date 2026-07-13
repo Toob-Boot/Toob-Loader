@@ -57,7 +57,8 @@ static inline bool wal_intent_is_security_bearing(uint32_t intent) {
 #define WAL_TMR_VERSION_1 1
 #define WAL_TMR_VERSION_2 2
 #define WAL_TMR_VERSION_3 3
-#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_3
+#define WAL_TMR_VERSION_4 4
+#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_4
 
 #define WAL_CHAIN_TAG_BYTES 16
 
@@ -123,7 +124,7 @@ typedef struct {
   uint32_t chain_entry_count;              /* Monotonic counter of chained entries */
 
   /* --- v4-Felder (L1: OS Mailbox Integration) --- */
-  uint32_t last_consumed_mailbox_seq;      /* Last processed seq number from OS Mailbox */
+  uint32_t last_mbx_request_id;            /* Last processed seq number from OS Mailbox */
 
   /* --- reserved tail (for future versions) --- */
   uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4 - 4];

@@ -60,6 +60,14 @@ void boot_diag_set_security_meta(uint32_t svn, uint32_t key_idx, const uint8_t *
 void boot_diag_set_recovery_events(uint32_t count);
 
 /**
+ * @brief Sets the platform system telemetry status (watchdog kicks, fallback mode, session ID).
+ * @param wdt_kicks Total watchdog kicks in this boot cycle.
+ * @param fallback 1 if fallback/recovery OS is booted, 0 otherwise.
+ * @param session_id Monotonic boot session ID from journal.
+ */
+void boot_diag_set_system_status(uint32_t wdt_kicks, bool fallback, uint32_t session_id);
+
+/**
  * @brief Records the sliding window flash wear leveling counters.
  * @param wear_stats Pointer to the extracted wear statistics.
  */

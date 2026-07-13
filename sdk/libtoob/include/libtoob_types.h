@@ -165,23 +165,27 @@ typedef struct __attribute__((aligned(8))) {
     
     /* Fehler-State */
     uint32_t last_error_code;        /* z.B. BOOT_ERR_WDT_TRIGGER */
-    uint32_t vendor_error;           /* Spezifischer Flash-Fehler / hardware_fault_record */
+    uint32_t vendor_error;           /* Spezifischer Flash-Fehler */
+    uint32_t hardware_fault_record;  /* Hardware-Fault register dump */
     
     /* Identity & Revisions */
     uint32_t active_key_index;       /* eFuse Epoch Index */
     uint32_t current_svn;            /* Aktuelle SVN Version */
+    uint32_t build_number;           /* CI build number */
     
     /* Protection & Crash History */
     uint32_t edge_recovery_events;   /* Aktuelle Edge-Recovery Versuche (boot_failure_count) */
+    uint32_t wdt_kicks;              /* Watchdog Kick Counter */
     
     /* Telemetry / Version Oracle (v2) */
-    uint32_t build_number;           /* CI build number */
     uint16_t fw_ver_major;           /* Firmware version */
     uint16_t fw_ver_minor;
     uint16_t fw_ver_patch;
-    uint8_t  _reserved_diag[6];      /* Alignment padding */
+    uint8_t  fallback_occurred;      /* 1 = recovery booted, 0 = normal */
+    uint8_t  _reserved_diag[1];      /* Alignment padding to 4-byte boundary */
     
-    /* SBOM */
+    /* SBOM & Handoff */
+    uint32_t boot_session_id;        /* Monotoner Boot-Counter */
     uint8_t  sbom_digest[32];        /* SHA-256 der letzten Stückliste (deterministisch 32 Bytes) */
     
     /* Extended Health (Optional gem. CBOR Spec) */
@@ -192,7 +196,7 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t crc32_trailer;          /* CRC32 Versiegelung im .noinit */
 } toob_boot_diag_t;
 
-_Static_assert(sizeof(toob_boot_diag_t) == 104, "toob_boot_diag_t size breach - must be exactly 104 bytes for ABI stability");
+_Static_assert(sizeof(toob_boot_diag_t) == 112, "toob_boot_diag_t size breach - must be exactly 112 bytes for ABI stability");
 
 _Static_assert(offsetof(toob_boot_diag_t, ext_health) % 4 == 0, "toob_ext_health_t alignment is broken in diag struct");
 _Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) > offsetof(toob_boot_diag_t, ext_health), "CRC32 trailer must be last field");
@@ -205,20 +209,26 @@ _Static_assert(offsetof(toob_boot_diag_t, boot_duration_ms) == 4, "boot_duration
 _Static_assert(offsetof(toob_boot_diag_t, verify_time_ms) == 8, "verify_time_ms offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, last_error_code) == 12, "last_error_code offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, vendor_error) == 16, "vendor_error offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, active_key_index) == 20, "active_key_index offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, current_svn) == 24, "current_svn offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, edge_recovery_events) == 28, "edge_recovery_events offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, hardware_fault_record) == 20, "hardware_fault_record offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, active_key_index) == 24, "active_key_index offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, current_svn) == 28, "current_svn offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, build_number) == 32, "build_number offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, fw_ver_major) == 36, "fw_ver_major offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, sbom_digest) == 48, "sbom_digest offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, ext_health_present) == 80, "ext_health_present offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, _padding) == 81, "_padding offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, ext_health) == 84, "ext_health offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, edge_recovery_events) == 36, "edge_recovery_events offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, wdt_kicks) == 40, "wdt_kicks offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_major) == 44, "fw_ver_major offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_minor) == 46, "fw_ver_minor offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fw_ver_patch) == 48, "fw_ver_patch offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, fallback_occurred) == 50, "fallback_occurred offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, boot_session_id) == 52, "boot_session_id offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, sbom_digest) == 56, "sbom_digest offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health_present) == 88, "ext_health_present offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, _padding) == 89, "_padding offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health) == 92, "ext_health offset drift");
 _Static_assert(offsetof(toob_ext_health_t, wal_erase_count) == 0, "wal_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, app_slot_erase_count) == 4, "app_slot_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, staging_slot_erase_count) == 8, "staging_slot_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, swap_buffer_erase_count) == 12, "swap_buffer_erase_count offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 100, "crc32_trailer offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 108, "crc32_trailer offset drift");
 
 /* Konstante für struct_version des Diag-Headers zur Vermeidung von ABI-Drift */
 #define TOOB_DIAG_STRUCT_VERSION 0x02000000

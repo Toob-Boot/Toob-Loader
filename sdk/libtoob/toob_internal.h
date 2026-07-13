@@ -117,15 +117,7 @@ static inline toob_status_t toob_ct_memcmp_glitch_safe(const uint8_t *a,
  * ============================================================================== */
 uint32_t toob_lib_crc32(const uint8_t *data, size_t length);
 
-/* ==============================================================================
- * 5. Mailbox Writer (replaces WAL Naive Append)
- *
- * Writes a single request record to a dedicated Flash sector.
- * The Core reads it at boot and folds it into its own rich WAL.
- * ============================================================================== */
-toob_status_t toob_mailbox_set_update(uint32_t manifest_flash_addr);
-toob_status_t toob_mailbox_set_confirm(uint64_t nonce);
-toob_status_t toob_mailbox_set_recovery_resolved(void);
+#include "toob_mailbox.h"
 
 /* Private SDK Linkage: Hidden from public API to prevent unvalidated memory access */
 extern TOOB_NOINIT toob_handoff_t toob_handoff_state;

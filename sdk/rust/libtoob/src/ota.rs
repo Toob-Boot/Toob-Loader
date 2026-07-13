@@ -27,7 +27,7 @@ impl OtaSession<Idle> {
     /// Begin a new unverified OTA update.
     pub fn begin(mut self, total_size: u32) -> Result<OtaSession<Receiving>> {
         unsafe {
-            sys::toob_ota_begin(&mut self.ctx, total_size).to_result()?;
+            sys::toob_ota_begin(&mut self.ctx, total_size, core::ptr::null()).to_result()?;
         }
         Ok(OtaSession {
             ctx: self.ctx,
@@ -38,7 +38,7 @@ impl OtaSession<Idle> {
     /// Begin a new update verified by a streaming SHA-256 hash.
     pub fn begin_verified(mut self, total_size: u32, expected_hash: &[u8; 32]) -> Result<OtaSession<Receiving>> {
         unsafe {
-            sys::toob_ota_begin_verified(&mut self.ctx, total_size, expected_hash.as_ptr()).to_result()?;
+            sys::toob_ota_begin(&mut self.ctx, total_size, expected_hash.as_ptr()).to_result()?;
         }
         Ok(OtaSession {
             ctx: self.ctx,
@@ -50,7 +50,7 @@ impl OtaSession<Idle> {
     pub fn resume(mut self, total_size: u32) -> Result<(OtaSession<Receiving>, u32)> {
         let mut offset = 0u32;
         unsafe {
-            sys::toob_ota_resume(&mut self.ctx, total_size, &mut offset).to_result()?;
+            sys::toob_ota_resume(&mut self.ctx, total_size, core::ptr::null(), &mut offset).to_result()?;
         }
         Ok((
             OtaSession {
@@ -65,7 +65,7 @@ impl OtaSession<Idle> {
     pub fn resume_verified(mut self, total_size: u32, expected_hash: &[u8; 32]) -> Result<(OtaSession<Receiving>, u32)> {
         let mut offset = 0u32;
         unsafe {
-            sys::toob_ota_resume_verified(&mut self.ctx, total_size, expected_hash.as_ptr(), &mut offset).to_result()?;
+            sys::toob_ota_resume(&mut self.ctx, total_size, expected_hash.as_ptr(), &mut offset).to_result()?;
         }
         Ok((
             OtaSession {

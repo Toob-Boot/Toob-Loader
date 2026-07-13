@@ -65,9 +65,18 @@ pub struct toob_boot_diag_t {
     pub verify_time_ms: u32,
     pub last_error_code: u32,
     pub vendor_error: u32,
+    pub hardware_fault_record: u32,
     pub active_key_index: u32,
     pub current_svn: u32,
+    pub build_number: u32,
     pub edge_recovery_events: u32,
+    pub wdt_kicks: u32,
+    pub fw_ver_major: u16,
+    pub fw_ver_minor: u16,
+    pub fw_ver_patch: u16,
+    pub fallback_occurred: u8,
+    pub _reserved_diag: [u8; 1],
+    pub boot_session_id: u32,
     pub sbom_digest: [u8; 32],
     pub ext_health_present: u8,
     pub _padding: [u8; 3],
@@ -100,7 +109,7 @@ pub struct toob_ota_ctx_t {
 const _: () = {
     assert!(core::mem::size_of::<toob_handoff_t>() == 80);
     assert!(core::mem::align_of::<toob_handoff_t>() == 8);
-    assert!(core::mem::size_of::<toob_boot_diag_t>() == 88);
+    assert!(core::mem::size_of::<toob_boot_diag_t>() == 112);
     assert!(core::mem::align_of::<toob_boot_diag_t>() == 8);
     assert!(core::mem::size_of::<toob_ota_ctx_t>() == 440);
     assert!(core::mem::align_of::<toob_ota_ctx_t>() == 8);
@@ -111,7 +120,6 @@ extern "C" {
     pub fn toob_get_handoff(out_handoff: *mut toob_handoff_t) -> ToobStatus;
     pub fn toob_confirm_boot() -> ToobStatus;
     pub fn toob_recovery_resolved() -> ToobStatus;
-    pub fn toob_accumulate_net_search(active_search_ms: u32) -> ToobStatus;
     pub fn toob_get_boot_diag(diag: *mut toob_boot_diag_t) -> ToobStatus;
     pub fn toob_get_boot_diag_cbor(out_buf: *mut u8, max_len: usize, out_len: *mut usize) -> ToobStatus;
     pub fn toob_set_next_update(manifest_flash_addr: u32) -> ToobStatus;
@@ -119,10 +127,8 @@ extern "C" {
     pub fn toob_get_device_id(out_id: *mut u8, id_len: usize) -> ToobStatus;
     
     pub fn toob_ota_ctx_init(ctx: *mut toob_ota_ctx_t) -> ToobStatus;
-    pub fn toob_ota_begin(ctx: *mut toob_ota_ctx_t, total_size: u32) -> ToobStatus;
-    pub fn toob_ota_begin_verified(ctx: *mut toob_ota_ctx_t, total_size: u32, expected_sha256: *const u8) -> ToobStatus;
-    pub fn toob_ota_resume(ctx: *mut toob_ota_ctx_t, total_size: u32, resume_offset: *mut u32) -> ToobStatus;
-    pub fn toob_ota_resume_verified(ctx: *mut toob_ota_ctx_t, total_size: u32, expected_sha256: *const u8, resume_offset: *mut u32) -> ToobStatus;
+    pub fn toob_ota_begin(ctx: *mut toob_ota_ctx_t, total_size: u32, expected_sha256: *const u8) -> ToobStatus;
+    pub fn toob_ota_resume(ctx: *mut toob_ota_ctx_t, total_size: u32, expected_sha256: *const u8, resume_offset: *mut u32) -> ToobStatus;
     pub fn toob_ota_abort(ctx: *mut toob_ota_ctx_t) -> ToobStatus;
     pub fn toob_ota_process_chunk(ctx: *mut toob_ota_ctx_t, chunk: *const u8, len: u32) -> ToobStatus;
     pub fn toob_ota_finalize(ctx: *mut toob_ota_ctx_t) -> ToobStatus;
