@@ -428,6 +428,36 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo, allowLinks bool) ([]st
 			}
 		}
 	}
+
+	// Recovery drivers layer
+	if ci.Recovery != nil {
+		idx, err := inst.cache.LoadIndex()
+		if err == nil && idx != nil {
+			for _, drvName := range []string{ci.Recovery.Console, ci.Recovery.Flash, ci.Recovery.WDT, ci.Recovery.Clock, ci.Recovery.RTC} {
+				if drvName == "" {
+					continue
+				}
+				drvPkg, ok := idx.Drivers[drvName]
+				if !ok {
+					ui.Warn("Recovery driver '%s' not found in registry index", drvName)
+					continue
+				}
+				driverDst := filepath.Join(inst.hal, filepath.FromSlash(drvPkg.Path))
+				if _, err := os.Stat(driverDst); os.IsNotExist(err) {
+					driverSrc, err := inst.cache.DriverSourcePath(drvPkg.Path)
+					if err != nil {
+						return created, err
+					}
+					if err := copyTree(driverSrc, driverDst, allowLinks); err != nil {
+						return created, err
+					}
+					created = append(created, driverDst)
+				} else if inst.lock.Registry.Version != "" {
+					ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", driverDst)
+				}
+			}
+		}
+	}
 	for _, inc := range ci.Includes {
 		if strings.HasPrefix(inc, "drivers/") || strings.HasPrefix(inc, "soc/") || strings.HasPrefix(inc, "shared/") {
 			incDst := filepath.Join(inst.hal, filepath.FromSlash(inc))

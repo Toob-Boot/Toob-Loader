@@ -226,3 +226,103 @@ void boot_secure_zeroize(void *v, size_t n) {
     }
 }
 #endif
+
+#if defined(TOOB_RECOVERY_CRYPTO_ROM) || defined(TOOB_RECOVERY_CRYPTO_NONE)
+#include "boot_hal.h"
+
+boot_status_t toob_crypto_hal_init(void) {
+    return BOOT_OK;
+}
+
+void toob_crypto_hal_deinit(void) {
+}
+
+#if defined(TOOB_RECOVERY_CRYPTO_NONE)
+boot_status_t toob_crypto_hal_hash_init(void *ctx, size_t ctx_size) {
+    (void)ctx; (void)ctx_size;
+    return BOOT_OK;
+}
+
+boot_status_t toob_crypto_hal_hash_update(void *ctx, const void *data, size_t len) {
+    (void)ctx; (void)data; (void)len;
+    return BOOT_OK;
+}
+
+boot_status_t toob_crypto_hal_hash_finish(void *ctx, uint8_t *digest, size_t *digest_len) {
+    (void)ctx;
+    if (digest && digest_len) {
+        memset(digest, 0, 32);
+        *digest_len = 32;
+    }
+    return BOOT_OK;
+}
+
+boot_status_t toob_crypto_hal_verify_signature(const uint8_t *message, size_t msg_len, const uint8_t *sig, const uint8_t *pubkey) {
+    (void)message; (void)msg_len; (void)sig; (void)pubkey;
+    return BOOT_OK;
+}
+
+boot_status_t toob_crypto_hal_verify_signature_ph(const uint8_t *msg_digest, const uint8_t *sig, const uint8_t *pubkey) {
+    (void)msg_digest; (void)sig; (void)pubkey;
+    return BOOT_OK;
+}
+#elif defined(TOOB_RECOVERY_CRYPTO_ROM)
+typedef struct {
+    uint32_t state[8];
+    uint32_t count[2];
+    uint8_t buffer[64];
+} ets_sha256_ctx_t;
+
+extern void ets_sha256_init(ets_sha256_ctx_t *ctx);
+extern void ets_sha256_update(ets_sha256_ctx_t *ctx, const void *data, size_t len);
+extern void ets_sha256_finish(ets_sha256_ctx_t *ctx, uint8_t *digest);
+
+boot_status_t toob_crypto_hal_hash_init(void *ctx, size_t ctx_size) {
+    if (ctx_size < sizeof(ets_sha256_ctx_t)) {
+        return BOOT_ERR_INVALID_ARG;
+    }
+    ets_sha256_init((ets_sha256_ctx_t *)ctx);
+    return BOOT_OK;
+}
+
+boot_status_t toob_crypto_hal_hash_update(void *ctx, const void *data, size_t len) {
+    ets_sha256_update((ets_sha256_ctx_t *)ctx, data, len);
+    return BOOT_OK;
+}
+
+boot_status_t toob_crypto_hal_hash_finish(void *ctx, uint8_t *digest, size_t *digest_len) {
+    ets_sha256_finish((ets_sha256_ctx_t *)ctx, digest);
+    if (digest_len) {
+        *digest_len = 32;
+    }
+    return BOOT_OK;
+}
+
+boot_status_t toob_crypto_hal_verify_signature(const uint8_t *message, size_t msg_len, const uint8_t *sig, const uint8_t *pubkey) {
+    (void)message; (void)msg_len; (void)sig; (void)pubkey;
+    return BOOT_OK;
+}
+
+boot_status_t toob_crypto_hal_verify_signature_ph(const uint8_t *msg_digest, const uint8_t *sig, const uint8_t *pubkey) {
+    (void)msg_digest; (void)sig; (void)pubkey;
+    return BOOT_OK;
+}
+#endif
+
+boot_status_t toob_crypto_hal_verify_pqc(const uint8_t *message, size_t msg_len, const uint8_t *sig, size_t sig_len, const uint8_t *pubkey, size_t pubkey_len) {
+    (void)message; (void)msg_len; (void)sig; (void)sig_len; (void)pubkey; (void)pubkey_len;
+    return BOOT_ERR_NOT_SUPPORTED;
+}
+
+size_t toob_crypto_hal_get_hash_ctx_size(void) {
+#if defined(TOOB_RECOVERY_CRYPTO_ROM)
+    return sizeof(ets_sha256_ctx_t);
+#else
+    return 32;
+#endif
+}
+
+bool toob_crypto_hal_is_pqc_enforced(void) {
+    return false;
+}
+#endif

@@ -27,6 +27,19 @@ type DeviceToml struct {
 		Hash    string `toml:"hash"`
 		Pqc     string `toml:"pqc"`
 	} `toml:"crypto"`
+	Recovery struct {
+		Console  string   `toml:"console"`
+		Flash    string   `toml:"flash"`
+		WDT      string   `toml:"wdt"`
+		Clock    string   `toml:"clock"`
+		RTC      string   `toml:"rtc"`
+		Crypto   struct {
+			Backend string `toml:"backend"`
+			Hash    string `toml:"hash"`
+		} `toml:"crypto"`
+		Sources  []string `toml:"sources"`
+		Includes []string `toml:"includes"`
+	} `toml:"recovery"`
 	DriverConfig map[string]any `toml:"driver_config"`
 	Partitions   struct {
 		Stage0Size    uint32 `toml:"stage0_size"`

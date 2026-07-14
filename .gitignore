@@ -50,3 +50,7 @@ full_review_export.txt
 mock_efuse.o
 # Toob-Loader Spawned HALs
 toobloader/hal/
+
+# Chip registry builds
+toob-registry/registry/chips/*/builds/
+

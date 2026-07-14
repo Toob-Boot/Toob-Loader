@@ -49,7 +49,8 @@ type ChipInfo struct {
 	Verified         bool         `json:"verified"`
 	Sources          *ChipSources `json:"sources,omitempty"`
 	Includes         []string     `json:"includes,omitempty"`
-	Crypto           *ChipCrypto  `json:"crypto,omitempty"`
+	Crypto           *ChipCrypto   `json:"crypto,omitempty"`
+	Recovery         *ChipRecovery `json:"recovery,omitempty"`
 }
 
 // ChipCrypto defines the default crypto package assignments for a chip.
@@ -57,6 +58,22 @@ type ChipCrypto struct {
 	Backend string `json:"backend,omitempty"`
 	Hash    string `json:"hash,omitempty"`
 	Pqc     string `json:"pqc,omitempty"`
+}
+
+type ChipRecovery struct {
+	Console  string          `json:"console"`
+	Flash    string          `json:"flash"`
+	WDT      string          `json:"wdt,omitempty"`
+	Clock    string          `json:"clock,omitempty"`
+	RTC      string          `json:"rtc,omitempty"`
+	Crypto   *RecoveryCrypto `json:"crypto,omitempty"`
+	Sources  []string        `json:"sources,omitempty"`
+	Includes []string        `json:"includes,omitempty"`
+}
+
+type RecoveryCrypto struct {
+	Backend string `json:"backend,omitempty"`
+	Hash    string `json:"hash,omitempty"`
 }
 
 // Removed VendorInfo

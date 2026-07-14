@@ -237,21 +237,95 @@ func assertRegistryIndexFromPort() {
 
 func assertChipToPort() {
 	var r registry.ChipInfo
+	var rec *ChipRecovery
+	if r.Recovery != nil {
+		var cryp *RecoveryCrypto
+		if r.Recovery.Crypto != nil {
+			cryp = &RecoveryCrypto{Backend: r.Recovery.Crypto.Backend, Hash: r.Recovery.Crypto.Hash}
+		}
+		rec = &ChipRecovery{
+			Console: r.Recovery.Console, Flash: r.Recovery.Flash,
+			WDT: r.Recovery.WDT, Clock: r.Recovery.Clock, RTC: r.Recovery.RTC,
+			Crypto: cryp,
+			Sources: r.Recovery.Sources, Includes: r.Recovery.Includes,
+		}
+	}
 	_ = RegistryChip{
 		Name: r.Name, Arch: r.Arch,
 		CompilerPrefix: r.CompilerPrefix, Path: r.Path,
 		Version: r.Version, CliCompatibility: r.CliCompatibility,
 		Verified: r.Verified, Description: r.Description,
+		Recovery: rec,
 	}
 }
 
 func assertChipFromPort() {
 	var p RegistryChip
+	var rec *registry.ChipRecovery
+	if p.Recovery != nil {
+		var cryp *registry.RecoveryCrypto
+		if p.Recovery.Crypto != nil {
+			cryp = &registry.RecoveryCrypto{Backend: p.Recovery.Crypto.Backend, Hash: p.Recovery.Crypto.Hash}
+		}
+		rec = &registry.ChipRecovery{
+			Console: p.Recovery.Console, Flash: p.Recovery.Flash,
+			WDT: p.Recovery.WDT, Clock: p.Recovery.Clock, RTC: p.Recovery.RTC,
+			Crypto: cryp,
+			Sources: p.Recovery.Sources, Includes: p.Recovery.Includes,
+		}
+	}
 	_ = registry.ChipInfo{
 		Name: p.Name, Arch: p.Arch,
 		CompilerPrefix: p.CompilerPrefix, Path: p.Path,
 		Version: p.Version, CliCompatibility: p.CliCompatibility,
 		Verified: p.Verified, Description: p.Description,
+		Recovery: rec,
+	}
+}
+
+// --- ChipRecovery ↔ registry.ChipRecovery ---
+
+func assertChipRecoveryToPort() {
+	var r registry.ChipRecovery
+	var cryp *RecoveryCrypto
+	if r.Crypto != nil {
+		cryp = &RecoveryCrypto{Backend: r.Crypto.Backend, Hash: r.Crypto.Hash}
+	}
+	_ = ChipRecovery{
+		Console: r.Console, Flash: r.Flash,
+		WDT: r.WDT, Clock: r.Clock, RTC: r.RTC,
+		Crypto: cryp,
+		Sources: r.Sources, Includes: r.Includes,
+	}
+}
+
+func assertChipRecoveryFromPort() {
+	var p ChipRecovery
+	var cryp *registry.RecoveryCrypto
+	if p.Crypto != nil {
+		cryp = &registry.RecoveryCrypto{Backend: p.Crypto.Backend, Hash: p.Crypto.Hash}
+	}
+	_ = registry.ChipRecovery{
+		Console: p.Console, Flash: p.Flash,
+		WDT: p.WDT, Clock: p.Clock, RTC: p.RTC,
+		Crypto: cryp,
+		Sources: p.Sources, Includes: p.Includes,
+	}
+}
+
+// --- RecoveryCrypto ↔ registry.RecoveryCrypto ---
+
+func assertRecoveryCryptoToPort() {
+	var r registry.RecoveryCrypto
+	_ = RecoveryCrypto{
+		Backend: r.Backend, Hash: r.Hash,
+	}
+}
+
+func assertRecoveryCryptoFromPort() {
+	var p RecoveryCrypto
+	_ = registry.RecoveryCrypto{
+		Backend: p.Backend, Hash: p.Hash,
 	}
 }
 

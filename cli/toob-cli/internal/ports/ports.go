@@ -215,7 +215,8 @@ type RegistryChip struct {
 	Description      string       `json:"description"       port:"optional"`
 	Sources          *ChipSources `json:"sources"           port:"optional"`
 	Includes         []string     `json:"includes"          port:"optional"`
-	Crypto           *ChipCrypto  `json:"crypto"            port:"optional"`
+	Crypto           *ChipCrypto   `json:"crypto"            port:"optional"`
+	Recovery         *ChipRecovery `json:"recovery"          port:"optional"`
 }
 
 // ChipCrypto defines the default crypto package assignments for a chip.
@@ -460,7 +461,24 @@ type ChipManifest struct {
 	MinCompiler    string       `json:"min_compiler"    port:"optional"`
 	Sources        *ChipSources `json:"sources"         port:"optional"`
 	Includes       []string     `json:"includes"        port:"optional"`
-	Crypto         *ChipCrypto  `json:"crypto"          port:"optional"`
+	Crypto         *ChipCrypto   `json:"crypto"          port:"optional"`
+	Recovery       *ChipRecovery `json:"recovery"        port:"optional"`
+}
+
+type ChipRecovery struct {
+	Console  string          `json:"console"            port:"optional"`
+	Flash    string          `json:"flash"              port:"optional"`
+	WDT      string          `json:"wdt,omitempty"      port:"optional"`
+	Clock    string          `json:"clock,omitempty"    port:"optional"`
+	RTC      string          `json:"rtc,omitempty"      port:"optional"`
+	Crypto   *RecoveryCrypto `json:"crypto,omitempty"   port:"optional"`
+	Sources  []string        `json:"sources,omitempty"  port:"optional"`
+	Includes []string        `json:"includes,omitempty" port:"optional"`
+}
+
+type RecoveryCrypto struct {
+	Backend string `json:"backend" port:"optional"`
+	Hash    string `json:"hash"    port:"optional"`
 }
 
 // =============================================================================

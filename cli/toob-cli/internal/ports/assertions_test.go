@@ -57,6 +57,8 @@ func TestPortFieldCounts(t *testing.T) {
 			reflect.TypeFor[RegistryEcosystem](), reflect.TypeFor[registry.EcosystemVersions]()},
 		{"RegistryChip ↔ registry.ChipInfo",
 			reflect.TypeFor[RegistryChip](), reflect.TypeFor[registry.ChipInfo]()},
+		{"ChipRecovery ↔ registry.ChipRecovery",
+			reflect.TypeFor[ChipRecovery](), reflect.TypeFor[registry.ChipRecovery]()},
 		{"ChipSources ↔ registry.ChipSources",
 			reflect.TypeFor[ChipSources](), reflect.TypeFor[registry.ChipSources]()},
 		{"RegistryArch ↔ registry.ArchInfo",
@@ -142,6 +144,10 @@ func TestPortFieldTypes(t *testing.T) {
 			reflect.TypeFor[RegistryEcosystem](), reflect.TypeFor[registry.EcosystemVersions]()},
 		{"RegistryChip ↔ registry.ChipInfo",
 			reflect.TypeFor[RegistryChip](), reflect.TypeFor[registry.ChipInfo]()},
+		{"ChipRecovery ↔ registry.ChipRecovery",
+			reflect.TypeFor[ChipRecovery](), reflect.TypeFor[registry.ChipRecovery]()},
+		{"RecoveryCrypto ↔ registry.RecoveryCrypto",
+			reflect.TypeFor[RecoveryCrypto](), reflect.TypeFor[registry.RecoveryCrypto]()},
 		{"ChipSources ↔ registry.ChipSources",
 			reflect.TypeFor[ChipSources](), reflect.TypeFor[registry.ChipSources]()},
 		{"RegistryArch ↔ registry.ArchInfo",
@@ -179,6 +185,12 @@ func TestPortFieldTypes(t *testing.T) {
 						continue
 					}
 					if pf.Type.String() == "*ports.ChipCrypto" && rf.Type.String() == "*registry.ChipCrypto" {
+						continue
+					}
+					if pf.Type.String() == "*ports.ChipRecovery" && rf.Type.String() == "*registry.ChipRecovery" {
+						continue
+					}
+					if pf.Type.String() == "*ports.RecoveryCrypto" && rf.Type.String() == "*registry.RecoveryCrypto" {
 						continue
 					}
 					t.Errorf("\n[BREAKING CHANGE] %s: Field %q type changed.\n"+

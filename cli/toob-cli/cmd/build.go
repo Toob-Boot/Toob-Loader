@@ -595,18 +595,151 @@ func runNativeBuild(ctx context.Context, root string, cache *registry.Cache) err
 
 	var driverDirs []string
 	var driversCMake strings.Builder
+	var recoveryCMake strings.Builder
+
+	var manifestRecovery *ports.ChipRecovery
 	if idx != nil {
-		if cInfo, ok := idx.Chips[chip]; ok && cInfo.Sources != nil {
-			for _, drvPath := range cInfo.Sources.Drivers {
-				drvRelDir := filepath.Dir(drvPath)
-				drvDir, err := cache.DriverSourcePath(filepath.ToSlash(drvRelDir))
-				if err != nil {
-					ui.Warn("Could not resolve driver '%s': %v", drvRelDir, err)
-					continue
-				}
-				driverDirs = append(driverDirs, drvDir)
-				driversCMake.WriteString(fmt.Sprintf("list(APPEND TOOB_DRIVERS \"%s\")\n", filepath.ToSlash(drvDir)))
+		if cInfo, ok := idx.Chips[chip]; ok && cInfo.Recovery != nil {
+			manifestRecovery = &ports.ChipRecovery{
+				Console:  cInfo.Recovery.Console,
+				Flash:    cInfo.Recovery.Flash,
+				WDT:      cInfo.Recovery.WDT,
+				Clock:    cInfo.Recovery.Clock,
+				RTC:      cInfo.Recovery.RTC,
+				Sources:  cInfo.Recovery.Sources,
+				Includes: cInfo.Recovery.Includes,
 			}
+			if cInfo.Recovery.Crypto != nil {
+				manifestRecovery.Crypto = &ports.RecoveryCrypto{
+					Backend: cInfo.Recovery.Crypto.Backend,
+					Hash:    cInfo.Recovery.Crypto.Hash,
+				}
+			}
+		}
+	}
+	if manifestRecovery == nil && cm.Recovery != nil {
+		manifestRecovery = cm.Recovery
+	}
+
+	recCryptoBackend := ""
+	recCryptoHash := ""
+
+	if manifestRecovery != nil && manifestRecovery.Crypto != nil {
+		recCryptoBackend = manifestRecovery.Crypto.Backend
+		recCryptoHash = manifestRecovery.Crypto.Hash
+	}
+
+	if dt.Recovery.Crypto.Backend != "" {
+		recCryptoBackend = dt.Recovery.Crypto.Backend
+	}
+	if dt.Recovery.Crypto.Hash != "" {
+		recCryptoHash = dt.Recovery.Crypto.Hash
+	}
+
+	if recCryptoBackend == "" {
+		if dt.Crypto.Backend != "" {
+			recCryptoBackend = dt.Crypto.Backend
+		} else if cm.Crypto != nil && cm.Crypto.Backend != "" {
+			recCryptoBackend = cm.Crypto.Backend
+		}
+	}
+	if recCryptoHash == "" {
+		if dt.Crypto.Hash != "" {
+			recCryptoHash = dt.Crypto.Hash
+		} else if cm.Crypto != nil && cm.Crypto.Hash != "" {
+			recCryptoHash = cm.Crypto.Hash
+		}
+	}
+
+	recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_CRYPTO_BACKEND \"%s\")\n", recCryptoBackend))
+	recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_CRYPTO_HASH \"%s\")\n", recCryptoHash))
+
+	if idx != nil {
+		if cInfo, ok := idx.Chips[chip]; ok {
+			if cInfo.Sources != nil {
+				for _, drvPath := range cInfo.Sources.Drivers {
+					drvRelDir := filepath.Dir(drvPath)
+					drvDir, err := cache.DriverSourcePath(filepath.ToSlash(drvRelDir))
+					if err != nil {
+						ui.Warn("Could not resolve driver '%s': %v", drvRelDir, err)
+						continue
+					}
+					driverDirs = append(driverDirs, drvDir)
+					driversCMake.WriteString(fmt.Sprintf("list(APPEND TOOB_DRIVERS \"%s\")\n", filepath.ToSlash(drvDir)))
+				}
+			}
+		}
+	}
+
+	if manifestRecovery != nil {
+		// Use manifest defaults, override with DeviceToml choices if set
+		recConsole := manifestRecovery.Console
+		if dt.Recovery.Console != "" {
+			recConsole = dt.Recovery.Console
+		}
+		recFlash := manifestRecovery.Flash
+		if dt.Recovery.Flash != "" {
+			recFlash = dt.Recovery.Flash
+		}
+		recWDT := manifestRecovery.WDT
+		if dt.Recovery.WDT != "" {
+			recWDT = dt.Recovery.WDT
+		}
+		recClock := manifestRecovery.Clock
+		if dt.Recovery.Clock != "" {
+			recClock = dt.Recovery.Clock
+		}
+		recRTC := manifestRecovery.RTC
+		if dt.Recovery.RTC != "" {
+			recRTC = dt.Recovery.RTC
+		}
+
+		if recConsole == "" {
+			return fmt.Errorf("chip '%s' manifest is missing required recovery 'console' driver mapping", chip)
+		}
+		if recFlash == "" {
+			return fmt.Errorf("chip '%s' manifest is missing required recovery 'flash' driver mapping", chip)
+		}
+		var recDrivers []string
+		for _, drvName := range []string{
+			recConsole,
+			recFlash,
+			recWDT,
+			recClock,
+			recRTC,
+		} {
+			if drvName == "" {
+				continue
+			}
+			drvDir, err := cache.DriverSourcePath(drvName)
+			if err != nil {
+				ui.Warn("Could not resolve recovery driver '%s': %v", drvName, err)
+				continue
+			}
+			recDrivers = append(recDrivers, filepath.ToSlash(drvDir))
+		}
+		if len(recDrivers) > 0 {
+			recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_DRIVERS \"%s\")\n", strings.Join(recDrivers, ";")))
+		}
+		var recSources []string
+		for _, src := range manifestRecovery.Sources {
+			recSources = append(recSources, filepath.ToSlash(filepath.Join(halChipDir, src)))
+		}
+		for _, src := range dt.Recovery.Sources {
+			recSources = append(recSources, filepath.ToSlash(filepath.Join(root, src)))
+		}
+		if len(recSources) > 0 {
+			recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_SOURCES \"%s\")\n", strings.Join(recSources, ";")))
+		}
+		var recIncludes []string
+		for _, inc := range manifestRecovery.Includes {
+			recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(halChipDir, inc)))
+		}
+		for _, inc := range dt.Recovery.Includes {
+			recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(root, inc)))
+		}
+		if len(recIncludes) > 0 {
+			fmt.Fprintf(&recoveryCMake, "set(TOOB_RECOVERY_INCLUDES \"%s\")\n", strings.Join(recIncludes, ";"))
 		}
 	}
 
@@ -825,13 +958,14 @@ func runNativeBuild(ctx context.Context, root string, cache *registry.Cache) err
 			"set(TOOB_CLI_PATH \"%s\")\n"+
 			"set(TOOB_CRYPTO_DIR \"%s\")\n"+
 			"set(TOOB_FEATURE_PQC_HYBRID %s)\n"+
-			"%s\n# --- Dynamic Crypto Configuration ---\n%s",
+			"%s\n# --- Dynamic Crypto Configuration ---\n%s\n# --- Dynamic Recovery Configuration ---\n%s",
 		arch, chip, toolchainPrefix,
 		coreDir, stage0Dir, halChipDir, halArchDir, sdkDir, toobCLIPath,
 		filepath.ToSlash(filepath.Join(bootloaderDir, "crypto")),
 		map[bool]string{true: "ON", false: "OFF"}[pqcEnabled],
-		driversCMake.String(), cryptoCMake.String(),
+		driversCMake.String(), cryptoCMake.String(), recoveryCMake.String(),
 	)
+
 	if err := writeFileIfChanged(filepath.Join(generatedDir, "toob_config.cmake"), []byte(configContent)); err != nil {
 		return err
 	}
