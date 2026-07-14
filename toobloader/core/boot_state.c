@@ -38,6 +38,7 @@
 #include "boot_tbm1.h"
 #include "boot_swap.h"
 #include "boot_effect.h"
+#include "boot_transport.h"
 #include "boot_types.h"
 #include "boot_verify.h"
 #include <string.h>
@@ -241,7 +242,41 @@ static boot_status_t _handle_rollback_flow(const boot_platform_t *platform,
     /* CASE A: Crash happened exactly after TXN_COMMIT. Revert Staging! */
     if (open_txn->intent == WAL_INTENT_TXN_COMMIT ||
         open_txn->intent == WAL_INTENT_TXN_ROLLBACK_PENDING) {
-      status = boot_rollback_trigger_revert(platform, arena, arena_len);
+      const slot_caps_t *caps = platform->slot_caps;
+      if (!caps) {
+        caps = boot_get_slot_caps();
+      }
+
+      toob_image_header_t backup_header;
+      boot_secure_zeroize(&backup_header, sizeof(backup_header));
+      uint8_t hdr_buf[32] __attribute__((aligned(8)));
+      boot_secure_zeroize(hdr_buf, sizeof(hdr_buf));
+      status = platform->flash->read(CHIP_STAGING_SLOT_ABS_ADDR, hdr_buf, 32);
+      if (status == BOOT_OK) {
+        memcpy(&backup_header, hdr_buf, sizeof(toob_image_header_t));
+      }
+      boot_secure_zeroize(hdr_buf, sizeof(hdr_buf));
+
+      if (status == BOOT_OK) {
+        slot_txn_t txn;
+        boot_secure_zeroize(&txn, sizeof(txn));
+        txn.src_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+        txn.src_region_size = CHIP_STAGING_SLOT_SIZE;
+        txn.dest_addr = CHIP_APP_SLOT_ABS_ADDR;
+        txn.dest_region_size = CHIP_APP_SLOT_SIZE;
+#ifdef CHIP_SCRATCH_SLOT_ABS_ADDR
+        txn.backup_addr = CHIP_SCRATCH_SLOT_ABS_ADDR;
+        txn.backup_region_size = CHIP_SCRATCH_SLOT_SIZE;
+#endif
+        txn.length = backup_header.image_size;
+        txn.dest_slot = BOOT_DEST_SLOT_APP;
+#ifdef TOOB_TMR_HAS_ACTIVE_APP_SLOT
+        txn.target_slot_index = current_tmr->active_app_slot;
+#endif
+        txn.src_verified = true;
+
+        status = boot_transport_active()->rollback(platform, caps, &txn, arena, arena_len);
+      }
       if (status != BOOT_OK)
         return status; /* FATAL: Cannot revert Staging image */
 
@@ -513,7 +548,7 @@ static boot_status_t stage_apply_delta(update_ctx_t *ctx) {
       ctx->platform, ctx->open_txn->offset + ctx->tbm1_total_len,
       CHIP_STAGING_SLOT_ABS_ADDR + CHIP_APP_SLOT_SIZE -
           (ctx->open_txn->offset + ctx->tbm1_total_len),
-      CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,
+      TOOB_DELTA_OUTPUT_ADDR, TOOB_DELTA_OUTPUT_SIZE,
       CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE,
       ctx->open_txn, delta_arena, delta_arena_len);
 
@@ -523,7 +558,7 @@ static boot_status_t stage_apply_delta(update_ctx_t *ctx) {
   }
 
   boot_status_t hash_stat = boot_merkle_verify_stream(
-      ctx->platform, CHIP_SCRATCH_SLOT_ABS_ADDR,
+      ctx->platform, TOOB_DELTA_OUTPUT_ADDR,
       ctx->primary_image->installed_size,
       ctx->primary_image->chunk_size,
       hash_arena, ctx->chunk_hash_len, ctx->num_chunks,
@@ -534,9 +569,9 @@ static boot_status_t stage_apply_delta(update_ctx_t *ctx) {
   if (hash_stat != BOOT_OK)
     return BOOT_ERR_VERIFY;
 
-  /* Delta erfolgreich: Swap-Quelle ist Scratch, Image-Size ist Zielgröße */
+  /* Delta erfolgreich: Swap-Quelle ist der entkoppelte Delta-Output, Image-Size ist Zielgröße */
   ctx->staging_header.image_size = ctx->primary_image->installed_size;
-  ctx->swap_src_addr = CHIP_SCRATCH_SLOT_ABS_ADDR;
+  ctx->swap_src_addr = TOOB_DELTA_OUTPUT_ADDR;
 
   return BOOT_OK;
 }
@@ -637,42 +672,35 @@ static boot_status_t stage_swap(update_ctx_t *ctx) {
 
   /* 3. Perform the actual physical swap or copy if admitted */
   if (ctx->requires_swap) {
-    if (ctx->is_delta) {
-      /* Two-Phase One-Way Copy for Delta path:
-       * Phase 1 (0x11111111): App (old) -> Staging (making it rollback-resilient)
-       * Phase 2 (0x22222222): Scratch (new) -> App (deploying update)
-       */
-      bool run_phase1 = true;
-      if (ctx->open_txn != NULL && ctx->open_txn->intent == WAL_INTENT_UPDATE_PENDING) {
-        if (ctx->open_txn->transfer_bitmap[0] == 0x22222222) {
-          run_phase1 = false;
-        }
-      }
-
-      if (run_phase1) {
-        swap_status = boot_copy_apply(
-            ctx->platform, CHIP_APP_SLOT_ABS_ADDR, CHIP_STAGING_SLOT_ABS_ADDR,
-            ctx->staging_header.image_size, 0x11111111, ctx->open_txn,
-            ctx->arena, ctx->arena_len);
-        if (swap_status == BOOT_OK && ctx->open_txn != NULL) {
-          ctx->open_txn->delta_chunk_id = 0;
-          ctx->open_txn->transfer_bitmap[0] = 0x22222222;
-          swap_status = boot_journal_append(ctx->platform, ctx->open_txn);
-        }
-      }
-
-      if (swap_status == BOOT_OK) {
-        swap_status = boot_copy_apply(
-            ctx->platform, CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_APP_SLOT_ABS_ADDR,
-            ctx->staging_header.image_size, 0x22222222, ctx->open_txn,
-            ctx->arena, ctx->arena_len);
-      }
-    } else {
-      swap_status = boot_swap_apply(
-          ctx->platform, ctx->swap_src_addr, CHIP_APP_SLOT_ABS_ADDR,
-          ctx->staging_header.image_size, BOOT_DEST_SLOT_APP, ctx->open_txn,
-          ctx->arena, ctx->arena_len);
+    const slot_caps_t *caps = ctx->platform->slot_caps;
+    if (!caps) {
+      caps = boot_get_slot_caps();
     }
+
+    slot_txn_t txn;
+    boot_secure_zeroize(&txn, sizeof(txn));
+    txn.src_addr = ctx->swap_src_addr;
+    txn.dest_addr = CHIP_APP_SLOT_ABS_ADDR;
+    txn.dest_region_size = CHIP_APP_SLOT_SIZE;
+#ifdef CHIP_SCRATCH_SLOT_ABS_ADDR
+    txn.backup_addr = CHIP_SCRATCH_SLOT_ABS_ADDR;
+    txn.backup_region_size = CHIP_SCRATCH_SLOT_SIZE;
+#endif
+    txn.length = ctx->staging_header.image_size;
+    txn.dest_slot = BOOT_DEST_SLOT_APP;
+    txn.src_is_delta_output = ctx->is_delta;
+    txn.src_verified = true;
+
+    if (ctx->is_delta) {
+      txn.src_region_size = CHIP_SCRATCH_SLOT_SIZE;
+      txn.backup_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+      txn.backup_region_size = CHIP_STAGING_SLOT_SIZE;
+    } else {
+      txn.src_region_size = CHIP_STAGING_SLOT_SIZE;
+    }
+
+    swap_status = boot_transport_active()->apply(
+        ctx->platform, caps, &txn, ctx->open_txn, ctx->arena, ctx->arena_len);
   }
 
   /* 4. Perform the actual physical multi-image write if admitted */

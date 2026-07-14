@@ -45,4 +45,15 @@ const slot_transport_t *boot_transport_active(void);
  */
 const slot_transport_t *boot_transport_by_id(uint8_t id);
 
+/* Fallback configuration for delta VM output addresses and sizes (ST-016 / ST-024) */
+#ifndef TOOB_DELTA_OUTPUT_ADDR
+#ifdef CHIP_SCRATCH_SLOT_ABS_ADDR
+#define TOOB_DELTA_OUTPUT_ADDR CHIP_SCRATCH_SLOT_ABS_ADDR
+#define TOOB_DELTA_OUTPUT_SIZE CHIP_SCRATCH_SLOT_SIZE
+#else
+#define TOOB_DELTA_OUTPUT_ADDR CHIP_STAGING_SLOT_ABS_ADDR
+#define TOOB_DELTA_OUTPUT_SIZE CHIP_STAGING_SLOT_SIZE
+#endif
+#endif
+
 #endif /* BOOT_TRANSPORT_H */

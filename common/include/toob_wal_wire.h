@@ -51,13 +51,17 @@ typedef struct {
 
     uint64_t expected_nonce;     /**< Anti-replay nonce, naturally 8-byte aligned */
 
-    uint32_t update_deadline;
+    uint16_t update_deadline;
+    uint8_t  transport_id;       /**< Active transport provider ID */
+    uint8_t  _pad_txn;
     uint32_t transfer_bitmap[8]; /**< 1 bit = 1 chunk (256 chunks max) */
     uint32_t delta_chunk_id;     /**< Delta-patch checkpoint */
     uint32_t offset;             /**< Generic offset. For UPDATE_PENDING: manifest_flash_addr. */
 
     uint32_t crc32_trailer;      /**< CRC-32 over [0 .. offsetof(crc32_trailer)) */
 } toob_wal_entry_payload_t;
+
+#define TOOB_WAL_HAS_TRANSPORT_ID 1
 
 typedef union {
     toob_wal_entry_payload_t data;

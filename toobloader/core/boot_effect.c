@@ -5,6 +5,7 @@
 #include "boot_fih.h"
 #include "generated_boot_config.h"
 #include "boot_secure_zeroize.h"
+#include "boot_slot_caps.h"
 
 static boot_status_t stream_copy(const boot_platform_t *platform, uint32_t src,
                                  uint32_t dest, size_t len,
@@ -66,6 +67,47 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform,
       op_stat = boot_swap_erase_safe(platform, fx[i].dst, fx[i].len, arena, arena_len);
     } else if (fx[i].op == EFF_COPY) {
       op_stat = stream_copy(platform, fx[i].src, fx[i].dst, fx[i].len, arena, arena_len);
+    } else if (fx[i].op == EFF_FLIP) {
+      const slot_caps_t *caps = platform->slot_caps;
+      if (!caps) {
+        caps = boot_get_slot_caps();
+      }
+      if (!caps) {
+        return BOOT_ERR_INVALID_ARG;
+      }
+
+      if (caps->exec_model == SLOT_EXEC_BANK_SWAP) {
+        if (!caps->bank_flip) return BOOT_ERR_NOT_SUPPORTED;
+        op_stat = caps->bank_flip(fx[i].dst);
+      } else if (caps->exec_model == SLOT_EXEC_XIP_REMAP) {
+        if (!caps->xip_remap_commit) return BOOT_ERR_NOT_SUPPORTED;
+        op_stat = caps->xip_remap_commit(fx[i].src);
+      } else if (caps->exec_model == SLOT_EXEC_RELOCATABLE) {
+#ifdef TOOB_TMR_HAS_ACTIVE_APP_SLOT
+        wal_tmr_payload_t tmr __attribute__((aligned(8)));
+        boot_secure_zeroize(&tmr, sizeof(tmr));
+        op_stat = boot_journal_get_tmr(platform, &tmr);
+        if (op_stat == BOOT_OK) {
+          tmr.active_app_slot = (uint8_t)fx[i].dst;
+          op_stat = boot_journal_update_tmr(platform, &tmr);
+        }
+        boot_secure_zeroize(&tmr, sizeof(tmr));
+#else
+        op_stat = BOOT_ERR_NOT_SUPPORTED;
+#endif
+      } else {
+        op_stat = BOOT_ERR_NOT_SUPPORTED;
+      }
+
+      if (op_stat == BOOT_OK && caps->get_active_slot) {
+        uint32_t active = 0xFFFFFFFFu;
+        op_stat = caps->get_active_slot(&active);
+        if (op_stat == BOOT_OK) {
+          BOOT_SECURE_REQUIRE(active == fx[i].dst, { return BOOT_ERR_VERIFY; });
+        }
+      }
+      if (op_stat != BOOT_OK) return op_stat;
+      continue; /* Skip standard flash read-back CRC check */
     }
     if (op_stat != BOOT_OK) return op_stat;
 

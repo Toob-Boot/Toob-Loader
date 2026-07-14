@@ -53,6 +53,7 @@
 #define TOOB_PHASE_ONEWAY_RBACK   0x33CA5AF0u
 #define TOOB_PHASE_SWAPMOVE_MOVE  0x5AC3F00Fu
 #define TOOB_PHASE_SWAPMOVE_SWAP  0xA53C0FF0u
+#define TOOB_PHASE_POINTER_COPY   0x5A5A3C3Cu
 
 /* Stable provider IDs — persisted into the WAL (ST-014) so a brownout resume
  * dispatches the SAME provider that began the transaction. Never renumber. */

@@ -159,9 +159,13 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	if dt.BootConfig.EdgeUnattendedMode {
 		edgeMode = "1"
 	}
-	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_EDGE_UNATTENDED_MODE %s\n", edgeMode))
-	b.WriteString(fmt.Sprintf("#define BOOT_CONFIG_BACKOFF_BASE_S  %dU\n", dt.BootConfig.BackoffBaseS))
+	fmt.Fprintf(&b, "#define BOOT_CONFIG_EDGE_UNATTENDED_MODE %s\n", edgeMode)
+	fmt.Fprintf(&b, "#define BOOT_CONFIG_BACKOFF_BASE_S  %dU\n", dt.BootConfig.BackoffBaseS)
 	b.WriteString(fmt.Sprintf("#define BOOT_STAGE1_SVN             %dU\n", dt.BootConfig.Stage1Svn))
+
+	if dt.BootConfig.TransportProvider != "" {
+		b.WriteString(fmt.Sprintf("#define TOOB_TRANSPORT_PROVIDER     TOOB_TRANSPORT_%s\n", strings.ToUpper(dt.BootConfig.TransportProvider)))
+	}
 
 	// P7d: Crypto-Backend Compile-Time Gating
 	pqcEnabled := "0"

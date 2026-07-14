@@ -151,6 +151,11 @@ add_library(toob_core STATIC
     ${TOOB_CORE_DIR}/boot_multiimage.c
     ${TOOB_CORE_DIR}/boot_cloud_cmd.c
     ${TOOB_CORE_DIR}/boot_rstore.c
+    ${TOOB_CORE_DIR}/boot_transport.c
+    ${TOOB_CORE_DIR}/boot_transport_swapscratch.c
+    ${TOOB_CORE_DIR}/boot_transport_oneway.c
+    ${TOOB_CORE_DIR}/boot_transport_swapmove.c
+    ${TOOB_CORE_DIR}/boot_transport_pointer.c
     ${GENERATED_CLOUD_CMD_C}
 )
 

@@ -133,6 +133,10 @@ static void upgrade_tmr_payload(wal_tmr_payload_t *tmr) {
   if (tmr->struct_version < WAL_TMR_VERSION_5) {
     tmr->recovery_failure_counter = 0;
   }
+  if (tmr->struct_version < WAL_TMR_VERSION_6) {
+    tmr->active_app_slot = 0;
+    tmr->active_transport_id = 0;
+  }
   tmr->struct_version = WAL_TMR_VERSION_CURRENT;
   tmr->populated_size = WAL_TMR_POPULATED_SIZE;
 }

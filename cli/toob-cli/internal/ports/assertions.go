@@ -644,7 +644,27 @@ func assertDeviceToml() {
 	_ = [2]bool{r.BootConfig.EdgeUnattendedMode, p.BootConfig.EdgeUnattendedMode}
 	_ = [2]uint32{r.BootConfig.BackoffBaseS, p.BootConfig.BackoffBaseS}
 	_ = [2]uint32{r.BootConfig.WdtTimeoutMs, p.BootConfig.WDTTimeoutMs}
+	_ = [2]string{r.BootConfig.TransportProvider, p.BootConfig.TransportProvider}
 	_ = [2]string{r.Crypto.Backend, p.Crypto.Backend}
 	_ = [2]string{r.Crypto.Hash, p.Crypto.Hash}
 	_ = [2]string{r.Crypto.Pqc, p.Crypto.Pqc}
+}
+
+func assertChipManifest() {
+	var r manifest.ChipManifest
+	var p ChipManifest
+	_ = [2]string{r.Arch, p.Arch}
+	_ = [2]string{r.CompilerPrefix, p.CompilerPrefix}
+	_ = [2]string{r.Version, p.Version}
+	_ = [2]string{r.MinCoreSDK, p.MinCoreSDK}
+	_ = [2]string{r.MinCompiler, p.MinCompiler}
+}
+
+func assertSlotCapabilities() {
+	var r manifest.SlotCapabilities
+	var p SlotCapabilities
+	_ = [2]string{r.ExecModel, p.ExecModel}
+	_ = [2]int{r.SlotCount, p.SlotCount}
+	_ = [2]bool{r.HasScratch, p.HasScratch}
+	_ = [2]uint32{r.MaxEraseCycles, p.MaxEraseCycles}
 }

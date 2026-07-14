@@ -19,6 +19,7 @@
 
 #include "boot_types.h"
 #include "toob_swap_event_wire.h"
+#include "boot_slot_caps.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -311,6 +312,7 @@ typedef struct {
   const console_hal_t *console;           /**< Optional */
   const soc_hal_t *soc;                   /**< Optional */
   const provisioning_hal_t *provisioning; /**< Optional */
+  const slot_caps_t *slot_caps;           /**< Optional, added in ST-015 */
 } boot_platform_t;
 
 /**

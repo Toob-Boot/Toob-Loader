@@ -1,7 +1,10 @@
 package manifest
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/toob-boot/toob/internal/ui"
@@ -11,6 +14,65 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 	dt, hj, err := LoadConfig(tomlPath, hardwarePath)
 	if err != nil {
 		return err
+	}
+
+	// Read and parse chip_manifest.json if present in halChipDir (ST-016 / Validation)
+	var cm ChipManifest
+	cmPath := filepath.Join(halChipDir, "chip_manifest.json")
+	hasCapabilities := false
+	if data, err := os.ReadFile(cmPath); err == nil {
+		if err := json.Unmarshal(data, &cm); err == nil && cm.SlotCapabilities != nil {
+			hasCapabilities = true
+		}
+	}
+
+	// Auto-selection or validation of transport provider based on capabilities
+	if hasCapabilities && cm.SlotCapabilities != nil {
+		caps := cm.SlotCapabilities
+		provider := strings.ToLower(dt.BootConfig.TransportProvider)
+
+		if provider == "" {
+			// Auto-selection algorithm
+			if caps.SlotCount >= 2 && (caps.ExecModel == "xip_remap" || caps.ExecModel == "bank_swap" || caps.ExecModel == "relocatable") {
+				dt.BootConfig.TransportProvider = "pointer"
+			} else if caps.SlotCount >= 2 {
+				dt.BootConfig.TransportProvider = "oneway"
+			} else if caps.HasScratch {
+				dt.BootConfig.TransportProvider = "swapscratch"
+			} else {
+				dt.BootConfig.TransportProvider = "swapmove"
+			}
+			ui.Success("Auto-selected transport provider '%s' based on chip capabilities", dt.BootConfig.TransportProvider)
+		} else {
+			// Validation algorithm
+			switch provider {
+			case "pointer":
+				if caps.SlotCount < 2 {
+					return fmt.Errorf("FATAL: transport provider 'pointer' requires slot_count >= 2, but chip has %d", caps.SlotCount)
+				}
+				if caps.ExecModel != "xip_remap" && caps.ExecModel != "bank_swap" && caps.ExecModel != "relocatable" {
+					return fmt.Errorf("FATAL: transport provider 'pointer' requires a remappable, bank-swappable, or relocatable execution model, but chip has '%s'", caps.ExecModel)
+				}
+			case "oneway":
+				if caps.SlotCount < 2 && dt.Partitions.ScratchSize == 0 {
+					return fmt.Errorf("FATAL: transport provider 'oneway' requires slot_count >= 2 or a configured scratch partition for backup, but chip has %d slots and scratch size is 0", caps.SlotCount)
+				}
+			case "swapscratch":
+				if !caps.HasScratch && dt.Partitions.ScratchSize == 0 {
+					return fmt.Errorf("FATAL: transport provider 'swapscratch' requires a scratch partition, but scratch size is 0")
+				}
+			case "swapmove":
+				// swapmove works on any chip
+			default:
+				return fmt.Errorf("FATAL: unknown transport provider '%s'", dt.BootConfig.TransportProvider)
+			}
+		}
+	} else {
+		// Fallback auto-selection if capabilities are not defined in registry
+		if dt.BootConfig.TransportProvider == "" {
+			dt.BootConfig.TransportProvider = "swapscratch"
+			ui.Warn("No chip capabilities declared; falling back to default 'swapscratch' transport provider")
+		}
 	}
 
 	tomlChip := strings.ToLower(strings.ReplaceAll(dt.Device.Chip, "-", ""))

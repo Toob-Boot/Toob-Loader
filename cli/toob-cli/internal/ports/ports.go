@@ -383,6 +383,7 @@ type BootConfigSection struct {
 	EdgeUnattendedMode bool   `json:"edge_unattended_mode" port:"optional"`
 	BackoffBaseS       uint32 `json:"backoff_base_s"       port:"optional"`
 	WDTTimeoutMs       uint32 `json:"wdt_timeout_ms"       port:"optional"`
+	TransportProvider  string `json:"transport_provider"   port:"optional"`
 }
 
 // =============================================================================
@@ -452,17 +453,25 @@ type ChipSources struct {
 	Extra    []string `json:"extra"    port:"optional"`
 }
 
+type SlotCapabilities struct {
+	ExecModel      string `json:"exec_model"        port:"optional"`
+	SlotCount      int    `json:"slot_count"        port:"optional"`
+	HasScratch     bool   `json:"has_scratch"       port:"optional"`
+	MaxEraseCycles uint32 `json:"max_erase_cycles"   port:"optional"`
+}
+
 // ChipManifest is the parsed content of chips/{chip}/chip_manifest.json.
 type ChipManifest struct {
-	Arch           string       `json:"arch"            port:"required"`
-	CompilerPrefix string       `json:"compiler_prefix" port:"required"`
-	Version        string       `json:"version"         port:"required"`
-	MinCoreSDK     string       `json:"min_core_sdk"    port:"optional"`
-	MinCompiler    string       `json:"min_compiler"    port:"optional"`
-	Sources        *ChipSources `json:"sources"         port:"optional"`
-	Includes       []string     `json:"includes"        port:"optional"`
-	Crypto         *ChipCrypto   `json:"crypto"          port:"optional"`
-	Recovery       *ChipRecovery `json:"recovery"        port:"optional"`
+	Arch           string            `json:"arch"            port:"required"`
+	CompilerPrefix string            `json:"compiler_prefix" port:"required"`
+	Version        string            `json:"version"         port:"required"`
+	MinCoreSDK     string            `json:"min_core_sdk"    port:"optional"`
+	MinCompiler    string            `json:"min_compiler"    port:"optional"`
+	SlotCapabilities *SlotCapabilities `json:"slot_capabilities" port:"optional"`
+	Sources        *ChipSources      `json:"sources"         port:"optional"`
+	Includes       []string          `json:"includes"        port:"optional"`
+	Crypto         *ChipCrypto       `json:"crypto"          port:"optional"`
+	Recovery       *ChipRecovery     `json:"recovery"        port:"optional"`
 }
 
 type ChipRecovery struct {

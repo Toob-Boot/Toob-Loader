@@ -11,6 +11,7 @@
  */
 
 #include "boot_transport.h"
+#include "boot_slot_caps.h"
 #include <stddef.h>
 
 #if TOOB_TRANSPORT_PROVIDER == TOOB_TRANSPORT_SWAPSCRATCH
@@ -38,4 +39,23 @@ const slot_transport_t *boot_transport_by_id(uint8_t id) {
    * than the one compiled in must NOT be continued by guesswork. */
   const slot_transport_t *t = TOOB_ACTIVE_TRANSPORT;
   return (t->id == id) ? t : NULL;
+}
+
+__attribute__((weak)) const slot_caps_t *boot_get_slot_caps(void) {
+  static const slot_caps_t default_caps = {
+      .exec_model = SLOT_EXEC_FIXED,
+      .slot_count = 1,
+      .has_scratch = true,
+#ifdef CHIP_SCRATCH_SLOT_SIZE
+      .scratch_size = CHIP_SCRATCH_SLOT_SIZE,
+#else
+      .scratch_size = 0,
+#endif
+      .max_erase_cycles = 100000u,
+      .bank_flip = NULL,
+      .xip_remap_commit = NULL,
+      .exec_addr_select = NULL,
+      .get_active_slot = NULL,
+  };
+  return &default_caps;
 }

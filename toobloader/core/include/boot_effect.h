@@ -6,7 +6,8 @@
 
 typedef enum {
   EFF_ERASE = 1,
-  EFF_COPY = 2
+  EFF_COPY = 2,
+  EFF_FLIP = 3
 } effect_op_t;
 
 typedef struct {

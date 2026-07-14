@@ -59,6 +59,7 @@ type DeviceToml struct {
 		BackoffBaseS       uint32 `toml:"backoff_base_s"`
 		WdtTimeoutMs       uint32 `toml:"wdt_timeout_ms"`
 		Stage1Svn          uint32 `toml:"stage1_svn"`
+		TransportProvider  string `toml:"transport_provider"`
 	} `toml:"boot_config"`
 }
 
@@ -102,6 +103,22 @@ func ParseToml(path string) (*DeviceToml, error) {
 		return nil, fmt.Errorf("FATAL [TOML_STRICT]: Unknown fields in %s: %v", path, meta.Undecoded())
 	}
 	return &dt, nil
+}
+
+type SlotCapabilities struct {
+	ExecModel      string `json:"exec_model"`
+	SlotCount      int    `json:"slot_count"`
+	HasScratch     bool   `json:"has_scratch"`
+	MaxEraseCycles uint32 `json:"max_erase_cycles"`
+}
+
+type ChipManifest struct {
+	Arch           string            `json:"arch"`
+	CompilerPrefix string            `json:"compiler_prefix"`
+	Version        string            `json:"version"`
+	MinCoreSDK     string            `json:"min_core_sdk"`
+	MinCompiler    string            `json:"min_compiler"`
+	SlotCapabilities *SlotCapabilities `json:"slot_capabilities"`
 }
 
 func LoadConfig(tomlPath, jsonPath string) (*DeviceToml, *HardwareJson, error) {
