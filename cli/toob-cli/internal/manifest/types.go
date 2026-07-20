@@ -72,6 +72,13 @@ type FlashRegion struct {
 	Name       string `json:"name,omitempty"`
 }
 
+type ReservedRamRegion struct {
+	Name        string `json:"name"`
+	Base        string `json:"base"`
+	Size        uint32 `json:"size"`
+	Description string `json:"description"`
+}
+
 type HardwareJson struct {
 	ChipFamily string `json:"chip_family"`
 	Flash      struct {
@@ -86,11 +93,14 @@ type HardwareJson struct {
 		ArenaSize uint32 `json:"arena_size"`
 	} `json:"crypto_capabilities"`
 	Memory struct {
-		RamBase string `json:"ram_base"`
-		RamSize string `json:"ram_size"`
+		RamBase   string `json:"ram_base"`
+		RamSize   string `json:"ram_size"`
+		LpRamBase string `json:"lp_ram_base,omitempty"`
+		LpRamSize string `json:"lp_ram_size,omitempty"`
 	} `json:"memory"`
-	Registers map[string]any `json:"registers"`
-	Constants map[string]any `json:"constants"`
+	ReservedRamRegions []ReservedRamRegion `json:"reserved_ram_regions,omitempty"`
+	Registers          map[string]any      `json:"registers"`
+	Constants          map[string]any      `json:"constants"`
 }
 
 func ParseToml(path string) (*DeviceToml, error) {

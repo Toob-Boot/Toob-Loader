@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/toob-boot/toob/internal/ui"
@@ -253,6 +254,16 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		b.WriteString("\n")
 	}
 
+	// Emit LP_RAM layout constants if declared
+	if hj.Memory.LpRamBase != "" && hj.Memory.LpRamSize != "" {
+		b.WriteString("/* ========================================================================\n")
+		b.WriteString(" * LP_RAM LAYOUT (Low-Power SRAM, survives resets)\n")
+		b.WriteString(" * ======================================================================== */\n")
+		b.WriteString(fmt.Sprintf("#define %-30s %sU\n", "CHIP_LP_RAM_BASE", hj.Memory.LpRamBase))
+		b.WriteString(fmt.Sprintf("#define %-30s %sU\n", "CHIP_LP_RAM_SIZE", hj.Memory.LpRamSize))
+		b.WriteString("\n")
+	}
+
 	b.WriteString("#include \"boot_layout.h\"\n")
 	b.WriteString("#include \"boot_layout_assert.h\"\n\n")
 
@@ -443,6 +454,56 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	s0ld.WriteString("}\n")
 	if err := writeFileIfChanged(stage0LdPath, []byte(s0ld.String())); err != nil {
 		return err
+	}
+
+	// Validate reserved_ram_regions: check for internal overlaps and emit diagnostics
+	if len(hj.ReservedRamRegions) > 0 {
+		type resolvedRegion struct {
+			name string
+			base uint64
+			size uint32
+		}
+		var resolved []resolvedRegion
+		for _, r := range hj.ReservedRamRegions {
+			baseStr := strings.TrimPrefix(r.Base, "0x")
+			baseStr = strings.TrimPrefix(baseStr, "0X")
+			addr, err := strconv.ParseUint(baseStr, 16, 64)
+			if err != nil {
+				return fmt.Errorf("FATAL: reserved_ram_regions[%s]: invalid base address '%s': %w", r.Name, r.Base, err)
+			}
+			resolved = append(resolved, resolvedRegion{name: r.Name, base: addr, size: r.Size})
+			ui.Info("  Reserved RAM: %-20s at 0x%08X (%d bytes) — %s", r.Name, addr, r.Size, r.Description)
+		}
+
+		// Check pair-wise overlaps between reserved regions
+		for i := 0; i < len(resolved); i++ {
+			for j := i + 1; j < len(resolved); j++ {
+				a, b := resolved[i], resolved[j]
+				if a.base < b.base+uint64(b.size) && b.base < a.base+uint64(a.size) {
+					return fmt.Errorf("FATAL: reserved_ram_regions overlap: '%s' [0x%08X..0x%08X) and '%s' [0x%08X..0x%08X)",
+						a.name, a.base, a.base+uint64(a.size),
+						b.name, b.base, b.base+uint64(b.size))
+				}
+			}
+		}
+
+		// Validate reserved regions are within LP_RAM bounds if LP_RAM is declared
+		if hj.Memory.LpRamBase != "" && hj.Memory.LpRamSize != "" {
+			lpBaseStr := strings.TrimPrefix(hj.Memory.LpRamBase, "0x")
+			lpBaseStr = strings.TrimPrefix(lpBaseStr, "0X")
+			lpBase, _ := strconv.ParseUint(lpBaseStr, 16, 64)
+
+			lpSizeStr := strings.TrimPrefix(hj.Memory.LpRamSize, "0x")
+			lpSizeStr = strings.TrimPrefix(lpSizeStr, "0X")
+			lpSize, _ := strconv.ParseUint(lpSizeStr, 16, 64)
+
+			for _, r := range resolved {
+				if r.base < lpBase || r.base+uint64(r.size) > lpBase+lpSize {
+					return fmt.Errorf("FATAL: reserved_ram_region '%s' [0x%08X..0x%08X) is outside LP_RAM [0x%08X..0x%08X)",
+						r.name, r.base, r.base+uint64(r.size), lpBase, lpBase+lpSize)
+				}
+			}
+		}
 	}
 
 	return nil
