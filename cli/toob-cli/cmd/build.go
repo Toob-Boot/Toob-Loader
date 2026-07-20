@@ -651,24 +651,28 @@ func runNativeBuild(ctx context.Context, root string, cache *registry.Cache) err
 		}
 	}
 
-	recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_CRYPTO_BACKEND \"%s\")\n", recCryptoBackend))
-	recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_CRYPTO_HASH \"%s\")\n", recCryptoHash))
+	fmt.Fprintf(&recoveryCMake, "set(TOOB_RECOVERY_CRYPTO_BACKEND \"%s\")\n", recCryptoBackend)
+	fmt.Fprintf(&recoveryCMake, "set(TOOB_RECOVERY_CRYPTO_HASH \"%s\")\n", recCryptoHash)
 
+	var chipDrivers []string
 	if idx != nil {
-		if cInfo, ok := idx.Chips[chip]; ok {
-			if cInfo.Sources != nil {
-				for _, drvPath := range cInfo.Sources.Drivers {
-					drvRelDir := filepath.Dir(drvPath)
-					drvDir, err := cache.DriverSourcePath(filepath.ToSlash(drvRelDir))
-					if err != nil {
-						ui.Warn("Could not resolve driver '%s': %v", drvRelDir, err)
-						continue
-					}
-					driverDirs = append(driverDirs, drvDir)
-					driversCMake.WriteString(fmt.Sprintf("list(APPEND TOOB_DRIVERS \"%s\")\n", filepath.ToSlash(drvDir)))
-				}
-			}
+		if cInfo, ok := idx.Chips[chip]; ok && cInfo.Sources != nil {
+			chipDrivers = cInfo.Sources.Drivers
 		}
+	}
+	if len(chipDrivers) == 0 && cm.Sources != nil {
+		chipDrivers = cm.Sources.Drivers
+	}
+
+	for _, drvPath := range chipDrivers {
+		drvRelDir := filepath.Dir(drvPath)
+		drvDir, err := cache.DriverSourcePath(filepath.ToSlash(drvRelDir))
+		if err != nil {
+			ui.Warn("Could not resolve driver '%s': %v", drvRelDir, err)
+			continue
+		}
+		driverDirs = append(driverDirs, drvDir)
+		fmt.Fprintf(&driversCMake, "list(APPEND TOOB_DRIVERS \"%s\")\n", filepath.ToSlash(drvDir))
 	}
 
 	if manifestRecovery != nil {

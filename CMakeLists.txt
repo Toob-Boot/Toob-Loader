@@ -133,18 +133,12 @@ endif()
 # 5.3.5 Cloud Command Pipeline
 option(TOOB_FEATURE_CLOUD_COMMANDS "Enable Cloud Command Pipeline" ON)
 
-# 5.3.6 eFuse Link-Time Mocking Strategy (P10 Anti-Brick)
-option(TOOB_MOCK_EFUSES "Use Link-Time Mocking for eFuses" ON)
+# 5.3.6 eFuse TU-Swap Strategy (P10 Anti-Brick)
+# When ON, toob_hal.cmake swaps efuse_real.c for efuse_mock.c (RAM-backed
+# test data). No --wrap needed: the mock TU provides the same global symbols.
+option(TOOB_MOCK_EFUSES "Use mock eFuse TU instead of real hardware access" ON)
 if(TOOB_MOCK_EFUSES)
     add_compile_definitions(TOOB_MOCK_EFUSES=1)
-    if(TOOB_CHIP STREQUAL "esp32c6")
-        target_link_options(toob_stage1 PRIVATE
-            "-Wl,--wrap=esp32c6_read_pubkey"
-            "-Wl,--wrap=esp32c6_read_dslc"
-            "-Wl,--wrap=esp32c6_read_monotonic"
-            "-Wl,--wrap=esp32c6_advance_monotonic"
-        )
-    endif()
 endif()
 
 # 5.4 Linker Script Integration

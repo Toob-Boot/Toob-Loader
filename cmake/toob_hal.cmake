@@ -62,6 +62,18 @@ if(EXISTS ${CHIP_MANIFEST})
         endforeach()
     endif()
 
+    # 2b. eFuse TU-Swap: Mock replaces Real when TOOB_MOCK_EFUSES is ON.
+    #     The manifest declares efuse_real.c in sources.extra. In sandbox
+    #     builds we swap it for efuse_mock.c (same symbols, RAM-backed data).
+    if(TOOB_MOCK_EFUSES)
+        set(_efuse_real "${TOOB_HAL_CHIP_DIR}/efuse_real.c")
+        set(_efuse_mock "${TOOB_HAL_CHIP_DIR}/efuse_mock.c")
+        if(EXISTS ${_efuse_mock})
+            list(REMOVE_ITEM FLAT_BOM_SOURCES "${_efuse_real}")
+            list(APPEND FLAT_BOM_SOURCES "${_efuse_mock}")
+        endif()
+    endif()
+
     # 3. Drivers
     string(JSON NUM_DRIVERS ERROR_VARIABLE JSON_ERR LENGTH ${MANIFEST_JSON} sources drivers)
     if(NOT JSON_ERR AND NUM_DRIVERS GREATER 0)
