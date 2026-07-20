@@ -7,7 +7,7 @@ stage0_size = 32768        # 32 KB
 stage1_size = 65536        # 64 KB (Accepted 55KB footprint)
 app_size = 393216          # 384 KB
 recovery_size = 32768      # 32 KB
-enable_deltas = true       # Force Scratch Slot Generation
+enable_deltas = true       # Enable delta update pipeline (xip_remap: no scratch needed)
 wal_sectors = 4            # Number of sectors for the Write-Ahead Log
 
 [boot_config]

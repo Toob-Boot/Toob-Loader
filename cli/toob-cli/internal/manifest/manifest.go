@@ -75,6 +75,25 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 		}
 	}
 
+	// Delta coherence check (REG-003):
+	// enable_deltas requires either:
+	//   a) has_scratch == true (scratch-based delta strategy), or
+	//   b) exec_model is xip_remap/bank_swap/relocatable (scratch-less delta via pointer transport)
+	if dt.Partitions.EnableDeltas && hasCapabilities && cm.SlotCapabilities != nil {
+		caps := cm.SlotCapabilities
+		scratchLessCapable := caps.ExecModel == "xip_remap" ||
+			caps.ExecModel == "bank_swap" ||
+			caps.ExecModel == "relocatable"
+		if !caps.HasScratch && !scratchLessCapable {
+			return fmt.Errorf(
+				"FATAL [REG-003]: enable_deltas = true requires either "+
+					"has_scratch = true or a scratch-less execution model "+
+					"(xip_remap, bank_swap, relocatable), but chip '%s' has "+
+					"has_scratch = %v and exec_model = '%s'",
+				hj.ChipFamily, caps.HasScratch, caps.ExecModel)
+		}
+	}
+
 	tomlChip := strings.ToLower(strings.ReplaceAll(dt.Device.Chip, "-", ""))
 	hwChip := strings.ToLower(strings.ReplaceAll(hj.ChipFamily, "-", ""))
 	if tomlChip != hwChip {
@@ -149,13 +168,21 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 		}
 	}
 
-	scratchBudget := dt.Partitions.ScratchSize
-	if scratchBudget == 0 {
-		scratchBudget = appBudget
-	}
-	scratchAddr, scratchSize, err := alloc.Allocate(scratchBudget, 0, "Scratch Buffer")
-	if err != nil {
-		return err
+	// Scratch allocation: only needed when the transport provider performs
+	// physical data movement (swapscratch, swapmove, oneway).
+	// Pointer-transport (xip_remap) remaps the MMU in-place and needs no scratch.
+	var scratchAddr, scratchSize uint32
+	transport := strings.ToLower(dt.BootConfig.TransportProvider)
+	needsScratch := transport == "swapscratch" || transport == "swapmove" || transport == "oneway"
+	if needsScratch {
+		scratchBudget := dt.Partitions.ScratchSize
+		if scratchBudget == 0 {
+			scratchBudget = appBudget
+		}
+		scratchAddr, scratchSize, err = alloc.Allocate(scratchBudget, 0, "Scratch Buffer")
+		if err != nil {
+			return err
+		}
 	}
 
 	walSectors := dt.Partitions.WalSectors
