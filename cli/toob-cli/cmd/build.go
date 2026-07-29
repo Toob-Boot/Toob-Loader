@@ -736,6 +736,13 @@ func runNativeBuild(ctx context.Context, root string, cache *registry.Cache) err
 			recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_SOURCES \"%s\")\n", strings.Join(recSources, ";")))
 		}
 		var recIncludes []string
+		for _, inc := range cm.Includes {
+			if strings.HasPrefix(inc, "soc/") || strings.HasPrefix(inc, "arch/") || strings.HasPrefix(inc, "drivers/") {
+				recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(halChipDir, "..", "..", inc)))
+			} else {
+				recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(halChipDir, inc)))
+			}
+		}
 		for _, inc := range manifestRecovery.Includes {
 			recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(halChipDir, inc)))
 		}

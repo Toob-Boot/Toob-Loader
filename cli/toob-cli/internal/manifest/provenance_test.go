@@ -68,8 +68,17 @@ func TestAuditProvenanceAndReport(t *testing.T) {
 	if !strings.Contains(reportStr, "Hardware Provenance Evidence Report") {
 		t.Errorf("report missing title header")
 	}
+	if !strings.Contains(reportStr, "Hardware Specification Digest (SHA-256)") {
+		t.Errorf("report missing SHA-256 digest header")
+	}
+	if !strings.Contains(reportStr, "SELF_ATTESTED (trm)") {
+		t.Errorf("report missing SELF_ATTESTED status")
+	}
 	if !strings.Contains(reportStr, "UNVERIFIED (SCAN)") {
 		t.Errorf("report missing unverified scan status")
+	}
+	if !strings.Contains(reportStr, "Claimed Value") {
+		t.Errorf("report missing Claimed Value column header")
 	}
 }
 

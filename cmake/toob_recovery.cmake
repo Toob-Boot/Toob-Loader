@@ -10,6 +10,11 @@ else()
     list(APPEND TOOB_RECOVERY_SRC_FILES ${CMAKE_SOURCE_DIR}/recovery/recovery_port.c)
 endif()
 
+if(EXISTS "${TOOB_HAL_CHIP_DIR}/startup.c")
+    list(APPEND TOOB_RECOVERY_SRC_FILES "${TOOB_HAL_CHIP_DIR}/startup.c")
+    list(APPEND TOOB_RECOVERY_SRC_FILES "${CMAKE_SOURCE_DIR}/toobloader/core/boot_platform_bringup.c")
+endif()
+
 if(TOOB_RECOVERY_DRIVERS)
     foreach(DRV_DIR IN LISTS TOOB_RECOVERY_DRIVERS)
         file(GLOB DRV_SOURCES "${DRV_DIR}/*.c" "${DRV_DIR}/*.S")
@@ -27,8 +32,11 @@ target_include_directories(toob_recovery PRIVATE
     ${CMAKE_SOURCE_DIR}/recovery
     ${CMAKE_SOURCE_DIR}/common/include
     ${CMAKE_SOURCE_DIR}/toobloader/core/include
+    ${CMAKE_SOURCE_DIR}/toobloader/core/utils/include
     ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
     ${CMAKE_BINARY_DIR}/generated
+    ${TOOB_HAL_CHIP_DIR}
+    ${TOOB_HAL_ROOT}
 )
 if(TOOB_RECOVERY_INCLUDES)
     target_include_directories(toob_recovery PRIVATE ${TOOB_RECOVERY_INCLUDES})
@@ -41,6 +49,9 @@ endif()
 target_link_libraries(toob_recovery PRIVATE toob_libtoob)
 if(TARGET toob_chip)
     target_link_libraries(toob_recovery PRIVATE toob_chip)
+endif()
+if(TARGET toob_arch)
+    target_link_libraries(toob_recovery PRIVATE toob_arch)
 endif()
 
 # Conditionally link crypto only if not using ROM or NONE crypto stubs

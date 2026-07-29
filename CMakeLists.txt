@@ -119,12 +119,10 @@ endif()
 add_executable(toob_stage1 toobloader/core/boot_main.c)
 
 # 5.3 Architektur-Spezifische P10 Limitierungen und Globale Libraries
-toob_apply_strict_flags(toob_stage1 TRUE)
-target_link_libraries(toob_stage1 PRIVATE toob_core)
-
 if(TARGET toob_chip)
     target_link_libraries(toob_stage1 PRIVATE toob_chip)
 endif()
+target_link_libraries(toob_stage1 PRIVATE toob_core)
 
 if(TARGET toob_crypto_upstream)
     target_link_libraries(toob_stage1 PRIVATE toob_crypto toob_crypto_upstream)

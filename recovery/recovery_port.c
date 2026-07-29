@@ -194,7 +194,8 @@ toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_has
 }
 
 boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *target, const uint32_t seal_key[4]);
-void boot_panic(const boot_platform_t *platform, boot_status_t reason);
+_Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason);
+_Noreturn void boot_terminal_halt(const boot_platform_t *platform, boot_status_t reason, uint16_t site_id);
 void toob_ecc_trap(void);
 void boot_secure_zeroize(void *v, size_t n);
 
@@ -208,11 +209,16 @@ boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *t
     return BOOT_OK;
 }
 
-void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
+_Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
     (void)platform;
     (void)reason;
     recovery_serial_print("[REC] PANIC\r\n");
     recovery_system_reboot();
+}
+
+_Noreturn void boot_terminal_halt(const boot_platform_t *platform, boot_status_t reason, uint16_t site_id) {
+    (void)site_id;
+    boot_panic(platform, reason);
 }
 
 void toob_ecc_trap(void) {

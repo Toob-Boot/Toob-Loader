@@ -26,6 +26,7 @@ add_executable(toob_stage0
     ${TOOB_STAGE0_DIR}/stage0_otp.c
     ${TOOB_STAGE0_DIR}/stage0_boot_pointer.c
     ${TOOB_STAGE0_DIR}/stage0_tentative.c
+    ${TOOB_CORE_DIR}/boot_platform_bringup.c
     ${TOOB_CORE_DIR}/utils/boot_crc32.c
 )
 

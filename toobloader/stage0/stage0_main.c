@@ -36,6 +36,11 @@ _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason)
     while(1) { BOOT_GLITCH_DELAY(); } /* Hardware Trap */
 }
 
+_Noreturn void boot_terminal_halt(const boot_platform_t *platform, boot_status_t reason, uint16_t site_id) {
+    (void)site_id;
+    boot_panic(platform, reason);
+}
+
 _Noreturn static void dead_halt(void) {
     while (1) {
         BOOT_GLITCH_DELAY(); /* Intentional starvation of WDT */

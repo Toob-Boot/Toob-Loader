@@ -113,6 +113,7 @@ if(FLAT_BOM_SOURCES)
     # Sichtbarkeit der Bootloader Core-Interfaces für die Chip-Ebene
     target_include_directories(toob_chip PUBLIC 
         ${TOOB_HAL_CHIP_DIR}
+        ${TOOB_HAL_ROOT}
         ${FLAT_BOM_INCLUDES}
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
