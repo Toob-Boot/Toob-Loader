@@ -34,8 +34,9 @@ type DeviceToml struct {
 		Clock    string   `toml:"clock"`
 		RTC      string   `toml:"rtc"`
 		Crypto   struct {
-			Backend string `toml:"backend"`
-			Hash    string `toml:"hash"`
+			Backend       string `toml:"backend"`
+			Hash          string `toml:"hash"`
+			Justification string `toml:"justification"`
 		} `toml:"crypto"`
 		Sources  []string `toml:"sources"`
 		Includes []string `toml:"includes"`
@@ -63,24 +64,53 @@ type DeviceToml struct {
 	} `toml:"boot_config"`
 }
 
+type Provenance struct {
+	Source   string `json:"source"` // "trm", "datasheet", "rom_disasm", "scan", "vendor_sdk"
+	Ref      string `json:"ref,omitempty"`
+	Verified string `json:"verified,omitempty"`
+}
+
 type FlashRegion struct {
-	Type       string `json:"type"`
-	Base       uint32 `json:"base"`
-	Size       uint32 `json:"size,omitempty"`
-	SectorSize uint32 `json:"sector_size,omitempty"`
-	Count      uint32 `json:"count,omitempty"`
-	Name       string `json:"name,omitempty"`
+	Type       string      `json:"type"`
+	Base       uint32      `json:"base"`
+	Size       uint32      `json:"size,omitempty"`
+	SectorSize uint32      `json:"sector_size,omitempty"`
+	Count      uint32      `json:"count,omitempty"`
+	Name       string      `json:"name,omitempty"`
+	Provenance *Provenance `json:"provenance,omitempty"`
 }
 
 type ReservedRamRegion struct {
-	Name        string `json:"name"`
-	Base        string `json:"base"`
-	Size        uint32 `json:"size"`
-	Description string `json:"description"`
+	Name        string      `json:"name"`
+	Base        string      `json:"base"`
+	Size        uint32      `json:"size"`
+	Description string      `json:"description"`
+	Provenance  *Provenance `json:"provenance,omitempty"`
+}
+
+type RegisterBlock struct {
+	Base       string            `json:"base"`
+	Regs       map[string]string `json:"regs"`
+	Provenance *Provenance       `json:"provenance,omitempty"`
+}
+
+type ResetCauseCode struct {
+	Name       string      `json:"name"`
+	Value      int         `json:"value"`
+	Class      string      `json:"class"` // "power", "intentional", "crash"
+	Provenance *Provenance `json:"provenance,omitempty"`
+}
+
+type ResetCauses struct {
+	RegisterOffset string           `json:"register_offset"`
+	Mask           string           `json:"mask"`
+	Codes          []ResetCauseCode `json:"codes"`
+	Provenance     *Provenance      `json:"provenance,omitempty"`
 }
 
 type HardwareJson struct {
-	ChipFamily string `json:"chip_family"`
+	ChipFamily string      `json:"chip_family"`
+	Provenance *Provenance `json:"provenance,omitempty"`
 	Flash      struct {
 		Size           uint32        `json:"size"`
 		WriteAlignment uint32        `json:"write_alignment"`
@@ -88,20 +118,27 @@ type HardwareJson struct {
 		BaseAddr       string        `json:"base_addr"`
 		XipBase        string        `json:"xip_base"`
 		Regions        []FlashRegion `json:"regions"`
+		Provenance     *Provenance   `json:"provenance,omitempty"`
 	} `json:"flash"`
 	CryptoCapabilities struct {
-		ArenaSize uint32 `json:"arena_size"`
+		ArenaSize  uint32      `json:"arena_size"`
+		Provenance *Provenance `json:"provenance,omitempty"`
 	} `json:"crypto_capabilities"`
 	Memory struct {
-		RamBase   string `json:"ram_base"`
-		RamSize   string `json:"ram_size"`
-		LpRamBase string `json:"lp_ram_base,omitempty"`
-		LpRamSize string `json:"lp_ram_size,omitempty"`
+		IramBase   string      `json:"iram_base"`
+		IramSize   string      `json:"iram_size"`
+		LpRamBase  string      `json:"lp_ram_base,omitempty"`
+		LpRamSize  string      `json:"lp_ram_size,omitempty"`
+		Provenance *Provenance `json:"provenance,omitempty"`
 	} `json:"memory"`
-	ReservedRamRegions []ReservedRamRegion `json:"reserved_ram_regions,omitempty"`
-	Registers          map[string]any      `json:"registers"`
-	Constants          map[string]any      `json:"constants"`
+	ReservedRamRegions []ReservedRamRegion      `json:"reserved_ram_regions,omitempty"`
+	RegisterBlocks     map[string]RegisterBlock `json:"register_blocks,omitempty"`
+	RegistersFlat      map[string]string        `json:"registers_flat,omitempty"`
+	ResetCauses        *ResetCauses             `json:"reset_causes,omitempty"`
+	Registers          map[string]any           `json:"registers,omitempty"`
+	Constants          map[string]any           `json:"constants"`
 }
+
 
 func ParseToml(path string) (*DeviceToml, error) {
 	var dt DeviceToml
@@ -122,13 +159,35 @@ type SlotCapabilities struct {
 	MaxEraseCycles uint32 `json:"max_erase_cycles"`
 }
 
+type DriverManifest struct {
+	Name        string            `json:"name"`
+	Author      string            `json:"author,omitempty"`
+	Version     string            `json:"version,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Trait       string            `json:"trait,omitempty"`
+	AbiVersion  string            `json:"abi_version,omitempty"`
+	Headers     []string          `json:"headers,omitempty"`
+	Symbols     map[string]string `json:"symbols,omitempty"`
+}
+
+type ChipSources struct {
+	Startup  string   `json:"startup,omitempty"`
+	Linker   string   `json:"linker,omitempty"`
+	Hardware string   `json:"hardware,omitempty"`
+	Drivers  []string `json:"drivers,omitempty"`
+	Extra    []string `json:"extra,omitempty"`
+}
+
 type ChipManifest struct {
-	Arch           string            `json:"arch"`
-	CompilerPrefix string            `json:"compiler_prefix"`
-	Version        string            `json:"version"`
-	MinCoreSDK     string            `json:"min_core_sdk"`
-	MinCompiler    string            `json:"min_compiler"`
+	Name             string            `json:"name,omitempty"`
+	Arch             string            `json:"arch"`
+	CompilerPrefix   string            `json:"compiler_prefix"`
+	Version          string            `json:"version"`
+	MinCoreSDK       string            `json:"min_core_sdk"`
+	MinCompiler      string            `json:"min_compiler"`
 	SlotCapabilities *SlotCapabilities `json:"slot_capabilities"`
+	HalBindings      map[string]string `json:"hal_bindings,omitempty"`
+	Sources          *ChipSources      `json:"sources,omitempty"`
 }
 
 func LoadConfig(tomlPath, jsonPath string) (*DeviceToml, *HardwareJson, error) {

@@ -50,6 +50,10 @@ if(EXISTS ${CHIP_MANIFEST})
     string(JSON CHIP_PLATFORM ERROR_VARIABLE JSON_ERR GET ${MANIFEST_JSON} sources platform)
     if(NOT JSON_ERR AND CHIP_PLATFORM)
         list(APPEND FLAT_BOM_SOURCES "${TOOB_HAL_CHIP_DIR}/${CHIP_PLATFORM}")
+    else()
+        if(EXISTS "${CMAKE_BINARY_DIR}/generated/generated_platform_wiring.c")
+            list(APPEND FLAT_BOM_SOURCES "${CMAKE_BINARY_DIR}/generated/generated_platform_wiring.c")
+        endif()
     endif()
     
     # 2. Extra Chip Sources

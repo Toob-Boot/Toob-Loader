@@ -90,28 +90,45 @@ static size_t sandbox_crypto_get_hash_ctx_size(void) {
     return 64;
 }
 
-static const crypto_hal_t sandbox_crypto_hal = {
-    .abi_version = 0x02000000,
-    .init = sandbox_crypto_init,
-    .deinit = sandbox_crypto_deinit,
-    .hash_init = sandbox_crypto_hash_init,
-    .hash_update = sandbox_crypto_hash_update,
-    .hash_finish = sandbox_crypto_hash_finish,
-    .verify_signature = sandbox_crypto_verify_signature,
-    .verify_pqc = sandbox_crypto_verify_pqc,
-    .random = sandbox_crypto_random,
-    .get_last_vendor_error = NULL,
-    .read_pubkey = sandbox_crypto_read_pubkey,
-    .read_chip_uid = sandbox_crypto_read_chip_uid,
-    .read_dslc = sandbox_crypto_read_dslc,
-    .write_dslc = sandbox_crypto_write_dslc,
-    .read_monotonic_counter = sandbox_crypto_read_monotonic_counter,
-    .advance_monotonic_counter = sandbox_crypto_advance_monotonic_counter,
-    .get_hash_ctx_size = sandbox_crypto_get_hash_ctx_size,
-    .has_hw_acceleration = false,
-    .is_pqc_enforced = NULL,
-    .verify_signature_ph = sandbox_crypto_verify_signature_ph
-};
+static const crypto_hal_t sandbox_crypto_hal =
+    TOOB_CRYPTO_HAL_V2(
+        sandbox_crypto_init,
+        sandbox_crypto_deinit,
+        sandbox_crypto_hash_init,
+        sandbox_crypto_hash_update,
+        sandbox_crypto_hash_finish,
+        sandbox_crypto_verify_signature,
+        sandbox_crypto_random,
+        sandbox_crypto_get_hash_ctx_size,
+        .verify_pqc               = sandbox_crypto_verify_pqc,
+        .read_pubkey              = sandbox_crypto_read_pubkey,
+        .read_chip_uid            = sandbox_crypto_read_chip_uid,
+        .read_dslc                = sandbox_crypto_read_dslc,
+        .write_dslc               = sandbox_crypto_write_dslc,
+        .read_monotonic_counter   = sandbox_crypto_read_monotonic_counter,
+        .advance_monotonic_counter = sandbox_crypto_advance_monotonic_counter,
+        .verify_signature_ph      = sandbox_crypto_verify_signature_ph,
+    );
+
+static const entropy_hal_t sandbox_entropy_hal =
+    TOOB_ENTROPY_HAL_V3(
+        sandbox_crypto_init,
+        sandbox_crypto_deinit,
+        sandbox_crypto_random,
+        .is_hardware_trng = false
+    );
+
+static const keystore_hal_t sandbox_keystore_hal =
+    TOOB_KEYSTORE_HAL_V3(
+        sandbox_crypto_init,
+        sandbox_crypto_deinit,
+        sandbox_crypto_read_pubkey,
+        sandbox_crypto_read_dslc,
+        sandbox_crypto_write_dslc,
+        .read_chip_uid            = sandbox_crypto_read_chip_uid,
+        .read_monotonic_counter   = sandbox_crypto_read_monotonic_counter,
+        .advance_monotonic_counter = sandbox_crypto_advance_monotonic_counter
+    );
 
 static boot_platform_t sandbox_platform = {
     .flash = &sandbox_flash_hal,
@@ -121,7 +138,9 @@ static boot_platform_t sandbox_platform = {
     .wdt = &sandbox_wdt_hal,
     .console = &sandbox_console_hal,
     .soc = &sandbox_soc_hal,
-    .provisioning = NULL
+    .provisioning = NULL,
+    .entropy = &sandbox_entropy_hal,
+    .keystore = &sandbox_keystore_hal
 };
 
 const boot_platform_t *boot_platform_init(void) {

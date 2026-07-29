@@ -11,6 +11,10 @@
  * relocatable dual-slot parts). The Core carries all transport algorithms and
  * selects a provider at compile time from these capabilities.
  *
+ * REG-034: Model-specific commit primitives live in a tagged union keyed by
+ * exec_model. Initializer macros per model prevent wrong-pointer-for-model
+ * bugs at compile time.
+ *
  * DEPENDENCY NOTE: needs boot_status_t. It is pulled from boot_types.h (the
  * base types header) — NOT from boot_hal.h, because boot_hal.h will include
  * this header (ST-015) and a cycle must be impossible.
@@ -35,38 +39,55 @@ typedef enum {
   SLOT_EXEC_BANK_SWAP   = 3  /* hardware dual-bank flip (e.g. STM32 BFB2)        */
 } slot_exec_model_t;
 
+/* ---- Model-specific commit operation types (union arms) ---- */
+
+/** HW dual-bank flip. target_bank: 0/1. Must be atomic in hardware. */
+typedef struct {
+  boot_status_t (*bank_flip)(uint32_t target_bank);
+} slot_ops_bank_swap_t;
+
+/** Commit an XIP/MMU remap so slot_phys_addr becomes the execution window. */
+typedef struct {
+  boot_status_t (*xip_remap_commit)(uint32_t slot_phys_addr);
+} slot_ops_xip_remap_t;
+
+/** Select the execution entry for a relocatable image (e.g. VTOR base). */
+typedef struct {
+  boot_status_t (*exec_addr_select)(uint32_t slot_phys_addr);
+} slot_ops_relocatable_t;
+
+/* SLOT_EXEC_FIXED: no commit operation — the image runs from a fixed address. */
+
 /**
- * @brief Capability sheet of one chip. Filled by the registry-installed driver
- *        (generated glue exposes it via boot_get_slot_caps()).
+ * @brief Capability sheet of one chip (REG-034: tagged union).
  *
- * Function pointers are NULL when the hardware does not support the primitive;
- * a NULL pointer simply makes the corresponding tier unavailable. All
- * primitives MUST be glitch-conscious on their side (single register writes
+ * The exec_model tag selects which union arm in `ops` is valid.
+ * Use the TOOB_SLOT_CAPS_* initializer macros to construct — they set the
+ * tag automatically and only expose the correct union arm.
+ *
+ * All primitives MUST be glitch-conscious on their side (single register writes
  * where possible) — the Core wraps every call in double-check shields anyway.
  */
 typedef struct {
   slot_exec_model_t exec_model;
   uint8_t  slot_count;        /* bootable slots: 1 (in-place) or 2 (A/B)        */
   uint8_t  _pad[3];
-  bool     has_scratch;       /* dedicated scratch/temp region present          */
+  bool     has_scratch;       /* dedicated scratch/temp region present           */
   uint8_t  _pad2[3];
   uint32_t scratch_size;      /* bytes; 0 if none                               */
   uint32_t max_erase_cycles;  /* flash endurance; 0 = unknown (no EOL gating)   */
 
-  /* ---- optional chip primitives (the thin driver delta) ---- */
-
-  /** HW dual-bank flip. target_bank: 0/1. Must be atomic in hardware. */
-  boot_status_t (*bank_flip)(uint32_t target_bank);
-
-  /** Commit an XIP/MMU remap so slot_phys_addr becomes the execution window. */
-  boot_status_t (*xip_remap_commit)(uint32_t slot_phys_addr);
-
-  /** Select the execution entry for a relocatable image (e.g. VTOR base).
-   *  Called by the Core at handoff time, not at commit time. */
-  boot_status_t (*exec_addr_select)(uint32_t slot_phys_addr);
-
-  /** Read back which slot/bank is active (HW tiers). out_slot: 0/1. */
+  /** Read back which slot/bank is active (HW tiers). out_slot: 0/1.
+   *  Common across all models — not model-specific. NULL if unsupported. */
   boot_status_t (*get_active_slot)(uint32_t *out_slot);
+
+  /** Model-specific commit operations (tagged by exec_model). */
+  union {
+    slot_ops_bank_swap_t   bank_swap;
+    slot_ops_xip_remap_t   xip_remap;
+    slot_ops_relocatable_t relocatable;
+    /* SLOT_EXEC_FIXED: empty — no arm needed */
+  } ops;
 } slot_caps_t;
 
 /* ABI guards: this struct crosses the Core/driver boundary. */
@@ -74,6 +95,42 @@ _Static_assert(sizeof(slot_exec_model_t) == sizeof(int),
                "slot_exec_model_t must have int size (enum ABI)");
 _Static_assert(offsetof(slot_caps_t, scratch_size) % 4 == 0,
                "slot_caps_t scalar block must stay 4-aligned");
+
+/* ---- Initializer macros (REG-034) ----
+ *
+ * One macro per exec_model. The tag is set automatically; only the correct
+ * union arm is populated. Missing a mandatory positional arg = compile error.
+ */
+
+/** @brief Bank-swap model (e.g. STM32 BFB2). Requires bank_flip + get_active. */
+#define TOOB_SLOT_CAPS_BANK_SWAP(slot_count_, bank_flip_, get_active_, ...) \
+    { .exec_model  = SLOT_EXEC_BANK_SWAP,                                  \
+      .slot_count  = (slot_count_),                                        \
+      .ops.bank_swap.bank_flip = (bank_flip_),                             \
+      .get_active_slot = (get_active_),                                    \
+      __VA_ARGS__ }
+
+/** @brief XIP/MMU remap model (e.g. ESP32). Requires xip_remap + get_active. */
+#define TOOB_SLOT_CAPS_XIP_REMAP(slot_count_, xip_remap_, get_active_, ...) \
+    { .exec_model  = SLOT_EXEC_XIP_REMAP,                                   \
+      .slot_count  = (slot_count_),                                         \
+      .ops.xip_remap.xip_remap_commit = (xip_remap_),                      \
+      .get_active_slot = (get_active_),                                     \
+      __VA_ARGS__ }
+
+/** @brief Relocatable model (PIC/dual-linked). Requires exec_addr_select. */
+#define TOOB_SLOT_CAPS_RELOCATABLE(slot_count_, exec_addr_, get_active_, ...) \
+    { .exec_model  = SLOT_EXEC_RELOCATABLE,                                   \
+      .slot_count  = (slot_count_),                                           \
+      .ops.relocatable.exec_addr_select = (exec_addr_),                       \
+      .get_active_slot = (get_active_),                                       \
+      __VA_ARGS__ }
+
+/** @brief Fixed-address model (single slot, no commit). */
+#define TOOB_SLOT_CAPS_FIXED(slot_count_, ...)                              \
+    { .exec_model  = SLOT_EXEC_FIXED,                                       \
+      .slot_count  = (slot_count_),                                         \
+      __VA_ARGS__ }
 
 /**
  * @brief Provided by the generated driver glue (Registry/manifest compiler).

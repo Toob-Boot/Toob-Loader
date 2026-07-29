@@ -29,23 +29,14 @@
 #include "generated_boot_config.h"
 #include <stddef.h>
 
-static const slot_caps_t g_reference_caps = {
-    .exec_model = SLOT_EXEC_FIXED,
-    .slot_count = 1,
-    .has_scratch = true,
+static const slot_caps_t g_reference_caps =
+    TOOB_SLOT_CAPS_FIXED(
+        1,
+        .has_scratch = true,
 #ifdef CHIP_SCRATCH_SLOT_SIZE
-    .scratch_size = CHIP_SCRATCH_SLOT_SIZE,
-#else
-    .scratch_size = 0,
+        .scratch_size = CHIP_SCRATCH_SLOT_SIZE,
 #endif
-    .max_erase_cycles = 100000u, /* typical SPI-NOR; 0 disables EOL gating */
-
-    /* No special hardware -> no primitives. NULL means "tier unavailable",
-     * and the compile-time selection falls through to a copy-based provider. */
-    .bank_flip = NULL,
-    .xip_remap_commit = NULL,
-    .exec_addr_select = NULL,
-    .get_active_slot = NULL,
-};
+        .max_erase_cycles = 100000u,
+    );
 
 const slot_caps_t *boot_get_slot_caps(void) { return &g_reference_caps; }

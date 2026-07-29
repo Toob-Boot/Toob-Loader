@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ type MapEntry struct {
 	Type string
 }
 
-func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocator, outDir string,
+func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, cm *ChipManifest, drivers map[string]*DriverManifest, alloc *Allocator, outDir string,
 	s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget,
 	recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize uint32,
 	walAddrs []uint32, walSizes []uint32, kdmAddr, kdmBudget, cloudCmdAddr, cloudCmdBudget, mailboxAddr, mailboxBudget, forensicAddr, forensicBudget uint32) error {
@@ -179,8 +180,53 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	}
 	b.WriteString("\n")
 
-	// Write fields that dynamic drivers use from Toml/Json
-	if len(hj.Registers) > 0 {
+	// Register Blocks (REG-031): base + per-register offset macros
+	if len(hj.RegisterBlocks) > 0 {
+		b.WriteString("/* ========================================================================\n")
+		b.WriteString(" * HARDWARE REGISTER BLOCKS (from hardware.json register_blocks)\n")
+		b.WriteString(" * ======================================================================== */\n")
+		var blockNames []string
+		for name := range hj.RegisterBlocks {
+			blockNames = append(blockNames, name)
+		}
+		sort.Strings(blockNames)
+		for _, name := range blockNames {
+			block := hj.RegisterBlocks[name]
+			baseMacro := "CHIP_REG_" + strings.ToUpper(name) + "_BASE"
+			b.WriteString(fmt.Sprintf("#define %-40s %sU\n", baseMacro, block.Base))
+
+			var regNames []string
+			for rn := range block.Regs {
+				regNames = append(regNames, rn)
+			}
+			sort.Strings(regNames)
+			for _, rn := range regNames {
+				regMacro := "CHIP_REG_" + strings.ToUpper(name) + "_" + strings.ToUpper(rn)
+				b.WriteString(fmt.Sprintf("#define %-40s (%s + %sU)\n", regMacro, baseMacro, block.Regs[rn]))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// Flat registers (REG-031): standalone addresses without block grouping
+	if len(hj.RegistersFlat) > 0 {
+		b.WriteString("/* ========================================================================\n")
+		b.WriteString(" * HARDWARE REGISTERS FLAT (from hardware.json registers_flat)\n")
+		b.WriteString(" * ======================================================================== */\n")
+		var flatKeys []string
+		for k := range hj.RegistersFlat {
+			flatKeys = append(flatKeys, k)
+		}
+		sort.Strings(flatKeys)
+		for _, k := range flatKeys {
+			macroName := "CHIP_REG_" + strings.ToUpper(k)
+			b.WriteString(fmt.Sprintf("#define %-40s %sU\n", macroName, hj.RegistersFlat[k]))
+		}
+		b.WriteString("\n")
+	}
+
+	// Legacy flat registers fallback (deprecated — use register_blocks/registers_flat)
+	if len(hj.RegisterBlocks) == 0 && len(hj.RegistersFlat) == 0 && len(hj.Registers) > 0 {
 		b.WriteString("/* ========================================================================\n")
 		b.WriteString(" * HARDWARE REGISTERS (Dynamic from hardware.json)\n")
 		b.WriteString(" * ======================================================================== */\n")
@@ -201,6 +247,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		}
 		b.WriteString("\n")
 	}
+
 
 	if len(hj.Constants) > 0 {
 		b.WriteString("/* ========================================================================\n")
@@ -224,7 +271,37 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		b.WriteString("\n")
 	}
 
+	// Reset Causes (REG-031): structured codes + classification from hardware.json
+	if hj.ResetCauses != nil && len(hj.ResetCauses.Codes) > 0 {
+		rc := hj.ResetCauses
+		b.WriteString("/* ========================================================================\n")
+		b.WriteString(" * RESET CAUSE CONSTANTS (from hardware.json reset_causes)\n")
+		b.WriteString(" * ======================================================================== */\n")
+		fmt.Fprintf(&b, "#define %-40s %sU\n", "CHIP_RST_CAUSE_OFFSET", rc.RegisterOffset)
+		fmt.Fprintf(&b, "#define %-40s %sU\n", "CHIP_RST_CAUSE_MASK", rc.Mask)
+		for _, code := range rc.Codes {
+			macroName := "CHIP_RST_" + strings.ToUpper(code.Name)
+			b.WriteString(fmt.Sprintf("#define %-40s %dU\n", macroName, code.Value))
+		}
+		b.WriteString("\n/* ========================================================================\n")
+		b.WriteString(" * WDT REGISTER & RESET ALIASES (REG-023)\n")
+		b.WriteString(" * ======================================================================== */\n")
+		b.WriteString("#define REG_TIMG0_WDT_CONFIG0      CHIP_REG_TIMG0_WDT_CONFIG0\n")
+		b.WriteString("#define REG_TIMG0_WDT_FEED         CHIP_REG_TIMG0_WDT_FEED\n")
+		b.WriteString("#define REG_TIMG0_WDT_WPROTECT     CHIP_REG_TIMG0_WDT_WPROTECT\n")
+		b.WriteString("#define REG_TIMG1_WDT_CONFIG0      CHIP_REG_TIMG1_WDT_CONFIG0\n")
+		b.WriteString("#define REG_TIMG1_WDT_WPROTECT     CHIP_REG_TIMG1_WDT_WPROTECT\n")
+		b.WriteString("#define REG_LP_WDT_CONFIG0         CHIP_REG_LP_WDT_CONFIG0\n")
+		b.WriteString("#define REG_LP_WDT_WPROTECT        CHIP_REG_LP_WDT_WPROTECT\n")
+		b.WriteString("#define REG_LP_WDT_SWD_CONFIG      CHIP_REG_LP_WDT_SWD_CONFIG\n")
+		b.WriteString("#define REG_LP_WDT_SWD_WPROTECT    CHIP_REG_LP_WDT_SWD_WPROTECT\n\n")
+		b.WriteString("#define REG_RESET_CAUSE            (CHIP_REG_PMU_BASE + CHIP_RST_CAUSE_OFFSET)\n")
+		b.WriteString("#define REG_RESET_CAUSE_MASK       CHIP_RST_CAUSE_MASK\n\n")
+		b.WriteString("#define ADDR_CONFIRM_RTC_RAM       ((volatile uint64_t *)(uintptr_t)CHIP_REG_CONFIRM_STORAGE_BASE)\n")
+	}
+
 	if dt.DriverConfig != nil {
+
 		b.WriteString("/* ========================================================================\n")
 		b.WriteString(" * USER DRIVER CONFIGURATION (Dynamic from device.toml)\n")
 		b.WriteString(" * ======================================================================== */\n")
@@ -273,7 +350,64 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		return err
 	}
 
+	// Generate generated_reset_causes.h (REG-031)
+	if hj.ResetCauses != nil && len(hj.ResetCauses.Codes) > 0 {
+		rcPath := filepath.Join(outDir, "generated_reset_causes.h")
+		var rcb strings.Builder
+		rcb.WriteString("/* AUTO-GENERATED BY TOOB MANIFEST COMPILER — DO NOT EDIT */\n")
+		rcb.WriteString("#ifndef GENERATED_RESET_CAUSES_H\n")
+		rcb.WriteString("#define GENERATED_RESET_CAUSES_H\n\n")
+		rcb.WriteString("#include <stdint.h>\n\n")
+
+		rcb.WriteString("#define CHIP_RST_CLASS_UNKNOWN     0U\n")
+		rcb.WriteString("#define CHIP_RST_CLASS_POWER       1U\n")
+		rcb.WriteString("#define CHIP_RST_CLASS_INTENTIONAL 2U\n")
+		rcb.WriteString("#define CHIP_RST_CLASS_CRASH       3U\n\n")
+
+		rcb.WriteString("typedef struct {\n")
+		rcb.WriteString("    uint8_t hw_code;\n")
+		rcb.WriteString("    uint8_t rst_class;\n")
+		rcb.WriteString("} chip_reset_cause_entry_t;\n\n")
+
+		rcb.WriteString("static const chip_reset_cause_entry_t CHIP_RESET_CAUSE_TABLE[] = {\n")
+		for _, code := range hj.ResetCauses.Codes {
+			classConst := "CHIP_RST_CLASS_UNKNOWN"
+			switch code.Class {
+			case "power":
+				classConst = "CHIP_RST_CLASS_POWER"
+			case "intentional":
+				classConst = "CHIP_RST_CLASS_INTENTIONAL"
+			case "crash":
+				classConst = "CHIP_RST_CLASS_CRASH"
+			}
+			rcb.WriteString(fmt.Sprintf("    { %2d, %-28s }, /* %s */\n", code.Value, classConst, code.Name))
+		}
+		rcb.WriteString("};\n")
+		rcb.WriteString(fmt.Sprintf("#define CHIP_RESET_CAUSE_TABLE_LEN %d\n\n", len(hj.ResetCauses.Codes)))
+
+		rcb.WriteString("/**\n")
+		rcb.WriteString(" * @brief Lookup reset class for a hardware reset code.\n")
+		rcb.WriteString(" * @return CHIP_RST_CLASS_* constant.\n")
+		rcb.WriteString(" */\n")
+		rcb.WriteString("static inline uint8_t chip_rst_class_lookup(uint8_t hw_code)\n")
+		rcb.WriteString("{\n")
+		rcb.WriteString("    for (uint8_t i = 0; i < CHIP_RESET_CAUSE_TABLE_LEN; i++) {\n")
+		rcb.WriteString("        if (CHIP_RESET_CAUSE_TABLE[i].hw_code == hw_code) {\n")
+		rcb.WriteString("            return CHIP_RESET_CAUSE_TABLE[i].rst_class;\n")
+		rcb.WriteString("        }\n")
+		rcb.WriteString("    }\n")
+		rcb.WriteString("    return CHIP_RST_CLASS_UNKNOWN;\n")
+		rcb.WriteString("}\n\n")
+
+		rcb.WriteString("#endif /* GENERATED_RESET_CAUSES_H */\n")
+
+		if err := writeFileIfChanged(rcPath, []byte(rcb.String())); err != nil {
+			return err
+		}
+	}
+
 	// Generate boot_layout.h
+
 	layoutPath := filepath.Join(outDir, "boot_layout.h")
 	var lob strings.Builder
 	lob.WriteString("/* AUTO-GENERATED BY TOOB MANIFEST COMPILER — DO NOT EDIT */\n")
@@ -409,7 +543,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	var ldb strings.Builder
 	ldb.WriteString("/* AUTO-GENERATED BY TOOB MANIFEST COMPILER */\n")
 	ldb.WriteString(fmt.Sprintf("__S0_BUDGET_START = 0x%08X;\n", s0Addr))
-	ldb.WriteString(fmt.Sprintf("__S0_BUDGET_SIZE = 0x%08X;\n", s0Budget))
+	fmt.Fprintf(&ldb, "__S0_BUDGET_SIZE = 0x%08X;\n", s0Budget)
 	ldb.WriteString(fmt.Sprintf("__S1A_BUDGET_START = 0x%08X;\n", s1aAddr))
 	ldb.WriteString(fmt.Sprintf("__S1B_BUDGET_START = 0x%08X;\n", s1bAddr))
 	ldb.WriteString(fmt.Sprintf("__S1_BUDGET_SIZE = 0x%08X;\n", s1Budget))
@@ -427,7 +561,7 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 	s0ld.WriteString("ENTRY(main)\n\n")
 	s0ld.WriteString("INCLUDE generated_memory.ld\n\n")
 	s0ld.WriteString("MEMORY {\n")
-	s0ld.WriteString(fmt.Sprintf("    S0_RAM (rwx) : ORIGIN = %s, LENGTH = %s\n", hj.Memory.RamBase, hj.Memory.RamSize))
+	s0ld.WriteString(fmt.Sprintf("    S0_RAM (rwx) : ORIGIN = %s, LENGTH = %s\n", hj.Memory.IramBase, hj.Memory.IramSize))
 	s0ld.WriteString("    S0_ROM (rx)  : ORIGIN = __S0_BUDGET_START, LENGTH = __S0_BUDGET_SIZE\n")
 	s0ld.WriteString("}\n\n")
 	s0ld.WriteString("SECTIONS {\n")
@@ -506,7 +640,349 @@ func GenerateHeadersAndScripts(dt *DeviceToml, hj *HardwareJson, alloc *Allocato
 		}
 	}
 
+	if err := GenerateProvenanceReport(hj, outDir); err != nil {
+		ui.Warn("Failed to generate provenance report: %v", err)
+	}
+
+	if err := generatePlatformWiring(cm, hj, drivers, outDir); err != nil {
+		return fmt.Errorf("failed to generate platform wiring: %w", err)
+	}
+
 	return nil
+}
+
+func LoadDriverManifests(halRoot string, driverPaths []string) map[string]*DriverManifest {
+	drivers := make(map[string]*DriverManifest)
+	for _, relPath := range driverPaths {
+		dir := filepath.Dir(relPath)
+		manifestPath := filepath.Join(halRoot, dir, "driver_manifest.json")
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			continue
+		}
+		var dm DriverManifest
+		if err := json.Unmarshal(data, &dm); err == nil && dm.Trait != "" {
+			drivers[dm.Trait] = &dm
+		}
+	}
+	return drivers
+}
+
+func sanitizeSymbol(s string) string {
+	s = strings.ReplaceAll(s, "-", "_")
+	s = strings.ReplaceAll(s, ".", "_")
+	s = strings.ToLower(s)
+	return s
+}
+
+func generatePlatformWiring(cm *ChipManifest, hj *HardwareJson, drivers map[string]*DriverManifest, outDir string) error {
+	chipPrefix := "chip"
+	if hj != nil && hj.ChipFamily != "" {
+		chipPrefix = sanitizeSymbol(hj.ChipFamily)
+	} else if cm != nil && cm.Name != "" {
+		chipPrefix = sanitizeSymbol(cm.Name)
+	}
+
+	archHeader := "arch_riscv.h"
+	archDisableInterrupts := "arch_riscv_disable_interrupts()"
+	if cm != nil {
+		switch strings.ToLower(cm.Arch) {
+		case "arm", "armv7m", "cortex-m", "cortex_m":
+			archHeader = "arch_arm.h"
+			archDisableInterrupts = "arch_arm_disable_interrupts()"
+		case "riscv32", "riscv", "riscv64":
+			archHeader = "arch_riscv.h"
+			archDisableInterrupts = "arch_riscv_disable_interrupts()"
+		case "xtensa":
+			archHeader = "arch_xtensa.h"
+			archDisableInterrupts = "arch_xtensa_disable_interrupts()"
+		}
+	}
+
+	sym := func(trait, key, fallback string) string {
+		if drivers != nil {
+			if dm, ok := drivers[trait]; ok && dm.Symbols != nil {
+				if s, found := dm.Symbols[key]; found && s != "" {
+					return s
+				}
+			}
+		}
+		return fallback
+	}
+
+	flashInit := sym("flash", "init", "esp_flash_init")
+	flashDeinit := sym("flash", "deinit", "esp_flash_deinit")
+	flashRead := sym("flash", "read", "esp_flash_read")
+	flashWrite := sym("flash", "write", "esp_flash_write")
+	flashErase := sym("flash", "erase_sector", "esp_flash_erase_sector")
+	flashGetSector := sym("flash", "get_sector_size", "esp_flash_get_sector_size")
+	flashGetErr := sym("flash", "get_vendor_error", "esp_flash_get_vendor_error")
+
+	confirmInit := sym("confirm", "init", "esp_confirm_init")
+	confirmDeinit := sym("confirm", "deinit", "esp_confirm_deinit")
+	confirmCheck := sym("confirm", "check_ok", "esp_confirm_check_ok")
+	confirmClear := sym("confirm", "clear", "esp_confirm_clear")
+
+	wdtInit := sym("wdt", "init", "esp_rwdt_init")
+	wdtDeinit := sym("wdt", "deinit", "esp_rwdt_deinit")
+	wdtKick := sym("wdt", "kick", "esp_rwdt_kick")
+	wdtSuspend := sym("wdt", "suspend", "esp_rwdt_suspend")
+	wdtResume := sym("wdt", "resume", "esp_rwdt_resume")
+
+	clockResetReason := sym("clock", "get_reset_reason", "esp_get_reset_reason")
+
+	consoleInit := sym("console", "init", "esp_uart_init")
+	consoleDeinit := sym("console", "deinit", "esp_uart_deinit")
+	consolePutchar := sym("console", "putchar", "esp_uart_putchar")
+	consoleGetchar := sym("console", "getchar", "esp_uart_getchar")
+	consoleFlush := sym("console", "flush", "esp_uart_flush")
+
+	slotCapsSymbol := "NULL"
+	if drivers != nil {
+		if slotDm, ok := drivers["slot_caps"]; ok && slotDm.Symbols != nil {
+			if s, found := slotDm.Symbols["slot_caps"]; found && s != "" {
+				slotCapsSymbol = "&" + s
+			}
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("/* AUTO-GENERATED BY TOOB MANIFEST COMPILER */\n")
+	b.WriteString("#include \"boot_hal.h\"\n")
+	b.WriteString("#include \"boot_panic.h\"\n")
+	b.WriteString("#include \"boot_platform_bringup.h\"\n")
+	b.WriteString("#include \"generated_boot_config.h\"\n\n")
+
+	b.WriteString(fmt.Sprintf("#include \"%s\"\n", archHeader))
+	b.WriteString("#include \"esp_common.h\"\n")
+	b.WriteString("#include \"efuse.h\"\n")
+
+	if drivers != nil {
+		if slotDm, ok := drivers["slot_caps"]; ok {
+			for _, h := range slotDm.Headers {
+				b.WriteString(fmt.Sprintf("#include \"%s\"\n", h))
+			}
+		}
+	}
+	b.WriteString("\n#include <stddef.h>\n\n")
+
+	b.WriteString("/* Vendor Driver Declarations */\n")
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(void);\n", flashInit))
+	b.WriteString(fmt.Sprintf("extern void %s(void);\n", flashDeinit))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(uint32_t addr, void *buf, size_t len);\n", flashRead))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(uint32_t addr, const void *buf, size_t len);\n", flashWrite))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(uint32_t addr);\n", flashErase))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(uint32_t addr, size_t *size_out);\n", flashGetSector))
+	b.WriteString(fmt.Sprintf("extern uint32_t %s(void);\n\n", flashGetErr))
+
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(void);\n", confirmInit))
+	b.WriteString(fmt.Sprintf("extern void %s(void);\n", confirmDeinit))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(void);\n", confirmCheck))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(void);\n\n", confirmClear))
+
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(uint32_t timeout_ms);\n", wdtInit))
+	b.WriteString(fmt.Sprintf("extern void %s(void);\n", wdtDeinit))
+	b.WriteString(fmt.Sprintf("extern void %s(void);\n", wdtKick))
+	b.WriteString(fmt.Sprintf("extern void %s(void);\n", wdtSuspend))
+	b.WriteString(fmt.Sprintf("extern void %s(void);\n\n", wdtResume))
+
+	b.WriteString(fmt.Sprintf("extern reset_reason_t %s(void);\n\n", clockResetReason))
+
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s(uint32_t baudrate);\n", consoleInit))
+	b.WriteString(fmt.Sprintf("extern void %s(void);\n", consoleDeinit))
+	b.WriteString(fmt.Sprintf("extern void %s(char c);\n", consolePutchar))
+	b.WriteString(fmt.Sprintf("extern char %s(void);\n", consoleGetchar))
+	b.WriteString(fmt.Sprintf("extern void %s(void);\n\n", consoleFlush))
+
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_read_pubkey(uint8_t *out_pubkey, size_t len);\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_read_dslc(uint8_t *out_dslc, size_t len);\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_write_dslc(const uint8_t *dslc, size_t len);\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_read_monotonic(uint32_t *out_counter);\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_advance_monotonic(void);\n\n", chipPrefix))
+
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_burn_pubkey(const uint8_t *pubkey, size_t len);\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_prov_write_dslc(const uint8_t *dslc, size_t len);\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_set_protection_bits(uint32_t mask);\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_enable_secure_boot(void);\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("extern boot_status_t %s_enable_flash_encryption(void);\n\n", chipPrefix))
+
+	b.WriteString("/* Trait Struct Instantiations */\n")
+	b.WriteString("static const flash_hal_t g_platform_flash_hal =\n")
+	b.WriteString("    TOOB_FLASH_HAL_V2(\n")
+	b.WriteString(fmt.Sprintf("        %s,\n", flashInit))
+	b.WriteString(fmt.Sprintf("        %s,\n", flashDeinit))
+	b.WriteString(fmt.Sprintf("        %s,\n", flashRead))
+	b.WriteString(fmt.Sprintf("        %s,\n", flashWrite))
+	b.WriteString(fmt.Sprintf("        %s,\n", flashErase))
+	b.WriteString(fmt.Sprintf("        %s,\n", flashGetSector))
+	b.WriteString(fmt.Sprintf("        .get_last_vendor_error = %s,\n", flashGetErr))
+	b.WriteString("        .max_sector_size      = CHIP_FLASH_MAX_SECTOR_SIZE,\n")
+	b.WriteString("        .total_size           = CHIP_FLASH_TOTAL_SIZE,\n")
+	b.WriteString("        .max_erase_cycles     = 100000U,\n")
+	b.WriteString("        .write_align          = CHIP_FLASH_WRITE_ALIGNMENT,\n")
+	b.WriteString("        .erased_value         = CHIP_FLASH_ERASED_BYTE,\n")
+	b.WriteString("        .erase_time_us_max    = 40000U,\n")
+	b.WriteString("        .write_time_us_page   = 800U\n")
+	b.WriteString("    );\n\n")
+
+	b.WriteString("static const confirm_hal_t g_platform_confirm_hal =\n")
+	b.WriteString("    TOOB_CONFIRM_HAL_V2(\n")
+	b.WriteString(fmt.Sprintf("        %s,\n", confirmInit))
+	b.WriteString(fmt.Sprintf("        %s,\n", confirmDeinit))
+	b.WriteString(fmt.Sprintf("        %s,\n", confirmCheck))
+	b.WriteString(fmt.Sprintf("        %s\n", confirmClear))
+	b.WriteString("    );\n\n")
+
+	b.WriteString("static const wdt_hal_t g_platform_wdt_hal =\n")
+	b.WriteString("    TOOB_WDT_HAL_V2(\n")
+	b.WriteString(fmt.Sprintf("        %s,\n", wdtInit))
+	b.WriteString(fmt.Sprintf("        %s,\n", wdtDeinit))
+	b.WriteString(fmt.Sprintf("        %s,\n", wdtKick))
+	b.WriteString(fmt.Sprintf("        %s,\n", wdtSuspend))
+	b.WriteString(fmt.Sprintf("        %s\n", wdtResume))
+	b.WriteString("    );\n\n")
+
+	b.WriteString("static boot_status_t g_clock_init_wrapper(void) {\n")
+	b.WriteString("    arch_riscv_timer_init(CHIP_REG_SYSTIMER_BASE, CHIP_CPU_FREQ_HZ);\n")
+	b.WriteString("    return BOOT_OK;\n")
+	b.WriteString("}\n\n")
+
+	b.WriteString("static void g_clock_deinit_wrapper(void) {\n")
+	b.WriteString("}\n\n")
+
+	b.WriteString("static const clock_hal_t g_platform_clock_hal =\n")
+	b.WriteString("    TOOB_CLOCK_HAL_V2(\n")
+	b.WriteString("        g_clock_init_wrapper,\n")
+	b.WriteString("        g_clock_deinit_wrapper,\n")
+	b.WriteString("        arch_riscv_get_tick_ms,\n")
+	b.WriteString("        arch_riscv_delay_ms,\n")
+	b.WriteString(fmt.Sprintf("        %s\n", clockResetReason))
+	b.WriteString("    );\n\n")
+
+	b.WriteString("static boot_status_t g_console_init_wrapper(uint32_t baudrate) {\n")
+	b.WriteString(fmt.Sprintf("    return %s(baudrate);\n", consoleInit))
+	b.WriteString("}\n\n")
+
+	b.WriteString("static const console_hal_t g_platform_console_hal =\n")
+	b.WriteString("    TOOB_CONSOLE_HAL_V2(\n")
+	b.WriteString("        g_console_init_wrapper,\n")
+	b.WriteString(fmt.Sprintf("        %s,\n", consoleDeinit))
+	b.WriteString(fmt.Sprintf("        %s,\n", consolePutchar))
+	b.WriteString(fmt.Sprintf("        %s,\n", consoleGetchar))
+	b.WriteString(fmt.Sprintf("        %s\n", consoleFlush))
+	b.WriteString("    );\n\n")
+
+	b.WriteString("#define RNG_INTER_READ_CYCLES 160U\n\n")
+	b.WriteString("static inline uint32_t rng_get_cycle_count(void)\n")
+	b.WriteString("{\n")
+	b.WriteString("    uint32_t cycles;\n")
+	b.WriteString("    __asm__ volatile(\"csrr %0, mcycle\" : \"=r\"(cycles));\n")
+	b.WriteString("    return cycles;\n")
+	b.WriteString("}\n\n")
+
+	b.WriteString(fmt.Sprintf("static boot_status_t %s_hw_random(uint8_t *buf, size_t len)\n", chipPrefix))
+	b.WriteString("{\n")
+	b.WriteString("    if (!buf || len == 0) {\n")
+	b.WriteString("        return BOOT_ERR_INVALID_ARG;\n")
+	b.WriteString("    }\n")
+	b.WriteString("    uint32_t last_read_cycle = rng_get_cycle_count();\n")
+	b.WriteString("    size_t pos = 0;\n")
+	b.WriteString("    while (pos < len) {\n")
+	b.WriteString("        while ((rng_get_cycle_count() - last_read_cycle) < RNG_INTER_READ_CYCLES) {\n")
+	b.WriteString("        }\n")
+	b.WriteString("        uint32_t word = REG_READ(CHIP_REG_RNG_DATA_REG);\n")
+	b.WriteString("        last_read_cycle = rng_get_cycle_count();\n")
+	b.WriteString("        size_t remaining = len - pos;\n")
+	b.WriteString("        size_t chunk = (remaining >= 4U) ? 4U : remaining;\n")
+	b.WriteString("        for (size_t i = 0; i < chunk; i++) {\n")
+	b.WriteString("            buf[pos + i] = (uint8_t)(word >> (i * 8U));\n")
+	b.WriteString("        }\n")
+	b.WriteString("        pos += chunk;\n")
+	b.WriteString("    }\n")
+	b.WriteString("    return BOOT_OK;\n")
+	b.WriteString("}\n\n")
+
+	b.WriteString("static const crypto_hal_t g_platform_crypto_hal =\n")
+	b.WriteString("    TOOB_CRYPTO_HAL_V2(\n")
+	b.WriteString("        toob_crypto_hal_init,\n")
+	b.WriteString("        toob_crypto_hal_deinit,\n")
+	b.WriteString("        toob_crypto_hal_hash_init,\n")
+	b.WriteString("        toob_crypto_hal_hash_update,\n")
+	b.WriteString("        toob_crypto_hal_hash_finish,\n")
+	b.WriteString("        toob_crypto_hal_verify_signature,\n")
+	b.WriteString(fmt.Sprintf("        %s_hw_random,\n", chipPrefix))
+	b.WriteString("        toob_crypto_hal_get_hash_ctx_size,\n")
+	b.WriteString("        .verify_pqc               = toob_crypto_hal_verify_pqc,\n")
+	b.WriteString(fmt.Sprintf("        .read_pubkey              = %s_read_pubkey,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .read_dslc                = %s_read_dslc,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .write_dslc               = %s_write_dslc,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .read_monotonic_counter   = %s_read_monotonic,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .advance_monotonic_counter = %s_advance_monotonic,\n", chipPrefix))
+	b.WriteString("        .is_pqc_enforced          = toob_crypto_hal_is_pqc_enforced,\n")
+	b.WriteString("        .verify_signature_ph      = toob_crypto_hal_verify_signature_ph\n")
+	b.WriteString("    );\n\n")
+
+	b.WriteString("static const provisioning_hal_t g_platform_provisioning_hal = {\n")
+	b.WriteString(fmt.Sprintf("    .burn_pubkey          = %s_burn_pubkey,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("    .write_dslc           = %s_prov_write_dslc,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("    .set_protection_bits  = %s_set_protection_bits,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("    .enable_secure_boot   = %s_enable_secure_boot,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("    .enable_flash_encryption = %s_enable_flash_encryption,\n", chipPrefix))
+	b.WriteString("};\n\n")
+
+	b.WriteString("static const entropy_hal_t g_platform_entropy_hal =\n")
+	b.WriteString("    TOOB_ENTROPY_HAL_V3(\n")
+	b.WriteString(fmt.Sprintf("        NULL, NULL, %s_hw_random, .is_hardware_trng = true\n", chipPrefix))
+	b.WriteString("    );\n\n")
+
+	b.WriteString("static const keystore_hal_t g_platform_keystore_hal =\n")
+	b.WriteString("    TOOB_KEYSTORE_HAL_V3(\n")
+	b.WriteString(fmt.Sprintf("        NULL, NULL, %s_read_pubkey, %s_read_dslc, %s_write_dslc,\n", chipPrefix, chipPrefix, chipPrefix))
+	b.WriteString(fmt.Sprintf("        .read_monotonic_counter = %s_read_monotonic,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .advance_monotonic_counter = %s_advance_monotonic,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .burn_pubkey = %s_burn_pubkey,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .set_protection_bits = %s_set_protection_bits,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .enable_secure_boot = %s_enable_secure_boot,\n", chipPrefix))
+	b.WriteString(fmt.Sprintf("        .enable_flash_encryption = %s_enable_flash_encryption\n", chipPrefix))
+	b.WriteString("    );\n\n")
+
+	b.WriteString("static const boot_platform_t g_platform_instance = {\n")
+	b.WriteString("    .flash        = &g_platform_flash_hal,\n")
+	b.WriteString("    .confirm      = &g_platform_confirm_hal,\n")
+	b.WriteString("    .crypto       = &g_platform_crypto_hal,\n")
+	b.WriteString("    .clock        = &g_platform_clock_hal,\n")
+	b.WriteString("    .wdt          = &g_platform_wdt_hal,\n")
+	b.WriteString("    .console      = &g_platform_console_hal,\n")
+	b.WriteString("    .soc          = NULL,\n")
+	b.WriteString("    .provisioning = &g_platform_provisioning_hal,\n")
+	b.WriteString(fmt.Sprintf("    .slot_caps    = %s,\n", slotCapsSymbol))
+	b.WriteString("    .entropy      = &g_platform_entropy_hal,\n")
+	b.WriteString("    .keystore     = &g_platform_keystore_hal,\n")
+	b.WriteString("};\n\n")
+
+	b.WriteString("static const bringup_step_t g_bringup_steps[] = {\n")
+	b.WriteString("    { BOOT_HAL_KIND_CLOCK,   true,  SITE_BRINGUP_CLOCK },\n")
+	b.WriteString("    { BOOT_HAL_KIND_FLASH,   true,  SITE_BRINGUP_FLASH },\n")
+	b.WriteString("    { BOOT_HAL_KIND_WDT,     true,  SITE_BRINGUP_WDT },\n")
+	b.WriteString("    { BOOT_HAL_KIND_CRYPTO,  true,  SITE_BRINGUP_CRYPTO },\n")
+	b.WriteString("    { BOOT_HAL_KIND_CONFIRM, true,  SITE_BRINGUP_CONFIRM },\n")
+	b.WriteString("    { BOOT_HAL_KIND_CONSOLE, false, 0 },\n")
+	b.WriteString("};\n\n")
+
+	b.WriteString("const boot_platform_t *boot_platform_init(void)\n")
+	b.WriteString("{\n")
+	b.WriteString(fmt.Sprintf("    %s;\n", archDisableInterrupts))
+	b.WriteString("    (void)boot_platform_bringup(&g_platform_instance, g_bringup_steps,\n")
+	b.WriteString("                                sizeof(g_bringup_steps) / sizeof(g_bringup_steps[0]));\n")
+	b.WriteString("    return &g_platform_instance;\n")
+	b.WriteString("}\n")
+
+	cPath := filepath.Join(outDir, "generated_platform_wiring.c")
+	incPath := filepath.Join(outDir, "generated_platform_wiring.inc")
+	if err := writeFileIfChanged(incPath, []byte(b.String())); err != nil {
+		return err
+	}
+	return writeFileIfChanged(cPath, []byte(b.String()))
 }
 
 func writeFileIfChanged(path string, data []byte) error {

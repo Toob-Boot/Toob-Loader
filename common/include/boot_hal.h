@@ -71,6 +71,22 @@ typedef struct {
 _Static_assert(offsetof(flash_hal_t, erased_value) < offsetof(flash_hal_t, erase_time_us_max),
                "ABI Layout Violation: erase_time_us_max must be appended at the end of flash_hal_t");
 
+/**
+ * @brief Initializer for flash_hal_t (REG-033).
+ * Positional: 6 mandatory function pointers (init..get_sector_size).
+ * Data fields and optional fn pointers via trailing designated initializers.
+ */
+#define TOOB_FLASH_HAL_V2(init_, deinit_, read_, write_,                    \
+                          erase_sector_, get_sector_size_, ...)             \
+    { .abi_version     = TOOB_HAL_ABI_V2,                                  \
+      .init            = (init_),                                          \
+      .deinit          = (deinit_),                                        \
+      .read            = (read_),                                          \
+      .write           = (write_),                                         \
+      .erase_sector    = (erase_sector_),                                  \
+      .get_sector_size = (get_sector_size_),                                \
+      __VA_ARGS__ }
+
 /* --- 2. Confirm HAL (Survival State Storage) --- */
 
 /**
@@ -99,6 +115,15 @@ typedef struct {
   boot_status_t (*clear)(void);
 } confirm_hal_t;
 
+/** @brief Initializer for confirm_hal_t (REG-033). All 4 fields mandatory. */
+#define TOOB_CONFIRM_HAL_V2(init_, deinit_, check_ok_, clear_, ...)         \
+    { .abi_version = TOOB_HAL_ABI_V2,                                      \
+      .init     = (init_),                                                 \
+      .deinit   = (deinit_),                                               \
+      .check_ok = (check_ok_),                                             \
+      .clear    = (clear_),                                                \
+      __VA_ARGS__ }
+
 /* --- 3. Watchdog HAL (Anti-Lockup) --- */
 
 /**
@@ -122,7 +147,79 @@ typedef struct {
   void (*resume)(void);
 } wdt_hal_t;
 
-/* --- 4. Crypto HAL (Security Primitives) --- */
+/** @brief Initializer for wdt_hal_t (REG-033). All 5 fields mandatory. */
+#define TOOB_WDT_HAL_V2(init_, deinit_, kick_, suspend_, resume_, ...)     \
+    { .abi_version                  = TOOB_HAL_ABI_V2,                     \
+      .init                         = (init_),                             \
+      .deinit                       = (deinit_),                           \
+      .kick                         = (kick_),                             \
+      .suspend_for_critical_section = (suspend_),                          \
+      .resume                       = (resume_),                           \
+      __VA_ARGS__ }
+
+//* --- 4. Crypto HAL (Security Primitives) --- */
+
+#define TOOB_HAL_ABI_V3 0x03000000
+
+/**
+ * @brief Hardware Entropy & TRNG Interface (ABI v3)
+ */
+typedef struct {
+  uint32_t abi_version; /**< MUST be 0x03000000 (V3) */
+
+  boot_status_t (*init)(void);
+  void (*deinit)(void);
+
+  /**
+   * @brief Generate cryptographic random bytes.
+   * HAL-Contract: Must perform NIST SP 800-90B health tests.
+   */
+  boot_status_t (*random)(uint8_t *buf, size_t len);
+
+  bool is_hardware_trng;
+} entropy_hal_t;
+
+#define TOOB_ENTROPY_HAL_V3(init_, deinit_, random_, ...)                    \
+    { .abi_version      = TOOB_HAL_ABI_V3,                                  \
+      .init             = (init_),                                          \
+      .deinit           = (deinit_),                                        \
+      .random           = (random_),                                        \
+      __VA_ARGS__ }
+
+/**
+ * @brief Keystore & OTP Controller Interface (ABI v3)
+ */
+typedef struct {
+  uint32_t abi_version; /**< MUST be 0x03000000 (V3) */
+
+  boot_status_t (*init)(void);
+  void (*deinit)(void);
+
+  /* Hardware Key & Identity Accessors */
+  boot_status_t (*read_pubkey)(uint8_t *key, size_t key_len, uint8_t key_index);
+  boot_status_t (*read_chip_uid)(uint8_t *buf, size_t max_len, size_t *out_len);
+  boot_status_t (*read_dslc)(uint8_t *buffer, size_t *len);
+  boot_status_t (*write_dslc)(const uint8_t *value, size_t len);
+
+  /* Hardware Monotonic Counter */
+  boot_status_t (*read_monotonic_counter)(uint32_t *ctr);
+  boot_status_t (*advance_monotonic_counter)(void);
+
+  /* Factory Provisioning & Security Lockdowns */
+  boot_status_t (*burn_pubkey)(const uint8_t *key, size_t len, uint8_t index);
+  boot_status_t (*set_protection_bits)(uint32_t bitmask);
+  boot_status_t (*enable_secure_boot)(void);
+  boot_status_t (*enable_flash_encryption)(void);
+} keystore_hal_t;
+
+#define TOOB_KEYSTORE_HAL_V3(init_, deinit_, read_pubkey_, read_dslc_, write_dslc_, ...) \
+    { .abi_version = TOOB_HAL_ABI_V3,                                      \
+      .init        = (init_),                                              \
+      .deinit      = (deinit_),                                            \
+      .read_pubkey = (read_pubkey_),                                       \
+      .read_dslc   = (read_dslc_),                                         \
+      .write_dslc  = (write_dslc_),                                        \
+      __VA_ARGS__ }
 
 /**
  * @brief Cryptographic Core Engine
@@ -185,6 +282,38 @@ typedef struct {
       const uint8_t *sig, const uint8_t *pubkey);
 } crypto_hal_t;
 
+/**
+ * @brief Initializer for crypto_hal_t (REG-033).
+ * Positional: 8 core primitives (init..get_hash_ctx_size).
+ * OTP accessors, PQC, and vendor-error via trailing designated initializers.
+ */
+#define TOOB_CRYPTO_HAL_V2(init_, deinit_, hash_init_, hash_update_,        \
+                           hash_finish_, verify_sig_, random_,              \
+                           get_hash_ctx_size_, ...)                         \
+    { .abi_version        = TOOB_HAL_ABI_V2,                               \
+      .init               = (init_),                                       \
+      .deinit             = (deinit_),                                     \
+      .hash_init          = (hash_init_),                                  \
+      .hash_update        = (hash_update_),                                \
+      .hash_finish        = (hash_finish_),                                \
+      .verify_signature   = (verify_sig_),                                 \
+      .random             = (random_),                                     \
+      .get_hash_ctx_size  = (get_hash_ctx_size_),                          \
+      __VA_ARGS__ }
+
+#define TOOB_CRYPTO_HAL_V3(init_, deinit_, hash_init_, hash_update_,        \
+                           hash_finish_, verify_sig_,                       \
+                           get_hash_ctx_size_, ...)                         \
+    { .abi_version        = TOOB_HAL_ABI_V3,                               \
+      .init               = (init_),                                       \
+      .deinit             = (deinit_),                                     \
+      .hash_init          = (hash_init_),                                  \
+      .hash_update        = (hash_update_),                                \
+      .hash_finish        = (hash_finish_),                                \
+      .verify_signature   = (verify_sig_),                                 \
+      .get_hash_ctx_size  = (get_hash_ctx_size_),                          \
+      __VA_ARGS__ }
+
 /* --- 5. Clock HAL (Timing & Resets) --- */
 
 /**
@@ -203,6 +332,17 @@ typedef struct {
   reset_reason_t (*get_reset_reason)(void);
 } clock_hal_t;
 
+/** @brief Initializer for clock_hal_t (REG-033). All 5 fields mandatory. */
+#define TOOB_CLOCK_HAL_V2(init_, deinit_, get_tick_ms_, delay_ms_,          \
+                           get_reset_reason_, ...)                           \
+    { .abi_version      = TOOB_HAL_ABI_V2,                                 \
+      .init             = (init_),                                         \
+      .deinit           = (deinit_),                                       \
+      .get_tick_ms      = (get_tick_ms_),                                  \
+      .delay_ms         = (delay_ms_),                                     \
+      .get_reset_reason = (get_reset_reason_),                             \
+      __VA_ARGS__ }
+
 /* --- 6. Console HAL (Passive Debug Logging) --- */
 
 /**
@@ -220,6 +360,16 @@ typedef struct {
   boot_status_t (*getchar)(uint8_t *out, uint32_t timeout_ms);
   void (*flush)(void);
 } console_hal_t;
+
+/** @brief Initializer for console_hal_t (REG-033). All 5 fields mandatory. */
+#define TOOB_CONSOLE_HAL_V2(init_, deinit_, putchar_, getchar_, flush_, ...)\
+    { .abi_version = TOOB_HAL_ABI_V2,                                      \
+      .init    = (init_),                                                  \
+      .deinit  = (deinit_),                                                \
+      .putchar = (putchar_),                                               \
+      .getchar = (getchar_),                                               \
+      .flush   = (flush_),                                                 \
+      __VA_ARGS__ }
 
 /* --- 7. SoC Guard HAL (Multi-Core & Power) --- */
 
@@ -275,6 +425,17 @@ typedef struct {
   toob_swap_notify_fn swap_notify;
 } soc_hal_t;
 
+/**
+ * @brief Initializer for soc_hal_t (REG-033).
+ * Positional: init, deinit only (the only universal SOC primitives).
+ * All other fields vary wildly between targets.
+ */
+#define TOOB_SOC_HAL_V2(init_, deinit_, ...)                               \
+    { .abi_version = TOOB_HAL_ABI_V2,                                      \
+      .init   = (init_),                                                   \
+      .deinit = (deinit_),                                                 \
+      __VA_ARGS__ }
+
 /* --- 8. Provisioning HAL (Factory & Lifecycle) --- */
 
 /**
@@ -313,6 +474,8 @@ typedef struct {
   const soc_hal_t *soc;                   /**< Optional */
   const provisioning_hal_t *provisioning; /**< Optional */
   const slot_caps_t *slot_caps;           /**< Optional, added in ST-015 */
+  const entropy_hal_t *entropy;           /**< Optional in v2, PFLICHT in v3 */
+  const keystore_hal_t *keystore;         /**< Optional in v2, PFLICHT in v3 */
 } boot_platform_t;
 
 /**

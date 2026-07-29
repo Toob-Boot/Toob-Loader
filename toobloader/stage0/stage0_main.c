@@ -260,8 +260,10 @@ int main(void) {
 
   /* Siegelprüfung direkt vor dem Jump */
   if (boot_proof_verify(&proof, g_seal_key) != BOOT_OK) {
+    boot_secure_zeroize(g_seal_key, sizeof(g_seal_key));
     dead_halt();
   }
+  boot_secure_zeroize(g_seal_key, sizeof(g_seal_key));
 
   /* Deinit Hardware (Schließt Flash/Crypto für S1-Isolation) */
   if (platform->crypto)

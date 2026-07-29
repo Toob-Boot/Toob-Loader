@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/apiclient"
+	"github.com/toob-boot/toob/internal/conformance"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/ui"
@@ -67,6 +68,18 @@ Examples:
 		if err := checkManifestDependencies(cmd_defaultCtx(), absDir, client); err != nil {
 			return err
 		}
+
+		// Mandatory HAL Conformance Gate (REG-042)
+		ui.Step("Running HAL Conformance Gate...")
+		confReport, confErr := conformance.AuditPackage(absDir)
+		if confErr != nil || confReport == nil || !confReport.Passed {
+			return fmt.Errorf("FATAL [CONFORMANCE_FAIL]: Package failed HAL conformance audit! Run 'toob conformance %s' for details.", absDir)
+		}
+		jsonPath := filepath.Join(absDir, "conformance_report.json")
+		mdPath := filepath.Join(absDir, "conformance_report.md")
+		_ = conformance.ExportReportJSON(confReport, jsonPath)
+		_ = conformance.ExportReportMarkdown(confReport, mdPath)
+		ui.Success("HAL Conformance audit PASSED cleanly. Generated CRA compliance reports.")
 		// Name collision pre-check (Gap 14)
 		manifestName := detectPackageName(absDir)
 		if manifestName != "" {

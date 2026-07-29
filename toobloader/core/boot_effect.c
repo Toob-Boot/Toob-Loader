@@ -77,11 +77,11 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform,
       }
 
       if (caps->exec_model == SLOT_EXEC_BANK_SWAP) {
-        if (!caps->bank_flip) return BOOT_ERR_NOT_SUPPORTED;
-        op_stat = caps->bank_flip(fx[i].dst);
+        if (!caps->ops.bank_swap.bank_flip) return BOOT_ERR_NOT_SUPPORTED;
+        op_stat = caps->ops.bank_swap.bank_flip(fx[i].dst);
       } else if (caps->exec_model == SLOT_EXEC_XIP_REMAP) {
-        if (!caps->xip_remap_commit) return BOOT_ERR_NOT_SUPPORTED;
-        op_stat = caps->xip_remap_commit(fx[i].src);
+        if (!caps->ops.xip_remap.xip_remap_commit) return BOOT_ERR_NOT_SUPPORTED;
+        op_stat = caps->ops.xip_remap.xip_remap_commit(fx[i].src);
       } else if (caps->exec_model == SLOT_EXEC_RELOCATABLE) {
 #ifdef TOOB_TMR_HAS_ACTIVE_APP_SLOT
         wal_tmr_payload_t tmr __attribute__((aligned(8)));

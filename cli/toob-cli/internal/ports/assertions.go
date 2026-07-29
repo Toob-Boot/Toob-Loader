@@ -601,6 +601,36 @@ func assertLockToolchainFromPort() {
 	_ = lockfile.ToolchainEntry{Version: p.Version}
 }
 
+func assertDriverManifestToPort() {
+	var r manifest.DriverManifest
+	_ = DriverManifest{
+		Name: r.Name, Author: r.Author, Version: r.Version, Description: r.Description,
+		Trait: r.Trait, AbiVersion: r.AbiVersion, Headers: r.Headers, Symbols: r.Symbols,
+	}
+}
+
+func assertDriverManifestFromPort() {
+	var p DriverManifest
+	_ = manifest.DriverManifest{
+		Name: p.Name, Author: p.Author, Version: p.Version, Description: p.Description,
+		Trait: p.Trait, AbiVersion: p.AbiVersion, Headers: p.Headers, Symbols: p.Symbols,
+	}
+}
+
+func assertProvenanceToPort() {
+	var r manifest.Provenance
+	_ = Provenance{
+		Source: r.Source, Ref: r.Ref, Verified: r.Verified,
+	}
+}
+
+func assertProvenanceFromPort() {
+	var p Provenance
+	_ = manifest.Provenance{
+		Source: p.Source, Ref: p.Ref, Verified: p.Verified,
+	}
+}
+
 // --- HardwareJson ↔ HardwareJSON (anonymous sub-structs, field-level check) ---
 
 func assertHardwareJSON() {
@@ -614,8 +644,15 @@ func assertHardwareJSON() {
 	_ = [2]string{r.Flash.BaseAddr, p.Flash.BaseAddr}
 	_ = [2]string{r.Flash.XipBase, p.Flash.XipBase}
 	_ = [2]uint32{r.CryptoCapabilities.ArenaSize, p.CryptoCapabilities.ArenaSize}
-	_ = [2]string{r.Memory.RamBase, p.Memory.RAMBase}
-	_ = [2]string{r.Memory.RamSize, p.Memory.RAMSize}
+	_ = [2]string{r.Memory.IramBase, p.Memory.IRAMBase}
+	_ = [2]string{r.Memory.IramSize, p.Memory.IRAMSize}
+
+	if r.Provenance != nil {
+		_ = Provenance{Source: r.Provenance.Source, Ref: r.Provenance.Ref, Verified: r.Provenance.Verified}
+	}
+	if p.Provenance != nil {
+		_ = manifest.Provenance{Source: p.Provenance.Source, Ref: p.Provenance.Ref, Verified: p.Provenance.Verified}
+	}
 }
 
 // --- DeviceToml ↔ ports.DeviceToml (anonymous sub-structs, field-level check) ---

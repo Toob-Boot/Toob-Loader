@@ -9,8 +9,8 @@
  * (staging == the other bootable slot; the delta VM writes there directly).
  * apply() therefore moves ZERO bytes — it only commits the flip:
  *
- *   SLOT_EXEC_BANK_SWAP   -> caps->bank_flip(target)      (HW register, atomic)
- *   SLOT_EXEC_XIP_REMAP   -> caps->xip_remap_commit(src)  (MMU window)
+ *   SLOT_EXEC_BANK_SWAP   -> caps->ops.bank_swap.bank_flip(target)    (HW register, atomic)
+ *   SLOT_EXEC_XIP_REMAP   -> caps->ops.xip_remap.xip_remap_commit(src)(MMU window)
  *   SLOT_EXEC_RELOCATABLE -> tmr.active_app_slot = target (TMR quorum = the
  *                            software boot pointer; requires ST-013)
  *   SLOT_EXEC_FIXED       -> BOOT_ERR_NOT_SUPPORTED (wrong provider selected)
@@ -234,24 +234,24 @@ static boot_status_t pointer_commit(const boot_platform_t *platform,
                                     uint32_t target_slot) {
   switch (caps->exec_model) {
   case SLOT_EXEC_BANK_SWAP:
-    if (!caps->bank_flip)
+    if (!caps->ops.bank_swap.bank_flip)
       return BOOT_ERR_NOT_SUPPORTED;
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
     {
-      boot_status_t st = caps->bank_flip(target_slot);
+      boot_status_t st = caps->ops.bank_swap.bank_flip(target_slot);
       if (st != BOOT_OK)
         return st;
     }
     return verify_active(caps, target_slot);
 
   case SLOT_EXEC_XIP_REMAP:
-    if (!caps->xip_remap_commit)
+    if (!caps->ops.xip_remap.xip_remap_commit)
       return BOOT_ERR_NOT_SUPPORTED;
     if (platform->wdt && platform->wdt->kick)
       platform->wdt->kick();
     {
-      boot_status_t st = caps->xip_remap_commit(txn->src_addr);
+      boot_status_t st = caps->ops.xip_remap.xip_remap_commit(txn->src_addr);
       if (st != BOOT_OK)
         return st;
     }

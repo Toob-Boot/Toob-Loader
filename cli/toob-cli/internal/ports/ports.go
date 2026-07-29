@@ -294,9 +294,17 @@ type ToolchainDownload struct {
 	Sha256          map[string]string `json:"sha256"           port:"required"`
 }
 
+// Provenance defines origin metadata for hardware constants.
+type Provenance struct {
+	Source   string `json:"source"   port:"required"`
+	Ref      string `json:"ref"      port:"optional"`
+	Verified string `json:"verified" port:"optional"`
+}
+
 // HardwareJSON is the parsed content of chips/{chip}/hardware.json.
 type HardwareJSON struct {
 	ChipFamily         string         `json:"chip_family"          port:"required"`
+	Provenance         *Provenance    `json:"provenance"           port:"optional"`
 	Flash              HardwareFlash  `json:"flash"                port:"required"`
 	CryptoCapabilities HardwareCrypto `json:"crypto_capabilities"  port:"required"`
 	Memory             HardwareMemory `json:"memory"               port:"required"`
@@ -310,27 +318,31 @@ type HardwareFlash struct {
 	BaseAddr       string                `json:"base_addr"       port:"optional"`
 	XipBase        string                `json:"xip_base"        port:"optional"`
 	Regions        []HardwareFlashRegion `json:"regions"       port:"required"`
+	Provenance     *Provenance           `json:"provenance"      port:"optional"`
 }
 
 // HardwareFlashRegion is a single flash region.
 type HardwareFlashRegion struct {
-	Type       string `json:"type"        port:"required"`
-	Base       uint32 `json:"base"        port:"required"`
-	Size       uint32 `json:"size"        port:"optional"`
-	SectorSize uint32 `json:"sector_size" port:"optional"`
-	Count      uint32 `json:"count"       port:"optional"`
-	Name       string `json:"name"        port:"optional"`
+	Type       string      `json:"type"        port:"required"`
+	Base       uint32      `json:"base"        port:"required"`
+	Size       uint32      `json:"size"        port:"optional"`
+	SectorSize uint32      `json:"sector_size" port:"optional"`
+	Count      uint32      `json:"count"       port:"optional"`
+	Name       string      `json:"name"        port:"optional"`
+	Provenance *Provenance `json:"provenance"  port:"optional"`
 }
 
 // HardwareCrypto defines crypto capabilities.
 type HardwareCrypto struct {
-	ArenaSize uint32 `json:"arena_size" port:"required"`
+	ArenaSize  uint32      `json:"arena_size" port:"required"`
+	Provenance *Provenance `json:"provenance" port:"optional"`
 }
 
 // HardwareMemory defines RAM geometry.
 type HardwareMemory struct {
-	RAMBase string `json:"ram_base" port:"required"`
-	RAMSize string `json:"ram_size" port:"required"`
+	IRAMBase   string      `json:"iram_base" port:"required"`
+	IRAMSize   string      `json:"iram_size" port:"required"`
+	Provenance *Provenance `json:"provenance" port:"optional"`
 }
 
 // DeviceToml is the parsed content of device.toml (user project manifest).
@@ -444,13 +456,13 @@ type MatrixChip struct {
 // =============================================================================
 
 type ChipSources struct {
-	Startup  string   `json:"startup"  port:"required"`
-	Platform string   `json:"platform" port:"required"`
-	Config   string   `json:"config"   port:"required"`
-	Linker   string   `json:"linker"   port:"required"`
-	Hardware string   `json:"hardware" port:"required"`
-	Drivers  []string `json:"drivers"  port:"optional"`
-	Extra    []string `json:"extra"    port:"optional"`
+	Startup  string   `json:"startup"            port:"required"`
+	Platform string   `json:"platform,omitempty" port:"optional"`
+	Config   string   `json:"config,omitempty"   port:"optional"`
+	Linker   string   `json:"linker"             port:"required"`
+	Hardware string   `json:"hardware"           port:"required"`
+	Drivers  []string `json:"drivers,omitempty"  port:"optional"`
+	Extra    []string `json:"extra,omitempty"    port:"optional"`
 }
 
 type SlotCapabilities struct {
@@ -460,18 +472,31 @@ type SlotCapabilities struct {
 	MaxEraseCycles uint32 `json:"max_erase_cycles"   port:"optional"`
 }
 
+type DriverManifest struct {
+	Name        string            `json:"name"        port:"required"`
+	Author      string            `json:"author"      port:"optional"`
+	Version     string            `json:"version"     port:"optional"`
+	Description string            `json:"description" port:"optional"`
+	Trait       string            `json:"trait"       port:"optional"`
+	AbiVersion  string            `json:"abi_version" port:"optional"`
+	Headers     []string          `json:"headers"     port:"optional"`
+	Symbols     map[string]string `json:"symbols"     port:"optional"`
+}
+
 // ChipManifest is the parsed content of chips/{chip}/chip_manifest.json.
 type ChipManifest struct {
-	Arch           string            `json:"arch"            port:"required"`
-	CompilerPrefix string            `json:"compiler_prefix" port:"required"`
-	Version        string            `json:"version"         port:"required"`
-	MinCoreSDK     string            `json:"min_core_sdk"    port:"optional"`
-	MinCompiler    string            `json:"min_compiler"    port:"optional"`
+	Name             string            `json:"name"              port:"optional"`
+	Arch             string            `json:"arch"              port:"required"`
+	CompilerPrefix   string            `json:"compiler_prefix"   port:"required"`
+	Version          string            `json:"version"           port:"required"`
+	MinCoreSDK       string            `json:"min_core_sdk"      port:"optional"`
+	MinCompiler      string            `json:"min_compiler"      port:"optional"`
 	SlotCapabilities *SlotCapabilities `json:"slot_capabilities" port:"optional"`
-	Sources        *ChipSources      `json:"sources"         port:"optional"`
-	Includes       []string          `json:"includes"        port:"optional"`
-	Crypto         *ChipCrypto       `json:"crypto"          port:"optional"`
-	Recovery       *ChipRecovery     `json:"recovery"        port:"optional"`
+	HalBindings      map[string]string `json:"hal_bindings"      port:"optional"`
+	Sources          *ChipSources      `json:"sources"           port:"optional"`
+	Includes         []string          `json:"includes"          port:"optional"`
+	Crypto           *ChipCrypto       `json:"crypto"            port:"optional"`
+	Recovery         *ChipRecovery     `json:"recovery"          port:"optional"`
 }
 
 type ChipRecovery struct {

@@ -184,17 +184,17 @@ static uint32_t model_get_last_vendor_error(void) {
     return 0;
 }
 
-static const flash_hal_t hal_interface = {
-    .abi_version = 0x02000000,
-    .init = model_init,
-    .deinit = model_deinit,
-    .read = model_read,
-    .write = model_write,
-    .erase_sector = model_erase_sector,
-    .get_sector_size = model_get_sector_size,
-    .set_otfdec_mode = model_set_otfdec_mode,
-    .get_last_vendor_error = model_get_last_vendor_error
-};
+static const flash_hal_t hal_interface =
+    TOOB_FLASH_HAL_V2(
+        model_init,
+        model_deinit,
+        model_read,
+        model_write,
+        model_erase_sector,
+        model_get_sector_size,
+        .set_otfdec_mode       = model_set_otfdec_mode,
+        .get_last_vendor_error = model_get_last_vendor_error,
+    );
 
 const flash_hal_t *flash_model_get_hal(flash_model_t *model) {
     g_model = model;

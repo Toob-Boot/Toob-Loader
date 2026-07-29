@@ -94,6 +94,33 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 		}
 	}
 
+	// Recovery crypto justification check (REG-007):
+	// backend = "none" requires an explicit justification explaining why
+	// unsigned recovery is acceptable for this device's security posture.
+	if strings.ToLower(dt.Recovery.Crypto.Backend) == "none" {
+		if strings.TrimSpace(dt.Recovery.Crypto.Justification) == "" {
+			return fmt.Errorf(
+				"FATAL [REG-007]: recovery.crypto.backend = \"none\" requires a non-empty " +
+					"'justification' field explaining why unsigned recovery is acceptable " +
+					"for this device's security posture")
+		}
+	}
+
+	// Version pin validation (REG-009):
+	// "latest" is semantically empty as a minimum version — reject it.
+	if hasCapabilities {
+		if strings.EqualFold(cm.MinCompiler, "latest") {
+			return fmt.Errorf(
+				"FATAL [REG-009]: chip_manifest.json min_compiler = \"latest\" is not a valid " +
+					"minimum version pin — use a concrete version (e.g., \"14.2.0\")")
+		}
+		if strings.EqualFold(cm.MinCoreSDK, "latest") {
+			return fmt.Errorf(
+				"FATAL [REG-009]: chip_manifest.json min_core_sdk = \"latest\" is not a valid " +
+					"minimum version pin — use a concrete semver (e.g., \"core/v0.1.0\")")
+		}
+	}
+
 	tomlChip := strings.ToLower(strings.ReplaceAll(dt.Device.Chip, "-", ""))
 	hwChip := strings.ToLower(strings.ReplaceAll(hj.ChipFamily, "-", ""))
 	if tomlChip != hwChip {
@@ -253,11 +280,18 @@ func Compile(tomlPath, hardwarePath, outDir, bootloaderDir, halChipDir string, e
 	if hj.CryptoCapabilities.ArenaSize == 0 {
 		return fmt.Errorf("FATAL: crypto_capabilities.arena_size is mandatory in hardware.json")
 	}
-	if hj.Memory.RamBase == "" || hj.Memory.RamSize == "" {
-		return fmt.Errorf("FATAL: memory.ram_base and memory.ram_size are mandatory in hardware.json")
+	if hj.Memory.IramBase == "" || hj.Memory.IramSize == "" {
+		return fmt.Errorf("FATAL: memory.iram_base and memory.iram_size are mandatory in hardware.json")
 	}
 
-	err = GenerateHeadersAndScripts(dt, hj, alloc, outDir,
+	halRoot := filepath.Dir(filepath.Dir(halChipDir))
+	var driverPaths []string
+	if cm.Sources != nil {
+		driverPaths = cm.Sources.Drivers
+	}
+	drivers := LoadDriverManifests(halRoot, driverPaths)
+
+	err = GenerateHeadersAndScripts(dt, hj, &cm, drivers, alloc, outDir,
 		s0Addr, s0Budget, s1aAddr, s1bAddr, s1Budget, appAddr, stagingAddr, appBudget,
 		recAddr, recBudget, netAddr, netBudget, scratchAddr, scratchSize, walAddr, walSize,
 		walAddrs, walSizes, kdmAddr, kdmBudget, cloudCmdAddr, cloudCmdBudget, mailboxAddr, mailboxBudget, forensicAddr, forensicBudget)
