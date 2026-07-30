@@ -1,326 +1,647 @@
-# Backlog: Slot-Transport-Schicht (Core-Seite)
+# Backlog — Befunde aus dem Deployment-Code
 
-Umsetzung der Architektur aus `slot_transport_architecture.md`, beschränkt auf den **Core** (kein
-Registry-Package-Inhalt, keine Toolchain/Dual-Link-Arbeit — die haben eigene Backlogs; ihre
-Core-Haken sind hier aber enthalten).
+**Ergänzt:** `BACKLOG-devops-umbau.md`. Dieses Dokument löst die dort mit **[Dateien nötig]**
+markierten Stellen auf und trägt nach, was erst aus dem tatsächlichen Code sichtbar wurde.
 
-**Ticket-Schema:** ID · Ziel · Berührt · Skizze · Fertig-wenn · Aufwand · Risiko · Hängt-an.
-**Aufwand:** S ≤0,5 T · M 1–2 T · L 3–5 T. **Risiko:** 🟢 mechanisch · 🟡 kritischer Pfad · 🔴 sicherheitskritischer Boot-Pfad / Design.
+**Grundlage:** `toob-registry/deploy/` (Packer, Terraform, Ansible, Nomad, Monitoring, `deploy.sh`)
+und `internal/ops/` (Stage-Engine, Stages, Topology, UI).
 
-## Übergreifende Abnahmekriterien (gelten für JEDES Ticket)
+**Einordnung:** Der Stack ist besser gebaut, als das Runbook vermuten ließ. Die
+Stage-Engine mit Preconditions/Postconditions/Teardown, die Plan-Gates mit
+Destroy-Warnung, die Zeremonie-Gates über `TOOB_CEREMONY:`-Marker, die
+Cross-Environment-Safety-Prüfung in `prereqs.go` und die Massenlöschbremse im DB-Pruner sind
+Arbeit, die der Umbau erhält. Die Befunde unten sind punktuell, nicht strukturell — mit zwei
+Ausnahmen (BEF-003, BEF-004), die vor allem anderen weg müssen.
 
-1. **Invarianten unantastbar.** Nach jeder Änderung gilt weiterhin: Es bootet immer entweder das alte
-   oder das neue *verifizierte* Image, nie ein Halbzustand; bis zum Confirm ist der Rückweg garantiert.
-2. **Modell vor Merge.** Jedes Ticket, das Offsets/Flush/Checkpoint/Resume/Commit anfasst, wird gegen
-   ein Referenzmodell bewiesen (frisch + Resume von jedem Checkpoint + Brownout nach jeder
-   Flash-Operation → identisches Ergebnis), bevor es gemergt wird. Methodik wie bei `boot_delta`.
-3. **Compile + HW.** Jedes Ticket, das Flash schreibt, braucht `-Werror`-Compile gegen echte Header +
-   einen On-Hardware-Durchlauf inkl. eines echten Brownout-Resume-Tests.
-4. **Verhaltenserhaltend heißt bit-identisch.** Migrations-Tickets („kein Verhaltenswechsel") werden
-   gegen den Ist-Zustand bit-identisch verifiziert (gleiche Effektliste, gleiche Erase-/Write-Zahlen).
-5. **C17, keine Sicherheitssemantik-Drift.** CFI, Glitch-Shields, Bounds, Single-Exit-Zeroize,
-   Phase-Bound-Read-Back bleiben in jedem migrierten/neuen Provider erhalten.
+**Präfix `BEF-`**, damit die Nummern nicht mit `OPS-` aus dem Umbau-Backlog kollidieren.
 
 ---
 
-# E0 — Sofortfix & Stabilisierung (unabhängig, sofort)
+## Übersicht
 
-### ST-001 — Delta-Bug: Two-Phase-One-Way (chirurgisch)                         [M · 🔴]
-Ziel        Den bestätigten Delta-Korruptions-/Brick-Bug beheben: Delta-Output (Scratch) kollidiert
-            mit dem Swap-Temp (Scratch). Delta umgeht `boot_swap_apply` und nutzt eine zweistufige
-            One-Way-Kopie über disjunkte Partitionen.
-Berührt     `boot_state.c` (`stage_apply_delta`/`stage_swap`), evtl. kleiner Helper in `boot_swap.c`.
-Skizze      Phase 1: App(alt) → Staging (Backup). Phase 2: Scratch(neu) → App. Kein Adresskonflikt;
-            Rollback findet die alte App in Staging (wie `boot_rollback` erwartet); 2 statt 3 ops/Sek.
-Fertig wenn Delta-Update bootet neues Image; Rollback nach Delta stellt altes Image her (Modell +
-            HW); kein Write auf eine mit einer Quelle geteilte Adresse.
-Hängt an    —  (chirurgischer Stopgap; wird später von ST-031 absorbiert)
-
-### ST-002 — Swap-Sofortgewinne (vier sichere Optimierungen)                   [M · 🟡]
-Ziel        Ohne Format-Änderung: (a) Tearing-Deduktion nur beim Resume laufen lassen (fresh →
-            run_all, −60 % Pre-Phase-Reads); (b) Early-Exit-Erased-Check; (c) Identity-CRCs als
-            Deduktions-CRCs wiederverwenden; (d) Whitelist-Scratch-Größe `65536` → `CHIP_SCRATCH_SLOT_SIZE`.
-Berührt     `boot_swap.c` (`boot_swap_apply`, `_boot_swap_erase_tracked`).
-Fertig wenn Fresh-Pfad ohne 3 Deduktions-Reads (Map-/Trace-Nachweis); Erase-Scan bricht beim ersten
-            Nicht-Erased-Byte ab; Ergebnis-Image bit-identisch zum Ist.
-Hängt an    —
-
----
-
-# E1 — Abstraktionen & persistenter Zustand
-
-### ST-010 — Header `boot_slot_caps.h`                                          [S · 🟢]
-Ziel        `slot_exec_model_t`, `slot_caps_t` (exec_model, slot_count, has_scratch, scratch_size,
-            max_erase_cycles + optionale Primitiven bank_flip/xip_remap_commit/exec_addr_select/
-            get_active_slot), `boot_get_slot_caps()`-Deklaration. Nur stdint/bool, geteilt Core+Treiber.
-Berührt     neu `common/include/boot_slot_caps.h`.
-Fertig wenn Header steht, `_Static_assert` für ABI-Größe/Alignment; von Core und einem Dummy-Treiber
-            inkludierbar ohne Zirkularität.
-Hängt an    —
-
-### ST-011 — Header `boot_slot_transport.h`                                     [S · 🟢]
-Ziel        `slot_txn_t` (src/dest/backup/length/src_is_delta_output/dest_slot/transport_id),
-            `slot_transport_t` (name/tier/id/apply/rollback), `boot_transport_active()`-Deklaration.
-Berührt     neu `common/include/boot_slot_transport.h`.
-Fertig wenn Header steht; `apply`/`rollback`-Signaturen nehmen `boot_platform_t*`, `slot_caps_t*`,
-            `slot_txn_t*`, `wal_entry_payload_t*`, arena.
-Hängt an    ST-010
-
-### ST-012 — Effect `EFF_FLIP` + Verify-vor-Commit-Gate                         [M · 🟡]
-Ziel        Neuer Effekt-Typ `EFF_FLIP` als *einziger* Commit-Effekt. `boot_effect_execute` führt ihn
-            nur nach vorausgegangenem Verify-Erfolg aus (Gate). Realisierung je Tier delegiert
-            (Caps-Primitive oder TMR-Feld).
-Berührt     `boot_effect.c/.h` (`flash_effect_t`-Enum, Executor).
-Skizze      `EFF_FLIP{ target_slot }`; Executor ruft `caps->bank_flip`/`xip_remap_commit` oder
-            TMR-Update; davor ein `verified`-Flag im Effekt-Kontext, das nur gesetzt ist, wenn die
-            vorherigen Verify-Effekte grün waren.
-Fertig wenn `EFF_FLIP` ohne Verify-Vorlauf gibt `BOOT_ERR_VERIFY` (Test); mit Vorlauf committet er;
-            glitch-doppelt abgesichert.
-Hängt an    ST-010
-
-### ST-013 — TMR-Feld `active_app_slot` (+ `active_transport_id`)               [M · 🟡]
-Ziel        Software-Boot-Pointer als TMR-Feld (Tier 1). Aus `reserved`-Tail; `struct_version` bump;
-            `WAL_TMR_POPULATED_SIZE` als *eine* Quelle der Wahrheit (dieselbe Disziplin wie beim
-            Mailbox-Watermark).
-Berührt     `boot_journal.h` (`wal_tmr_payload_t`, Static-Asserts), `boot_journal.c` (populated_size).
-Fertig wenn Feld liest/schreibt persistent über Quorum-Rotation; `struct_version`-Migration lässt
-            Alt-TMR sauber lesen; Offset-Static-Asserts grün.
-Hängt an    —
-
-### ST-014 — WAL-Feld `transport_id` im offenen Txn                            [S · 🟢]
-Ziel        `transport_id` in `wal_entry_payload_t`, damit ein Brownout-Resume den richtigen Provider
-            dispatcht und kein Provider-Wechsel mitten in einer Txn passiert.
-Berührt     `common/include/toob_wal_wire.h`, ggf. `boot_journal.c` (CRC-Länge).
-Fertig wenn Feld im WAL persistiert; Resume liest es; ABI-Static-Asserts grün.
-Hängt an    —
-
-### ST-015 — `boot_hal.h`: Caps + Primitiven-Signaturen                        [S · 🟢]
-Ziel        `const slot_caps_t *slot_caps;` in `boot_platform_t` (oder Accessor), plus die optionalen
-            Primitiven-Signaturen dokumentiert.
-Berührt     `boot_hal.h`.
-Fertig wenn Core kommt an die Caps; NULL-tolerant (fehlende Primitive = Tier nicht verfügbar).
-Hängt an    ST-010
-
-### ST-016 — Core-Config: Secondary-/Backup-/Pointer-Regionen                  [M · 🟡]
-Ziel        `generated_boot_config.h` bekommt getrennte Adressen für Delta-Output-Secondary,
-            Rollback-Backup und (Tier 1) den logischen zweiten Slot — statt Scratch für alles.
-Berührt     `generated_boot_config.h` (Core-Sicht; Codegen-Seite ist eigener Backlog).
-Fertig wenn Delta-Output-Ziel ≠ Swap-Temp per Config erzwungen; Geometrie-Static-Asserts grün.
-Hängt an    —  (Codegen liefert die echten Werte; Core definiert die Felder/Verträge)
+| ID | Titel | Prio | Typ | Aufw. | Datei |
+|---|---|---|---|---|---|
+| BEF-001 | Geleakte Dev-Credentials rotieren | P0 | security | S | `.toob-ops-secrets.dev.json` |
+| BEF-002 | Secrets- und State-Dateien aus dem Repo ausschließen | P0 | security | S | `deploy/` |
+| BEF-003 | Teardown löscht Produktions-Vault-Backups | P0 | bug | S | `stages/terraform.go` |
+| BEF-004 | Seccomp-Profil ist wirkungslos | P0 | security | M | `api/seccomp-api.json` |
+| BEF-005 | `pgp_key_count` undefiniert — Prod-Vault-Init bricht ab | P0 | bug | S | `ansible/playbook.yml` |
+| BEF-006 | Backup-Bucket nicht umgebungsgetrennt | P1 | security | M | `vault/scripts/backup.sh` u. a. |
+| BEF-007 | Stale Failure-Metriken nach Wiederanlauf | P1 | bug | S | `monitoring/systemd/` |
+| BEF-008 | Nomad-/Vault-Versionsdrift Tooling ↔ Server | P1 | bug | M | `Dockerfile.ops`, `install-binaries.sh` |
+| BEF-009 | Loki ohne Authentifizierung | P1 | security | M | `monitoring/loki/loki.yml` |
+| BEF-010 | Vault-PKI mit 24 h TTL im künftigen Datenpfad | P1 | security | M | `nomad/vault-agent*.hcl` |
+| BEF-011 | Cloudflare-IP-Liste in Caddy driftet | P2 | bug | S | `caddy/Caddyfile.j2` |
+| BEF-012 | Regex-`replace` auf Nomad-Konfigurationen | P2 | refactor | M | `ansible/playbook.yml` |
+| BEF-013 | `OutputCapture.Write` paniert | P2 | bug | S | `ops/exec/capture.go` |
+| BEF-014 | Teardown-`actionGoBack` mit fehlerhafter Indexlogik | P2 | bug | S | `ops/engine/engine.go` |
+| BEF-015 | Ops-Container mit `--privileged` und Docker-Socket | P2 | security | M | `cmd/toob-ops/main.go` |
+| BEF-016 | `--insecure-ignore-tlog` unbegründet | P2 | security | S | `api/deploy.sh` |
+| BEF-017 | CIDR-Plan kollidiert mit Staging | P1 | infra | S | `ops/topology/topology.go` |
+| BEF-018 | Tote Konfigurationsdateien neben Templates | P3 | cleanup | S | `monitoring/prometheus/` |
+| BEF-019 | Cosign-Token nicht im TTL-Exporter | P2 | security | S | `token-ttl-exporter.sh.j2` |
+| BEF-020 | `.env.<env>` wird zum Klartext-Secret-Store | P2 | security | M | `stages/prereqs.go` |
 
 ---
 
-# E2 — TSM-Refactor (verhaltenserhaltend)
+## BEF-001 — Geleakte Dev-Credentials rotieren
 
-### ST-030 — Provider `swapscratch` (Migration, bit-identisch)                 [L · 🔴]
-Ziel        Die aktuelle `boot_swap.c`-Logik als Fallback-Provider (Tier 4) hinter `slot_transport_t`
-            ziehen — **ohne Verhaltenswechsel** —, damit E2 gegen etwas Funktionierendes umbaut.
-            Die ST-002-Gewinne sind eingefaltet.
-Berührt     neu `boot_transport_swapscratch.c`; `boot_swap.c` (retiring), `boot_swap_erase_safe`
-            als Util behalten/umziehen.
-Fertig wenn Über den Provider gefahren erzeugt dieselbe Effektliste/Erase-Zahlen wie das Ist
-            (bit-identisch, Modell); Sicherheitssemantik erhalten.
-Hängt an    ST-011, ST-002
+**Prio:** P0 · **Typ:** security · **Aufwand:** S
 
-### ST-020 — Selektions-Glue `boot_transport.c/.h`                             [M · 🟡]
-Ziel        `boot_transport_active()` gibt den *einen* per `TOOB_TRANSPORT_PROVIDER` (Codegen)
-            gebundenen Provider zurück; `--gc-sections` strippt die übrigen. Bootstrap gegen
-            `swapscratch`.
-Berührt     neu `boot_transport.c/.h`.
-Fertig wenn Default-Build bindet `swapscratch`; ungenutzte Provider nicht im Map-File; Umschalten per
-            `#define` ohne Code-Änderung.
-Hängt an    ST-011, ST-030
+`deploy/.toob-ops-secrets.dev.json` wurde außerhalb des Systems geteilt. Enthalten sind ein
+gültiger Vault-Token, ein Nomad-Management-Token und **beide WireGuard-Private-Keys**.
 
-### ST-021 — `stage_swap` → `slot_txn_t` + `transport->apply` (N1)             [L · 🔴]
-Ziel        `boot_state.c` baut eine `slot_txn_t` (Delta-Ziel aus Caps aufgelöst) und ruft
-            `boot_transport_active()->apply` statt direkt `boot_swap_apply`. Multi-Image bleibt.
-Berührt     `boot_state.c` (`stage_swap`, `update_ctx_t`).
-Fertig wenn Update-Pfad läuft über die Transport-Schicht mit `swapscratch` → Ergebnis bit-identisch
-            zum Ist (Regression); `transport_id` in den WAL geschrieben.
-Hängt an    ST-020, ST-024, ST-014
+Der WireGuard-Client-Key wiegt am schwersten: er gewährt Netzzugang zu `10.1.0.0/16`, und dort
+sind SSH auf allen Knoten und Vault auf `10.1.1.10:8200` erreichbar. Der Nomad-Token ist,
+wenn es der Bootstrap-Token ist, ein Management-Token mit voller Job-Kontrolle.
 
-### ST-022 — Handoff: aktiver Slot statt fixer Adresse (N2)                    [M · 🔴]
-Ziel        STEP 5 bezieht die Ausführungsadresse aus dem aktiven Slot (`caps->get_active_slot` HW /
-            `tmr.active_app_slot` SW) statt fix `CHIP_APP_SLOT_ABS_ADDR`.
-Berührt     `boot_state.c` (STEP 5, `boot_proof_seal`-Eingaben).
-Fertig wenn Single-Slot-Chip unverändert (aktiver Slot == App-Slot); der Pfad ist für Tier 0/1
-            vorbereitet (zwei Slots wählbar).
-Hängt an    ST-013
+**Lösung**
+1. `vault token revoke` für den Vault-Token.
+2. Nomad-Token löschen; falls Bootstrap-Token, ACL-Bootstrap zurücksetzen.
+3. WireGuard-Keys neu erzeugen. Über die CLI: die Werte im Secrets-File leeren, dann Phase 3
+   erneut laufen lassen — `ensureWireGuardKeys` in `stages/terraform.go` generiert sie dann
+   neu über `crypto/ecdh`.
+4. Prüfen, ob dieselben Werte in `.env.dev` oder in einer anderen Umgebung stehen. Die
+   Cross-Environment-Prüfung in `prereqs.go` (`checkCrossEnvironmentSafety`) deckt genau das
+   ab und sollte einmal bewusst gelaufen sein.
 
-### ST-023 — Rollback-Flow → `provider->rollback` (N3)                         [M · 🔴]
-Ziel        `_handle_rollback_flow` ruft `boot_transport_active()->rollback` statt direkt
-            `boot_rollback_trigger_revert`. Policy (`boot_rollback_evaluate_os`) bleibt unberührt.
-Berührt     `boot_state.c` (`_handle_rollback_flow`), `boot_rollback.c` (als swapscratch/oneway-
-            Rollback-Pfad).
-Fertig wenn Rollback über den Provider erzeugt dasselbe Ergebnis wie das Ist (Modell + HW).
-Hängt an    ST-020
-
-### ST-024 — Delta-Output vom Swap-Temp entkoppeln (N6)                        [M · 🔴]
-Ziel        `stage_apply_delta` schreibt in einen dedizierten Secondary-Bereich (aus ST-016), den der
-            TSM an `boot_delta_apply` übergibt — nie mehr implizit den Swap-Scratch.
-Berührt     `boot_state.c` (`stage_apply_delta`), `boot_delta.c`-Aufrufparameter.
-Fertig wenn Delta-Output-Adresse ≠ jede Swap-Temp-Adresse (statisch geprüft); ST-001 wird obsolet
-            (der Konflikt existiert strukturell nicht mehr).
-Hängt an    ST-016
+**Akzeptanzkriterien**
+- [ ] Der alte Vault-Token liefert `403`.
+- [ ] Das alte WireGuard-Profil baut keine Verbindung mehr auf.
+- [ ] Kein Wert aus der Datei ist irgendwo noch gültig.
 
 ---
 
-# E3 — Provider-Suite (neue Algorithmen)
+## BEF-002 — Secrets- und State-Dateien aus dem Repository ausschließen
 
-### ST-031 — Provider `oneway` (Two-Phase, raw + delta)                        [L · 🔴]
-Ziel        Der saubere Two-Phase-One-Way-Provider (Tier 3), der ST-001 absorbiert und auch den
-            Raw-Pfad kann. 2 ops/Sektor, alte App landet in Staging.
-Berührt     neu `boot_transport_oneway.c`.
-Fertig wenn Modell-verifiziert (fresh/resume/brownout); raw + delta beide korrekt; Rollback aus
-            Staging; HW-getestet.
-Hängt an    ST-011, ST-016
+**Prio:** P0 · **Typ:** security · **Aufwand:** S
 
-### ST-032 — Provider `swapmove` (kein Scratch-Hotspot)                        [L · 🔴]
-Ziel        Swap-Move (Tier 2): in-place-Austausch mit einem Reserve-Sektor, ~2 ops/Sektor,
-            Verschleiß über den Slot verteilt statt auf einen Scratch-Sektor.
-Berührt     neu `boot_transport_swapmove.c`.
-Fertig wenn Modell-verifiziert; Wear-Bench zeigt keinen Einzel-Sektor-Hotspot; Resume von jedem
-            Move-/Swap-Schritt identisch; HW-getestet.
-Hängt an    ST-011
-Notiz       Komplexeste Resume-Logik der Suite — Move-Phase und Swap-Phase getrennt checkpointen.
+Unter `deploy/` entstehen im Betrieb: `.toob-ops-secrets.<env>.json`,
+`.toob-ops-state.<env>.json`, `wg0.<env>.conf`, `nomad-deployer-token.json`,
+`vault-deployer-token.json` und `logs/<env>/*.log`.
 
-### ST-033 — Provider `pointer` (Bank-Flip / XIP-Remap / Dual-Slot)           [L · 🔴]
-Ziel        Null-Kopie-Commit (Tier 0/1): Secondary vorbereiten + verifizieren, dann `EFF_FLIP`.
-            Nutzt `caps->bank_flip`/`xip_remap_commit`/`exec_addr_select`. Rollback = Re-Flip.
-Berührt     neu `boot_transport_pointer.c`.
-Fertig wenn Auf einem Chip mit HW-Bank *oder* MMU: 1 E + 1 W pro neuem Sektor, Commit atomar,
-            Rollback = Flip (0 Wear); Brownout vor/nach Flip beide sicher (Modell + HW).
-Hängt an    ST-011, ST-012, ST-013, ST-015
+Die beiden Deployer-Token-Dateien werden von `stages/ansible.go` nach dem Einlesen gelöscht —
+das ist bereits richtig gemacht. Die übrigen bleiben liegen. Die Logs können Ausgaben
+enthalten, die trotz `no_log` durchrutschen.
 
-### ST-034 — `boot_multiimage` als One-Way-Multi-Target migrieren             [M · 🟡]
-Ziel        Das bereits effiziente Multi-Image-One-Way unter den `oneway`-Provider (Multi-Target-
-            Variante) fassen oder als registrierten Provider führen — eine Kopier-Semantik im System.
-Berührt     `boot_multiimage.c`, `boot_transport_oneway.c`.
-Fertig wenn Netcore/Recovery/Stage1-Deployment läuft über denselben One-Way-Pfad; bit-identisch zum Ist.
-Hängt an    ST-031
+**Lösung**
+`.gitignore`-Einträge für alle Muster, plus ein CI-Check, der den Index dagegen prüft. Falls
+bereits committet: History bereinigen und für jeden betroffenen Wert BEF-001 anwenden.
 
 ---
 
-# E4 — Commit, Resume & Rollback-Korrektheit (querschnittlich)
+## BEF-003 — Teardown löscht Produktions-Vault-Backups
 
-### ST-040 — Atomarer Commit + Resume-über-den-Flip (Modell)                   [L · 🔴]
-Ziel        Beweisen, dass der Commit ein einziger atomarer Punkt ist: Brownout *vor* dem Flip →
-            altes Image bootet; *nach* dem Flip → neues Image bootet; *während* → A/B-Redundanz
-            (TMR-Quorum bzw. HW-Register) lässt genau einen gültigen Zustand überleben.
-Berührt     Modell-Harness; ggf. `boot_effect.c` (Flip-Atomarität), `boot_journal.c`.
-Fertig wenn Modell zeigt für jeden Provider: kein Brownout-Zeitpunkt führt zu einem Halb-Boot.
-Hängt an    ST-012, ST-013, ST-033
+**Prio:** P0 · **Typ:** bug · **Aufwand:** S · **Datei:** `internal/ops/stages/terraform.go`
 
-### ST-041 — Resume-Dispatch über `transport_id`                               [M · 🟡]
-Ziel        Ein Resume dispatcht den Provider aus dem WAL (`transport_id`), niemals einen anderen als
-            den, der die Txn begann. Fehlender/unbekannter Provider → sicher abbrechen, nicht raten.
-Berührt     `boot_state.c` (Resume-Pfad), `boot_transport.c`.
-Fertig wenn Resume mit fremdem `transport_id` wird abgelehnt (Test); passender Provider setzt fort.
-Hängt an    ST-014, ST-020
+**Problem**
+In `cleanupStateBuckets`:
 
-### ST-042 — Rollback pro Provider                                             [L · 🔴]
-Ziel        Jeder Provider implementiert `rollback` passend: Re-Flip (Tier 0/1, 0 Wear),
-            Reverse-Copy aus Staging (oneway/swapscratch), Reverse-Swap (swapmove).
-Berührt     alle `boot_transport_*.c`, `boot_rollback.c` (als Copy-Rollback-Pfad).
-Fertig wenn Für jeden Provider stellt Rollback nachweislich das letzte gute Image her (Modell + HW);
-            Rollback ist selbst brownout-resumbar.
-Hängt an    ST-031, ST-032, ST-033
-
-### ST-043 — Wear-Telemetrie pro Provider in die TMR                           [S · 🟢]
-Ziel        Jeder Provider meldet seine physischen Erases sauber in die TMR-Counter
-            (`app/staging/swap_buffer_erase_counter`), damit ST-052 und spätere wear-aware Logik echte
-            Zahlen haben.
-Berührt     alle `boot_transport_*.c`, `boot_journal` (Counter).
-Fertig wenn Counter stimmen mit der Wear-Bench (ST-052) überein (±0).
-Hängt an    ST-030, ST-031, ST-032, ST-033
-
----
-
-# E5 — Verifikation, Absicherung & Wear-Regression
-
-### ST-050 — Per-Provider Resume+Rollback-Modell-Harness                       [M · 🟡]
-Ziel        Ein wiederverwendbares Python-Referenzmodell + Flash-Sim (wie bei `boot_delta`), das jeden
-            Provider gegen frisch/Resume/Brownout prüft und „kein Write in nicht-erased Sektor" hart
-            asserted.
-Berührt     Test-Harness (`/tools/models/`).
-Fertig wenn Alle vier Provider laufen grün durchs Harness; Teil der CI.
-Hängt an    ST-031, ST-032, ST-033
-
-### ST-051 — TSM-Invarianten-Modellcheck                                        [L · 🔴]
-Ziel        Den transaktionalen Layer strategie-unabhängig modell-checken: Atomarität, kein
-            Halb-Boot, Rollback-immer-verfügbar-bis-Confirm, Anti-Rollback bleibt.
-Berührt     Modell (TLA+/Alloy oder erschöpfender Python-Zustandsraum).
-Fertig wenn Der Check erschöpft die Brownout-×-Provider-×-State-Matrix ohne Invarianten-Verletzung.
-Hängt an    ST-040
-Notiz       Das ist die „Perfektion"-Absicherung — sollte ein Merge-Gate für neue Provider werden.
-
-### ST-052 — Wear-Regressions-Bench                                            [M · 🟢]
-Ziel        Reproduzierbarer Bench: Erase-/Write-Zahlen je Provider für definierte Update-Profile
-            (voll / 30 % / 5 % geändert), gegen die Baseline (swap-scratch) und untereinander.
-Berührt     Test-Harness.
-Fertig wenn Zahlen bestätigen die Tier-Erwartung (pointer 1 E/Sek, oneway 2, swapmove ~2 ohne
-            Hotspot, swapscratch 3); als CI-Regression verankert.
-Hängt an    ST-043
-
-### ST-053 — HW-Brownout-Matrix                                                [L · 🔴]
-Ziel        Auf echter Hardware jeden Provider an jeder Phasengrenze (Erase/Write/Verify/Flip)
-            unterbrechen und Resume → korrektes bootbares Image nachweisen.
-Berührt     HW-Testrig.
-Fertig wenn Für jeden Provider: Cut an jeder Grenze → Gerät bootet altes oder neues verifiziertes
-            Image, nie brick.
-Hängt an    ST-031, ST-032, ST-033
-
----
-
-# E6 — Core-Haken für Advanced Wear (vorbereitend, optional)
-
-### ST-060 — Reverse-Delta-Rollback (Provider-Rollback-Variante)               [L · 🔴]
-Ziel        Für Delta-Updates Δ⁻¹ (Reverse-Patch, winzig) statt der ganzen alten App als
-            Rollback-Datum. Rollback = Δ⁻¹ auf die neue App anwenden.
-Berührt     `boot_transport_oneway.c` (rollback), `boot_delta.c` (rückwärts anwendbar), TBM1
-            (Δ⁻¹-Region), Delta-Generator (Build, eigener Backlog).
-Fertig wenn Rollback-Storage = `size(Δ⁻¹)`; Rollback stellt bit-genau die alte App her (Modell + HW).
-Hängt an    ST-042
-Notiz       Braucht Build-Seite (Δ⁻¹-Erzeugung) — hier nur der Core-Anwendungspfad.
-
-### ST-061 — Wear-gelevelter Scratch-Pool (swapscratch-Verbesserung)          [M · 🟡]
-Ziel        Im Fallback-Provider den Scratch über einen Pool von Spare-Sektoren rotieren
-            (Round-Robin via TMR-Zähler) statt fix — verteilt den Hotspot ohne volle Swap-Move-
-            Komplexität.
-Berührt     `boot_transport_swapscratch.c`, `boot_journal` (Rotations-Zähler).
-Fertig wenn Wear-Bench zeigt gleichmäßige Scratch-Pool-Verteilung; Resume kennt den aktiven
-            Pool-Sektor.
-Hängt an    ST-030, ST-043
-
----
-
-## Reihenfolge & kritischer Pfad
-
-```
-E0 (ST-001, ST-002)                      ── sofort, unabhängig
-   │
-E1 (ST-010,011,012,013,014,015,016)      ── Abstraktionen + Zustand (parallelisierbar)
-   │
-ST-030 swapscratch-Migration (Brücke)    ── verhaltenserhaltend, ermöglicht E2
-   │
-ST-020 Glue → ST-024 Delta-Entkopplung → ST-021 stage_swap → ST-022/023  (E2-Refactor)
-   │
-E3 (ST-031 oneway, ST-032 swapmove, ST-033 pointer, ST-034 multiimage)   ── neue Provider
-   │
-E4 (ST-040 commit-atomar, ST-041 resume-dispatch, ST-042 rollback, ST-043 telemetry)
-   │
-E5 (ST-050 harness, ST-051 invariant-check, ST-052 wear-bench, ST-053 hw-matrix)
-   │
-E6 (ST-060 reverse-delta, ST-061 scratch-pool)   ── optional/vorbereitend
+```go
+buckets := []string{
+    fmt.Sprintf("toob-terraform-state-%s", env),
+    "toob-vault-backups",
+}
 ```
 
-**Merge-Gate ab E3:** Kein neuer Provider geht in die Registry, bevor er ST-050 (Resume/Rollback-
-Modell) und — sobald vorhanden — ST-051 (Invarianten-Check) grün durchläuft. Das ist die Grenze
-zwischen „schnell/sparsam" und „korrekt", und sie ist nicht verhandelbar.
+Beide Buckets werden geleert — inklusive aller Objektversionen und unvollständiger
+Multipart-Uploads — und anschließend gelöscht. `emptyNonStateBuckets` leert
+`toob-vault-backups` zusätzlich vor dem Terraform-Destroy.
 
-## Bewusst NICHT in diesem Backlog (eigene Backlogs, nur Core-Haken hier)
+Der Bucket ist **nicht** umgebungspräfigiert: `backup.sh` und `backup-nomad.sh` haben
+`S3_BUCKET="toob-vault-backups"` hartkodiert, und `bootstrapStateBucket` legt ihn ohne Suffix
+an. Dev-, Staging- und Produktions-Snapshots liegen also im selben Bucket.
 
-- Registry-Package-Inhalt (`drivers/<chip>/slot_caps.c`) + Manifest-Compiler-Codegen (Provider-
-  Selektion, `generated_slot_caps.c`). Core-Haken: ST-016, ST-020 (`TOOB_TRANSPORT_PROVIDER`).
-- Build-Co-Design (Dual-Linked-Images, TBM1-`slot_variant`, VTOR, CLI-Emission). Core-Haken: ST-022.
-- Δ⁻¹-Erzeugung im Delta-Generator. Core-Haken: ST-060.
+Konsequenz: **`toob-ops destroy --env dev` vernichtet die Vault-Snapshots der Produktion.**
+Ein Aufräumvorgang in der Entwicklungsumgebung zerstört die Wiederherstellungsbasis der
+Produktion — und zwar leise, weil der Teardown ansonsten wie erwartet durchläuft.
+
+**Lösung**
+Kurzfristig (Minuten): `"toob-vault-backups"` aus beiden Listen entfernen. Der Bucket wird von
+keinem Terraform-Modul verwaltet und gehört nicht in den Teardown-Pfad.
+
+Dauerhaft: BEF-006 trennt den Bucket pro Umgebung, danach kann er wieder in den Teardown —
+mit einer Namensprüfung als zweiter Verteidigungslinie, die einen Bucket ohne Umgebungssuffix
+ablehnt.
+
+**Akzeptanzkriterien**
+- [ ] Ein Teardown mit `--env dev` fasst keinen Bucket ohne `-dev`-Suffix an.
+- [ ] Testlauf gegen einen Mock-S3-Endpunkt weist das nach.
+
+---
+
+## BEF-004 — Seccomp-Profil ist wirkungslos
+
+**Prio:** P0 · **Typ:** security · **Aufwand:** M · **Datei:** `deploy/api/seccomp-api.json`
+
+**Problem**
+Die Datei dokumentiert im eigenen Kommentar:
+
+> Default action: ERRNO (deny). Only the ~45 syscalls that a Go HTTP server actually uses are
+> allowed. Everything else is blocked.
+> Notable blocks: mount, ptrace, reboot, kexec_load, init_module, setns, unshare, pivot_root —
+> prevents container escape, kernel module loading, and namespace manipulation.
+
+und setzt dann:
+
+```json
+"defaultAction": "SCMP_ACT_ALLOW"
+```
+
+Damit ist jeder Syscall erlaubt und die Whitelist reine Dekoration. Keiner der als „notable
+blocks" genannten Aufrufe ist blockiert. Das Profil ist im Nomad-Job unter
+`security_opt = ["seccomp=/opt/toob-registry/seccomp-api.json"]` eingebunden und erzeugt in
+jeder Sicherheitsbetrachtung den Eindruck einer Härtung, die es nicht leistet.
+
+**Lösung**
+Nicht direkt auf `SCMP_ACT_ERRNO` schalten — die Liste stammt laut Kommentar aus einem
+`strace` und wird für aktuelle Go-Versionen unvollständig sein (`statx`, `openat2`,
+`fchmodat2`, `membarrier` fehlen unter anderem).
+
+Dreistufig:
+1. `"defaultAction": "SCMP_ACT_LOG"` ausrollen.
+2. Eine Woche Produktionslast, `auditd`-Log auswerten, fehlende Syscalls ergänzen.
+3. `"defaultAction": "SCMP_ACT_ERRNO"`.
+
+**Akzeptanzkriterien**
+- [ ] `defaultAction` ist `SCMP_ACT_ERRNO`.
+- [ ] Der API-Container bedient Last ohne Syscall-Fehler.
+- [ ] Negativtest: ein Testcontainer mit demselben Profil kann `mount` nicht aufrufen.
+
+---
+
+## BEF-005 — `pgp_key_count` ist undefiniert
+
+**Prio:** P0 · **Typ:** bug · **Aufwand:** S · **Datei:** `deploy/ansible/playbook.yml`
+
+**Problem**
+Die Task „Initialize Primary Vault (Production - PGP Encrypted)" hat als letzte Bedingung:
+
+```yaml
+- pgp_key_count.stdout | int == 5
+```
+
+`pgp_key_count` wird im gesamten Playbook nirgends registriert. Die vorangehende Task
+registriert `pgp_keys_stat` (eine `stat`-Schleife über `op1.asc` … `op5.asc`), und die
+Fail-Task dazwischen wertet korrekt `pgp_keys_stat.results` aus.
+
+Ansible bricht bei einer undefinierten Variablen im `when` mit einem Fehler ab. Der
+PGP-Initialisierungspfad des Primary-Vaults ist damit nie erfolgreich durchlaufen — was
+erklärt, warum der State im Repository `dev` zeigt: in dev greift der andere Zweig
+(`vault_env_tier != 'production'`, Init 1/1).
+
+**Lösung**
+Die Bedingung ist ohnehin redundant, weil die Fail-Task davor bereits abbricht, wenn nicht
+alle fünf Schlüssel vorhanden sind. Ersatzlos streichen — oder, wenn eine explizite Prüfung
+gewünscht ist:
+
+```yaml
+- pgp_keys_stat.results | selectattr('stat.exists') | list | length == 5
+```
+
+**Akzeptanzkriterien**
+- [ ] Ein Lauf mit `VAULT_ENV=production` gegen eine Wegwerf-Umgebung erreicht die Zeremonie
+      und bricht dort kontrolliert mit `TOOB_CEREMONY:PRIMARY_UNSEAL` ab.
+- [ ] Ansible-Lint im CI meldet undefinierte Variablen in `when`-Blöcken.
+
+---
+
+## BEF-006 — Backup-Bucket nicht umgebungsgetrennt
+
+**Prio:** P1 · **Typ:** security · **Aufwand:** M
+
+**Problem**
+`toob-vault-backups` ist an drei Stellen hartkodiert und für alle Umgebungen dieselbe:
+`vault/scripts/backup.sh`, `nomad/scripts/backup-nomad.sh` und `bootstrapStateBucket` in
+`stages/terraform.go`. Der Terraform-State ist dagegen korrekt präfigiert
+(`toob-terraform-state-<env>`).
+
+Das ist auch ohne BEF-003 eine Vermischung von Vertrauensbereichen: Dev-Credentials haben
+Schreib- und Löschzugriff auf Produktions-Snapshots.
+
+**Lösung**
+`toob-vault-backups-<env>`, konsistent in allen drei Stellen sowie in `emptyNonStateBuckets`
+und `cleanupStateBuckets`. Bestehende Objekte in den neuen Produktions-Bucket kopieren, bevor
+der alte angefasst wird.
+
+**Akzeptanzkriterien**
+- [ ] Kein Bucket-Name ohne Umgebungspräfix im gesamten `deploy/`-Baum (Grep-Test im CI).
+- [ ] Produktions-Snapshots sind im neuen Bucket restorebar (Nachweis über BEF-Restore-Test).
+
+---
+
+## BEF-007 — Stale Failure-Metriken nach Wiederanlauf
+
+**Prio:** P1 · **Typ:** bug · **Aufwand:** S
+
+**Problem**
+`monitoring/systemd/notify-failure.sh` schreibt `service_failure_<unit>.prom` mit Wert 1.
+Nur `nomad.service` räumt sie beim Start wieder weg:
+
+```ini
+ExecStartPost=-/bin/rm -f /var/lib/prometheus/node-exporter/service_failure_%n.prom
+```
+
+`caddy.service`, `vault.service`, die Vault-Agents und alle Backup-Timer haben zwar
+`OnFailure=notify-failure@%n`, aber kein Gegenstück.
+
+Konsequenz: Ein einmal fehlgeschlagener Dienst hält `SystemdServiceFailed` (Alert 2,
+`severity: critical`) dauerhaft aktiv, auch nach erfolgreicher Wiederherstellung. Nach dem
+zweiten Vorfall glaubt niemand mehr dem Alarm — und das ist der Alarm, der im Ops-Home-Dashboard
+die Statusmatrix für Nomad und Caddy speist.
+
+**Lösung**
+Einheitlich über eine `notify-recovery@.service` als `ExecStartPost` in allen Units mit
+`OnFailure`. Dann liegt die Logik an einer Stelle statt in jeder Unit-Datei.
+
+**Akzeptanzkriterien**
+- [ ] `systemctl stop caddy && systemctl start caddy` ⇒ Alarm löst aus und löst sich wieder auf.
+- [ ] Jede Unit mit `OnFailure` hat einen Aufräumpfad (Prüfskript).
+
+---
+
+## BEF-008 — Versionsdrift zwischen Tooling und Servern
+
+**Prio:** P1 · **Typ:** bug · **Aufwand:** M
+
+**Problem**
+
+| | Nomad | Vault |
+|---|---|---|
+| `Dockerfile.ops` (Tooling-Container) | 2.0.3 | 2.0.2 |
+| `packer/scripts/install-binaries.sh` (Server) | 1.8.1 | 1.16.2 |
+
+Eine Major-Version Unterschied zwischen CLI und Server. `deploy.sh` ruft `nomad job run` und
+`nomad job status` gegen den Server, das Playbook ruft `vault operator init`, `vault kv put`
+und `nomad acl bootstrap` — alles CLI gegen Server über die Versionsgrenze hinweg.
+
+Dass es bisher funktioniert, ist kein Beweis für Kompatibilität, sondern dafür, dass die
+verwendeten Kommandos stabil geblieben sind.
+
+**Lösung**
+Eine einzige Versionsquelle. Das Muster existiert im Repository bereits und funktioniert gut:
+`compiler/compiler_manifest.json` ist die einzige Wahrheit für den Compiler-Build, wird von
+`build-compiler.sh` gelesen und über ein Label verifiziert.
+
+Analog: `deploy/versions.json`, gelesen von `Dockerfile.ops` (als Build-Arg) und
+`install-binaries.sh`. Dazu ein Precondition-Check in Phase 0, der CLI- und Cluster-Version
+vergleicht, sobald der Cluster erreichbar ist.
+
+**Akzeptanzkriterien**
+- [x] Nomad- und Vault-Version stehen an genau einer Stelle.
+- [ ] Phase 0 warnt bei Major-Version-Abweichung.
+
+> **Offener Punkt:** Der Phase-0-Precondition-Check (CLI- vs. Cluster-Version vergleichen)
+> ist erst lauffähig, wenn der Cluster erreichbar ist (Phase 3+). Separates Ticket,
+> nicht im Scope von BEF-008.
+
+---
+
+## BEF-009 — Loki ohne Authentifizierung
+
+**Prio:** P1 · **Typ:** security · **Aufwand:** M · **Datei:** `monitoring/loki/loki.yml`
+
+**Problem**
+```yaml
+auth_enabled: false
+```
+
+Der Port ist im Compose-Template auf die private IP gebunden
+(`{{ ansible_host }}:3100:3100`), nicht auf localhost. Jeder Knoten im Privatnetz — inklusive
+der Firecracker-Worker-Hosts, auf denen fremder Code ausgeführt wird — kann damit alle Logs
+aller Dienste lesen und schreiben.
+
+Solange alles ein Projekt ist, ist das eine bewusste Vereinfachung. In der Zielarchitektur
+pushen mehrere Projekte in dieselbe Instanz, und die Kontrollebene erlaubt genau einen
+eingehenden Port von den Spokes — diesen hier.
+
+**Lösung**
+`auth_enabled: true`, `X-Scope-OrgID` pro Projekt, Alloy sendet den Header (in
+`config.alloy.j2` am `loki.write`-Block). Retention-Cap und Rate-Limit pro Mandant.
+Grafana-Datenquellen pro Ordner mit festem Mandantenkontext.
+
+**Reihenfolge:** Muss stehen, **bevor** ein zweites Projekt in dieselbe Instanz schreibt.
+Danach ist es eine Datenmigration statt einer Konfigurationsänderung.
+
+**Akzeptanzkriterien**
+- [ ] Ein Push ohne `X-Scope-OrgID` wird abgelehnt.
+- [ ] Eine Abfrage mit Mandant A liefert keine Logs von Mandant B.
+
+---
+
+## BEF-010 — Vault-PKI mit 24 h TTL im künftigen Datenpfad
+
+**Prio:** P1 · **Typ:** security · **Aufwand:** M
+
+**Problem**
+`nomad/vault-agent.hcl` und `vault-agent-api.hcl` rendern über
+`/etc/vault.d/templates/nomad-tls.json.tpl` ein TLS-Bundle aus `pki/issue/nomad-cluster`.
+`init.sh` legt die Rolle laut Runbook mit TTL 24 h / max 72 h an. Alert 8
+(`NomadTLSRotationFailed`) feuert bei über 20 Stunden ohne Rotation.
+
+Für die Registry ist das die richtige Entscheidung — kurze TTLs erzwingen, dass Rotation
+nachweislich funktioniert, und der Alarm ist scharf gestellt. Der Bundle-Ansatz (eine
+Issuance, ein JSON, atomares Entpacken über `unpack-nomad-tls.sh`) ist zudem sauber gelöst und
+vermeidet genau den Cert/Key-Mismatch, den Mehrfach-Templates erzeugen.
+
+Für den künftigen Update-Datenpfad wäre dieselbe Konstruktion eine harte
+Verfügbarkeitskopplung: Vault fällt aus, und spätestens 24 Stunden später reißt die
+Firmware-Auslieferung.
+
+**Lösung**
+Regel für die Zielarchitektur: **kein Secret im Datenpfad eines Produkts mit TTL unter 30
+Tagen.** Konkret bedeutet das für `toob-update` keine Vault-PKI, sondern langlebige
+Zertifikate aus einer deploy-verteilten CA, plus DB-URL und Token-HMAC-Key mit langer Lease
+und `exit_after_auth = false` im Agent.
+
+Die Registry behält ihre 24-Stunden-PKI unverändert.
+
+**Akzeptanzkriterien**
+- [ ] Ein Precondition-Check listet die Leases des Datenpfads und schlägt bei zu kurzen an.
+- [ ] Vault 24 h abgeschaltet ⇒ Update-Auslieferung unverändert.
+
+---
+
+## BEF-011 — Cloudflare-IP-Liste in Caddy driftet
+
+**Prio:** P2 · **Typ:** bug · **Aufwand:** S · **Datei:** `caddy/Caddyfile.j2`
+
+**Problem**
+```
+trusted_proxies static 173.245.48.0/20 103.21.244.0/22 … 2c0f:f248::/32
+```
+
+Eine statisch einkopierte Liste. Das Terraform-Control-Plane-Modul lädt dieselben Ranges laut
+Runbook **zur Apply-Zeit live** von cloudflare.com/ips für die Hetzner-Firewall.
+
+Zwei Quellen für dieselbe Liste, eine davon eingefroren. Driftet sie, akzeptiert die Firewall
+Verkehr aus einem neuen Range, aber Caddy übernimmt `X-Real-IP` aus `CF-Connecting-IP` nicht
+mehr — das serverseitige Rate-Limiting sieht dann die Cloudflare-IP statt der Client-IP und
+limitiert alle Anfragen aus diesem Range gemeinsam.
+
+**Lösung**
+Die Liste im Ansible-Lauf aus derselben Quelle beziehen wie Terraform und ins Template
+einsetzen. Ein Postcondition-Check vergleicht die ausgerollte Liste mit der aktuellen.
+
+---
+
+## BEF-012 — Regex-`replace` auf Nomad-Konfigurationen
+
+**Prio:** P2 · **Typ:** refactor · **Aufwand:** M · **Datei:** `ansible/playbook.yml`
+
+**Problem**
+Fünf aufeinanderfolgende `replace`-Tasks manipulieren `/etc/nomad.d/nomad.hcl`:
+Server-IP (`10\.0\.1\.10:4647`), Gossip-Key, Pool-Meta, Datacenter und die
+`raw_exec`-Aktivierung. Zwei davon sind mehrzeilige `(?s)`-Regexe über HCL-Blöcke.
+
+`replace` meldet keinen Fehler, wenn das Muster nicht vorkommt. Ändert sich `client.hcl` oder
+`server.hcl`, schlägt die Anpassung **stillschweigend** fehl, und der Knoten läuft mit der
+Default-Konfiguration — bei der Server-IP hieße das: der Client sucht `10.0.1.10:4647`, also
+die Produktionsadresse, aus einer Dev-Umgebung heraus.
+
+**Lösung**
+`server.hcl` und `client.hcl` werden Jinja-Templates mit echten Variablen. Das ist ohnehin
+Voraussetzung für die Projektparametrisierung — Pool, Datacenter und Server-Adresse werden
+dann projektabhängig.
+
+**Akzeptanzkriterien**
+- [ ] Keine `replace`-Task mehr auf Nomad-Konfigurationen.
+- [ ] Ein absichtlich falsch gesetzter Template-Wert lässt `nomad config validate` fehlschlagen.
+
+---
+
+## BEF-013 — `OutputCapture.Write` paniert
+
+**Prio:** P2 · **Typ:** bug · **Aufwand:** S · **Datei:** `internal/ops/exec/capture.go`
+
+```go
+// Write implements [io.Writer].
+func (c *OutputCapture) Write(p []byte) (n int, err error) {
+	panic("unimplemented")
+}
+```
+
+Der Typ erfüllt damit `io.Writer`, aber jeder Aufruf über dieses Interface stürzt ab. Aktuell
+ungenutzt — `runner.go` verwendet `AppendLine`, der Testrunner einen eigenen `uiTestWriter`.
+
+Es ist eine geladene Falle: `cmd.Stdout = capture` kompiliert und paniert zur Laufzeit.
+
+**Lösung**
+Entweder korrekt implementieren (zeilenweise puffern, `AppendLine` aufrufen — der Testrunner
+hat die Logik bereits) oder die Methode entfernen, damit der Typ `io.Writer` nicht mehr
+erfüllt. Zweiteres ist ehrlicher.
+
+---
+
+## BEF-014 — Teardown-`actionGoBack` mit fehlerhafter Indexlogik
+
+**Prio:** P2 · **Typ:** bug · **Aufwand:** S · **Datei:** `internal/ops/engine/engine.go`
+
+In `Teardown` läuft die Schleife rückwärts (`for i := len(e.stages) - 1; i >= 0; i--`). Im
+Fehlerfall:
+
+```go
+if action == actionGoBack {
+    prev := i + 1
+    if prev >= len(e.stages) { prev = len(e.stages) - 1 }
+    i = prev + 1
+}
+```
+
+`i` wird auf `i+2` gesetzt, die Schleife dekrementiert auf `i+1`. Nahe dem Ende kann `prev+1`
+außerhalb des Bereichs liegen. Zusätzlich wird `i++` bei `actionRetry` gesetzt, was in
+Kombination mit dem Schleifen-Dekrement stimmt, aber nur durch Zufall lesbar ist.
+
+**Lösung**
+Die Schleife auf einen expliziten Index-Cursor umstellen statt `for`-Dekrement plus
+Korrekturen im Rumpf. Ein Tabellentest, der jede Aktion an jeder Position durchspielt.
+
+---
+
+## BEF-015 — Ops-Container mit `--privileged` und Docker-Socket
+
+**Prio:** P2 · **Typ:** security · **Aufwand:** M · **Datei:** `cmd/toob-ops/main.go`
+
+**Problem**
+`runInDockerIfNeeded` startet den Tooling-Container mit:
+
+```go
+"run", runFlags, "--privileged",
+"-v", "//var/run/docker.sock:/var/run/docker.sock",
+```
+
+plus einem Read-only-Mount von `~/.ssh`, das im Container nach `/root/.ssh` kopiert wird.
+`--privileged` mit Docker-Socket ist effektiv Root auf dem Host.
+
+Für ein Entwicklerwerkzeug auf einem Windows-Arbeitsplatz ist das ein bewusster Kompromiss —
+gebraucht wird es für die Loop-Mounts beim Rootfs-Bau (`mount -o loop` in
+`build-compiler.sh` und `test_build.go`) und für `/dev/kvm` beim Firecracker-Test. Für einen
+CI-Runner in der Kontrollebene wäre es nicht vertretbar.
+
+**Lösung**
+Zwei Profile: privilegiert für Artefakt- und Firecracker-Phasen, unprivilegiert für Terraform,
+Ansible, Deploy und Status. Der künftige `ops-ci` läuft ausschließlich unprivilegiert.
+
+**Akzeptanzkriterien**
+- [ ] `toob-ops status` und ein Deploy-Lauf funktionieren ohne `--privileged`.
+- [ ] Der Docker-Socket wird nur in den Phasen gemountet, die ihn brauchen.
+
+---
+
+## BEF-016 — `--insecure-ignore-tlog` unbegründet
+
+**Prio:** P2 · **Typ:** security · **Aufwand:** S · **Datei:** `api/deploy.sh`
+
+`cmd_verify` ruft `cosign verify --insecure-ignore-tlog`. Das schaltet die Prüfung gegen den
+Transparency-Log ab.
+
+Bei einem selbstverwalteten Vault-Transit-Schlüssel ohne Rekor-Eintrag ist das die einzige
+Möglichkeit — die Signatur landet gar nicht im öffentlichen Log. Die Entscheidung ist
+vermutlich richtig; sie steht nur nirgends, und der Flag-Name legt das Gegenteil nahe.
+
+**Lösung**
+Kommentar im Skript mit Begründung, eine Zeile im Sicherheitsmodell. Eigener Rekor-Betrieb als
+offener Punkt vermerken, nicht als Aufgabe.
+
+---
+
+## BEF-017 — CIDR-Plan kollidiert mit Staging
+
+**Prio:** P1 · **Typ:** infra · **Aufwand:** S · **Datei:** `internal/ops/topology/topology.go`
+
+**Problem**
+Belegt sind bereits: `10.0.0.0/16` (production), `10.1.0.0/16` (dev), `10.2.0.0/16` (staging).
+Der Architekturentwurf sah `10.2.1.0/24` für `toob-identity` vor — das kollidiert mit Staging.
+
+**Lösung**
+Ein dokumentierter Plan, der Projekt und Umgebung trennt:
+
+| Bereich | Belegung |
+|---|---|
+| `10.0.0.0/16` | registry / production (Bestand) |
+| `10.1.0.0/16` | registry / dev (Bestand) |
+| `10.2.0.0/16` | registry / staging (Bestand) |
+| `10.10.0.0/16` | ops / production |
+| `10.11.0.0/16` | ops / dev |
+| `10.20.0.0/16` | identity / production |
+| `10.21.0.0/16` | identity / dev |
+| `10.30.0.0/16` | update / production |
+| `10.31.0.0/16` | update / dev |
+
+Zehnerschritte pro Projekt, Einerschritte pro Umgebung. Jeder Bereich ist damit auf einen
+Blick zuzuordnen, und die WireGuard-`AllowedIPs` am Hub sind trivial zu schreiben.
+
+**Akzeptanzkriterien**
+- [ ] Der Plan steht als Tabelle in `topology.go` und im Architekturdokument.
+- [ ] Eine Testfunktion prüft auf Überschneidung.
+
+---
+
+## BEF-018 — Tote Konfigurationsdateien neben Templates
+
+**Prio:** P3 · **Typ:** cleanup · **Aufwand:** S
+
+`monitoring/prometheus/prometheus.yml` existiert neben `prometheus.yml.j2`, ebenso
+`docker-compose.monitoring.yml` neben `.yml.j2`. Das Playbook rollt die Templates aus.
+
+Die statischen Varianten enthalten hartkodierte `10.0.1.x`-Adressen, also die
+Produktionstopologie — für dev (`10.1.1.x`) schlicht falsch. Wer sie zum Nachlesen öffnet,
+liest die falsche Umgebung.
+
+Dasselbe gilt für `monitoring/prometheus/vault-token`, das einen Platzhaltertext enthält und
+zur Laufzeit vom Vault-Agent überschrieben wird.
+
+**Lösung**
+Statische Varianten löschen. Templates sind die Referenz.
+
+---
+
+## BEF-019 — Cosign-Token nicht im TTL-Exporter
+
+**Prio:** P2 · **Typ:** security · **Aufwand:** S · **Datei:** `token-ttl-exporter.sh.j2`
+
+**Problem**
+Der Exporter prüft drei Token: `autounseal`, `nomad_server`, `vault_agent`. Alert 18
+(`TokenTTLLow`) feuert bei unter 24 Stunden.
+
+Der Cosign-Token für die Release-Pipeline (`-period=720h`, laut Runbook manuell zu erneuern)
+ist nicht dabei. Das langlebigste und am wenigsten überwachte Credential im Stack ist damit
+das einzige, für das kein Alarm existiert.
+
+**Lösung**
+Kurzfristig: als vierten Eintrag in den Exporter. Dauerhaft besser: den Token ersatzlos
+streichen, indem der CI-Runner sich per AppRole authentifiziert und pro Lauf einen kurzlebigen
+Token zieht. Dann gibt es nichts zu überwachen.
+
+---
+
+## BEF-020 — `.env.<env>` wird zum Klartext-Secret-Store
+
+**Prio:** P2 · **Typ:** security · **Aufwand:** M · **Datei:** `internal/ops/stages/prereqs.go`
+
+**Problem**
+Fehlende Pflichtvariablen werden interaktiv abgefragt und auf Nachfrage in `.env.<env>`
+**angehängt**:
+
+```go
+f, err := os.OpenFile(savePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+```
+
+Das ist bequem und gut gemacht — Dateimodus `0600`, Pfadangaben werden als Pfad gespeichert
+statt als aufgelöster Inhalt, und die Reihenfolge folgt `AllEnvRequirements()`. Der Effekt ist
+trotzdem, dass achtzehn Produktionsgeheimnisse im Klartext in einer Datei im Arbeitsverzeichnis
+landen.
+
+Verschärfend: `loadEnvFiles` setzt sie anschließend ins Prozess-Environment, und
+`seed.sh` bekommt sie von dort. Beim Bootstrap steht damit jedes Geheimnis in der Shell des
+Operators, inklusive History.
+
+**Lösung**
+Kurzfristig: `.env.<env>` in BEF-002 aufnehmen und in der Doku als „enthält
+Produktionsgeheimnisse, niemals committen, niemals teilen" kennzeichnen. Das Speichern-Prompt
+bekommt einen entsprechenden Hinweis.
+
+Mittelfristig: `seed.sh` liest aus einer `0600`-Datei via `vault kv put @file` statt aus dem
+Environment. Langfristig: der CI-Runner führt das Seeding aus und holt die Werte aus einem
+verschlüsselten Repo-Secret.
+
+---
+
+## Einordnung in `BACKLOG-devops-umbau.md`
+
+| Befund | Löst dort auf / ergänzt |
+|---|---|
+| BEF-003, BEF-006 | neu — war ohne Dateien nicht sichtbar |
+| BEF-004, BEF-005 | neu — Widerspruch bzw. Bug nur im Code erkennbar |
+| BEF-008, BEF-012, BEF-018 | ergänzt die mit **[Dateien nötig]** markierten Tickets |
+| BEF-009, BEF-010 | konkretisiert die Loki- und TTL-Tickets mit Dateibezug |
+| BEF-017 | korrigiert den CIDR-Vorschlag der Architektur |
+| BEF-013, BEF-014, BEF-015, BEF-020 | neu — betreffen `internal/ops/`, das im Runbook nicht vorkam |
+
+---
+
+## Reihenfolge
+
+**Heute:** `BEF-001` → `BEF-002` · `BEF-003`
+
+BEF-003 ist eine Zeilenstreichung und verhindert einen Datenverlust, der beim nächsten
+Dev-Teardown eintritt.
+
+**Diese Woche:** `BEF-004` · `BEF-005` · `BEF-006` · `BEF-007`
+
+**Vor dem Umbau:** `BEF-008` · `BEF-012` · `BEF-017` · `BEF-013` · `BEF-014` · `BEF-018`
+
+Der Stack sollte in einem Zustand sein, in dem Alarme etwas bedeuten und Konfigurationen
+nicht per Regex entstehen, bevor eine Projektdimension dazukommt.
+
+**Während des Umbaus:** `BEF-009` (vor dem zweiten Projekt) · `BEF-010` (vor `toob-update`) ·
+`BEF-015` (vor `ops-ci`) · `BEF-019` · `BEF-020` · `BEF-011` · `BEF-016`
+
+---
+
+## Merksatz
+
+> Zwei Befunde sind keine Verbesserungsvorschläge, sondern Wartezeit auf einen Vorfall:
+> ein Teardown-Pfad, der Produktions-Backups löscht, und ein Seccomp-Profil, das das
+> Gegenteil von dem tut, was sein eigener Kommentar behauptet. Alles andere in diesem
+> Dokument kann in eine Sprintplanung.

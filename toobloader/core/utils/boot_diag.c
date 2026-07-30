@@ -30,7 +30,8 @@ void boot_diag_set_error(boot_status_t error, uint32_t vendor_fault) {
 }
 
 void boot_diag_set_system_status(uint32_t wdt_kicks, bool fallback, uint32_t session_id) {
-    toob_diag_state.wdt_kicks = wdt_kicks;
+    (void)wdt_kicks; /* UPD-009: Explicitly reserved field in Diag v3 */
+    toob_diag_state.wdt_kicks = 0;
     toob_diag_state.fallback_occurred = fallback ? 1 : 0;
     toob_diag_state.boot_session_id = session_id;
 }
@@ -68,11 +69,39 @@ void boot_diag_set_wear_data(const toob_ext_health_t *wear_stats) {
     }
 }
 
+void boot_diag_set_installed_state(uint32_t app_svn, uint32_t stage1_svn,
+                                   uint32_t build_number) {
+    /* Guard: only fill fields that boot_diag_set_security_meta() hasn't
+     * already populated from TBM1 data during an update boot. */
+    if (toob_diag_state.current_svn == 0) {
+        toob_diag_state.current_svn = app_svn;
+    }
+    if (toob_diag_state.build_number == 0) {
+        toob_diag_state.build_number = build_number;
+    }
+    toob_diag_state.installed_app_svn = app_svn;
+    toob_diag_state.installed_stage1_svn = stage1_svn;
+    toob_diag_state.reader_major = 1;
+    toob_diag_state.reader_minor = 0;
+}
+
+void boot_diag_set_update_result(uint8_t outcome, uint8_t reject_reason) {
+    toob_diag_state.last_update_outcome = outcome;
+    toob_diag_state.last_update_reject = reject_reason;
+}
+
 void boot_diag_seal(void) {
     /* P10 Defense: Ensure internal alignment padding cannot leak stack/RAM fragments */
+    toob_diag_state._padding_v3[0] = 0;
+    toob_diag_state._padding_v3[1] = 0;
+    toob_diag_state._padding_v3[2] = 0;
     toob_diag_state._padding[0] = 0;
     toob_diag_state._padding[1] = 0;
     toob_diag_state._padding[2] = 0;
+    toob_diag_state._padding_end[0] = 0;
+    toob_diag_state._padding_end[1] = 0;
+    toob_diag_state._padding_end[2] = 0;
+    toob_diag_state._padding_end[3] = 0;
     
     /* Calculate CRC-32 exactly up to the trailer boundary */
     size_t payload_len = offsetof(toob_boot_diag_t, crc32_trailer);

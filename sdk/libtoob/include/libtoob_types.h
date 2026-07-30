@@ -157,7 +157,7 @@ typedef struct {
  * Harmonisiert GAP-F29 & GAP-16 mit toob_telemetry.md
  */
 typedef struct __attribute__((aligned(8))) {
-    uint32_t struct_version;         /* Abwärtskompatibler Header */
+    uint32_t struct_version;         /* Abwärtskompatibler Header (0x03000000) */
     
     /* Systemwerte */
     uint32_t boot_duration_ms;       /* Gesamtdauer Start (boot_time_ms) */
@@ -177,12 +177,21 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t edge_recovery_events;   /* Aktuelle Edge-Recovery Versuche (boot_failure_count) */
     uint32_t wdt_kicks;              /* Watchdog Kick Counter */
     
-    /* Telemetry / Version Oracle (v2) */
+    /* Telemetry / Version Oracle (v2 & v3) */
     uint16_t fw_ver_major;           /* Firmware version */
     uint16_t fw_ver_minor;
     uint16_t fw_ver_patch;
     uint8_t  fallback_occurred;      /* 1 = recovery booted, 0 = normal */
-    uint8_t  _reserved_diag[1];      /* Alignment padding to 4-byte boundary */
+    uint8_t  last_update_outcome;    /* UPD-007: 0=none, 1=applied, 2=rejected, 3=reverted, 4=deferred */
+    
+    /* Diag v3 Additions (UPD-007) */
+    uint32_t installed_app_svn;      /* App SVN from TMR */
+    uint32_t installed_stage1_svn;   /* Stage-1 SVN from TMR */
+    uint16_t reader_major;           /* Reader Major Version */
+    uint16_t reader_minor;           /* Reader Minor Version */
+    uint32_t monotonic_counter;      /* OTP Monotonic Counter */
+    uint8_t  last_update_reject;     /* tbm1_reject_t error detail */
+    uint8_t  _padding_v3[3];         /* Alignment padding to 4-byte boundary */
     
     /* SBOM & Handoff */
     uint32_t boot_session_id;        /* Monotoner Boot-Counter */
@@ -194,15 +203,16 @@ typedef struct __attribute__((aligned(8))) {
     toob_ext_health_t ext_health;    /* Health & Wear Data */
     
     uint32_t crc32_trailer;          /* CRC32 Versiegelung im .noinit */
+    uint8_t  _padding_end[4];        /* Explicit padding for 8-byte struct alignment (136 bytes total) */
 } toob_boot_diag_t;
 
-_Static_assert(sizeof(toob_boot_diag_t) == 112, "toob_boot_diag_t size breach - must be exactly 112 bytes for ABI stability");
+_Static_assert(sizeof(toob_boot_diag_t) == 136, "toob_boot_diag_t size breach - must be exactly 136 bytes for ABI stability (v3)");
 
 _Static_assert(offsetof(toob_boot_diag_t, ext_health) % 4 == 0, "toob_ext_health_t alignment is broken in diag struct");
 _Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) > offsetof(toob_boot_diag_t, ext_health), "CRC32 trailer must be last field");
 
 /* ========================================================
- * Diag ABI Layout Static Asserts (P10)
+ * Diag ABI Layout Static Asserts (P10 - Diag v3)
  * ======================================================== */
 _Static_assert(offsetof(toob_boot_diag_t, struct_version) == 0, "struct_version offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, boot_duration_ms) == 4, "boot_duration_ms offset drift");
@@ -219,19 +229,27 @@ _Static_assert(offsetof(toob_boot_diag_t, fw_ver_major) == 44, "fw_ver_major off
 _Static_assert(offsetof(toob_boot_diag_t, fw_ver_minor) == 46, "fw_ver_minor offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, fw_ver_patch) == 48, "fw_ver_patch offset drift");
 _Static_assert(offsetof(toob_boot_diag_t, fallback_occurred) == 50, "fallback_occurred offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, boot_session_id) == 52, "boot_session_id offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, sbom_digest) == 56, "sbom_digest offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, ext_health_present) == 88, "ext_health_present offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, _padding) == 89, "_padding offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, ext_health) == 92, "ext_health offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, last_update_outcome) == 51, "last_update_outcome offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, installed_app_svn) == 52, "installed_app_svn offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, installed_stage1_svn) == 56, "installed_stage1_svn offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, reader_major) == 60, "reader_major offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, reader_minor) == 62, "reader_minor offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, monotonic_counter) == 64, "monotonic_counter offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, last_update_reject) == 68, "last_update_reject offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, _padding_v3) == 69, "_padding_v3 offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, boot_session_id) == 72, "boot_session_id offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, sbom_digest) == 76, "sbom_digest offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health_present) == 108, "ext_health_present offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, _padding) == 109, "_padding offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, ext_health) == 112, "ext_health offset drift");
 _Static_assert(offsetof(toob_ext_health_t, wal_erase_count) == 0, "wal_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, app_slot_erase_count) == 4, "app_slot_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, staging_slot_erase_count) == 8, "staging_slot_erase_count offset drift");
 _Static_assert(offsetof(toob_ext_health_t, swap_buffer_erase_count) == 12, "swap_buffer_erase_count offset drift");
-_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 108, "crc32_trailer offset drift");
+_Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 128, "crc32_trailer offset drift");
 
 /* Konstante für struct_version des Diag-Headers zur Vermeidung von ABI-Drift */
-#define TOOB_DIAG_STRUCT_VERSION 0x02000000
+#define TOOB_DIAG_STRUCT_VERSION 0x03000000
 
 /* ========================================================
  * 4. WAL (Write-Ahead-Log) Wire Format

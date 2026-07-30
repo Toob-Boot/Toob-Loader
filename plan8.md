@@ -1,523 +1,1342 @@
-# Backlog — Registry Chip-Packages: Korrektheit, Auflösung & Standardisierung
+# Backlog — Toob Update Service
 
-**Scope:** `toob-registry/registry/chips/*`, neue Driver-Packages unter `drivers/slot/` und `drivers/otp/`, der Manifest-Compiler, sowie zwei klar markierte Core-Tickets (Bringup-Interpreter, ABI-v3-Vorbereitung). Grundlage ist **ARCHITEKTUR-registry-chips.md** — jedes Ticket referenziert den zugehörigen Abschnitt (§).
+**Grundlage:** `ARCHITEKTUR-update-service-v2.md` (plan7.md). Jedes Ticket referenziert den Abschnitt (§)
+bzw. den Befund (B), den es umsetzt. Doku und Code dürfen nicht driften — ändert ein Ticket
+eine Entscheidung, wird die Architektur im selben PR angepasst.
 
-**Leitprinzip:** Erst den Ist-Zustand vertrauenswürdig machen (EPIC A), dann Code bewegen (EPIC B), dann Struktur erzwingen (EPIC C/D). Kein Big Bang; jede Stufe ist einzeln shipbar (§7).
+**Scope:** Der ausführende Update-Dienst plus die Core-/SDK-Vorbedingungen, ohne die er nicht
+betreibbar ist. Flotten, Rollouts und Plugin-Markets sind **nicht** enthalten — sie hängen an
+EPIC G und erzeugen keine Tickets hier.
+
+**Leitprinzip:** Der Dienst wählt und liefert, er entscheidet nicht über Vertrauen. Jedes
+Ticket, das eine Sicherheitsaussage in den Server verlagern würde, ist falsch geschnitten.
 
 ---
 
 ## Legende & Konventionen
 
-**Priorität:** P0 (Korrektheits-/Sicherheitsdefekt, sofort) · P1 (latenter Bug / reale Brick- oder Bypass-Konsequenz) · P2 (Robustheit/Struktur) · P3 (Hygiene/Doku)
+**Priorität**
+- **P0** — Blockierend oder sicherheitsrelevant. Ohne diese läuft kein sinnvoller Betrieb.
+- **P1** — Für das Gate der jeweiligen Phase erforderlich.
+- **P2** — Robustheit, Performance, Beobachtbarkeit.
+- **P3** — Hygiene, Doku.
 
-**Typ:** `bug` · `security` · `refactor` · `codegen` · `infra` · `dx` · `cleanup` · `spike`
+**Typ:** `bug` · `security` · `feature` · `refactor` · `infra` · `abi` · `perf` · `dx`
 
 **Aufwand:** S (≤ ½ Tag) · M (1–2 Tage) · L (> 2 Tage / koordiniert)
 
+**Komponente:** `core` (toobloader) · `sdk` (libtoob / os_client) · `cli` (toob) ·
+`svc` (Update Service) · `sign` (Signing Service) · `infra`
+
 **Definition of Done (global):**
-1. Build grün für Sandbox- **und** Production-Profil des ESP32-C6-Targets.
-2. Bei Verhaltensänderung: gezielter Test (Host-Mock, Conformance-Vektor oder ELF-Audit-Case) deckt das alte Fehlverhalten ab.
-3. Betroffene Abschnitte in ARCHITEKTUR-registry-chips.md bestätigt oder per PR angepasst (Doku und Code driften nicht).
-4. Kein neuer Verstoß gegen die Fail-Fast-Invarianten (§6.5).
+1. Bei Core-/SDK-Änderungen: Sandbox-Build **und** ESP32-C6-Target-Build grün, alle
+   `_Static_assert` kompilieren.
+2. Bei Verhaltensänderung: gezielter Test, der das alte Verhalten nachweist (Host-Mock,
+   Integrationstest oder HIL).
+3. Fail-Fast eingehalten: kein stiller Default, kein Fallback, der einen Fehlerzustand
+   maskiert. Fehlende Konfiguration bricht den Start ab, nicht den Request.
+4. Kein neuer Codepfad liefert Bytes aus, die das Gerät garantiert ablehnen würde (§P4).
+5. Betroffene Abschnitte der Architektur bestätigt oder per PR angepasst.
 
 ---
 
 ## Ticket-Übersicht
 
-| ID | Titel | Prio | Typ | Aufwand |
-|---|---|---|---|---|
-| REG-001 | Mock-Mechanik reparieren: Struct-/TU-Swap statt wirkungslosem `--wrap` | P0 | bug/security | M |
-| REG-002 | Adress-Overlap 0x50000000: Confirm-Storage vs. `.noinit` klären & absichern | P0 | bug/security | S–M |
-| REG-003 | Delta/Scratch-Kohärenzregel im Manifest-Compiler | P1 | bug/codegen | S |
-| REG-004 | XIP-Remap: Register & Größen aus Config statt Hardcode | P1 | bug/security | M |
-| REG-005 | TRNG-Sampling-Disziplin (Entropie-Wartezeit) | P1 | security | S |
-| REG-006 | Silent Fallbacks eliminieren (Baudrate-`#error`, `get_active_slot` fail-fast) | P1 | bug | S |
-| REG-007 | Recovery-Krypto „none": Begründungspflicht + signierter Template-Default | P1 | security | S |
-| REG-008 | `hardware.json`-Widersprüche auflösen (`ram_size`, Capability-Semantik) | P2 | bug/cleanup | S |
-| REG-009 | Versions-Pins statt `"latest"` in Manifest & Template | P2 | infra | S |
-| REG-010 | Panic-Sites unterscheidbar machen | P2 | dx | S |
-| REG-011 | Kleinbefunde-Sammelticket (Timeout, Fehlerdomäne, seal_key-Zeroize, WDT-Fenster, Sprache) | P3 | cleanup | S–M |
-| REG-020 | Extraktion: `drivers/slot/esp_mmu_remap/` (pointer-Provider) | P1 | refactor | M |
-| REG-021 | Extraktion: `drivers/otp/esp_efuse/` (Keystore + Provisioning) | P1 | refactor | M |
-| REG-022 | Core: `boot_platform_bringup`-Tabellen-Interpreter | P2 | refactor | M |
-| REG-023 | Codegen: `generated_platform_wiring.inc` (Wiring-Emission) | P2 | codegen | L |
-| REG-024 | ABI v3 Spike: Crypto-Trait-Entflechtung (crypto/keystore/entropy) | P2 | spike | M |
-| REG-030 | JSON-Schemas + CI-Gate für `hardware.json`/`chip_manifest.json` | P1 | infra | M |
-| REG-031 | Zahlenformat-Normalisierung + strukturierte Reset-Causes + Register-Blocks | P2 | codegen | M |
-| REG-032 | Provenance-Metadaten für Hardware-Konstanten | P2 | infra | S–M |
-| REG-033 | Initializer-Makros `TOOB_*_HAL_V2` mit ABI-Stempel | P2 | dx | S |
-| REG-034 | `slot_caps` als tagged union (ABI v2.1) | P2 | refactor | M |
-| REG-035 | Sprachpolitik: Englisch in Registry-Code | P3 | cleanup | S |
-| REG-040 | Literal-Bann-Lint für `chips/` und `drivers/` | P2 | infra | S–M |
-| REG-041 | Post-Link-ELF-Audit (Mock-Poison-Pill, Overlap, Budgets) | P1 | infra | M |
-| REG-042 | HAL-Conformance-Harness als Registry-Zulassung (+ Mock/Real-Äquivalenz) | P1 | infra | L |
+| ID | Titel | Prio | Typ | Komp. | Aufw. |
+|---|---|---|---|---|---|
+| **EPIC A — Core-/SDK-Vorbedingungen** ||||||
+| UPD-001 | Diag auf jedem Boot befüllen (Kaltstart liefert Müll) | P0 | bug/security | core | S |
+| UPD-002 | HTTP-Hook generalisieren (Methode, Header, Status, Retry-After) | P0 | feature | sdk | M |
+| UPD-003 | Device-Credential-Speicher im OS-NVS | P1 | feature | sdk | M |
+| UPD-004 | Check-in-Client auf POST + Diag-Body umbauen | P1 | refactor | sdk | M |
+| UPD-005 | Blob-Download über gebundenen Pfad-Suffix | P1 | feature | sdk | M |
+| UPD-006 | `counter_min`-Deckel + `issued_at`-Freshness | P0 | security | core | S |
+| UPD-007 | Diag v3 — ABI-Bump (Sammelticket) | P2 | abi | sdk/core | L |
+| UPD-008 | Resume-State im OS-eigenen `.noinit`-Slot | P2 | feature | sdk | M |
+| UPD-009 | `wdt_kicks` echt zählen oder als reserviert kennzeichnen | P3 | cleanup | core | S |
+| **EPIC B — Datenmodell, Ingest, Artefakt-Store** ||||||
+| UPD-010 | Schema-Migration v1 | P1 | infra | svc | M |
+| UPD-011 | Admission-Gate: host-kompilierter C-Reader im Ingest | P0 | security | svc | M |
+| UPD-012 | SVN-Geländer pro Target-Slot als DB-Invariante | P0 | security | svc | M |
+| UPD-013 | Artefakt-Store: WORM, Digest-Verifikation nach Upload | P1 | infra | svc | M |
+| UPD-014 | Ingest-API + Release-Pointer | P1 | feature | svc | M |
+| UPD-015 | Signing-Service-Policy (Produkt-, Key-, SVN-Bindung) | P1 | security | sign | M |
+| UPD-016 | Reproduzierbarkeits-Invariante für `build_number` | P2 | infra | svc | S |
+| **EPIC C — Device Gateway (Hot Path)** ||||||
+| UPD-020 | Check-in-Endpunkt | P1 | feature | svc | M |
+| UPD-021 | Resolver: Pin → Channel → Kompatibilität → Fortschritt | P1 | feature | svc | M |
+| UPD-022 | Lazy Materialisierung + Ein-offene-Zuweisung-Invariante | P1 | feature | svc | M |
+| UPD-023 | Blob-Auslieferung: Range, 416, identity, kein Redirect | P0 | bug/infra | svc | M |
+| UPD-024 | `Retry-After` in jeder Antwort inkl. 204 und 5xx | P1 | feature | svc | S |
+| UPD-025 | Assignment-Zustandsautomat mit Monotonie-Guard | P1 | feature | svc | M |
+| UPD-026 | Confirm-Inferenz aus dem Folge-Check-in | P1 | feature | svc | M |
+| UPD-027 | Events-Endpunkt (best effort) | P2 | feature | svc | S |
+| UPD-028 | Idempotenz über `X-Toob-Seq` | P1 | feature | svc | S |
+| **EPIC D — Identität & Schlüssel** ||||||
+| UPD-030 | Enrollment in `toob provision` | P1 | feature | cli/svc | L |
+| UPD-031 | Token-Verifikation via HMAC (nicht Argon2id) | P1 | security/perf | svc | S |
+| UPD-032 | Server-initiierte Token-Rotation (Key 7) | P2 | security | svc/sdk | M |
+| UPD-033 | Key-Custody-Trennung als Deployment-Grenze | P1 | security | infra | M |
+| UPD-034 | Auth-Pflicht ohne Bypass-Schalter | P0 | security | svc | S |
+| **EPIC E — Verschleiß & Fehlerpolitik** ||||||
+| UPD-040 | Attempt-Cap als Hardware-Schutz | P1 | feature | svc | S |
+| UPD-041 | `deferred_power` erhöht `attempts` nicht | P1 | bug | svc | S |
+| UPD-042 | Verschleiß-bewusste Auslieferung via `ext_health` | P2 | feature | svc | M |
+| UPD-043 | Fehlertaxonomie + Artefakt-Quarantäne | P2 | feature | svc | M |
+| UPD-044 | `device.health`-Aussteuerung | P2 | feature | svc | S |
+| **EPIC F — Performance** ||||||
+| UPD-050 | Kohorten-Cache für den 204-Pfad | P2 | perf | svc | M |
+| UPD-051 | Zero-Write-Hot-Path (Append + Rollup) | P2 | perf | svc | M |
+| UPD-052 | Edge-Konfiguration (Cache-Policies, Origin Cache Lock) | P2 | infra | infra | S |
+| UPD-053 | Lastprofil-Test: Flotten-Rückkehr nach Regionalausfall | P2 | infra | svc | M |
+| **EPIC G — Naht zum Management-Layer** ||||||
+| UPD-060 | Internal-API für Desired State | P2 | feature | svc | M |
+| UPD-061 | Transactional Outbox + Poller | P2 | feature | svc | M |
+| UPD-062 | Pinning (`assignment_source = 'pin'`) | P2 | feature | svc | S |
+| UPD-063 | `ramp_bps` / `cohort_seed` als Resolver-Eingabe | P2 | feature | svc | S |
+| **EPIC H — Delta (Vorbereitung)** ||||||
+| UPD-070 | Delta-Auswahl im Resolver | P3 | feature | svc | S |
+| UPD-071 | Delta-Admission: exakter `base_build`-Match | P3 | security | svc | S |
 
 ---
 
-# EPIC A — Korrektheit im Ist-Zustand (Stufe 1)
+# EPIC A — Core-/SDK-Vorbedingungen
 
-> Diese Tickets machen den heutigen Code vertrauenswürdig, **bevor** er bewegt wird. Kein Strukturumbau.
+> Ohne UPD-001 und UPD-002 ist der Dienst nicht sinnvoll betreibbar. Diese Epic ist Phase 0.
 
 ---
 
-### REG-001 — Mock-Mechanik reparieren: Struct-/TU-Swap statt wirkungslosem `--wrap`
-**Prio:** P0 · **Typ:** bug/security · **Aufwand:** M · **Arch-Ref:** §5.4
-**Dateien:** `chips/esp32c6/mock_efuse.c` (entfällt), `chips/esp32c6/chip_platform.c`, Build-System
+### UPD-001 — Diag auf jedem Boot befüllen
+
+**Prio:** P0 · **Typ:** bug/security · **Komp.:** core · **Aufwand:** S · **Ref:** B1, §12.1
+**Dateien:** `toobloader/core/boot_main.c`, `toobloader/core/utils/boot_diag.c`,
+`toobloader/core/utils/include/boot_diag.h`
 
 **Problem**
-`mock_efuse.c` definiert `__wrap_esp32c6_read_pubkey` etc. — aber `--wrap` greift nur bei vom Linker aufgelösten **globalen** Symbolreferenzen. Die Zielfunktionen sind `static` in `chip_platform.c` und werden ausschließlich über Funktionspointer im `crypto_hal`-Struct referenziert. Der Linker hat nichts umzubiegen: **die Mocks werden nie aufgerufen.** Sandbox-Builds lesen mutmaßlich echte (leere/ungeflashte) eFuse-Register. Zweiter Defekt: Mock- und Real-Kontrakte divergieren — Real-`read_dslc` liefert 1 Byte (`*len >= 1`), Mock liefert 32 Bytes (`*len >= 32`); Real-`read_pubkey` ignoriert `key_index` (statisch KEY0), der Mock implementiert Rotation via Fallback-Key. Rotationstests, die gegen den Mock grün sind, wären auf Silizium rot.
+`boot_diag_set_security_meta()` wird ausschließlich aus `stage_check_binding()` gerufen — also
+nur auf einem Boot, der tatsächlich ein Update durch die Pipeline schiebt. `boot_diag_init()`
+(das zeroisiert und `struct_version` setzt) läuft in `boot_main.c` nur im Forensik-Zweig
+(`if (forensic_valid)`). `toob_diag_state` liegt in `.noinit`.
+
+Nach einem **Kaltstart** enthält die Diag-Struktur damit undefiniertes RAM, und
+`boot_diag_seal()` versieht diesen Zufall am Ende jedes Boots mit einer *gültigen* CRC.
+`toob_get_boot_diag()` liefert `TOOB_OK` mit Müll.
 
 **Root Cause**
-Link-Time-Wrapping wurde für ein Referenzmuster gewählt (direkter Call), das im Pointer-basierten HAL-Wiring nicht existiert. Die Kontrakt-Divergenz blieb unentdeckt, weil es keinen Äquivalenztest gibt (→ REG-042).
+Die Diag-Befüllung ist an den Update-Pfad gekoppelt statt an den Boot-Pfad. Die Werte, die das
+OS braucht (`current_svn`, `build_number`, `fw_ver_*`), liegen aber auf jedem Boot vor: im TMR
+(`tmr.app_svn`, `tmr.stage1_svn`) und im `toob_image_header_t` des gebooteten Slots.
+
+**Auswirkung**
+`toob_network_client.c` setzt `current_svn = diag.current_svn` und schickt das an den Server.
+Meldet ein Gerät nach einem Netzausfall zufällig einen hohen Wert, filtert der Resolver alles
+weg — das Gerät fällt **dauerhaft und still** aus der Update-Versorgung. Meldet es 0, lädt es
+Updates herunter, die es bereits hat, und verbrennt Staging-Erase-Zyklen. Der `sbom_digest` in
+der CRA-Evidenz ist Zufallsrauschen.
 
 **Lösung**
-1. `mock_efuse.c` und den `--wrap`-Ansatz vollständig entfernen.
-2. Übergangslösung bis REG-021: die eFuse-Funktionen in ein eigenes TU-Paar innerhalb des Chip-Packages ziehen (`efuse_real.c` / `efuse_mock.c`) mit **identischer globaler Symbolliste**; Build-Profil (`TOOB_PROFILE=sandbox|production`) wählt die TU. Das Wiring in `chip_platform.c` bleibt unverändert.
-3. Kontrakte angleichen: DSLC-Längensemantik festlegen (Entscheidung dokumentieren: 1 Byte oder 32 Bytes — der Core-Konsument `boot_state.c` ist maßgeblich) und in **beiden** TUs identisch implementieren; `key_index`-Verhalten in beiden TUs identisch (entweder beide Rotation oder beide statisch, mit TODO auf echten Multi-Key-Support).
-4. Poison-Pill vorziehen (voller Umfang in REG-041): Build bricht ab, wenn `*_mock`-Symbole im Production-Profil landen.
+1. `boot_diag_init()` unbedingt und früh in `boot_main.c` rufen, nicht nur im Forensik-Zweig.
+   Der Forensik-Pfad überschreibt danach wie bisher via `boot_diag_set_error()`.
+2. Neuer Setter in `boot_diag.c`:
+   ```c
+   void boot_diag_set_installed_state(uint32_t app_svn, uint32_t stage1_svn,
+                                      uint32_t build_number);
+   ```
+3. In `boot_main.c` BLOCK 5 aufrufen, wo `tmr` bereits gelesen und `app_header` bereits
+   verfügbar ist. Kein zusätzlicher Flash-Read.
+4. Kommentar an beiden Stellen, der die Kopplung erklärt — sonst wird der Aufruf beim nächsten
+   Refactoring wieder entfernt.
 
 **Akzeptanzkriterien**
-- [ ] Sandbox-Build ruft nachweislich die Mock-TU (Testvektor: RFC-8032-Key kommt zurück).
-- [ ] Production-Build enthält kein Mock-Symbol (nm-Check).
-- [ ] Mock und Real bestehen dieselbe Kontrakt-Vektor-Suite (Längen, key_index, Fehlercodes).
-- [ ] `--wrap`-Flags aus dem Build-System entfernt.
+- [ ] Host-Test: `.noinit` vor dem Boot mit `0xA5`-Muster gefüllt ⇒ `toob_get_boot_diag()`
+      liefert die echten TMR-Werte, nicht das Muster.
+- [ ] Host-Test: Boot **ohne** Update ⇒ `diag.current_svn == tmr.app_svn` (vorher: 0 oder Müll).
+- [ ] HIL: Kaltstart (Netztrennung ≥ 10 s) ⇒ das Gerät meldet dieselbe SVN wie vor dem Trennen.
+- [ ] `struct_version` ist nach jedem Boot gesetzt, auch ohne Forensik-Record.
+
+**Abhängigkeit:** Keine. **Blockiert:** UPD-021, UPD-026, UPD-042 und damit faktisch Phase 1.
 
 ---
 
-### REG-002 — Adress-Overlap 0x50000000: Confirm-Storage vs. `.noinit`
-**Prio:** P0 · **Typ:** bug/security · **Aufwand:** S–M · **Arch-Ref:** §3.1 R5, §6.3
-**Dateien:** `chips/esp32c6/chip_config.h`, `esp32c6_stage1.ld`, `generated_memory.ld` (Compiler), `hardware.json`
+### UPD-002 — HTTP-Hook generalisieren
+
+**Prio:** P0 · **Typ:** feature · **Komp.:** sdk · **Aufwand:** M · **Ref:** B5, §12.2
+**Dateien:** `sdk/os_client/include/toob_network_client.h`, `rtos_http_zephyr.c`,
+`rtos_http_esp.c`, `sdk/os_client/src/toob_network_client.c`
 
 **Problem**
-`ADDR_CONFIRM_RTC_RAM` zeigt auf `CHIP_REG_RTC_RAM_BASE` = `0x50000000`. Das Linkerscript legt `lp_ram` mit ORIGIN `0x50000000` an und platziert dort `.noinit` (`toob_handoff_state`, `toob_diag_state`). Falls `generated_memory.ld` den Confirm-Bereich nicht explizit auscarvt, schreibt der Confirm-Treiber seine Nonce in die ersten 8 Bytes des Handoff-States — dieselbe Bug-Klasse wie die bestätigte Delta/Scratch-Adresskollision.
+`rtos_http_get(url, resume_offset, cb, ctx)` ist der einzige RTOS-Hook. Damit sind unmöglich:
+`Authorization`-Header, CBOR-Request-Body, `Retry-After`-Auswertung und die Unterscheidung von
+`204` gegenüber „200 mit leerem Body" — beides ergibt heute `mbuf.len == 0`.
 
 **Root Cause**
-Fest-Adressen, die der Bootloader beschreibt, sind nirgends als reservierte Regionen deklariert; Linker-Platzierung und Treiber-Adressen werden nie gegeneinander geprüft.
+Der Hook wurde für genau einen Anwendungsfall (Blob-Download) entworfen und trägt keine
+HTTP-Semantik nach außen.
 
 **Lösung**
-1. **Sofort verifizieren:** `generated_memory.ld` + Map-File des aktuellen Builds prüfen — überlappt `.noinit` mit `0x50000000 + [0..8)`?
-2. Bei Overlap: Confirm-Storage an dedizierte Adresse legen (z. B. letzte 64 Bytes des LP_RAM) **oder** `.noinit`-ORIGIN verschieben; Entscheidung in `hardware.json` als `reserved_ram_regions`-Eintrag kodieren (R5).
-3. Unabhängig vom Befund: `reserved_ram_regions` ins Schema aufnehmen und den Manifest-Compiler die Linker-Platzierung dagegen prüfen lassen (Vorstufe des ELF-Audits REG-041 — hier reicht der Codegen-seitige Check).
+Ein Hook, nicht zwei — die Zero-Bloat-Philosophie soll nicht durch Hook-Vermehrung erodieren:
+
+```c
+typedef enum { TOOB_HTTP_GET = 0, TOOB_HTTP_POST = 1 } toob_http_method_t;
+
+TOOB_MUST_CHECK toob_status_t rtos_http_request(
+    toob_http_method_t method,
+    const char *url,
+    const char *const *headers, uint32_t header_count,
+    const uint8_t *body, uint32_t body_len,
+    uint32_t range_offset,
+    toob_http_chunk_cb_t callback, void *ctx,
+    uint16_t *out_status,
+    uint32_t *out_retry_after_s);
+```
+
+- `out_status` ist Pflicht: ohne echten Statuscode ist die Fehlertabelle aus §4.5 nicht
+  implementierbar.
+- `out_retry_after_s` ist Pflicht: `204` hat keinen Body, der Header ist der einzige Kanal für
+  serverseitiges Poll-Steering.
+- Beide Ausgaben werden **vor** dem ersten Callback gesetzt, damit der Aufrufer bei `204`
+  gar nicht erst puffert.
+- `headers` ist ein Array von `"Name: Value"`-Strings; der Aufrufer besitzt den Speicher.
+  Kein dynamischer Aufbau im Hook.
 
 **Akzeptanzkriterien**
-- [ ] Schriftlicher Befund (Overlap ja/nein) mit Map-File-Beleg im Ticket.
-- [ ] `hardware.json` deklariert Confirm-Storage als reservierte Region.
-- [ ] Compiler bricht ab, wenn eine `.noinit`-/Section-Platzierung eine reservierte Region schneidet (Negativtest vorhanden).
+- [ ] Zephyr- und ESP-IDF-Implementierung liefern `204` und `200`-mit-leerem-Body
+      unterscheidbar zurück.
+- [ ] `Retry-After` wird auf beiden Plattformen aus dem Response-Header extrahiert;
+      fehlender Header ⇒ `*out_retry_after_s = 0` (Aufrufer entscheidet, kein Default im Hook).
+- [ ] POST mit CBOR-Body funktioniert gegen einen Host-Mock-Server.
+- [ ] Der alte `rtos_http_get` existiert nicht mehr — kein Deprecation-Shim, ein Aufrufer.
+
+**Abhängigkeit:** Keine. **Blockiert:** UPD-003 bis UPD-005, UPD-020, UPD-024.
 
 ---
 
-### REG-003 — Delta/Scratch-Kohärenzregel im Manifest-Compiler
-**Prio:** P1 · **Typ:** bug/codegen · **Aufwand:** S · **Arch-Ref:** §3.2 R7
-**Dateien:** Manifest-Compiler, `chips/esp32c6/template_device.toml`
+### UPD-003 — Device-Credential-Speicher im OS-NVS
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** sdk · **Aufwand:** M · **Ref:** §12.3, §6
 
 **Problem**
-`template_device.toml` setzt `enable_deltas = true` („Force Scratch Slot Generation") auf einem Chip, dessen Manifest `has_scratch: false` deklariert. Genau diese Config-Inkohärenz ist der Brutkasten der bestätigten Delta/Scratch-Adresskollision.
+Der Check-in braucht ein Bearer-Token (§7.1) und einen Idempotenz-Sequenzzähler (§6, B2).
+Beides ist **nicht** aus Chip-UID oder Root-Key ableitbar — beide sind öffentlich.
 
 **Lösung**
-1. Compiler-Regel: `enable_deltas = true` ist nur gültig, wenn `slot_capabilities.has_scratch == true` **oder** das `exec_model` eine deklarierte scratch-lose Delta-Strategie besitzt. Sonst Build-Abbruch mit Erklärtext (welcher Chip, welche Fähigkeit fehlt, welche Optionen bestehen).
-2. `template_device.toml` korrigieren: entweder `enable_deltas = false` oder die scratch-lose Strategie explizit konfigurieren.
+Ein OS-eigener NVS-Bereich (Zephyr Settings / ESP-IDF NVS), nicht in `toob_handoff_t`
+(80 Byte, static-asserted, bootloader-versiegelt):
+
+```c
+typedef struct {
+    uint8_t  device_token[32];
+    uint64_t checkin_seq;
+} toob_device_cred_t;
+```
+
+`checkin_seq` wird **pro Check-in** inkrementiert und geschrieben, nicht pro Boot. Bei einem
+Poll-Intervall von Stunden ist der Verschleiß vernachlässigbar.
+
+Zugriff über zwei Funktionen, kein direkter NVS-Zugriff aus dem Update-Flow:
+`toob_cred_load()`, `toob_cred_bump_seq()`. Fehlt das Credential ⇒ `TOOB_ERR_NOT_FOUND`, und
+der Daemon bricht den Check-in ab — kein anonymer Request.
 
 **Akzeptanzkriterien**
-- [ ] Negativtest: heutiges Template gegen heutiges Manifest bricht mit verständlicher Meldung.
-- [ ] Positivtest: kohärente Konfiguration baut durch.
+- [ ] Token überlebt Reboot und Firmware-Update.
+- [ ] `checkin_seq` ist über Reboots hinweg strikt monoton.
+- [ ] Fehlendes Credential ⇒ Check-in wird gar nicht erst gesendet, Log-Eintrag, Backoff.
+
+**Abhängigkeit:** UPD-002.
 
 ---
 
-### REG-004 — XIP-Remap: Register & Größen aus Config statt Hardcode
-**Prio:** P1 · **Typ:** bug/security · **Aufwand:** M · **Arch-Ref:** §5.1, §3.1 R2
-**Dateien:** `chips/esp32c6/chip_platform.c` (bis REG-020), `hardware.json`
+### UPD-004 — Check-in-Client auf POST + Diag-Body umbauen
+
+**Prio:** P1 · **Typ:** refactor · **Komp.:** sdk · **Aufwand:** M · **Ref:** §4.2
+**Datei:** `sdk/os_client/src/toob_network_client.c`
 
 **Problem**
-`esp32c6_xip_remap_commit` schreibt MMU-/Cache-Register als nackte Literale (`0x60002380`, `0x6000237C`, `0x600C8098–A4`, `0x42000000`) — Konventionsbruch gegen „alle Adressen aus hardware.json". Gravierender: die Schleife mappt fest **6 Pages = 384 KB** und synct fest **393216 Bytes**, während `app_size` im Geräte-TOML konfigurierbar ist. Ändert ein Kunde `app_size`, remappt der Bootloader still zu wenig oder zu viel — je nach Richtung nicht ausgeführter App-Code oder fremde Flash-Inhalte im XIP-Fenster.
+`toob_network_trigger_ota()` baut heute `"%s/check?svn=%u"` und schickt einen GET ohne
+Identität. Die Architektur verlangt einen POST mit dem Diag-CBOR als Body, Token im Header und
+Sequenz im `X-Toob-Seq`-Header.
 
 **Lösung**
-1. MMU-Index/-Content-Register, Cache-Sync-Registerblock, XIP-Base, Page-Size und Valid-Bit-Maske nach `hardware.json` (`register_blocks`, R2).
-2. Page-Count = `CHIP_APP_SLOT_SIZE / CHIP_MMU_PAGE_SIZE` (Codegen-Konstante, mit Compile-Assert auf Teilbarkeit); Sync-Size = `CHIP_APP_SLOT_SIZE`.
-3. Timeout zeitbasiert über `clock_hal->get_tick_ms` statt Iterationszähler; Fehlerdomäne korrigieren (nicht `BOOT_ERR_FLASH_HW`, sondern `BOOT_ERR_STATE` oder neuer MMU-Fehlercode).
+1. Request bauen: `POST {base}/v1/devices/{hex(device_id)}/checkin`,
+   Header `Authorization: Bearer …` und `X-Toob-Seq: …`,
+   Body = unveränderte Ausgabe von `toob_get_boot_diag_cbor()`.
+2. `device_id` über `toob_get_device_id()` beziehen, hex-kodieren (feste Länge 64, kein
+   dynamischer String).
+3. Antwortauswertung anhand `out_status`:
+   `200` → Manifest parsen; `204` → kein Update; `401/403/404` → Backoff + Log;
+   `429/5xx` → Backoff mit `Retry-After`.
+4. Der bestehende `_parse_cbor_manifest()` bleibt unverändert nutzbar (Keys 1–4); neue Keys
+   fallen durch `zcbor_any_skip()`.
 
 **Akzeptanzkriterien**
-- [ ] Keine numerischen Register-Literale mehr in der Funktion (Vorgriff auf REG-040).
-- [ ] Host-/HIL-Test: `app_size`-Änderung im TOML ändert Page-Count und Sync-Size nachweislich mit.
-- [ ] `_Static_assert`: `CHIP_APP_SLOT_SIZE % CHIP_MMU_PAGE_SIZE == 0`.
+- [ ] Host-Test gegen Mock: `204` führt zu keinem Download-Versuch und keinem Fehlerlog.
+- [ ] Host-Test: `401` führt zu Backoff, nicht zu einem Retry-Sturm.
+- [ ] Der Body ist byte-identisch mit `toob_get_boot_diag_cbor()` — kein Re-Encoding.
+- [ ] URL-Länge bleibt unter der `check_url[256]`-Grenze (Trunkierungsprüfung bleibt bestehen).
+
+**Abhängigkeit:** UPD-002, UPD-003.
 
 ---
 
-### REG-005 — TRNG-Sampling-Disziplin
-**Prio:** P1 · **Typ:** security · **Aufwand:** S · **Arch-Ref:** §6.5
-**Dateien:** `chips/esp32c6/chip_platform.c` (RNG-Teil; wandert später mit REG-024/021)
+### UPD-005 — Blob-Download über gebundenen Pfad-Suffix
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** sdk · **Aufwand:** M · **Ref:** §4.4
 
 **Problem**
-`esp32c6_hw_random` liest `CHIP_REG_RNG_DATA_REG` in einer engen Schleife. Espressifs TRNG liefert nur bei begrenzter Leserate volle Entropie; Back-to-back-Reads liefern korrelierte Werte. Aus dieser Quelle stammen `seal_key` (Stage-1→OS-Proof) und perspektivisch die per-Boot-randomisierten CFI-Tokens — das ist Sicherheits-, keine Stilfrage. Zusätzlich: der Kommentar beschreibt den ESP32 (Original), nicht den C6 — Copy-Paste-Drift, die genau die falsche Timing-Annahme transportieren kann.
+Der Client baut heute `"%s/download"` — ein fest verdrahteter Pfad, der keine
+Objektschlüssel-Migration und keine Region-Steuerung erlaubt. Eine freie absolute URL aus der
+Antwort ist aber nicht tragfähig: `cbor_manifest_buf_t.buf[256]` fasst die **gesamte**
+CBOR-Antwort, und eine Pre-Signed-URL ist allein 400–700 Zeichen lang.
 
 **Lösung**
-1. Zwischen Word-Reads eine dokumentierte Mindestwartezeit einziehen (systimer-basiert; Wert gegen C6-TRM verifizieren, nicht vom ESP32 übernehmen).
-2. Kommentar auf C6 korrigieren, TRM-Referenz + Provenance angeben (Vorgriff auf REG-032).
-3. Testbarkeit: im Sandbox-Profil einen einfachen Monobit-/Repeat-Check über N Samples als Smoke-Test (kein NIST-Suite-Anspruch — nur „nicht offensichtlich korreliert").
+1. `cbor_manifest_buf_t.buf` auf 512 Byte (OS-seitiges RAM, nicht Bootloader).
+2. Key 5 als `tstr` mit harter Längenprüfung ≤ 128 Byte parsen. Überlänge ⇒
+   `TOOB_ERR_INVALID_ARG`, kein Abschneiden.
+3. **Ablehnen**, wenn der Wert `":"` oder `"//"` enthält — Key 5 trägt ausschließlich Pfad und
+   Query, niemals Schema oder Host. Der Host bleibt einkompiliert und ist vom Netz nicht
+   veränderbar.
+4. Download-URL: `snprintf(url, sizeof(url), "%s%s", CONFIG_TOOB_SERVER_URL, blob_path)`,
+   mit Trunkierungsprüfung.
 
 **Akzeptanzkriterien**
-- [ ] Reads sind zeitlich beabstandet; Wartezeit als benannte Konstante mit TRM-Referenz.
-- [ ] Kommentarblock beschreibt den C6, nicht den ESP32.
-- [ ] Smoke-Test vorhanden.
+- [ ] Ein Key-5-Wert mit `http://` oder `//` wird abgelehnt, kein Request abgesetzt.
+- [ ] Ein 129-Byte-Wert wird abgelehnt.
+- [ ] Fehlt Key 5 ⇒ `TOOB_ERR_INVALID_ARG` (kein Rückfall auf einen Default-Pfad).
+- [ ] Der Manifest-Puffer wird nach dem Parsen zeroisiert.
+
+**Abhängigkeit:** UPD-002. **Hinweis:** MISRA/CERT-relevant — netzkontrollierter String im
+URL-Aufbau. Die Host-Bindung ist die Kernabsicherung und darf nicht wegkonfiguriert werden.
 
 ---
 
-### REG-006 — Silent Fallbacks eliminieren
-**Prio:** P1 · **Typ:** bug · **Aufwand:** S · **Arch-Ref:** §6.5
-**Dateien:** `chips/esp32c6/chip_platform.c`
+### UPD-006 — `counter_min`-Deckel + `issued_at`-Freshness
+
+**Prio:** P0 · **Typ:** security · **Komp.:** core · **Aufwand:** S · **Ref:** B4, §12.5
+**Datei:** `toobloader/core/boot_cloud_cmd.c`
 
 **Problem**
-Zwei Verstöße gegen die eigene Fail-Fast-Philosophie: (1) Fehlt `TOOB_DRIVER_UART_BAUDRATE`, fällt die Console-Init still auf `115200U` zurück — ein kaputter Codegen-Lauf wird maskiert statt gemeldet. (2) `esp32c6_get_active_slot` defaultet bei nicht klassifizierbarem MMU-Zustand (weder App- noch Staging-Base) still auf Slot 0 — ein Anomalie-Signal wird geschluckt.
+`boot_cloud_cmd_evaluate_buffer()` berechnet `burns_needed = decoded.counter_min - current_counter`
+und brennt so oft, **ohne Obergrenze**. Ein fehlerhaft berechneter oder manipulierter Wert
+verbrennt irreversibel OTP-Bits bis zur Erschöpfung des Zählers.
+
+Zusätzlich wird `decoded.issued_at` dekodiert, aber nie geprüft: ein abgefangenes, nie
+zugestelltes Kommando bleibt unbegrenzt gültig.
 
 **Lösung**
-1. `#else`-Zweig durch `#error "TOOB_DRIVER_UART_BAUDRATE missing — manifest compiler output incomplete"` ersetzen.
-2. `get_active_slot`: nicht klassifizierbarer, aber als valid markierter MMU-Eintrag ⇒ `BOOT_ERR_STATE`. (Invalid-Bit ⇒ Slot 0 bleibt korrekt: das ist der definierte Kaltstart-Zustand.)
+```c
+/* Ein einzelner Command darf den OTP-Zähler nie um mehr als
+ * TOOB_CMD_MAX_BURN_STEPS vorrücken. Ein zu hoher counter_min ist ein Fehler
+ * des Ausstellers oder ein Angriff — kein Grund, OTP-Bits zu verbrennen. */
+uint32_t burns_needed = decoded.counter_min - current_counter;
+if (burns_needed > TOOB_CMD_MAX_BURN_STEPS) {
+    final_status = BOOT_ERR_INVALID_ARG;
+    goto cleanup;
+}
+```
+
+`TOOB_CMD_MAX_BURN_STEPS` als generierte Konstante (Vorschlag: 4). Dazu ein Freshness-Fenster
+gegen `issued_at`, dessen Breite aus dem Geräte-TOML kommt.
+
+> **TODO:** Das Gerät hat keine vertrauenswürdige Wanduhr. Das Freshness-Fenster kann daher
+> nur gegen einen monoton wachsenden Referenzwert geprüft werden (z. B. `issued_at` des zuletzt
+> akzeptierten Commands). Die genaue Semantik ist vor der Umsetzung festzulegen — ein
+> Zeitfenster ohne Zeitquelle wäre ein Scheingate.
 
 **Akzeptanzkriterien**
-- [ ] Build ohne Baudraten-Makro bricht mit `#error`.
-- [ ] Host-Test: MMU-Content mit fremder Page-Adresse ⇒ `BOOT_ERR_STATE`, kein Slot-0-Default.
+- [ ] Host-Test: `counter_min = current + 5` bei `MAX_BURN_STEPS = 4` ⇒ `BOOT_ERR_INVALID_ARG`,
+      **kein** `advance_monotonic_counter()`-Aufruf.
+- [ ] Host-Test: `counter_min = current + 1` ⇒ genau ein Burn.
+- [ ] `issued_at` kleiner als der zuletzt akzeptierte Wert ⇒ Ablehnung.
+
+**Abhängigkeit:** Keine. Unabhängig vom Rest des Backlogs umsetzbar.
 
 ---
 
-### REG-007 — Recovery-Krypto „none": Begründungspflicht + signierter Default
-**Prio:** P1 · **Typ:** security · **Aufwand:** S · **Arch-Ref:** §3.2 R8
-**Dateien:** `chips/esp32c6/chip_manifest.json`, `template_device.toml`, Manifest-Compiler
+### UPD-007 — Diag v3 (ABI-Bump, Sammelticket)
+
+**Prio:** P2 · **Typ:** abi · **Komp.:** sdk/core · **Aufwand:** L · **Ref:** §12.6
+**Dateien:** `sdk/libtoob/include/libtoob_types.h`, `toobloader/core/utils/boot_diag.c`,
+`cli/cbor/toob_telemetry.cddl`, generierte zcbor-Encoder
 
 **Problem**
-`recovery.crypto.backend = "none"` steht als Default in Manifest **und** Template. Ein unsigniertes Recovery ist ein potenzieller Unsigned-Code-Execution-Pfad am signierten Boot vorbei — als Template-Default wird eine Security-Posture-Entscheidung normalisiert, die bewusst getroffen werden muss.
+Mehrere Felder, die der Server für Resolver, Confirm-Inferenz und sichere Cloud-Commands
+braucht, existieren in `toob_boot_diag_t` nicht. `_reserved_diag[1]` reicht nicht.
 
-**Lösung**
-1. Compiler: `backend = "none"` im Recovery-Block erfordert Pflichtfeld `justification` (String, nicht leer); fehlt es ⇒ Abbruch.
-2. Architektur-Entscheidung dokumentieren: **ist** das C6-Recovery-Image Teil des Stage-1-Merkle-Baums (dann ist „none" vertretbar und die Begründung lautet genau das) oder nicht (dann Default auf `sha256_sw` + Signatur drehen)?
-3. Template auf den begründeten bzw. signierten Zustand bringen.
+**Lösung — als *ein* Bump, nicht als drei**
+
+| Feld | Zweck |
+|---|---|
+| `installed_app_svn`, `installed_stage1_svn` | Resolver-Fortschrittsfilter (§6, UPD-001) |
+| `reader_major`, `reader_minor` | `min_reader_*`-Gate serverseitig prüfbar (§7.4) |
+| `monotonic_counter` | Sichere `counter_min`-Berechnung (§4.3) |
+| `last_update_outcome` | enum: none / applied / rejected / reverted / deferred |
+| `last_update_reject` | `tbm1_reject_t` — heute verliert `_handle_update_result()` die feingranulare Ursache über die `ERR_TABLE`, obwohl `boot_tbm1.c` selbst anmerkt, dass genau sie in die Telemetrie gehört |
+
+Koordiniert mitzuziehen: die vollständige `_Static_assert`-Offsetkette,
+`TOOB_DIAG_STRUCT_VERSION` → `0x03000000`, das CDDL-Schema (additiv, neue Keys ≥ 12) und der
+generierte Encoder.
 
 **Akzeptanzkriterien**
-- [ ] „none" ohne Begründung bricht den Build.
-- [ ] Entscheidung (Merkle-gedeckt ja/nein) schriftlich im Manifest-Kommentar/Doku.
+- [ ] Alle Offset-Asserts aktualisiert; ein absichtlich eingefügtes Testfeld lässt den Build rot werden.
+- [ ] `last_update_reject` trägt nach einem abgelehnten Update den echten `tbm1_reject_t`.
+- [ ] Der Server kann aus der Telemetrie „abgelehnt" von „nie versucht" unterscheiden.
+- [ ] CDDL und C-Struct sind konsistent (Round-Trip-Test Encode → Decode).
+
+**Abhängigkeit:** UPD-001 (sonst sind auch die neuen Felder auf einem Normalboot leer).
 
 ---
 
-### REG-008 — `hardware.json`-Widersprüche auflösen
-**Prio:** P2 · **Typ:** bug/cleanup · **Aufwand:** S · **Arch-Ref:** §3.1 R3
-**Dateien:** `chips/esp32c6/hardware.json`
+### UPD-008 — Resume-State im OS-eigenen `.noinit`-Slot
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** sdk · **Aufwand:** M · **Ref:** B3, §12.4
 
 **Problem**
-(1) `memory.ram_size = "0x8000"` (32 KB) widerspricht dem Linkerscript (496 KB IRAM) — vermutlich meint das Feld LP_RAM oder ist schlicht falsch; der Codegen könnte darauf Entscheidungen treffen. (2) `crypto_capabilities.hw_sha256 = true` widerspricht dem Code-Kommentar („no HW SHA on C6 BootROM") und `has_hw_acceleration = false` — Silizium-Präsenz und Boot-Nutzbarkeit sind vermengt. (3) `"description": "Derived from scan: skipped"` ist ein Scan-Artefakt als Produktionstext.
+`toob_ota_resume()` liest `toob_handoff_state.resume_offset`. Der Core füllt das Feld aus
+`WAL_INTENT_DOWNLOAD_CHECKPOINT`; seit der Mailbox-Umstellung schreibt aber nichts mehr diesen
+Intent, und `toob_mailbox_wire.h` kennt keinen Checkpoint-Request. Der Wert ist konstant 0,
+`toob_ota_resume()` liefert immer `TOOB_ERR_NOT_FOUND`.
 
-**Lösung**
-1. `memory` korrigieren und eindeutig benennen (`iram_base/iram_size`, `lp_ram_base/lp_ram_size`).
-2. Capabilities auf Zwei-Ebenen-Schema (R3: `hw_present`/`boot_usable`/`note`) heben; `has_hw_acceleration` wird vom Codegen aus `boot_usable` abgeleitet.
-3. Scan-Artefakte durch echte Beschreibungen ersetzen (Region 0: „BootROM/Stage-0-Bereich, von Slot-Vergabe ausgenommen" o. ä.) — Provenance-Kennzeichnung folgt in REG-032.
+**Lösung — ohne Core-Änderung**
+Der tote WAL-Pfad wird nicht wiederbelebt. Stattdessen ein OS-eigener `.noinit`-Slot, getrennt
+vom bootloader-versiegelten `toob_handoff_state` (dessen CRC das OS nicht neu berechnen darf):
+
+```c
+typedef struct __attribute__((aligned(8))) {
+    uint32_t magic;
+    uint32_t bytes_staged;
+    uint8_t  artifact_sha256[32];
+    uint8_t  assignment_id[16];
+    uint32_t crc32_trailer;
+} toob_ota_resume_state_t;
+```
+
+Resume nur, wenn Magic und CRC stimmen **und** `artifact_sha256` mit dem Wert aus dem frischen
+Check-in übereinstimmt. Sonst Neustart — ein Spleiß zweier verschiedener Images würde sonst
+erst am Finalize-SHA auffallen, nach vollem Download.
+
+Kein flash-persistenter Checkpoint: bei einem 1-MB-Image kostete das dutzende Sektor-Erases pro
+Download und griffe genau die Lebensdauer an, die EPIC E schützt. Resume überlebt WDT-Reset,
+HardFault und Soft-Reboot; ein Stromausfall führt bewusst zum Neustart.
 
 **Akzeptanzkriterien**
-- [ ] Kein Feld widerspricht Linkerscript oder Code-Kommentaren.
-- [ ] `hw_present`/`boot_usable` für alle Crypto-Capabilities gesetzt.
+- [ ] HIL: WDT-Reset bei 50 % Download ⇒ Resume ab exakt `bytes_staged`, Finalize-SHA grün.
+- [ ] Wechselt der Server die Zuweisung, wird der Resume verworfen und neu begonnen —
+      nachweisbar über ein `download_started`-Event mit `bytes_done == 0`.
+- [ ] Kaltstart ⇒ kein Resume, kein Fehler.
+- [ ] Die Region ist als `reserved_ram_regions`-Eintrag im Chip-Package deklariert
+      (`ARCHITEKTUR-registry-chips.md` §3.1 R5) und wird vom ELF-Audit gegen `.noinit`
+      geprüft.
+
+**Abhängigkeit:** UPD-004, UPD-005; Chip-Package-Ticket REG-002/REG-041 für die Region.
 
 ---
 
-### REG-009 — Versions-Pins statt `"latest"`
-**Prio:** P2 · **Typ:** infra · **Aufwand:** S · **Arch-Ref:** §3.2 R6
-**Dateien:** `chip_manifest.json`, `template_device.toml`, Manifest-Compiler
+### UPD-009 — `wdt_kicks` echt zählen oder als reserviert kennzeichnen
+
+**Prio:** P3 · **Typ:** cleanup · **Komp.:** core · **Aufwand:** S · **Ref:** §12.7
 
 **Problem**
-`"min_compiler": "latest"` und `core_sdk = "latest"` sind als *Minimum* semantisch leer und nicht reproduzierbar — dieselbe Fehlerklasse wie der im CLI gefixte Lockfile-Bypass. Templates leben Pinning nicht vor.
+`boot_main.c` ruft `boot_diag_set_system_status(0, …)` — `wdt_kicks` ist hart auf 0 verdrahtet.
+Ein konstant nullwertiges Telemetriefeld ist schlimmer als kein Feld: es täuscht eine Auswertung
+vor, die es nicht gibt.
 
 **Lösung**
-Schema lehnt `"latest"` in `min_*`-Feldern ab; Manifest und Template auf konkrete Versionen pinnen (`core/vX.Y.Z`, Compiler-Mindestversion). `latest` bleibt zulässig ausschließlich als explizite *Auflösungs*-Anweisung in Nicht-`min_`-Feldern, die das CLI zum Lock-Zeitpunkt in einen Pin übersetzt.
+Entweder einen echten Zähler im WDT-HAL-Wrapper führen, oder das Feld im CDDL und im Header
+explizit als `reserved` dokumentieren und serverseitig nicht auswerten. Keine dritte Variante.
 
 **Akzeptanzkriterien**
-- [ ] Schema-Negativtest: `"min_compiler": "latest"` wird abgelehnt.
-- [ ] ESP32-C6-Manifest + Template gepinnt.
+- [ ] Feld liefert entweder echte Werte oder ist als reserviert dokumentiert und wird vom
+      Ingest ignoriert.
 
 ---
 
-### REG-010 — Panic-Sites unterscheidbar machen
-**Prio:** P2 · **Typ:** dx · **Aufwand:** S · **Arch-Ref:** §5.3
-**Dateien:** `chips/esp32c6/chip_platform.c` (übergangsweise), Core-`site_id`-Enum
+# EPIC B — Datenmodell, Ingest, Artefakt-Store
+
+---
+
+### UPD-010 — Schema-Migration v1
+
+**Prio:** P1 · **Typ:** infra · **Komp.:** svc · **Aufwand:** M · **Ref:** §3.1
+
+**Lösung**
+Tabellen `products`, `product_svn_floor`, `artifacts`, `releases`, `devices`, `assignments`,
+`device_events` gemäß Architektur. Kritische Invarianten als DB-Constraints, nicht als
+Anwendungscode:
+
+- `releases_one_active` — partieller Unique-Index auf `(product, channel) WHERE active`.
+- `assignments_one_open` — partieller Unique-Index auf `device_id` für offene Zustände.
+- `artifacts_build_unique` auf `(product, build_number, kind, COALESCE(base_build, -1))`.
+- `CHECK ((kind = 'delta') = (base_build IS NOT NULL))`.
+- `CHECK (octet_length(digest) = 32)` und analog für `device_id`, `sbom_digest`.
+
+**Akzeptanzkriterien**
+- [ ] Jede Invariante hat einen Negativtest, der den Constraint auslöst.
+- [ ] Migration ist vorwärts *und* rückwärts lauffähig.
+- [ ] `device_events` ist append-only: kein `UPDATE`/`DELETE`-Grant für die Anwendungsrolle.
+
+---
+
+### UPD-011 — Admission-Gate: host-kompilierter C-Reader im Ingest
+
+**Prio:** P0 · **Typ:** security · **Komp.:** svc · **Aufwand:** M · **Ref:** §7.4
 
 **Problem**
-Clock-, WDT- und Confirm-Init-Fehlschlag panicken alle mit `BOOT_ERR_STATE`. Ein Feld-Forensik-Record sagt damit nur „irgendwas bei Init" — die vorhandene site_id-Infrastruktur wird an dieser Stelle nicht genutzt.
+`validateBlock()` in `tools/tbm1/tbm1_encoder.go` ist ein *Spiegel* des C-Readers. Spiegel
+driften. Golden Vectors decken das stichprobenartig ab, nicht vollständig.
 
 **Lösung**
-Pro Bringup-Schritt eine eigene site_id (`SITE_BRINGUP_CLOCK`, `SITE_BRINGUP_WDT`, …) vergeben und an `boot_panic` durchreichen. (Wird mit REG-022 strukturell; dieses Ticket ist der sofort wirksame Vorgriff.)
+Der echte C-Reader (`tbm1_precheck` → `tbm1_validate_regions` → `tbm1_validate_images` aus
+`boot_tbm1.c`) ist host-kompilierbar und läuft in der Publish-Pipeline über den **fertigen
+Blob**, mit der echten `staging_cap`, `product_id` und `hw_rev` des Zielprofils.
+
+Zusätzlich die vier Regeln, die kein Vorgänger hatte:
+
+1. **Kein Image mit `target_slot == TBM1_SLOT_RECOVERY`.** `stage_swap()` gibt dafür
+   unbedingt `BOOT_ERR_NOT_SUPPORTED` zurück — Recovery ist factory-locked. Ein solches
+   Artefakt ist garantiert unbrauchbar.
+2. **Bei `TBM1_SLOT_STAGE1`: `stage1_svn != 0`**, sonst `BOOT_ERR_INVALID_ARG` im Core.
+3. **`min_reader_major/minor` ≤ Reader-Version** aller Geräte im Zielkanal.
+4. **`size_bytes` ≤ kleinste `staging_capacity`** im Zielkanal — sonst lehnt
+   `toob_ota_begin()` nach dem Download ab.
+
+Ein Artefakt, das hier durchfällt, wird **nicht** gespeichert und nicht assignbar. Kein
+Warn-und-trotzdem-publizieren.
 
 **Akzeptanzkriterien**
-- [ ] Jeder Init-Fehlschlag erzeugt einen im Forensik-Record eindeutig zuordenbaren Site-Code.
+- [ ] Ein Artefakt mit Recovery-Image wird abgewiesen, mit nennbarem Grund.
+- [ ] Ein Artefakt größer als `staging_capacity` des Zielkanals wird abgewiesen.
+- [ ] Der C-Reader läuft im CI gegen jedes Testartefakt; ein absichtlich verfälschtes CRC32
+      führt zu `TBM1_BAD_CRC` und nicht zu einer Go-seitigen Fehlermeldung.
+- [ ] Reject-Grund wird als `tbm1_reject_t` protokolliert, nicht als generischer Fehler.
+
+**Abhängigkeit:** UPD-010.
 
 ---
 
-### REG-011 — Kleinbefunde-Sammelticket
-**Prio:** P3 · **Typ:** cleanup · **Aufwand:** S–M · **Arch-Ref:** §6.5, §3.4
-**Dateien:** `chip_platform.c`, `startup.c`, `chip_config.h`, `hardware.json`
+### UPD-012 — SVN-Geländer pro Target-Slot als DB-Invariante
 
-**Inhalt (je eigener Commit, gemeinsamer PR):**
-1. `seal_key` nach `boot_proof_verify` und vor `jump_to_os` zeroizen (`boot_ct_utils`-Zeroize; sensitives Material liegt sonst lesbar auf dem Stage-1-Stack im OS).
-2. WDT-freies Fenster dokumentieren: zwischen `wdt_sterilize_all` und `wdt->init` (nach Clock+Flash) hängt ein Flash-Init-Hang permanent. Bewusste Abwägung als Kommentar an beide Stellen; prüfen, ob SWD-Auto-Feed statt Voll-Sterilisierung das Fenster schließen kann, ohne die BootROM-Timeout-Gefahr zurückzuholen.
-3. `verify_signature_ph`-Feldausrichtung reparieren (Handedit-Spur; erledigt sich endgültig mit REG-033).
-4. WDT-Register-Offsets aus `chip_config.h` nach `hardware.json` (R2; finaler Entfall des Shims mit REG-023).
-5. Typo „brcking"; ESP32-vs-C6-Kommentardrift (mit REG-005 koordinieren); deutsche Kommentare in Registry-Dateien auf Englisch (Umsetzungsdetail von REG-035).
-
-**Akzeptanzkriterien**
-- [ ] Alle fünf Punkte einzeln nachvollziehbar committet.
-
----
-
-# EPIC B — Auflösung von `chip_platform.c` (Stufen 2–4)
-
----
-
-### REG-020 — Extraktion: `drivers/slot/esp_mmu_remap/`
-**Prio:** P1 · **Typ:** refactor · **Aufwand:** M · **Arch-Ref:** §2.2, §5.1
-**Abhängigkeit:** REG-004 (Fixes wandern mit, nicht doppelt)
+**Prio:** P0 · **Typ:** security · **Komp.:** svc · **Aufwand:** M · **Ref:** §7.3
 
 **Problem**
-Slot-Operationen (`xip_remap_commit`, `get_active_slot`) sind der größte und gefährlichste Codeblock in `chip_platform.c` — und der einzige Treiber, der nicht als Package existiert, obwohl UART/Flash/WDT/RTC/Clock es längst sind.
+Ein Artefakt mit zu niedriger SVN zu veröffentlichen, nachdem eine höhere im Feld ist, macht
+Geräte dauerhaft unerreichbar für diese Linie: `boot_rollback_verify_svn()` verweigert alles
+unterhalb des TMR-Floors, und die eFuse-Epoche ist irreversibel.
+
+Ein **gemeinsamer** Zähler pro Produkt ist zu grob: der Core führt getrennte Floors für
+`ROLLBACK_TARGET_APP` (`tmr.app_svn`), `_RECOVERY` (`tmr.svn_recovery_counter`) und
+`_STAGE1` (`tmr.stage1_svn`).
 
 **Lösung**
-1. Neues Package `drivers/slot/esp_mmu_remap/` mit eigenem Manifest (deklariert: bedient `slot_caps`, `exec_model: xip_remap`, ABI v2), globalen Symbolen `esp_mmu_remap_commit` / `esp_mmu_get_active_slot`.
-2. `chip_manifest.json`: Treiber unter `sources.drivers` referenzieren; `slot_capabilities` bleibt die deklarative Quelle.
-3. Conformance-Vektoren beilegen (Remap auf Slot-0-/Slot-1-Adresse, fremde Adresse ⇒ Fehler, Timeout-Pfad) — Zulassungsgrundlage für REG-042.
-4. Einordnung: dieses Package ist die **pointer-Provider-Bindung** des Slot-Transport-Systems; Naming und Ops-Signaturen mit den vier Core-Providern (`swapscratch`, `oneway`, `swapmove`, `pointer`) abstimmen.
+```sql
+SELECT max_published_svn FROM product_svn_floor
+  WHERE product = $1 AND target_slot = $2 FOR UPDATE;
+-- Abbruch wenn new_svn < max_published_svn
+UPDATE product_svn_floor SET max_published_svn = GREATEST(max_published_svn, $3)
+  WHERE product = $1 AND target_slot = $2;
+```
+
+In derselben Transaktion wie das Einfügen des Artefakts. Ein `force`-Pfad existiert, erfordert
+aber einen Audit-Eintrag mit Begründung und ist nicht über die normale API erreichbar.
 
 **Akzeptanzkriterien**
-- [ ] `chip_platform.c` enthält keine Slot-Logik mehr.
-- [ ] Package baut eigenständig, Conformance-Vektoren grün.
-- [ ] `template_device.toml`-Build des C6 verhält sich bit-identisch (Map-File-Diff der relevanten Sections).
+- [ ] Publish mit `svn < max_published_svn` schlägt fehl, Artefakt wird nicht gespeichert.
+- [ ] App- und Stage-1-Linie beeinflussen sich nicht.
+- [ ] Nebenläufiger Publish zweier Artefakte: der Floor ist danach das Maximum, kein Lost Update.
+- [ ] `force` ohne Audit-Eintrag ist nicht möglich.
+
+**Abhängigkeit:** UPD-010.
 
 ---
 
-### REG-021 — Extraktion: `drivers/otp/esp_efuse/`
-**Prio:** P1 · **Typ:** refactor · **Aufwand:** M · **Arch-Ref:** §2.2, §5.2, §5.4
-**Abhängigkeit:** REG-001 (TU-Paar wird hierhin verschoben), REG-011.4 (Offsets im JSON)
+### UPD-013 — Artefakt-Store: WORM, Digest-Verifikation nach Upload
+
+**Prio:** P1 · **Typ:** infra · **Komp.:** svc · **Aufwand:** M · **Ref:** §7.4, §13
+
+**Lösung**
+- Hetzner Object Storage mit Object Lock (WORM), Schlüssel = `hex(sha256(blob))`.
+- **Nach** dem Upload zurücklesen und den Digest verifizieren. Mismatch ⇒ Objekt verwerfen,
+  Alarm, kein Katalogeintrag. Derselbe Read-Back-Gedanke wie im Flash-Pfad des Geräts.
+- Beim Ausliefern (UPD-023) verifiziert der Store den Digest nicht erneut — das wäre auf dem
+  Hot Path zu teuer; die WORM-Garantie trägt.
+
+**Akzeptanzkriterien**
+- [ ] Ein manipuliertes Objekt kann nach dem Publish nicht ersetzt werden (Object-Lock-Test).
+- [ ] Digest-Mismatch beim Upload ⇒ kein `artifacts`-Eintrag.
+
+---
+
+### UPD-014 — Ingest-API + Release-Pointer
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §5, §7.4
+
+**Lösung**
+```
+POST /v1/internal/artifacts     # signierter Blob + Metadaten → Admission → Store
+POST /v1/internal/releases      # setzt (product, channel) → artifact, atomar
+```
+
+Metadaten werden **aus dem signierten TBM1-Header gelesen**, nicht aus der Operator-Eingabe:
+`svn`, `product_id`, `hw_rev_min/max`, `key_index`, `build_number`, `fw_ver_*`, `sbom_digest`,
+`target_slot`. Das Artefakt ist die Wahrheit über sich selbst; Operator-Eingaben sind
+höchstens Plausibilisierung.
+
+`releases_one_active` sorgt dafür, dass ein Channel nie zwei aktive Releases hat.
+
+**Akzeptanzkriterien**
+- [ ] Widerspricht eine Operator-Angabe dem Header, wird abgewiesen — nicht die Angabe
+      übernommen und nicht der Header überschrieben.
+- [ ] Release-Wechsel ist atomar; ein paralleler Check-in sieht entweder das alte oder das
+      neue Release, nie keines.
+
+**Abhängigkeit:** UPD-011, UPD-012, UPD-013.
+
+---
+
+### UPD-015 — Signing-Service-Policy
+
+**Prio:** P1 · **Typ:** security · **Komp.:** sign · **Aufwand:** M · **Ref:** §7.2
 
 **Problem**
-eFuse-Lesezugriffe, Provisioning-Stubs und die Mock-TU leben verstreut im Chip-Package statt als versionierbares OTP-Driver-Package.
+`SignBlock()` validiert bereits die Struktur und ist damit kein generisches Ed25519-Orakel.
+Es fehlt die Policy-Ebene: *welcher Schlüssel darf für welches Produkt signieren.*
 
 **Lösung**
-1. Neues Package `drivers/otp/esp_efuse/` mit `esp_efuse.c` (real) + `esp_efuse_mock.c` (Profil-gewählt), identische Symbolliste/Kontrakte (aus REG-001 übernommen).
-2. Registeradressen (`EFUSE_BLK_KEY0_DATA0`, `SYS_DATA_PART2`) via `register_blocks` aus `hardware.json`.
-3. Provisioning-Stubs (NOT_SUPPORTED bis ROM-Call-Integration) mitziehen; Fähigkeitsstand im Package-Manifest deklarieren (`"provisioning": "stubbed"`), nicht nur im Kommentar.
-4. Perspektive dokumentieren: dieses Package wird mit ABI v3 (REG-024) der `keystore_hal_t`-Provider.
+Vor dem Signieren prüfen: erlaubte `product_id`-Menge pro Schlüssel, Konsistenz von
+`key_index`/`key_epoch`, und die SVN-Monotonie aus UPD-012 (zweite Verteidigungslinie —
+der Signer ist der letzte Punkt, an dem ein Fehler noch billig ist). Jede Signatur wird mit
+Antragsteller, Digest und Policy-Entscheidung auditiert.
 
 **Akzeptanzkriterien**
-- [ ] `chip_platform.c` enthält keine eFuse-/Provisioning-Logik mehr.
-- [ ] Mock/Real-Kontrakt-Suite (aus REG-001) läuft im Package-CI.
-- [ ] Production-ELF weiterhin mock-frei (nm-Check).
+- [ ] Ein Block mit fremder `product_id` wird nicht signiert.
+- [ ] Audit-Log enthält für jede Signatur Digest und Entscheidungsgrundlage.
+- [ ] Der Update Service hat keinen Netzpfad zum Signer-Schlüssel (Netzwerk-Test).
 
 ---
 
-### REG-022 — Core: `boot_platform_bringup`-Tabellen-Interpreter
-**Prio:** P2 · **Typ:** refactor (Core-Ticket) · **Aufwand:** M · **Arch-Ref:** §5.3
-**Abhängigkeit:** REG-010 (site_ids existieren)
+### UPD-016 — Reproduzierbarkeits-Invariante für `build_number`
+
+**Prio:** P2 · **Typ:** infra · **Komp.:** svc · **Aufwand:** S · **Ref:** §8
 
 **Problem**
-Jedes Chip-Package re-implementiert dieselbe geordnete Init-Sequenz mit denselben Panic-Mappings — n Kopien einer normativen Regel (`hals.md`).
+Deltas werden über `base_build` (= `build_number` der Basis) verschlüsselt, nicht über den
+8-Byte `base_fingerprint`. Das ist die schlankere Wahl, setzt aber voraus, dass
+`build_number` **1:1 auf Image-Bytes** abbildet. Sonst schlägt der Ghost-Base-Check im SDVM
+fehl — nach vollem Download.
 
 **Lösung**
-1. Core-API `boot_platform_bringup(platform, steps[], n)` mit `bringup_step_t { kind, mandatory, panic_site }` (Signatur siehe Architektur §5.3).
-2. Interpreter ruft pro Schritt das `init()` des Traits (Dispatch über `kind`), panickt bei Pflicht-Fehlschlag mit dem schritt-eigenen `panic_site`, toleriert optionale Fehlschläge (Console) mit Diag-Vermerk.
-3. Chip-seitig schrumpft `boot_platform_init` auf: Interrupts aus → Tabelle definieren → `boot_platform_bringup` → Plattform zurückgeben.
-4. Konsistenz-Guard im Core: Tabelle muss die normative Reihenfolge einhalten (`_Static_assert`-artige Laufzeitprüfung im Debug-Profil oder Codegen-Garantie ab REG-023).
+`artifacts_build_unique` erzwingt Eindeutigkeit im Katalog. Zusätzlich beim Ingest: existiert
+bereits ein Artefakt mit derselben `(product, build_number, kind='full')` aber anderem Digest,
+ist das ein harter Fehler und ein Hinweis auf eine nicht-reproduzierbare Build-Pipeline.
 
 **Akzeptanzkriterien**
-- [ ] C6-`boot_platform_init` enthält keine eigene Sequenz-/Panic-Logik mehr.
-- [ ] Host-Test: Pflicht-HAL-Fehlschlag an Position k erzeugt Forensik-Record mit site_id von Schritt k.
-- [ ] `hals.md` referenziert den Interpreter als einzige normative Implementierung.
+- [ ] Zweiter Upload mit gleicher `build_number` und abweichendem Digest wird abgewiesen.
+- [ ] Die Anforderung ist in der Build-Doku als Vertrag festgehalten.
 
 ---
 
-### REG-023 — Codegen: `generated_platform_wiring.inc`
-**Prio:** P2 · **Typ:** codegen · **Aufwand:** L · **Arch-Ref:** §5.5
-**Abhängigkeit:** REG-020, REG-021, REG-022, REG-033; REG-030 dringend empfohlen
+# EPIC C — Device Gateway (Hot Path)
+
+---
+
+### UPD-020 — Check-in-Endpunkt
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §4.2
+
+**Lösung**
+`POST /v1/devices/{device_id_hex}/checkin`, CBOR rein (Diag), CBOR raus (Meta-Map).
+Antwort-Keys 1–4 exakt wie vom heutigen `_parse_cbor_manifest()` erwartet; 5–7 und 20 additiv.
+
+Harte Grenzen:
+- Request-Body ≤ 1 KiB, sonst `413`.
+- Antwort ≤ 512 Byte (Puffergrenze des Clients nach UPD-005). Ein Test erzwingt das.
+- Kein Trailing-Byte nach der CBOR-Map — das Gerät prüft `consumed == len`.
+- `Cache-Control: no-store`.
+
+**Akzeptanzkriterien**
+- [ ] Antwort überschreitet nie 512 Byte, auch mit Key 7 und Key 20 gleichzeitig.
+- [ ] Ein Gerät mit Altprotokoll (nur Keys 1–4 verstanden) funktioniert weiter.
+- [ ] `204` hat einen leeren Body und trägt trotzdem `Retry-After`.
+
+**Abhängigkeit:** UPD-010, UPD-021, UPD-022, UPD-031.
+
+---
+
+### UPD-021 — Resolver
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §6
+
+**Lösung**
+Reine Funktion, nur lesende I/O:
+
+```go
+func Resolve(dev Device, obs ObservedState) (*Artifact, Reason, error)
+```
+
+Reihenfolge:
+1. **Pin** — `assignments.source = 'pin'`. Gewinnt immer.
+2. **Channel** — aktives Release für `(dev.product, dev.channel)`.
+3. **Kompatibilität** — `dev.hw_rev BETWEEN hw_rev_min AND hw_rev_max`,
+   `size_bytes <= dev.staging_capacity`, `min_reader_* <= dev.reader_*`.
+4. **Fortschritt** — `artifact.svn >= obs.reported_svn` **und**
+   `artifact.build_number != obs.reported_build`.
+5. **Delta** (UPD-070), sonst `kind='full'`.
+
+Kein Treffer ⇒ `204`. Kein stiller Fallback auf „irgendein neueres Artefakt".
+
+Der Resolver muss **deterministisch in `device_id`** sein — kein Zufallszug pro Request, sonst
+wird die Materialisierung aus UPD-022 zur Lotterie.
+
+**Akzeptanzkriterien**
+- [ ] Zwei aufeinanderfolgende Aufrufe mit identischem Input liefern identischen Output.
+- [ ] Ein Downgrade wird verworfen, nicht dem Gerät zugemutet.
+- [ ] Ein Artefakt größer als die Staging-Kapazität des Geräts wird nie angeboten.
+- [ ] Property-Test: für zufällige Geräte/Artefakt-Kombinationen gilt — was der Resolver
+      anbietet, besteht `admissible()`.
+
+**Abhängigkeit:** UPD-001 (ohne echte `reported_svn` ist Schritt 4 wirkungslos).
+
+---
+
+### UPD-022 — Lazy Materialisierung + Ein-offene-Zuweisung-Invariante
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §5.2, §5.3
 
 **Problem**
-Nach den Extraktionen ist `chip_platform.c` reine Struct-Montage aus Informationen, die die Manifeste bereits enthalten — handgepflegte Redundanz mit Drift-Risiko.
+Eine Zuweisung muss stabil sein, sobald sie einem Gerät gezeigt wurde — ein Download über drei
+Boots muss dreimal dieselbe Antwort bekommen. Bulk-Materialisierung über eine Million Geräte
+pro Rampenschritt ist dafür aber unnötig teuer.
 
 **Lösung**
-1. Manifest-Compiler emittiert `generated_platform_wiring.inc`: Trait-Instanzen via `TOOB_*_HAL_V2`-Makros aus den referenzierten Driver-Symbolen, `boot_platform_t`-Montage, Bringup-Tabelle, minimales `boot_platform_init()`.
-2. `chip_config.h`-Aliase (WDT-Register für `startup.c`, `ADDR_CONFIRM_RTC_RAM`) in den Codegen übernehmen; Shim-Datei entfällt.
-3. Out-of-Tree-Escape dokumentieren: handgeschriebenes Wiring bleibt möglich (gleiche Makros), Registry-Packages nutzen den Codegen verpflichtend.
-4. `chip_platform.c` aus dem ESP32-C6-Package löschen; `sources.platform` im Manifest-Schema optional machen (nur noch Out-of-Tree).
+```
+a := open_assignment(device)
+if a != null:  return a                 # stabil, keine Neuberechnung, kein Write
+art := Resolve(device, obs)             # rein lesend, deterministisch
+if art == null: return 204              # Normalfall, kein Write
+a := INSERT assignments(...)            # Materialisierung genau hier
+```
+
+Die Zuweisung entsteht in dem Moment, in dem sie erstmals gezeigt wird, und ist ab dann
+autoritativ. Der Partial-Unique-Index `assignments_one_open` erzwingt genau eine offene
+Zuweisung pro Gerät; ein Konflikt ist ein harter Fehler, kein Merge.
 
 **Akzeptanzkriterien**
-- [ ] C6 baut vollständig ohne handgeschriebenes `chip_platform.c`/`chip_config.h`.
-- [ ] Generat ist deterministisch (zweimal generieren ⇒ byte-identisch; Reproduzierbarkeits-Anforderung wie im CLI).
-- [ ] Diff-Test: generiertes Wiring vs. letztes Hand-Wiring funktional identisch (HIL-Smoke-Boot).
+- [ ] Wechselt der Channel während eines laufenden Downloads, bekommt das Gerät weiterhin die
+      alte Zuweisung, bis sie abgeschlossen oder explizit `superseded` ist.
+- [ ] Der 204-Pfad erzeugt keinen `assignments`-Eintrag.
+- [ ] Nebenläufige Check-ins desselben Geräts erzeugen genau eine Zuweisung
+      (Constraint-Test unter Last).
+
+**Abhängigkeit:** UPD-010, UPD-021.
 
 ---
 
-### REG-024 — ABI v3 Spike: Crypto-Trait-Entflechtung
-**Prio:** P2 · **Typ:** spike (Core-Koordination) · **Aufwand:** M · **Arch-Ref:** §4.3
-**Abhängigkeit:** REG-021 (Keystore-Provider existiert als Package)
+### UPD-023 — Blob-Auslieferung
+
+**Prio:** P0 · **Typ:** bug/infra · **Komp.:** svc · **Aufwand:** M · **Ref:** §3.3
 
 **Problem**
-`crypto_hal_t` mischt Algorithmen, Keystore/OTP und Entropie. Das koppelt die Zertifizierungs-Profilgrenze (`default`/`cnsa`/`fips`) an Keystore-Details und macht Profil-Swaps invasiver als nötig.
+Zwei Fehlerklassen korrumpieren das Staging **still**:
+- Ein `200` auf einen Range-Request schreibt Byte 0 des Blobs an `resume_offset`.
+- Ein CDN, das transparent gzip't, verschiebt Bytegrenzen und zerstört jeden Resume.
 
-**Lösung (Spike, keine Umsetzung)**
-1. Header-Entwurf: `crypto_hal_t` (nur Algorithmen), `keystore_hal_t`, `entropy_hal_t`; `provisioning_hal_t`-Konsolidierung in den Keystore-Provider prüfen.
-2. Migrationsplan: v2-Kompatibilitäts-Shim (v3-Traits hinter v2-Fassade) vs. harter Schnitt; Auswirkung auf `boot_platform_t`, Codegen (REG-023) und bestehende Chips.
-3. Entscheidungsvorlage inkl. Zertifizierungs-Sicht: bestätigt der Schnitt, dass ein `cnsa`-/`fips`-Profilwechsel ein reiner `crypto/`-Package-Swap ist?
-
-**Akzeptanzkriterien**
-- [ ] Header-Entwurf + Migrationsplan + Entscheidungsvorlage liegen vor; Go/No-Go für v3 dokumentiert.
-
----
-
-# EPIC C — Format- & Schema-Standardisierung
-
----
-
-### REG-030 — JSON-Schemas + CI-Gate
-**Prio:** P1 · **Typ:** infra · **Aufwand:** M · **Arch-Ref:** §3.1, §3.2, §6.1
+Beides fällt erst beim Finalize-SHA auf, nach vollem Download plus Staging-Erase.
 
 **Lösung**
-1. Formale Schemas für `hardware.json` (R1–R5) und `chip_manifest.json` (R6–R8); TOML-Validierung für `template_device.toml` (Partitions-Arithmetik, Pflichtfelder).
-2. CI: jeder Registry-PR validiert alle Manifeste; Schema-Versionierung (`"schema": 1`) für spätere Migrationen.
-3. Bestands-Manifeste (C6 + weitere Chips) migrieren.
+`GET /v1/artifacts/{sha256hex}`:
+- `Accept-Ranges: bytes`, `Range: bytes=N-` → `206` mit `Content-Range`.
+- **Unerfüllbarer Range ⇒ `416`**, niemals `200` mit Vollinhalt.
+- **`identity`-Encoding erzwingen**, kein `Content-Encoding` auf dieser Route.
+- **Keine Redirects** — Zephyr `http_client` folgt ihnen nicht zuverlässig; ein `302` wäre ein
+  stiller Fehlerpfad quer durch die Flotte.
+- `ETag: "<digest>"`, `Cache-Control: public, max-age=31536000, immutable`.
+- Unbekannter Digest ⇒ `404`, kein „ähnliches Artefakt".
 
 **Akzeptanzkriterien**
-- [ ] Alle Regeln R1–R8 maschinell geprüft (je ein Negativtest pro Regel).
-- [ ] CI-Gate aktiv; Bestand valide.
+- [ ] `Range: bytes=999999999-` ⇒ `416`, nicht `200`.
+- [ ] `Accept-Encoding: gzip` ⇒ Antwort ist trotzdem `identity` (Edge-Konfiguration
+      mitgetestet, nicht nur Origin).
+- [ ] Kein Response auf dieser Route hat jemals Status `3xx`.
+- [ ] Integrationstest: Download in zwei Teilen über `Range` ergibt bitgleich denselben Blob.
+
+**Abhängigkeit:** UPD-013.
 
 ---
 
-### REG-031 — Zahlenformat, Register-Blocks, strukturierte Reset-Causes
-**Prio:** P2 · **Typ:** codegen · **Aufwand:** M · **Arch-Ref:** §3.1 R1/R2/R4
-**Abhängigkeit:** REG-030 (Schema trägt die neuen Formen)
+### UPD-024 — `Retry-After` in jeder Antwort
 
-**Lösung**
-1. `hardware.json` auf einheitliches Zahlenformat normalisieren (Adressen/Masken hex-string, Größen dezimal).
-2. `registers` → `register_blocks` mit base+regs-Offsets (R2); Codegen emittiert daraus `CHIP_REG_<BLOCK>_<REG>`-Makros — die WDT-Alias-Ableitungen aus `chip_config.h` entstehen dann generiert.
-3. `rst_*`-Flachkonstanten → `reset_causes`-Map mit `class`-Tag (R4); Codegen emittiert Konstanten **und** Klassifizierungstabelle für `boot_state.c` (crash/intentional/power — direkt anschlussfähig an die P7b-Crash-Attribution).
-
-**Akzeptanzkriterien**
-- [ ] C6-`hardware.json` vollständig migriert; Codegen-Output deckt alle bisherigen Makros (Diff-Liste leer).
-- [ ] Reset-Klassifizierung wird aus dem JSON generiert, nicht mehr im C-Code gepflegt.
-
----
-
-### REG-032 — Provenance-Metadaten
-**Prio:** P2 · **Typ:** infra · **Aufwand:** S–M · **Arch-Ref:** §3.3
-
-**Lösung**
-1. `provenance`-Objekt (source/ref/verified) für `register_blocks`, `reserved_ram_regions`, Timing-Konstanten ins Schema.
-2. Compiler-Verhalten: `source: scan` ⇒ Warnung im Production-Profil („unverified hardware constant"); Whitelist pro Wert nach manueller TRM-Verifikation.
-3. C6-Bestand kennzeichnen (ehrlich: was stammt aus toobfuzzer-Blueprints, was ist TRM-verifiziert?).
-4. Export: Compiler kann eine Provenance-Tabelle (CSV/MD) emittieren — CRA-Evidenz-Baustein für die Technical Documentation.
-
-**Akzeptanzkriterien**
-- [ ] Schema + Warnverhalten umgesetzt; C6 vollständig gekennzeichnet.
-- [ ] Provenance-Export vorhanden.
-
----
-
-### REG-033 — Initializer-Makros `TOOB_*_HAL_V2`
-**Prio:** P2 · **Typ:** dx · **Aufwand:** S · **Arch-Ref:** §4.4
-
-**Lösung**
-Pro Trait ein Initializer-Makro (setzt `abi_version` automatisch, Pflichtfelder positional, Optionales via `__VA_ARGS__`); C6-Wiring darauf umstellen (übergangsweise von Hand, ab REG-023 als Codegen-Zielsprache).
-
-**Akzeptanzkriterien**
-- [ ] Kein handgesetztes `abi_version`-Feld mehr im C6-Wiring.
-- [ ] Vergessenes Pflichtfeld ⇒ Compile-Fehler (Negativtest).
-
----
-
-### REG-034 — `slot_caps` als tagged union (ABI v2.1)
-**Prio:** P2 · **Typ:** refactor (Core-koordiniert) · **Aufwand:** M · **Arch-Ref:** §4.2
-**Abhängigkeit:** REG-020; Koordination mit dem Slot-Transport-Strang (vier Provider)
-
-**Lösung**
-1. `slot_caps_t` auf exec_model-getaggte union umstellen (Struktur siehe Architektur §4.2); `get_active_slot` bleibt gemeinsame Pflicht.
-2. Core-Dispatch ausschließlich über den Tag; Initializer-Makros pro Modell (`TOOB_SLOT_CAPS_XIP_REMAP(...)` etc.), die nur den passenden union-Zweig befüllen können.
-3. Alle bestehenden Provider-Bindungen migrieren.
-
-**Akzeptanzkriterien**
-- [ ] „Falscher Pointer fürs Modell" ist nicht mehr repräsentierbar (Compile-Negativtest).
-- [ ] C6 (pointer/xip_remap) läuft unverändert (HIL-Smoke).
-
----
-
-### REG-035 — Sprachpolitik: Englisch in Registry-Code
-**Prio:** P3 · **Typ:** cleanup · **Aufwand:** S · **Arch-Ref:** §3.4
-
-**Lösung**
-Alle Code-Kommentare und Manifest-Texte in `registry/` auf Englisch; CONTRIBUTING-Notiz („English in registry code, German allowed in internal docs"); optional ein einfacher CI-Heuristik-Check (Umlaut-/ß-Scan in `.c/.h/.json` unter `registry/`).
-
-**Akzeptanzkriterien**
-- [ ] C6-Package kommentarseitig englisch; Policy dokumentiert.
-
----
-
-# EPIC D — Verifikations-Gates
-
----
-
-### REG-040 — Literal-Bann-Lint
-**Prio:** P2 · **Typ:** infra · **Aufwand:** S–M · **Arch-Ref:** §6.2
-**Abhängigkeit:** REG-031 (Makro-Deckung), sonst false positives
-
-**Lösung**
-1. Lint (clang-query/Regex-Hybrid) über `chips/` und `drivers/`: numerische Literale außer 0/1 und Schleifen-/Shift-Idiomen sind Fehler; jede Adresse/Maske/Größe muss aus `generated_boot_config.h` stammen.
-2. Whitelist-Mechanismus mit Pflicht-Begründungskommentar (`/* lint-allow: <reason> */`) für seltene legitime Fälle.
-3. CI-Gate; Bestand bereinigen (nach REG-004/031 sollte die Liste kurz sein).
-
-**Akzeptanzkriterien**
-- [ ] Der alte `xip_remap_commit`-Stand schlägt im Lint fehl (Regressionstest mit eingefrorenem Snapshot).
-- [ ] C6-Bestand lint-clean oder begründet gewhitelistet.
-
----
-
-### REG-041 — Post-Link-ELF-Audit
-**Prio:** P1 · **Typ:** infra · **Aufwand:** M · **Arch-Ref:** §6.3
-**Abhängigkeit:** REG-002 (reserved_ram_regions existieren), REG-001 (Mock-Symbolkonvention)
-
-**Lösung**
-1. Skript (nm/readelf) nach jedem Link, drei Prüfungen: **(a)** Mock-Poison-Pill — keine `*_mock`-Symbole im Production-Profil; **(b)** Adress-Overlap — Section-Platzierung (`.noinit`, Stacks) gegen alle `reserved_ram_regions`; **(c)** Budgets — Sektionsgrößen gegen `stage1_size`/Partitionen aus dem Geräte-TOML.
-2. In den `toob`-CLI-Build-Flow integrieren (läuft lokal wie in CI identisch — Reproduzierbarkeits-Linie des CLI fortgesetzt).
-3. Je Prüfung ein konstruierter Negativ-Case im CI (absichtlich verletzendes Test-Target).
-
-**Akzeptanzkriterien**
-- [ ] Alle drei Prüfungen mit Negativ-Cases grün/rot wie erwartet.
-- [ ] Audit läuft verpflichtend in CI und im CLI-Build.
-
----
-
-### REG-042 — HAL-Conformance-Harness als Registry-Zulassung
-**Prio:** P1 · **Typ:** infra · **Aufwand:** L · **Arch-Ref:** §6.4
-**Abhängigkeit:** REG-020/021 (erste Packages als Pilot), REG-030 (Manifest-Deklarationen)
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** S · **Ref:** §4.2
 
 **Problem**
-Es gibt keinen maschinellen Nachweis, dass ein Chip-/Driver-Package die HAL-Verträge einhält — Vertragstreue ist heute Hoffnung plus Review. Der Mock-Befund (REG-001) zeigt die Konsequenz.
+Geräteseitiger Backoff (`_calculate_backoff_sec`) kann eine Flotte nicht entzerren. Nach einem
+regionalen Strom- oder Netzausfall kommen alle Geräte gleichzeitig zurück.
 
 **Lösung**
-1. Harness-Firmware + Host-Runner: pro Trait eine Vektor-Suite (Fehlercode-Semantik, Grenzwerte/Alignment, deklarierte Timings vs. Messung wo HIL verfügbar; Flash: erased_value/write_align-Verhalten; Slot: Remap-/Fehlerpfade; OTP: Längen-/Index-Kontrakte).
-2. **Mock/Real-Äquivalenz als Pflichtteil:** beide TUs eines Packages durchlaufen dieselbe Suite; jede Divergenz (Längen, Indizes, Fehlercodes) ist ein Zulassungs-Fail.
-3. Registry-Policy: Package-Publish erfordert grünen Conformance-Lauf (Ergebnis-Artefakt wird dem Package beigelegt — zugleich Vertrauens-/Marketing-Asset für Community-Ports und CRA-Evidenz).
-4. Pilot: `esp_mmu_remap` + `esp_efuse`, dann Bestandstreiber (uart/flash/wdt/rtc/clock) nachziehen.
+`Retry-After: <s>` in **jeder** Antwort, inklusive `204` und `5xx`, mit Jitter aus einem
+deterministischen Anteil (`H(device_id) mod jitter_window`) plus Basisintervall. Da `204`
+keinen Body hat, ist der Header die einzige Quelle — **kein CBOR-Duplikat**, sonst gibt es
+zwei Wahrheiten.
 
 **Akzeptanzkriterien**
-- [ ] Harness läuft für beide Pilot-Packages; Ergebnis-Artefakt im Package.
-- [ ] Publish ohne grünen Lauf wird von der Registry abgelehnt.
-- [ ] Der alte Mock/Real-Divergenzfall (DSLC 1 B vs. 32 B) schlägt als Regressionstest fehl.
+- [ ] Alle Antwortpfade tragen den Header (Test über die vollständige Statuscode-Matrix).
+- [ ] Bei 10 000 simulierten Geräten ist die Poll-Verteilung über das Fenster gleichmäßig.
+- [ ] Der Client bevorzugt `Retry-After` gegenüber seinem eigenen Backoff (UPD-004).
+
+**Abhängigkeit:** UPD-002 (Client kann den Header sonst nicht lesen).
 
 ---
 
-## Empfohlene Reihenfolge (abhängigkeitsbewusst)
+### UPD-025 — Assignment-Zustandsautomat mit Monotonie-Guard
 
-**Sprint 1 — „Trust the ground" (Stufe 1):**
-`REG-001` → `REG-002` → `REG-003` → `REG-006` → `REG-007` → `REG-005` → `REG-004` → `REG-010` → `REG-008`/`REG-009` → `REG-011`.
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §5.1
 
-**Sprint 2 — Extraktion + erste Gates (Stufe 2):**
-`REG-020` → `REG-021` → `REG-041` (Poison-Pill + Overlap jetzt strukturell) → `REG-030`.
+**Lösung**
+Zustände: `assigned → downloading → staged → installing → {confirmed | rolled_back | failed}`,
+plus `superseded` aus jedem offenen Zustand.
 
-**Sprint 3 — Core & Schema-Tiefe (Stufe 3):**
-`REG-022` → `REG-031` → `REG-033` → `REG-034` → `REG-032` → `REG-040`.
+**`assignment.state` darf nie zurückspringen.** Jeder Zustand bekommt eine Ordinalzahl; ein
+verspätet eintreffender `downloading`-Event nach `confirmed` wird verworfen, nicht angewendet.
+Übergänge laufen über eine einzige Funktion mit expliziter Erlaubnis-Matrix — kein verstreutes
+`state = …`.
 
-**Sprint 4 — Generierung & Zulassung (Stufe 4):**
-`REG-023` → `REG-042` → `REG-035` → parallel `REG-024` (ABI-v3-Entscheidung).
+**Akzeptanzkriterien**
+- [ ] Ein Event, der einen Rückwärtsübergang verlangt, wird verworfen und protokolliert.
+- [ ] Jeder Übergang erzeugt genau einen `device_events`-Eintrag.
+- [ ] Property-Test: keine Eventreihenfolge führt zu einem ungültigen Zustand.
+
+---
+
+### UPD-026 — Confirm-Inferenz
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §6
+
+**Problem**
+Übergänge nach `staged` sind nicht meldbar — das Gerät rebootet. Ein gebricktes Gerät kann
+keinen Fehler melden. Der einzige fälschungssichere Erfolgsbeweis ist ein *nachfolgender
+Check-in mit dem neuen Build*.
+
+**Lösung**
+```
+if diag.build_number == want.build_number and diag.booted_partition == APP:
+    state = 'confirmed'
+elif diag.booted_partition == RECOVERY:
+    state = 'rolled_back';  device.health = 'degraded'
+elif state == 'installing' and diag.build_number == device.reported_build:
+    attempts += 1
+    state = (attempts >= MAX_ATTEMPTS) ? 'failed' : 'assigned'
+```
+
+Zwei Korrekturen gegenüber dem ursprünglichen Entwurf:
+1. Idempotenz über `X-Toob-Seq` (UPD-028), **nicht** über `diag.boot_session_id` — dieser ist
+   `tmr.chain_entry_count` und steigt nur bei security-bearing Intents, also nicht auf jedem
+   Boot (B2).
+2. `attempts` steigt nur, wenn das Gerät **nachweislich mit dem alten Build** zurückkehrt.
+   Ohne diese Bedingung zählt jeder Check-in im Zustand `installing` hoch, auch wenn das Gerät
+   den Download nur fortsetzt.
+
+**Akzeptanzkriterien**
+- [ ] Ein Gerät, das den Download über drei Check-ins fortsetzt, hat danach `attempts == 0`.
+- [ ] Boot in Recovery ⇒ `rolled_back` **und** `device.health = 'degraded'`.
+- [ ] Erfolgreiches Update ⇒ genau ein `confirmed`-Übergang, auch bei doppeltem Check-in.
+
+**Abhängigkeit:** UPD-001 (kritisch — ohne echten `build_number` läuft die Inferenz blind),
+UPD-025, UPD-028.
+
+---
+
+### UPD-027 — Events-Endpunkt
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** svc · **Aufwand:** S · **Ref:** §4.5
+
+**Lösung**
+`POST /v1/devices/{id}/events` → `202`.
+`kind ∈ { download_started, download_failed, staged, deferred_power, verify_failed }`.
+
+Events sind **best effort** und nie entscheidungsrelevant: ein Ausfall der Event-Ingestion darf
+den Update-Pfad nicht blockieren. Sie sind untrusted Input und beeinflussen in v1 keine
+Zuweisung automatisch.
+
+**Akzeptanzkriterien**
+- [ ] Event-Endpunkt ausgefallen ⇒ Check-in und Download funktionieren unverändert.
+- [ ] Unbekannter `kind` wird verworfen, nicht gespeichert.
+
+---
+
+### UPD-028 — Idempotenz über `X-Toob-Seq`
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** S · **Ref:** §6, B2
+
+**Problem**
+Ohne Idempotenzschlüssel führt ein wiederholt zugestellter Check-in (Netz-Retry) zu doppelten
+Zustandsübergängen und falschen `attempts`-Werten. `diag.boot_session_id` ist dafür ungeeignet
+(B2).
+
+**Lösung**
+Header `X-Toob-Seq: <uint64>` aus dem OS-NVS (UPD-003). `seq <= device.last_seq` ⇒
+gecachte Antwort zurückgeben, **kein** Zustandsübergang. `last_seq` wird nur bei
+tatsächlicher Verarbeitung fortgeschrieben.
+
+**Akzeptanzkriterien**
+- [ ] Derselbe Check-in dreimal gesendet ⇒ ein Zustandsübergang, drei identische Antworten.
+- [ ] Fehlender Header ⇒ `400`, kein Verarbeiten ohne Idempotenzschlüssel.
+
+**Abhängigkeit:** UPD-003.
+
+---
+
+# EPIC D — Identität & Schlüssel
+
+---
+
+### UPD-030 — Enrollment in `toob provision`
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** cli/svc · **Aufwand:** L · **Ref:** §4.1
+
+**Problem**
+Ohne Enrollment kennt der Server weder Produkt, Hardware-Revision, Staging-Kapazität noch
+Reader-Version — und der Check-in müsste all das mitschicken, mit entsprechender Angriffsfläche.
+
+**Lösung**
+`toob provision` liest bereits per `PROV_CMD_READ_ID` die Chip-UID und brennt den Root-Key. Es
+kann `device_id = SHA-256(chip_uid ‖ root_pubkey ‖ "toob-device-id-v1")` deterministisch
+berechnen und in einem Zug registrieren:
+
+```
+POST /v1/internal/devices
+{ device_id, vendor_id, product_id, hw_rev, key_index,
+  staging_capacity, reader_major, reader_minor, channel }
+→ 201 { device_token }
+```
+
+Das Token wird anschließend in den NVS-Bereich des Geräts geschrieben (UPD-003). Bricht der
+Vorgang zwischen Registrierung und Token-Write ab, ist das Gerät registriert, aber ohne
+Credential — die CLI muss diesen Zustand erkennen und die Registrierung wiederholbar machen
+(idempotent über `device_id`).
+
+**Akzeptanzkriterien**
+- [ ] Die von der CLI berechnete `device_id` stimmt bitgleich mit `toob_get_device_id()` überein.
+- [ ] Wiederholtes Provisioning desselben Chips erzeugt keinen zweiten Datensatz.
+- [ ] Abbruch nach Registrierung, vor Token-Write ⇒ erneuter Lauf stellt einen konsistenten
+      Zustand her.
+- [ ] Ein nicht-enrolltes Gerät bekommt beim Check-in `404` und niemals Firmware.
+
+**Abhängigkeit:** UPD-003, UPD-010.
+
+---
+
+### UPD-031 — Token-Verifikation via HMAC
+
+**Prio:** P1 · **Typ:** security/perf · **Komp.:** svc · **Aufwand:** S · **Ref:** §7.1, §10.3
+
+**Problem**
+Argon2id ist für menschliche Passwörter gebaut — niedrige Entropie, niedrige Rate, absichtlich
+teuer. Ein Device-Token ist ein 256-Bit-Zufallswert mit voller Entropie; Brute-Force ist
+unabhängig von der KDF aussichtslos. Argon2id auf dem Hot Path macht den Check-in dagegen zum
+DoS-Verstärker: eine Flotte im Retry-Sturm erzeugt Hunderte Verifikationen pro Sekunde
+à ~50 ms CPU.
+
+**Lösung**
+Token = `token_id ‖ secret`. Gespeichert wird `HMAC-SHA256(server_key, secret)`; der Vergleich
+läuft constant-time über den `token_id`-Index. ~1 µs statt ~50 ms. Kein Salt nötig (volle
+Entropie), und `server_key` ist rotierbar, ohne alle Tokens neu auszustellen.
+
+**Akzeptanzkriterien**
+- [ ] Benchmark: ≥ 50 000 Verifikationen/s auf einem CX22-Kern.
+- [ ] Vergleich ist constant-time (kein `bytes.Equal` auf dem Secret).
+- [ ] `server_key`-Rotation invalidiert keine ausgestellten Tokens.
+
+---
+
+### UPD-032 — Server-initiierte Token-Rotation
+
+**Prio:** P2 · **Typ:** security · **Komp.:** svc/sdk · **Aufwand:** M · **Ref:** §7.1
+
+**Lösung**
+Key 7 im Check-in-Response trägt ein neues Token. Das Gerät schreibt es in NVS und bestätigt
+implizit durch dessen Verwendung beim nächsten Check-in. Der alte Token bleibt für ein Fenster
+gültig, damit ein Absturz zwischen Empfang und NVS-Write nicht aussperrt.
+
+**Akzeptanzkriterien**
+- [ ] Absturz zwischen Empfang und NVS-Write ⇒ Gerät bleibt erreichbar (Test mit
+      simuliertem Reset).
+- [ ] Nach erfolgreicher Rotation wird der alte Token nach Ablauf des Fensters abgelehnt.
+
+**Abhängigkeit:** UPD-003, UPD-031.
+
+---
+
+### UPD-033 — Key-Custody-Trennung als Deployment-Grenze
+
+**Prio:** P1 · **Typ:** security · **Komp.:** infra · **Aufwand:** M · **Ref:** §7.2
+
+**Lösung**
+Build Service (schlüssellos) → Signing Service (KMS/HSM) → Artifact Store → Update Service
+(liest nur). Der Update Service hat **keinen Netzpfad** zum Signer.
+
+**Akzeptanzkriterien**
+- [ ] Netzwerk-Test: vom Update-Service-Host ist der Signer nicht erreichbar.
+- [ ] Der Update Service hat keine Credentials, mit denen sich ein Artefakt erzeugen ließe.
+- [ ] Dokumentierte Blast-Radius-Aussage: kompromittierter Gateway ⇒ Verfügbarkeit,
+      nicht Integrität.
+
+---
+
+### UPD-034 — Auth-Pflicht ohne Bypass-Schalter
+
+**Prio:** P0 · **Typ:** security · **Komp.:** svc · **Aufwand:** S · **Ref:** §7.1, P5
+
+**Problem**
+Ein `auth_optional`-Schalter für die Entwicklung überlebt erfahrungsgemäß bis in die Produktion.
+
+**Lösung**
+Kein Schalter. Ein Request ohne gültigen Token ist `401`. Fehlt die Token-Konfiguration beim
+Start, bricht der Dienst ab — er startet nicht im ungesicherten Modus. Für lokale Entwicklung
+wird ein echtes Test-Token erzeugt, kein Bypass.
+
+**Akzeptanzkriterien**
+- [ ] Es existiert kein Codepfad, der ohne gültigen Token ausliefert (Test über alle Endpunkte).
+- [ ] Start ohne Auth-Konfiguration ⇒ Prozessabbruch mit klarer Meldung.
+
+---
+
+# EPIC E — Verschleiß & Fehlerpolitik
+
+---
+
+### UPD-040 — Attempt-Cap als Hardware-Schutz
+
+**Prio:** P1 · **Typ:** feature · **Komp.:** svc · **Aufwand:** S · **Ref:** §9.2
+
+**Problem**
+Jeder Versuch beginnt mit `toob_ota_begin()` → Erase des Staging-Slots über
+`ceil(total_size / sector)` Sektoren. Der geräteseitige Backoff deckelt bei
+`TOOB_BACKOFF_MAX_SEC = 1800`, also **48 Versuche pro Tag** im Dauerfehlerfall. Bei
+`max_erase_cycles = 100 000` ist der Staging-Slot nach ~5,7 Jahren verbraucht — innerhalb der
+Auslegungslebensdauer, durch ein einziges dauerhaft fehlschlagendes Artefakt.
+
+**Lösung**
+`MAX_ATTEMPTS = 3` pro Assignment. Danach `state = 'failed'`, Artefakt-Flag, kein Re-Serve ohne
+Operator-Eingriff. Der Cap gehört serverseitig, weil das Gerät die Historie über Reboots hinweg
+nicht kennt.
+
+**Akzeptanzkriterien**
+- [ ] Nach dem dritten Fehlversuch liefert der Check-in `204`, nicht dasselbe Artefakt.
+- [ ] Ein Operator kann die Zuweisung explizit zurücksetzen.
+- [ ] Der Cap gilt pro `(device, artifact)`, nicht global pro Gerät.
+
+---
+
+### UPD-041 — `deferred_power` erhöht `attempts` nicht
+
+**Prio:** P1 · **Typ:** bug · **Komp.:** svc · **Aufwand:** S · **Ref:** §4.5, §9.1
+
+**Problem**
+`BOOT_ERR_DEFER` aus `boot_effect_admit_or_defer()` bedeutet Unterspannung oder erschöpftes
+Erase-Budget — **kein Fehler**. Zählt der Server das als Versuch, quarantänisiert er Geräte mit
+leerem Akku.
+
+**Lösung**
+Eigener Event-Typ `deferred_power`, kein `attempts++`, stattdessen längeres `Retry-After`.
+
+**Akzeptanzkriterien**
+- [ ] Zehn `deferred_power`-Events hintereinander ⇒ `attempts == 0`, Zuweisung bleibt offen.
+- [ ] `Retry-After` ist nach `deferred_power` deutlich länger als im Normalfall.
+
+---
+
+### UPD-042 — Verschleiß-bewusste Auslieferung via `ext_health`
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §9.3
+
+**Problem**
+`toob_boot_diag_t` enthält bereits `ext_health` mit `app_slot_erase_count`,
+`staging_slot_erase_count` und `swap_buffer_erase_count`, aus dem TMR befüllt und im
+CBOR-Telemetrieschema als optionaler Key 20 vorhanden. Niemand wertet das aus.
+
+**Lösung**
+Drei Anwendungen, alle ohne Geräteänderung und ohne zusätzlichen Traffic:
+
+1. **Delta-Priorisierung nach Verschleiß** — Geräte mit hohem `staging_slot_erase_count`
+   bekommen bevorzugt Deltas (kleinerer Blob, weniger Erase-Sektoren pro Versuch).
+2. **Aussteuerung vor der Erschöpfung** — nähert sich ein Zähler `max_erase_cycles`, stellt der
+   Resolver die Auslieferung ein und setzt `device.health = 'degraded'`, **bevor**
+   `boot_effect_admit_or_defer()` gerätelokal mit `BOOT_ERR_COUNTER_EXHAUSTED` dichtmacht.
+   Der Unterschied: der Server weiß es vorher und kann den Betreiber warnen.
+3. **Flottenweite Verschleiß-Prognose** als Betriebs- und CRA-Evidenz.
+
+**Akzeptanzkriterien**
+- [ ] Ein Gerät oberhalb der Warnschwelle bekommt kein Full-Artefakt mehr angeboten, wenn ein
+      Delta existiert.
+- [ ] Oberhalb der Sperrschwelle wird gar nichts mehr angeboten und der Betreiber alarmiert.
+- [ ] Fehlt `ext_health` (optional im CDDL), gilt das Gerät als unbekannt — nicht als
+      verschleißfrei. Fail-Fast statt optimistischer Annahme.
+
+**Abhängigkeit:** UPD-001, UPD-020.
+
+---
+
+### UPD-043 — Fehlertaxonomie + Artefakt-Quarantäne
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §9.1
+
+**Lösung**
+Klassifikation gemäß Architektur-Tabelle: transient / deferred / permanent-Artefakt /
+permanent-Gerät. Häufen sich permanente Artefakt-Fehler über mehrere Geräte hinweg, wird das
+Artefakt automatisch quarantänisiert (nicht mehr assignbar) und der Betreiber alarmiert — ein
+defektes Release darf nicht die halbe Flotte durchlaufen.
+
+**Akzeptanzkriterien**
+- [ ] Schwellwert-Test: N Geräte melden `verify_failed` für dasselbe Artefakt ⇒ Quarantäne.
+- [ ] Quarantäne blockiert neue Zuweisungen, bricht laufende Downloads aber nicht ab.
+
+---
+
+### UPD-044 — `device.health`-Aussteuerung
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** svc · **Aufwand:** S · **Ref:** §5.1, §9.3
+
+**Lösung**
+`healthy | degraded | quarantined`. `degraded` nach Rollback oder nahender
+Erase-Erschöpfung — kein Auto-Retry, aber weiterhin Check-ins. `quarantined` wird nur manuell
+gesetzt und blockiert jede Auslieferung.
+
+**Akzeptanzkriterien**
+- [ ] `degraded` verhindert automatische Neuzuweisung desselben Artefakts.
+- [ ] `quarantined` liefert unter allen Umständen `204`.
+
+---
+
+# EPIC F — Performance
+
+---
+
+### UPD-050 — Kohorten-Cache für den 204-Pfad
+
+**Prio:** P2 · **Typ:** perf · **Komp.:** svc · **Aufwand:** M · **Ref:** §10.1
+
+**Problem**
+Über die Lebensdauer einer Flotte ist die überwältigende Mehrheit aller Check-ins ein
+`204 — kein Update`. Diese Antwort hängt ausschließlich von
+`(product, channel, reported_build, hw_rev)` ab, nicht vom einzelnen Gerät.
+
+**Lösung**
+In-Process-Cache mit diesem Schlüssel, TTL ~30 s, invalidiert beim Publish eines Release
+(UPD-014) und beim Setzen eines Pins. Eine Million täglicher Check-ins kollabiert damit auf
+einige Dutzend DB-Abfragen.
+
+Der Cache darf **nur** den 204-Fall und den Assignment-*Kandidaten* halten, nie eine bereits
+materialisierte Zuweisung — die ist gerätespezifisch.
+
+**Akzeptanzkriterien**
+- [ ] Nach einem Release-Publish liefert kein Gerät mehr eine veraltete 204-Antwort
+      (Invalidierungstest).
+- [ ] Ein gepinntes Gerät umgeht den Cache.
+- [ ] Cache-Hit-Rate > 95 % im Lastprofil aus UPD-053.
+
+---
+
+### UPD-051 — Zero-Write-Hot-Path
+
+**Prio:** P2 · **Typ:** perf · **Komp.:** svc · **Aufwand:** M · **Ref:** §10.1
+
+**Problem**
+`UPDATE devices SET last_seen = now()` pro Check-in erzeugt eine Hot-Row-Schreiblast, die genau
+dann eskaliert, wenn die Flotte nach einem Ausfall gleichzeitig zurückkommt.
+
+**Lösung**
+Telemetrie und `last_seen` gehen in eine Append-Only-Ingest-Tabelle bzw. den Event-Strom und
+werden periodisch in `devices` zusammengefasst (Rollup-Job).
+
+**Ziel-Invariante:** Der 204-Pfad ist ein Cache-Lookup plus ein Append. Kein Row-Update, kein
+Join, keine Transaktion.
+
+**Akzeptanzkriterien**
+- [ ] Ein 204-Check-in erzeugt nachweislich kein `UPDATE` (Query-Log-Assertion im Test).
+- [ ] Rollup-Verzögerung ist konfiguriert und dokumentiert; `last_seen` ist explizit als
+      „bis zu N Minuten alt" spezifiziert, nicht als exakt.
+
+---
+
+### UPD-052 — Edge-Konfiguration
+
+**Prio:** P2 · **Typ:** infra · **Komp.:** infra · **Aufwand:** S · **Ref:** §10.2, §13
+
+**Lösung**
+- Blob-Route: `immutable`, langes TTL, **Origin Cache Lock** (Request-Coalescing) gegen den
+  Cache-Miss-Sturm beim ersten Zugriff nach einem Publish.
+- Check-in-Route: `no-store`, kein Caching.
+- **Keine Komprimierung auf der Blob-Route** (Gegenstück zu UPD-023, hier am Edge erzwungen).
+
+**Akzeptanzkriterien**
+- [ ] 10 000 gleichzeitige Erstzugriffe erzeugen genau einen Origin-Request.
+- [ ] Edge liefert auf der Blob-Route nie `Content-Encoding: gzip`.
+
+---
+
+### UPD-053 — Lastprofil-Test: Flotten-Rückkehr
+
+**Prio:** P2 · **Typ:** infra · **Komp.:** svc · **Aufwand:** M · **Ref:** §10
+
+**Lösung**
+Simulation: 100 000 Geräte kommen innerhalb von 60 s zurück (Regionalausfall). Gemessen wird
+Origin-QPS, DB-Verbindungen, p99-Latenz und die Verteilung über das `Retry-After`-Fenster.
+
+**Akzeptanzkriterien**
+- [ ] Zwei API-Knoten halten das Profil ohne Fehlerantworten.
+- [ ] Die Poll-Verteilung ist nach einem Zyklus gleichmäßig, nicht synchronisiert.
+- [ ] Kein DB-Verbindungspool läuft voll.
+
+---
+
+# EPIC G — Naht zum Management-Layer
+
+---
+
+### UPD-060 — Internal-API für Desired State
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §11
+
+**Lösung**
+```
+PUT    /v1/internal/assignments          # idempotent, bulk
+DELETE /v1/internal/assignments/{device_id}
+GET    /v1/internal/devices?filter=…     # Observed State als Policy-Input
+```
+
+Getrennte Authentifizierung (OIDC/Token), nie über den Geräte-Kanal erreichbar.
+
+**Akzeptanzkriterien**
+- [ ] `PUT` ist idempotent: zweimal dieselbe Zuweisung ⇒ ein Datensatz, kein Fehler.
+- [ ] Die Internal-API ist vom Geräte-Listener netzwerkseitig getrennt.
+
+---
+
+### UPD-061 — Transactional Outbox + Poller
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** svc · **Aufwand:** M · **Ref:** §11
+
+**Lösung**
+Zustandsübergänge schreiben in derselben Transaktion einen Outbox-Eintrag; ein Poller stellt
+sie nach NATS/Webhook zu. Das ist der Punkt, an dem ein Rollout-Layer „Fehlerrate > X % →
+Kampagne anhalten" implementiert, ohne die Executor-Datenbank zu pollen.
+
+**Akzeptanzkriterien**
+- [ ] Kein Übergang ohne Outbox-Eintrag (Transaktionstest mit induziertem Abbruch).
+- [ ] At-least-once-Zustellung mit Dedup-Schlüssel beim Konsumenten.
+
+---
+
+### UPD-062 — Pinning
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** svc · **Aufwand:** S · **Ref:** §6
+
+**Lösung**
+`assignment_source = 'pin'` gewinnt im Resolver immer. Ein Pin überschreibt eine offene
+Channel-Zuweisung durch `superseded` — ein gezielter Write, kein flächiger.
+
+**Akzeptanzkriterien**
+- [ ] Ein Pin auf ein älteres Artefakt wird trotzdem vom Fortschrittsfilter geprüft und, falls
+      es ein Downgrade wäre, abgelehnt — mit klarer Fehlermeldung an den Operator statt stiller
+      Wirkungslosigkeit.
+
+---
+
+### UPD-063 — `ramp_bps` / `cohort_seed` als Resolver-Eingabe
+
+**Prio:** P2 · **Typ:** feature · **Komp.:** svc · **Aufwand:** S · **Ref:** §5.2, §11
+
+**Lösung**
+Zwei Felder am Release. Der Resolver wertet
+`H(device_id ‖ cohort_seed) mod 10000 < ramp_bps` aus. Deterministisch in `device_id` —
+ein Zufallszug pro Request würde die Materialisierung zur Lotterie machen.
+
+Damit ist der gesamte Rollout-Mechanismus vorbereitet, ohne dass der Executor das Wort
+„Rollout" kennt: ein Management-Layer setzt zwei Zahlen.
+
+**Akzeptanzkriterien**
+- [ ] Dasselbe Gerät bekommt bei unverändertem `ramp_bps` immer dieselbe Antwort.
+- [ ] Rampenerhöhung nimmt nie Geräte aus der Kohorte heraus (Monotonie-Test).
+
+---
+
+# EPIC H — Delta (Vorbereitung)
+
+---
+
+### UPD-070 — Delta-Auswahl im Resolver
+
+**Prio:** P3 · **Typ:** feature · **Komp.:** svc · **Aufwand:** S · **Ref:** §8
+
+**Lösung**
+```
+if exists artifact{kind:delta, product, build_number:target, base_build:obs.reported_build}:
+    serve delta
+else:
+    serve full
+```
+
+v1 baut die Spalten und diesen einen `if`, aber **keine Delta-Erzeugungs-Pipeline** — die hängt
+am Build Service.
+
+**Akzeptanzkriterien**
+- [ ] Existiert kein passendes Delta, wird das Full-Artefakt geliefert (kein Fehler — Delta ist
+      eine Optimierung, kein Zustand, der fehlschlagen kann).
+
+---
+
+### UPD-071 — Delta-Admission: exakter `base_build`-Match
+
+**Prio:** P3 · **Typ:** security · **Komp.:** svc · **Aufwand:** S · **Ref:** §8
+
+**Problem**
+Ein Delta an ein Gerät mit abweichender Basis wird vom Ghost-Base-Check im SDVM
+(`verify_ghost_base`) abgefangen — aber erst nach vollem Download plus Staging-Erase.
+
+**Lösung**
+Nur exakter `base_build`-Match. Kein „nächstbester" Treffer, keine Heuristik.
+
+**Akzeptanzkriterien**
+- [ ] Ein Gerät mit unbekanntem Build bekommt nie ein Delta.
+- [ ] Ein gemeldeter Build, zu dem kein Artefakt im Katalog passt, erzeugt ein
+      `unknown_build`-Event (Hinweis auf nicht-autorisierte Firmware im Feld).
+
+---
+
+## Empfohlene Reihenfolge
+
+**Phase 0 — Core-Vorbedingungen (blockierend):**
+`UPD-001` → `UPD-002` → `UPD-003`. Parallel und unabhängig: `UPD-006`.
+*Gate:* Ein Gerät meldet nach einem Kaltstart reproduzierbar seine echte SVN und Build-Nummer.
+
+**Phase 1 — Labor:**
+`UPD-010` → `UPD-011` → `UPD-012` → `UPD-013` → `UPD-014` → `UPD-021` → `UPD-022` →
+`UPD-020` → `UPD-023` → `UPD-025` → `UPD-026` → `UPD-028` → `UPD-004` → `UPD-005`.
+*Gate:* Ein Gerät durchläuft `assigned → confirmed` reproduzierbar.
+
+**Phase 2 — Auth & Enrollment:**
+`UPD-031` → `UPD-034` → `UPD-030` → `UPD-024` → `UPD-040` → `UPD-041` → `UPD-015` → `UPD-033`.
+*Gate:* Nicht-enrolltes Gerät bekommt `404`. Kein Codepfad liefert ohne gültigen Token aus.
+
+**Phase 3 — Beobachtbarkeit & Härtung:**
+`UPD-007` → `UPD-027` → `UPD-008` → `UPD-042` → `UPD-043` → `UPD-044` → `UPD-032` →
+`UPD-016` → `UPD-009`.
+*Gate:* Ein Feldfehler ist ohne Geräterücksendung klassifizierbar; Resume überlebt harten Reset.
+
+**Phase 4 — Naht & Performance:**
+`UPD-050` → `UPD-051` → `UPD-052` → `UPD-053` → `UPD-060` → `UPD-061` → `UPD-062` → `UPD-063`.
+*Gate:* Ein externer Prozess kann Desired State schreiben und Übergänge konsumieren.
+
+**Phase 5 — Delta:**
+`UPD-070` → `UPD-071`, nach der Delta-Erzeugung im Build Service.
 
 ---
 
 ## Architektur-Merksatz für neue Mitarbeiter
 
-Ein Chip-Package **beschreibt** Hardware — es implementiert keine Logik, die der Core orchestrieren (Bringup), ein Driver-Package kapseln (Slot/OTP/Quirks) oder der Manifest-Compiler generieren kann (Wiring, Konstanten, Linker-MEMORY). Alle Zahlen kommen aus `hardware.json` mit Provenance; alle Verträge werden maschinell geprüft (Schema, Lint, ELF-Audit, Conformance), nicht gehofft. Wer eine Adresse in eine `.c`-Datei tippt, hat mit hoher Wahrscheinlichkeit die falsche Datei offen.
+Der Update Service ist ein **Reconciliation-Loop** über zwei Zustände: Desired State
+(`assignments`, vom Backend) und Observed State (Check-in-Telemetrie, vom Gerät). Er wählt und
+liefert — er entscheidet nicht über Vertrauen. Jede Sicherheitsaussage wird gerätelokal
+durchgesetzt und hielte auch dann, wenn dieser Dienst in fremder Hand wäre.
+
+Zwei Dinge sind teuer und deshalb nicht verhandelbar: **jeder ausgelieferte Byte, den das Gerät
+verwirft**, und **jeder Erase-Zyklus, den es nicht überlebt**. Wer ein Ticket schneidet, das
+eines von beidem billigend in Kauf nimmt, hat es falsch geschnitten.

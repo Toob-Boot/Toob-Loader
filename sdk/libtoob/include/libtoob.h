@@ -238,6 +238,24 @@ TOOB_MUST_CHECK toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total
  * @param resume_offset Output pointer for the byte offset to resume from.
  * @return TOOB_OK if resumable, TOOB_ERR_NOT_FOUND if no partial download exists.
  */
+#define TOOB_OTA_RESUME_MAGIC 0x544F4F42u /* 'TOOB' */
+
+typedef struct __attribute__((aligned(8))) {
+    uint32_t magic;
+    uint32_t bytes_staged;
+    uint8_t  artifact_sha256[32];
+    uint8_t  assignment_id[16];
+    uint32_t crc32_trailer;
+    uint8_t  _padding[4];              /* Explicit padding to 64 bytes */
+} toob_ota_resume_state_t;
+
+_Static_assert(sizeof(toob_ota_resume_state_t) == 64, "toob_ota_resume_state_t size drift");
+
+extern TOOB_NOINIT toob_ota_resume_state_t g_toob_ota_resume_state;
+
+void toob_ota_checkpoint_save(uint32_t bytes_staged, const uint8_t sha256[32]);
+void toob_ota_checkpoint_clear(void);
+
 TOOB_MUST_CHECK toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32], uint32_t* resume_offset);
 
 /**

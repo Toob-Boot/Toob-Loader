@@ -370,8 +370,10 @@ static boot_status_t stage_parse(update_ctx_t *ctx) {
     return read_stat;
 
   tbm1_reject_t rc = tbm1_validate(ctx->arena, ctx->arena_len, CHIP_STAGING_SLOT_SIZE, ctx->chunk_hash_offs);
-  if (rc != TBM1_OK)
+  if (rc != TBM1_OK) {
+    boot_diag_set_update_result(2 /* rejected */, (uint8_t)rc);
     return tbm1_reject_to_boot_status(rc);
+  }
 
   ctx->tbm1 = (const tbm1_header_t *)ctx->arena;
   ctx->tbm1_total_len = ctx->tbm1->total_len;
@@ -476,6 +478,7 @@ static boot_status_t stage_check_binding(update_ctx_t *ctx) {
       ctx->tbm1->fw_ver_minor,
       ctx->tbm1->fw_ver_patch);
 
+  boot_diag_set_update_result(1 /* applied */, 0 /* TBM1_OK */);
   return BOOT_OK;
 }
 

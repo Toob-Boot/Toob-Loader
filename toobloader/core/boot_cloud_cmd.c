@@ -14,6 +14,7 @@
 #include "boot_fih.h"
 #include "boot_ct_utils.h"
 #include "boot_identity.h"
+#include "boot_journal.h"
 #include "boot_rstore.h"
 #include "boot_secure_zeroize.h"
 #include "generated_boot_config.h"
@@ -201,6 +202,26 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
   });
   boot_cfi_step(cmd_cfi_ctx, CMD_CFI_SLOT_COUNTER);
 
+  /* 3b. Freshness Check (UPD-006): Reject stale commands whose issued_at
+   * is not strictly greater than the last accepted value. The reference
+   * is TMR-persisted and survives reboots. On factory-fresh devices the
+   * TMR field is zero, so any positive issued_at passes. */
+  {
+    wal_tmr_payload_t freshness_tmr;
+    boot_secure_zeroize(&freshness_tmr, sizeof(freshness_tmr));
+    boot_status_t tmr_stat = boot_journal_get_tmr(platform, &freshness_tmr);
+    uint32_t last_accepted = 0;
+    if (tmr_stat == BOOT_OK) {
+      last_accepted = freshness_tmr.last_accepted_issued_at;
+    }
+    boot_secure_zeroize(&freshness_tmr, sizeof(freshness_tmr));
+
+    BOOT_SECURE_REQUIRE(decoded.issued_at > last_accepted, {
+      final_status = BOOT_ERR_CMD_REPLAY;
+      goto cleanup;
+    });
+  }
+
   /* 4. Signature Verification */
   uint8_t cloud_pubkey[32] __attribute__((aligned(8)));
   uint32_t kdm_seq = 0;
@@ -240,10 +261,17 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
   boot_cfi_step(cmd_cfi_ctx, CMD_CFI_SLOT_VERIFY);
 
   /* 5. Exhaustion Defense: Advance Counter ONLY after successful verify */
-  /* Burn the exact difference */
   uint32_t burns_needed = decoded.counter_min - current_counter;
+
+  /* UPD-006: Hard cap — a single command must never burn more than
+   * TOOB_CMD_MAX_BURN_STEPS OTP bits. A larger delta is an issuer bug
+   * or an injection attack — reject without burning. */
+  if (burns_needed > TOOB_CMD_MAX_BURN_STEPS) {
+    final_status = BOOT_ERR_INVALID_ARG;
+    goto cleanup;
+  }
+
   for (uint32_t i = 0; i < burns_needed; i++) {
-    /* P10 Fix: eFuse Burning ist riskant! Spannungseinbruch = Replay-Risk. */
     boot_status_t burn_stat = platform->crypto->advance_monotonic_counter();
 
     if (boot_secure_confirm(burn_stat) != BOOT_OK) {
@@ -326,6 +354,22 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
 
   *out_cmd = (toob_cloud_cmd_t)decoded.command;
   final_status = BOOT_OK;
+
+  /* UPD-006: Persist accepted issued_at into TMR for future freshness checks.
+   * If the TMR write fails, the command was already executed and the OTP
+   * counter already advanced — the counter_min check provides defense-in-depth
+   * against replay even if this persist is lost. */
+  {
+    wal_tmr_payload_t persist_tmr;
+    boot_secure_zeroize(&persist_tmr, sizeof(persist_tmr));
+    if (boot_journal_get_tmr(platform, &persist_tmr) == BOOT_OK) {
+      persist_tmr.last_accepted_issued_at = decoded.issued_at;
+      persist_tmr.struct_version = WAL_TMR_VERSION_CURRENT;
+      persist_tmr.populated_size = WAL_TMR_POPULATED_SIZE;
+      (void)boot_journal_update_tmr(platform, &persist_tmr);
+    }
+    boot_secure_zeroize(&persist_tmr, sizeof(persist_tmr));
+  }
 
 cleanup:
   boot_secure_zeroize(&decoded, sizeof(decoded));

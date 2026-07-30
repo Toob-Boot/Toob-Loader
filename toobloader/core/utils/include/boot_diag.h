@@ -74,6 +74,28 @@ void boot_diag_set_system_status(uint32_t wdt_kicks, bool fallback, uint32_t ses
 void boot_diag_set_wear_data(const toob_ext_health_t *wear_stats);
 
 /**
+ * @brief Populates SVN fields from the TMR on every boot path (UPD-001).
+ *
+ * On an update boot, boot_diag_set_security_meta() has already written the
+ * richer TBM1 data (svn, build, fw_ver, sbom). This setter acts as a
+ * cold-start safety net: it only writes fields that are still zero, so
+ * authoritative TBM1 values are never downgraded.
+ *
+ * @param app_svn      Current app SVN from TMR.
+ * @param stage1_svn   Current Stage-1 SVN from TMR.
+ * @param build_number CI build number (0 if unavailable from TMR).
+ */
+void boot_diag_set_installed_state(uint32_t app_svn, uint32_t stage1_svn,
+                                   uint32_t build_number);
+
+/**
+ * @brief Sets the outcome and fine-grained reject reason of the last update (UPD-007).
+ * @param outcome 0=none, 1=applied, 2=rejected, 3=reverted, 4=deferred.
+ * @param reject_reason Fine-grained tbm1_reject_t error cause.
+ */
+void boot_diag_set_update_result(uint8_t outcome, uint8_t reject_reason);
+
+/**
  * @brief Calculates the CRC-32 trailer and mathematically seals the payload.
  * Must be the last call before jumping to the Feature-OS.
  */

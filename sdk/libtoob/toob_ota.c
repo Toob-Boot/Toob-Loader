@@ -77,6 +77,7 @@ static void _ctx_reset(toob_ota_ctx_t *ctx) {
     ctx->write_cursor = CHIP_STAGING_SLOT_ABS_ADDR;
     ctx->total_size = 0;
     ctx->is_verified = 0;
+    toob_ota_checkpoint_clear();
 }
 
 static toob_status_t _flush_buffer(toob_ota_ctx_t *ctx, uint32_t write_len) {
@@ -208,6 +209,30 @@ toob_status_t toob_ota_abort(toob_ota_ctx_t *ctx) {
     return TOOB_OK;
 }
 
+TOOB_NOINIT toob_ota_resume_state_t g_toob_ota_resume_state;
+
+void toob_ota_checkpoint_clear(void) {
+    boot_secure_zeroize(&g_toob_ota_resume_state, sizeof(g_toob_ota_resume_state));
+}
+
+void toob_ota_checkpoint_save(uint32_t bytes_staged, const uint8_t sha256[32]) {
+    g_toob_ota_resume_state.magic = TOOB_OTA_RESUME_MAGIC;
+    g_toob_ota_resume_state.bytes_staged = bytes_staged;
+    if (sha256) {
+        memcpy(g_toob_ota_resume_state.artifact_sha256, sha256, 32);
+    } else {
+        memset(g_toob_ota_resume_state.artifact_sha256, 0, 32);
+    }
+    memset(g_toob_ota_resume_state.assignment_id, 0, 16);
+    g_toob_ota_resume_state._padding[0] = 0;
+    g_toob_ota_resume_state._padding[1] = 0;
+    g_toob_ota_resume_state._padding[2] = 0;
+    g_toob_ota_resume_state._padding[3] = 0;
+
+    size_t payload_len = offsetof(toob_ota_resume_state_t, crc32_trailer);
+    g_toob_ota_resume_state.crc32_trailer = compute_boot_crc32((const uint8_t *)&g_toob_ota_resume_state, payload_len);
+}
+
 toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size,
                               const uint8_t expected_sha256[32],
                               uint32_t *resume_offset) {
@@ -219,11 +244,23 @@ toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size,
         return TOOB_OK;
     }
 
-    /* GAP-02: Lese Checkpoint aus dem OS Handoff RAM */
-    if (toob_validate_handoff() == TOOB_OK) {
-        if (toob_handoff_state.resume_offset > 0 && toob_handoff_state.resume_offset <= CHIP_STAGING_SLOT_SIZE) {
-            ctx->write_cursor = CHIP_STAGING_SLOT_ABS_ADDR + toob_handoff_state.resume_offset;
-            ctx->bytes_queued = toob_handoff_state.resume_offset;
+    /* UPD-008: Validate RAM .noinit resume slot */
+    if (g_toob_ota_resume_state.magic == TOOB_OTA_RESUME_MAGIC) {
+        size_t payload_len = offsetof(toob_ota_resume_state_t, crc32_trailer);
+        uint32_t crc = compute_boot_crc32((const uint8_t *)&g_toob_ota_resume_state, payload_len);
+        if (crc == g_toob_ota_resume_state.crc32_trailer &&
+            g_toob_ota_resume_state.bytes_staged > 0 &&
+            g_toob_ota_resume_state.bytes_staged <= total_size) {
+            
+            /* Verify artifact SHA-256 matches fresh check-in to prevent splicing */
+            if (expected_sha256 != NULL &&
+                memcmp(g_toob_ota_resume_state.artifact_sha256, expected_sha256, 32) != 0) {
+                toob_ota_checkpoint_clear();
+                return TOOB_ERR_NOT_FOUND;
+            }
+
+            ctx->write_cursor = CHIP_STAGING_SLOT_ABS_ADDR + g_toob_ota_resume_state.bytes_staged;
+            ctx->bytes_queued = g_toob_ota_resume_state.bytes_staged;
             ctx->total_size = total_size;
             ctx->state = TOOB_OTA_STATE_RECEIVING;
             *resume_offset = ctx->bytes_queued;
@@ -231,16 +268,15 @@ toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size,
             if (expected_sha256 != NULL) {
                 uint32_t prefix_len = *resume_offset;
                 if (prefix_len > 0) {
-                    /* Initialize SHA-256 streaming context */
                     if (toob_os_sha256_init(&ctx->sha_ctx) != TOOB_OK) {
                         _ctx_reset(ctx);
+                        toob_ota_checkpoint_clear();
                         return TOOB_ERR_NOT_SUPPORTED;
                     }
                     memcpy(ctx->expected_sha256, expected_sha256, 32);
                     ctx->is_verified = 1;
 
-                    /* Re-hash the already-staged prefix by reading it back from flash.
-                     * Reuses ctx->align_buf as temporary read buffer — zero additional allocation. */
+                    /* Re-hash the already-staged prefix from flash */
                     uint32_t rehashed = 0;
                     while (rehashed < prefix_len) {
                         uint32_t chunk_len = TOOB_OTA_BUF_SIZE;
@@ -254,11 +290,13 @@ toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size,
                             chunk_len);
                         if (rd != TOOB_OK) {
                             _ctx_reset(ctx);
+                            toob_ota_checkpoint_clear();
                             return rd;
                         }
 
                         if (toob_os_sha256_update(&ctx->sha_ctx, ctx->align_buf, chunk_len) != TOOB_OK) {
                             _ctx_reset(ctx);
+                            toob_ota_checkpoint_clear();
                             return TOOB_ERR_NOT_SUPPORTED;
                         }
 
@@ -273,6 +311,7 @@ toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size,
         }
     }
 
+    toob_ota_checkpoint_clear();
     return TOOB_ERR_NOT_FOUND;
 }
 
@@ -333,6 +372,10 @@ toob_status_t toob_ota_process_chunk(toob_ota_ctx_t *ctx, const uint8_t *chunk, 
   /* Transition to DONE when all declared bytes have been received */
   if (ctx->bytes_queued == ctx->total_size) {
     ctx->state = TOOB_OTA_STATE_DONE;
+  }
+
+  if (ctx->bytes_queued > 0) {
+      toob_ota_checkpoint_save(ctx->bytes_queued, ctx->is_verified ? ctx->expected_sha256 : NULL);
   }
 
   return TOOB_OK;

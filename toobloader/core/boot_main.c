@@ -211,6 +211,11 @@ boot_status_t boot_main(const boot_platform_t *platform,
     goto init_cleanup;
   init_mask |= INIT_MASK_FLASH;
 
+  /* UPD-001: Unconditional init prevents cold-start garbage in .noinit.
+   * Must run before any diag setter. The forensic branch below overwrites
+   * error fields if a valid crash record exists. */
+  boot_diag_init();
+
   /* Read forensic slot if present and mirror to telemetry */
   {
     boot_forensic_record_t forensic_record;
@@ -250,8 +255,6 @@ boot_status_t boot_main(const boot_platform_t *platform,
     }
 
     if (forensic_valid) {
-      /* Mirror to toob_diag_state */
-      boot_diag_init();
       boot_diag_set_error((boot_status_t)forensic_record.reason, forensic_record.site_id);
       
       /* Invalidate the slot to prevent reading the same crash on next reboot */
@@ -452,9 +455,13 @@ init_success:
   wal_tmr_payload_t tmr __attribute__((aligned(8)));
   boot_secure_zeroize(&tmr, sizeof(tmr));
   uint32_t session_id = 0;
+  uint32_t installed_app_svn = 0;
+  uint32_t installed_stage1_svn = 0;
   if (boot_journal_get_tmr(platform, &tmr) == BOOT_OK) {
     boot_diag_set_recovery_events(tmr.boot_failure_counter);
     session_id = tmr.chain_entry_count;
+    installed_app_svn = tmr.app_svn;
+    installed_stage1_svn = tmr.stage1_svn;
 
     toob_ext_health_t wear = {
         .wal_erase_count = 0, /* TMR has no aggregated WAL wear counter */
@@ -467,6 +474,12 @@ init_success:
   boot_secure_zeroize(&tmr, sizeof(tmr));
 
   boot_diag_set_system_status(0, target_out->boot_recovery_os, session_id);
+
+  /* UPD-001: Populate SVN from TMR on EVERY boot, not only update boots.
+   * boot_diag_set_security_meta() in boot_state.c only fires during stage-check.
+   * Without this, a cold start reports garbage SVN to the server (B1). */
+  boot_diag_set_installed_state(installed_app_svn, installed_stage1_svn, 0);
+
   boot_diag_seal(); /* Kapselt CRC & Padding-Nulling perfekt ein */
 
   /* Handoff Struct Population */

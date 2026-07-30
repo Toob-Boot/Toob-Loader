@@ -1,4 +1,5 @@
 #include "toob_network_client.h"
+#include "toob_device_cred.h"
 #include "libtoob.h"
 #include <stddef.h>
 #include <string.h>
@@ -21,7 +22,7 @@
 #endif
 
 #ifndef CONFIG_TOOB_SERVER_URL
-#define CONFIG_TOOB_SERVER_URL "https://api.toob.io/v1/update"
+#define CONFIG_TOOB_SERVER_URL "https://api.toob.io"
 #endif
 
 #ifndef CONFIG_TOOB_POLL_INTERVAL_SEC
@@ -51,11 +52,11 @@ static uint32_t _calculate_backoff_sec(void) {
 }
 
 /* ============================================================================
- * Phase 1: CBOR Manifest Fetching & Parsing
+ * Phase 1: CBOR Manifest Fetching & Parsing (UPD-004, UPD-005)
  * ============================================================================ */
 
 typedef struct {
-    uint8_t buf[256];
+    uint8_t buf[512]; /* UPD-005: Resized from 256 to 512 bytes */
     size_t  len;
 } cbor_manifest_buf_t;
 
@@ -63,14 +64,14 @@ static toob_status_t _manifest_chunk_cb(const uint8_t* chunk, uint32_t len, void
     cbor_manifest_buf_t* mbuf = (cbor_manifest_buf_t*)ctx;
     /* GAP-N16: Integer overflow protection */
     if (len > sizeof(mbuf->buf) || mbuf->len > sizeof(mbuf->buf) - len) {
-        return TOOB_ERR_INVALID_ARG; /* Manifest zu groß */
+        return TOOB_ERR_INVALID_ARG; /* Manifest exceeds 512 bytes */
     }
     memcpy(&mbuf->buf[mbuf->len], chunk, len);
     mbuf->len += len;
     return TOOB_OK;
 }
 
-/* Parsed ein Meta-CBOR Map mit den Keys 1=svn, 2=size, 3=sha256, 4=image_type */
+/* Parsed ein Meta-CBOR Map (Keys 1=svn, 2=size, 3=sha256, 4=image_type, 5=blob_path) */
 static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_info_t* out) {
     if (!data || len == 0 || !out) {
         return false;
@@ -87,11 +88,13 @@ static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_in
     bool has_size = false;
     bool has_sha256 = false;
     bool has_svn = false;
+    bool has_blob_path = false;
 
     bool parsed_svn = false;
     bool parsed_size = false;
     bool parsed_sha256 = false;
     bool parsed_image_type = false;
+    bool parsed_blob_path = false;
 
     /* GAP-N02: zcbor_array_at_end existiert, list_or_map_end nicht */
     while (ok && !zcbor_array_at_end(state)) {
@@ -138,6 +141,36 @@ static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_in
                 }
                 break;
             }
+            case 5: /* blob_path (UPD-005) */
+            {
+                if (parsed_blob_path) { ok = false; break; }
+                struct zcbor_string str;
+                ok = zcbor_tstr_decode(state, &str);
+                if (ok && str.len > 0 && str.len <= 128) {
+                    memcpy(out->blob_path, str.value, str.len);
+                    out->blob_path[str.len] = '\0';
+                    has_blob_path = true;
+                    parsed_blob_path = true;
+                } else {
+                    ok = false; /* Over 128 bytes or 0 bytes -> FAIL */
+                }
+                break;
+            }
+            case 7: /* rotated_token (UPD-032) */
+            {
+                static bool parsed_rotated_token = false;
+                if (parsed_rotated_token) { ok = false; break; }
+                struct zcbor_string str;
+                ok = zcbor_bstr_decode(state, &str);
+                if (ok && str.len == 32) {
+                    memcpy(out->rotated_token, str.value, 32);
+                    out->has_rotated_token = true;
+                    parsed_rotated_token = true;
+                } else {
+                    ok = false;
+                }
+                break;
+            }
             default:
                 /* zcbor_any_skip fails if nesting > 1, preventing DoS stack exhaustion */
                 ok = zcbor_any_skip(state, NULL);
@@ -154,9 +187,18 @@ static bool _parse_cbor_manifest(const uint8_t* data, size_t len, toob_update_in
             ok = false;
         }
     }
+
+    /* UPD-005 Host-Bound Security Check (MISRA/CERT C):
+     * Key 5 MUST contain path + query ONLY. Reject if it contains '://' or '//' */
+    if (ok && has_blob_path) {
+        if (strstr(out->blob_path, "://") != NULL || strstr(out->blob_path, "//") != NULL) {
+            TOOB_LOGE(TAG, "blob_path contains illegal schema/host specifier: %s", out->blob_path);
+            ok = false;
+        }
+    }
     
     /* Mathematische Perfektion: Pflichtfelder MÜSSEN vorhanden und valide sein */
-    return ok && has_size && has_sha256 && has_svn;
+    return ok && has_size && has_sha256 && has_svn && has_blob_path;
 }
 
 /* ============================================================================
@@ -173,7 +215,7 @@ static toob_status_t _payload_chunk_cb(const uint8_t* chunk, uint32_t len, void*
 }
 
 /* ============================================================================
- * Main OTA Flow
+ * Main OTA Flow (UPD-004, UPD-005)
  * ============================================================================ */
 
 /* OTA session context (static: survives across resume cycles) */
@@ -194,6 +236,14 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
         s_net_init = true;
         toob_ota_ctx_init(&s_ota_ctx);
     }
+
+    /* UPD-004 Step 0: Load device credentials from OS-NVS */
+    toob_device_cred_t cred;
+    toob_status_t cred_stat = toob_cred_load(&cred);
+    if (cred_stat != TOOB_OK) {
+        TOOB_LOGE(TAG, "No device credentials in OS-NVS (0x%08X), skipping checkin", (unsigned)cred_stat);
+        return cred_stat; /* Fail fast! No anonymous requests! */
+    }
     
     toob_status_t stat = TOOB_OK;
 
@@ -204,34 +254,96 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
         current_svn = diag.current_svn;
     }
 
-    /* Phase 1: Fetch CBOR Manifest */
+    /* UPD-004 Step 1: Obtain Device ID & hex encode (64 chars) */
+    uint8_t dev_id[32];
+    if (toob_get_device_id(dev_id) != TOOB_OK) {
+        TOOB_LOGE(TAG, "Failed to compute device ID");
+        return TOOB_ERR_HARDWARE;
+    }
+
+    char dev_id_hex[65];
+    for (int i = 0; i < 32; i++) {
+        snprintf(&dev_id_hex[i * 2], 3, "%02x", dev_id[i]);
+    }
+    dev_id_hex[64] = '\0';
+
+    /* UPD-004 Step 2: Format POST Checkin URL: %s/v1/devices/%s/checkin */
     char check_url[256];
-    /* GAP-N10: URL Truncation Check */
-    int written = snprintf(check_url, sizeof(check_url), "%s/check?svn=%u", server_url, current_svn);
+    int written = snprintf(check_url, sizeof(check_url), "%s/v1/devices/%s/checkin", server_url, dev_id_hex);
     if (written < 0 || (size_t)written >= sizeof(check_url)) {
         TOOB_LOGE(TAG, "Check URL truncated");
         return TOOB_ERR_INVALID_ARG;
     }
-    
+
+    /* UPD-004 Step 3: Get telemetry CBOR body (toob_get_boot_diag_cbor) */
+    uint8_t diag_buf[512];
+    uint32_t diag_len = 0;
+    if (toob_get_boot_diag_cbor(diag_buf, sizeof(diag_buf), &diag_len) != TOOB_OK) {
+        TOOB_LOGE(TAG, "Failed to generate boot diag CBOR");
+        return TOOB_ERR_HARDWARE;
+    }
+
+    /* UPD-004 Step 4: Sequence counter & Headers assembly */
+    uint64_t seq = 0;
+    (void)toob_cred_bump_seq(&seq);
+
+    char auth_hdr[96];
+    snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s\r\n", (const char*)cred.device_token);
+
+    char seq_hdr[64];
+    snprintf(seq_hdr, sizeof(seq_hdr), "X-Toob-Seq: %llu\r\n", (unsigned long long)seq);
+
+    const char *const headers[3] = {
+        auth_hdr,
+        "Content-Type: application/cbor\r\n",
+        seq_hdr
+    };
+
+    /* UPD-004 Step 5: Execute HTTP POST Check-in request */
     cbor_manifest_buf_t mbuf = { .len = 0 };
-    stat = rtos_http_get(check_url, 0, _manifest_chunk_cb, &mbuf);
+    uint16_t http_status = 0;
+    uint32_t retry_after = 0;
+    stat = rtos_http_request(TOOB_HTTP_POST, check_url,
+                             headers, 3,
+                             diag_buf, diag_len, 0,
+                             _manifest_chunk_cb, &mbuf,
+                             &http_status, &retry_after);
     if (stat != TOOB_OK) {
-        TOOB_LOGE(TAG, "Check request failed (HTTP error/Timeout)");
+        TOOB_LOGE(TAG, "Checkin POST request failed (transport error 0x%08X)", (unsigned)stat);
         return stat;
     }
 
-    /* HTTP 204 No Content liefert mbuf.len == 0 */
-    if (mbuf.len == 0) {
-        TOOB_LOGI(TAG, "No update available (SVN: %u)", current_svn);
+    /* UPD-004 Step 6: Evaluate HTTP Status & 204 No Content */
+    if (http_status == 204 || mbuf.len == 0) {
+        TOOB_LOGI(TAG, "No update available (204 No Content, SVN: %u)", current_svn);
+        memset(&mbuf, 0, sizeof(mbuf)); /* Zeroise buffer immediately */
+        return TOOB_ERR_NOT_FOUND;
+    }
+    if (http_status != 200) {
+        TOOB_LOGW(TAG, "Checkin HTTP status: %u (Retry-After: %u s)", http_status, retry_after);
+        memset(&mbuf, 0, sizeof(mbuf)); /* Zeroise buffer immediately */
         return TOOB_ERR_NOT_FOUND;
     }
 
+    /* UPD-004 / UPD-005 Step 7: Parse Manifest & Zeroise Buffer */
     toob_update_info_t info;
     memset(&info, 0, sizeof(info));
-    if (!_parse_cbor_manifest(mbuf.buf, mbuf.len, &info)) {
+    bool parse_ok = _parse_cbor_manifest(mbuf.buf, mbuf.len, &info);
+    memset(&mbuf, 0, sizeof(mbuf)); /* UPD-005: Immediate zeroisation per security spec */
+    if (!parse_ok) {
         TOOB_LOGE(TAG, "Failed to parse CBOR manifest");
         return TOOB_ERR_VERIFY;
     }
+
+    /* UPD-032: Handle Server-Initiated Token Rotation (Key 7) */
+    if (info.has_rotated_token) {
+        TOOB_LOGI(TAG, "Server requested token rotation (Key 7), persisting new token to NVS...");
+        toob_status_t rot_stat = toob_cred_rotate_token(info.rotated_token);
+        if (rot_stat != TOOB_OK) {
+            TOOB_LOGE(TAG, "Failed to persist rotated token: 0x%08X", (unsigned)rot_stat);
+        }
+    }
+
     /* Defense-in-Depth: Anti-Rollback Prüfung auf OS-Ebene (vor dem Bootloader) */
     if (info.remote_svn <= current_svn) {
         TOOB_LOGI(TAG, "Update skipped: remote SVN (%u) is not strictly newer than current (%u)", 
@@ -240,7 +352,7 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
     }
 
     info.update_available = true;
-    TOOB_LOGI(TAG, "Update available: size=%u, svn=%u", info.total_size, info.remote_svn);
+    TOOB_LOGI(TAG, "Update available: size=%u, svn=%u, blob_path=%s", info.total_size, info.remote_svn, info.blob_path);
 
     /* Phase 2: Resume / Begin */
     uint32_t resume_offset = 0;
@@ -256,21 +368,28 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
         resume_offset = 0;
     }
 
-    /* Phase 3: Download Payload */
+    /* UPD-005 Phase 3: Download Payload via Host-Bound URL (%s%s) */
     char download_url[256];
-    /* GAP-N10: URL Truncation Check */
-    written = snprintf(download_url, sizeof(download_url), "%s/download", server_url);
+    written = snprintf(download_url, sizeof(download_url), "%s%s", server_url, info.blob_path);
     if (written < 0 || (size_t)written >= sizeof(download_url)) {
         TOOB_LOGE(TAG, "Download URL truncated");
         toob_ota_abort(&s_ota_ctx);
         return TOOB_ERR_INVALID_ARG;
     }
     
-    stat = rtos_http_get(download_url, resume_offset, _payload_chunk_cb, &s_ota_ctx);
+    stat = rtos_http_request(TOOB_HTTP_GET, download_url,
+                             NULL, 0, NULL, 0, resume_offset,
+                             _payload_chunk_cb, &s_ota_ctx,
+                             &http_status, &retry_after);
     if (stat != TOOB_OK) {
         TOOB_LOGE(TAG, "Download failed: 0x%08X", (unsigned)stat);
         toob_ota_abort(&s_ota_ctx);
         return stat;
+    }
+    if (http_status != 200 && http_status != 206) {
+        TOOB_LOGE(TAG, "Download rejected with HTTP %u", http_status);
+        toob_ota_abort(&s_ota_ctx);
+        return TOOB_ERR_NOT_FOUND;
     }
 
     /* Phase 4: Finalize */
@@ -311,10 +430,8 @@ _Noreturn void toob_network_daemon_loop(void) {
         }
 
 #if defined(__ZEPHYR__)
-        /* GAP-N19: Chunked Sleep (nicht zwingend für Zephyr nötig, aber konsistent) */
         k_sleep(K_SECONDS(sleep_sec));
 #elif defined(ESP_PLATFORM)
-        /* GAP-N19: Defensiver Sleep in Blöcken gegen Integer Overflow in FreeRTOS */
         uint32_t remaining = sleep_sec;
         while (remaining > 0) {
             uint32_t chunk = (remaining > 60) ? 60 : remaining;

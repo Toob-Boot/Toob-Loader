@@ -1,17 +1,18 @@
-// Package tbm1 encodes and signs TBM1 v2 fixed-format boot manifests.
+// Package tbm1 encodes, validates, and signs TBM1 v2 fixed-format boot manifests.
 //
-// It is designed to be driven as an API, not a CLI. Three layers, smallest to
-// largest:
+// It is designed to be driven as a library or an HTTP microservice.
+// Three layers, smallest to largest:
 //
 //	Library   — BuildUnsigned / Package / validateBlock: pure, no key, no I/O.
 //	Signer    — an interface over "sign 64-byte Ed25519 over these bytes", so
 //	            the private key can live in memory, a KMS, or an HSM. The build
 //	            step never needs it (key-custody split).
-//	HTTP       — NewHandler(Signer) exposes /build (keyless), /sign (key-holding),
+//	HTTP      — NewHandler(Signer) exposes /build (keyless), /sign (key-holding),
 //	            /package (both) and /verify as a mountable http.Handler.
 //
-// Every layout constant mirrors boot_tbm1.h byte-for-byte; the shared golden
-// vectors exist to catch drift between this writer and the C reader.
+// Every layout constant mirrors boot_tbm1.h byte-for-byte; validation is bound
+// directly to the host-compiled C-Reader (boot_tbm1.c via CGo) to eliminate
+// parser drift between encoder and bootloader.
 //
 // Flat on-flash package (as libtoob streams it into staging):
 //
@@ -208,8 +209,8 @@ func alignUp(v, a uint32) uint32 {
 }
 
 // BuildUnsigned assembles the manifest block with a zeroed signature slot.
-// It re-runs the reader's checks, so a successful build cannot produce a
-// manifest that tbm1_validate would reject.
+// It re-runs the reader's checks via CGo C-Reader, so a successful build
+// cannot produce a manifest that boot_tbm1.c would reject on device.
 func BuildUnsigned(m Manifest) (*Package, error) {
 	n := len(m.Images)
 	if n < 1 || n > MaxImages {
@@ -481,88 +482,12 @@ func Build(m Manifest, s Signer) (*Package, error) {
 	return pkg, nil
 }
 
-// ---- validateBlock: reader mirror, panic-safe on untrusted input --------
+// ---- validateBlock: host C-Reader validation (zero drift by construction) ----
 
 func validateBlock(b []byte) error {
-	if len(b) < FixedLen {
-		return errors.New("block shorter than fixed header")
-	}
-	le := binary.LittleEndian
-	if le.Uint32(b[offMagic:]) != Magic {
-		return errors.New("bad magic")
-	}
-	if le.Uint16(b[offFixedLen:]) != FixedLen {
-		return errors.New("bad fixed_len")
-	}
-	if b[offVersionMajor] != VersionMajor {
-		return errors.New("bad version_major")
-	}
-	total := le.Uint32(b[offTotalLen:])
-	if total < FixedLen+SigLen {
-		return errors.New("total_len too small")
-	}
-	if int(total) != len(b) {
-		return fmt.Errorf("total_len %d != block length %d", total, len(b))
-	}
-	if le.Uint32(b[offFixedCRC32:]) != crc32.ChecksumIEEE(b[:CRCLen]) {
-		return errors.New("crc mismatch")
-	}
-	sigStart := total - SigLen
-	prevEnd := uint32(FixedLen)
-	var seen uint16
-	for i := 0; i < MaxRegions; i++ {
-		base := offRegions + i*regionStride
-		id := le.Uint16(b[base:])
-		if id == RegionNone {
-			continue
-		}
-		if id < 16 {
-			bit := uint16(1) << id
-			if seen&bit != 0 {
-				return fmt.Errorf("duplicate region %d", id)
-			}
-			seen |= bit
-		}
-		off := le.Uint32(b[base+4:])
-		ln := le.Uint32(b[base+8:])
-		if off > sigStart || ln > sigStart-off {
-			return fmt.Errorf("region %d out of bounds", id)
-		}
-		if off < prevEnd {
-			return fmt.Errorf("region %d not ascending", id)
-		}
-		prevEnd = off + ln
-	}
-	nImg := int(b[offImageCount])
-	if nImg < 1 || nImg > MaxImages {
-		return fmt.Errorf("image_count %d out of range", nImg)
-	}
-	var chLen uint32
-	foundCh := false
-	for i := 0; i < MaxRegions; i++ {
-		base := offRegions + i*regionStride
-		if le.Uint16(b[base:]) == RegionChunkHashes {
-			chLen = le.Uint32(b[base+8:])
-			foundCh = true
-			break
-		}
-	}
-	if !foundCh {
-		return errors.New("missing chunk-hash region")
-	}
-	var acc uint64
-	for i := 0; i < nImg; i++ {
-		base := offImages + i*imageStride
-		installed := le.Uint32(b[base+12:])
-		cs := le.Uint32(b[base+16:])
-		nc := le.Uint32(b[base+20:])
-		if cs == 0 || nc != ceilDivU32(installed, cs) {
-			return fmt.Errorf("image %d chunk math", i)
-		}
-		acc += uint64(nc) * DigestLen
-	}
-	if acc != uint64(chLen) {
-		return errors.New("chunk-hash length cross-check failed")
+	rc := ValidateCReader(b, 0)
+	if rc != RejectOK {
+		return fmt.Errorf("c-reader rejected manifest: %s", rc)
 	}
 	return nil
 }

@@ -60,7 +60,8 @@ static inline bool wal_intent_is_security_bearing(uint32_t intent) {
 #define WAL_TMR_VERSION_4 4
 #define WAL_TMR_VERSION_5 5
 #define WAL_TMR_VERSION_6 6
-#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_6
+#define WAL_TMR_VERSION_7 7
+#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_7
 
 #define TOOB_TMR_HAS_ACTIVE_APP_SLOT 1
 
@@ -138,8 +139,14 @@ typedef struct {
   uint8_t  active_transport_id;            /* Selected active provider ID */
   uint8_t  _pad_tmr[2];                    /* 4-byte alignment padding */
 
-  /* --- reserved tail (for future versions) --- */
-  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4 - 4 - 4 - 4];
+  /* --- v7-Felder (UPD-006: Cloud-Command Freshness) --- */
+  uint32_t last_accepted_issued_at;         /* issued_at of the last accepted cloud command.
+                                            * Zero on factory-fresh devices (no command ever
+                                            * accepted). Used as monotonic reference — a new
+                                            * command must have issued_at > this value. */
+
+  /* --- reserved tail (for future versions, e.g. UPD-007 diag fields) --- */
+  uint8_t reserved[TMR_PAYLOAD_SLOT_BYTES - 4 - 52 - WAL_CHAIN_TAG_BYTES - 4 - 4 - 4 - 4 - 4];
 } wal_tmr_payload_t;
 
 /** Canonical populated-size: all fields before the reserved tail.
@@ -179,8 +186,8 @@ _Static_assert(sizeof(wal_sector_header_t) <= 128,
                "ABI Drift: WAL Header exceeds slot size!");
 _Static_assert(sizeof(wal_sector_header_aligned_t) == 128,
                "ABI Drift: Aligned WAL Header must be exactly 128 bytes!");
-_Static_assert(WAL_TMR_POPULATED_SIZE == 88,
-               "ABI Drift: populated_size must match hand-computed 88!");
+_Static_assert(WAL_TMR_POPULATED_SIZE == 92,
+               "ABI Drift: populated_size must match hand-computed 92!");
 
 /* Cross-check: Core's typed sector header must match the wire format's opaque version */
 _Static_assert(sizeof(wal_sector_header_t) == sizeof(toob_wal_sector_header_t),

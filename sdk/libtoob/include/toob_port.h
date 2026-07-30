@@ -80,6 +80,40 @@ TOOB_MUST_CHECK toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, c
  */
 TOOB_MUST_CHECK toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]);
 
+/* ==============================================================================
+ * 3. Non-Volatile Storage Porting Hooks (UPD-003: Device Credentials)
+ *
+ * Keys use the "toob_sys/" namespace prefix to isolate internal state from
+ * user-facing NVS data. Each RTOS port maps this to its native KV store:
+ *   - Zephyr:  settings_runtime_get / settings_runtime_set
+ *   - ESP-IDF: nvs_open("toob_sys", ...) + nvs_get_blob / nvs_set_blob
+ * ============================================================================== */
+
+/**
+ * @brief Hook: Read a blob from OS-managed non-volatile storage.
+ * @param key   Null-terminated key string (e.g., "toob_sys/cred").
+ * @param buf   Output buffer.
+ * @param len   [in] Buffer capacity in bytes, [out] actual bytes read.
+ * @return TOOB_OK on success.
+ *         TOOB_ERR_NOT_FOUND if the key does not exist.
+ *         TOOB_ERR_INVALID_ARG if buf or len is NULL.
+ *         TOOB_ERR_FLASH on storage hardware failure.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_nvs_read(const char *key,
+                                                uint8_t *buf, size_t *len);
+
+/**
+ * @brief Hook: Write a blob to OS-managed non-volatile storage.
+ * @param key   Null-terminated key string.
+ * @param buf   Data to persist.
+ * @param len   Length in bytes.
+ * @return TOOB_OK on success.
+ *         TOOB_ERR_INVALID_ARG if key or buf is NULL, or len is 0.
+ *         TOOB_ERR_FLASH on storage hardware failure.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_nvs_write(const char *key,
+                                                 const uint8_t *buf, size_t len);
+
 #ifdef __cplusplus
 }
 #endif
