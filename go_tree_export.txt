@@ -1,0 +1,300 @@
+Auflistung der Ordnerpfade fÅr Volume Daten
+Volumeseriennummer : 0000007B 9C2B:6CD5
+C:\USERS\ROBIN\DESKTOP\TOOB-LOADER\TOOB-INFRA\CMD
++---autoscaler
+|       main.go
+|       
++---server
+|       main.go
+|       
++---toob-ops
+|       console_other.go
+|       console_windows.go
+|       list_compilers.go
+|       main.go
+|       test_build.go
+|       
++---validator
+|       main.go
+|       
++---vmrunner
+|       main.go
+|       main_test.go
+|       semver.go
+|       
+\---worker
+        main.go
+        
+  
+Auflistung der Ordnerpfade fÅr Volume Daten
+Volumeseriennummer : 000000A4 9C2B:6CD5
+C:\USERS\ROBIN\DESKTOP\TOOB-LOADER\TOOB-INFRA\INTERNAL
++---archiveutil
+|       archiveutil.go
+|       
++---autoscaler
+|       autoscaler.go
+|       autoscaler_test.go
+|       cloudinit.go
+|       config.go
+|       hetzner.go
+|       nomad.go
+|       user_data.yaml.tmpl
+|       vault.go
+|       
++---domain
+|       admin.go
+|       advisory.go
+|       audit.go
+|       ecosystem.go
+|       errors.go
+|       job.go
+|       matrix.go
+|       organization.go
+|       package.go
+|       package_test.go
+|       permission.go
+|       permission_test.go
+|       plan.go
+|       plan_test.go
+|       publish_job.go
+|       registry.go
+|       release.go
+|       release_job.go
+|       revision.go
+|       user.go
+|       vmresult.go
+|       
++---envutil
+|       envutil.go
+|       
++---jobtoken
+|       jobtoken.go
+|       
++---logx
++---matrixgen
+|       generator.go
+|       generator_test.go
+|       
++---ops
+|   +---dashboard
+|   |       dashboard.go
+|   |       poller.go
+|   |       render.go
+|   |       
+|   +---engine
+|   |       engine.go
+|   |       envcheck.go
+|   |       stage.go
+|   |       state.go
+|   |       
+|   +---exec
+|   |       capture.go
+|   |       capture_test.go
+|   |       runner.go
+|   |       
+|   +---stages
+|   |       ansible.go
+|   |       artifacts.go
+|   |       config.go
+|   |       deploy.go
+|   |       env_safety_test.go
+|   |       packer.go
+|   |       prereqs.go
+|   |       terraform.go
+|   |       verify.go
+|   |       vpn.go
+|   |       workers.go
+|   |       
+|   +---testrunner
+|   |       runner.go
+|   |       
+|   +---topology
+|   |       topology.go
+|   |       topology_test.go
+|   |       
+|   \---ui
+|           color.go
+|           output.go
+|           prompt.go
+|           spinner.go
+|           stage.go
+|           
++---retry
+|       retry.go
+|       
++---server
+|   +---app
+|   |       app.go
+|   |       
+|   +---authz
+|   |       policy.go
+|   |       policy_test.go
+|   |       
+|   +---cache
+|   |       registry.go
+|   |       registry_test.go
+|   |       
+|   +---cloudflare
+|   |       client.go
+|   |       
+|   +---config
+|   |       config.go
+|   |       
+|   +---crypto
+|   |       signer.go
+|   |       
+|   +---github
+|   |       client.go
+|   |       
+|   +---handler
+|   |   |   admin_cache.go
+|   |   |   admin_dashboard.go
+|   |   |   admin_jobs.go
+|   |   |   admin_matrix.go
+|   |   |   admin_packages.go
+|   |   |   admin_plan.go
+|   |   |   admin_releases.go
+|   |   |   auth.go
+|   |   |   billing.go
+|   |   |   compiler.go
+|   |   |   devices_handler.go
+|   |   |   devices_handler_test.go
+|   |   |   download.go
+|   |   |   health.go
+|   |   |   helper.go
+|   |   |   mock_github.go
+|   |   |   notification.go
+|   |   |   organization.go
+|   |   |   packages.go
+|   |   |   profile.go
+|   |   |   publish.go
+|   |   |   registry.go
+|   |   |   release_download.go
+|   |   |   resolve.go
+|   |   |   response.go
+|   |   |   scope.go
+|   |   |   search.go
+|   |   |   sync.go
+|   |   |   tokens.go
+|   |   |   webhook.go
+|   |   |   webhook_test.go
+|   |   |   worker.go
+|   |   |   worker_publish.go
+|   |   |   worker_release.go
+|   |   |   worker_release_sync.go
+|   |   |   worker_validation.go
+|   |   |   
+|   |   \---assets
+|   |           oob.html
+|   |           
+|   +---ingest
+|   |       ingest.go
+|   |       tarball_validate.go
+|   |       tarball_validate_test.go
+|   |       
+|   +---metrics
+|   |       collectors.go
+|   |       metrics.go
+|   |       middleware.go
+|   |       middleware_test.go
+|   |       
+|   +---middleware
+|   |       auth.go
+|   |       auth_test.go
+|   |       bodylimit.go
+|   |       compress.go
+|   |       edge_cache.go
+|   |       logging.go
+|   |       mtls.go
+|   |       ratelimit.go
+|   |       recovery.go
+|   |       scope.go
+|   |       timeout.go
+|   |       webhook.go
+|   |       
+|   +---mirror
+|   |       pusher.go
+|   |       
+|   +---notify
+|   |       webhook.go
+|   |       
+|   +---postgres
+|   |       advisories.go
+|   |       audit.go
+|   |       dashboard.go
+|   |       db.go
+|   |       ecosystem.go
+|   |       jobs.go
+|   |       matrix.go
+|   |       notifications.go
+|   |       oauth.go
+|   |       organizations.go
+|   |       packages.go
+|   |       packages_authz.go
+|   |       packages_lifecycle.go
+|   |       packages_publish.go
+|   |       packages_read.go
+|   |       publish_jobs.go
+|   |       release_jobs.go
+|   |       revisions.go
+|   |       stores.go
+|   |       sync_log.go
+|   |       users.go
+|   |       
+|   +---router
+|   |       cache_sync.go
+|   |       middleware.go
+|   |       router.go
+|   |       routes_admin.go
+|   |       routes_auth.go
+|   |       routes_org.go
+|   |       routes_public.go
+|   |       routes_publish.go
+|   |       
+|   +---signing
+|   |       transit.go
+|   |       
+|   +---storage
+|   |       object.go
+|   |       s3.go
+|   |       
+|   \---vault
+|           client.go
+|           
++---strutil
+|       strutil.go
+|       
++---subsystem
+|       subsystem.go
+|       subsystem_test.go
+|       
++---validate
+|       diffbump.go
+|       integrity.go
+|       integrity_test.go
+|       manifest.go
+|       rules.go
+|       rules_test.go
+|       security.go
+|       step.go
+|       
+\---worker
+    +---config
+    |       config.go
+    |       
+    \---daemon
+            apiclient.go
+            archive.go
+            archive_test.go
+            cleanup.go
+            daemon.go
+            firecracker.go
+            firecracker_test.go
+            git.go
+            release.go
+            rootfs.go
+            snapshot.go
+            validation.go
+            vmapi.go
+            

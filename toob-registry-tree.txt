@@ -1,0 +1,936 @@
+Auflistung der Ordnerpfade fÅr Volume Daten
+Volumeseriennummer : 0000001D 9C2B:6CD5
+C:\USERS\ROBIN\DESKTOP\TOOB-LOADER\TOOB-REGISTRY
+|   .dockerignore
+|   .env.dev
+|   .env.staging
+|   .gitignore
+|   CONTRIBUTING.md
+|   deploy_export.txt
+|   go.mod
+|   go.sum
+|   justfile
+|   ops_export.txt
+|   README.md
+|   
++---.github
+|   +---workflows
+|   |       deploy-api.yml
+|   |       
+|   \---_archived_workflows
+|           deploy-api.yml
+|           main-release.yml
+|           mirror-to-public.yml
+|           pr-validator.yml
+|           version-index.yml
+|           
++---build
+|       autoscaler
+|       busybox
+|       rootfs.ext4
+|       server.exe
+|       vm-runner
+|       worker
+|       
++---cmd
+|   +---autoscaler
+|   |       main.go
+|   |       
+|   +---server
+|   |       main.go
+|   |       
+|   +---toob-ops
+|   |       console_other.go
+|   |       console_windows.go
+|   |       list_compilers.go
+|   |       main.go
+|   |       test_build.go
+|   |       
+|   +---validator
+|   |       main.go
+|   |       
+|   +---vmrunner
+|   |       main.go
+|   |       main_test.go
+|   |       semver.go
+|   |       
+|   \---worker
+|           main.go
+|           
++---deploy
+|   |   .toob-ops-secrets.dev.json
+|   |   .toob-ops-state.dev.json
+|   |   .toob-ops-state.dev.json.dryrun
+|   |   Dockerfile.ops
+|   |   versions.json
+|   |   
+|   +---ansible
+|   |   |   ansible.cfg
+|   |   |   inventory.ini
+|   |   |   site.yml
+|   |   |   
+|   |   +---files
+|   |   |       cleanup-db-firewall.py
+|   |   |       
+|   |   \---roles
+|   |       +---caddy
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---ci-runner
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---common
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---monitoring
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---nomad
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---ubicloud-db
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---update-service
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---vault-kms
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---vault-primary
+|   |       |   \---tasks
+|   |       |           main.yml
+|   |       |           
+|   |       +---wg-hub
+|   |       |   +---handlers
+|   |       |   |       main.yml
+|   |       |   |       
+|   |       |   +---tasks
+|   |       |   |       main.yml
+|   |       |   |       
+|   |       |   \---templates
+|   |       |           wg0-hub.conf.j2
+|   |       |           
+|   |       +---wg-peer
+|   |       |   +---handlers
+|   |       |   |       main.yml
+|   |       |   |       
+|   |       |   +---tasks
+|   |       |   |       main.yml
+|   |       |   |       
+|   |       |   \---templates
+|   |       |           wg-emergency.conf.disabled.j2
+|   |       |           wg0-spoke.conf.j2
+|   |       |           
+|   |       \---zitadel
+|   |           +---handlers
+|   |           |       main.yml
+|   |           |       
+|   |           \---tasks
+|   |                   main.yml
+|   |                   
+|   +---api
+|   |       .last_tag.dev
+|   |       deploy.sh
+|   |       Dockerfile.api
+|   |       seccomp-api.json
+|   |       toob-api-hardening.service
+|   |       
+|   +---caddy
+|   |       caddy.service
+|   |       Caddyfile.j2
+|   |       
+|   +---compiler
+|   |       build-compiler.sh
+|   |       Dockerfile.compiler
+|   |       install_toolchains.py
+|   |       
+|   +---logs
+|   |   \---dev
+|   +---monitoring
+|   |   |   docker-compose.monitoring.yml.j2
+|   |   |   docker-compose.pgweb.yml
+|   |   |   vault-agent-monitoring.hcl
+|   |   |   
+|   |   +---alloy
+|   |   |       config.alloy.j2
+|   |   |       
+|   |   +---grafana
+|   |   |   +---dashboards
+|   |   |   |       api-performance.json
+|   |   |   |       infrastructure.json
+|   |   |   |       ops-home.json
+|   |   |   |       vault-security.json
+|   |   |   |       worker-pipeline.json
+|   |   |   |       
+|   |   |   \---provisioning
+|   |   |       +---dashboards
+|   |   |       |       dashboards.yml
+|   |   |       |       
+|   |   |       \---datasources
+|   |   |               loki.yml
+|   |   |               prometheus.yml
+|   |   |               
+|   |   +---loki
+|   |   |       loki.yml
+|   |   |       
+|   |   +---prometheus
+|   |   |       alert.rules.yml
+|   |   |       alertmanager.yml.j2
+|   |   |       blackbox.yml
+|   |   |       prometheus.yml.j2
+|   |   |       token-ttl-exporter.sh.j2
+|   |   |       
+|   |   \---systemd
+|   |           notify-failure.sh
+|   |           notify-failure@.service
+|   |           notify-recovery.sh
+|   |           notify-recovery@.service
+|   |           
+|   +---nomad
+|   |   |   client.hcl
+|   |   |   client.hcl.j2
+|   |   |   nomad.service
+|   |   |   registry-api.nomad.hcl
+|   |   |   registry-autoscaler.nomad.hcl
+|   |   |   registry-migrate.nomad.hcl
+|   |   |   registry-worker.nomad.hcl
+|   |   |   server.hcl
+|   |   |   server.hcl.j2
+|   |   |   vault-agent-api.hcl
+|   |   |   vault-agent.hcl
+|   |   |   
+|   |   +---scripts
+|   |   |       backup-nomad.sh
+|   |   |       unpack-nomad-tls.sh
+|   |   |       
+|   |   \---templates
+|   |           nomad-tls.json.tpl
+|   |           
+|   +---packer
+|   |   |   image.pkr.hcl
+|   |   |   packer-manifest.json
+|   |   |   
+|   |   \---scripts
+|   |           install-base.sh
+|   |           install-binaries.sh
+|   |           install-worker.sh
+|   |           
+|   +---scripts
+|   |       break-glass.sh
+|   |       gen-admin-wg.sh
+|   |       rolling-deploy.sh
+|   |       
+|   +---terraform
+|   |   +---cloudflare
+|   |   |   |   .terraform.lock.hcl
+|   |   |   |   main.tf
+|   |   |   |   tfplan
+|   |   |   |   
+|   |   |   \---.terraform
+|   |   |       |   terraform.tfstate
+|   |   |       |   
+|   |   |       \---providers
+|   |   |           \---registry.terraform.io
+|   |   |               \---cloudflare
+|   |   |                   \---cloudflare
+|   |   |                       +---4.52.7
+|   |   |                       |   \---windows_amd64
+|   |   |                       |           CHANGELOG.md
+|   |   |                       |           LICENSE
+|   |   |                       |           README.md
+|   |   |                       |           terraform-provider-cloudflare_v4.52.7.exe
+|   |   |                       |           
+|   |   |                       \---5.19.1
+|   |   |                           +---linux_amd64
+|   |   |                           |       terraform-provider-cloudflare_v5.19.1
+|   |   |                           |       
+|   |   |                           \---windows_amd64
+|   |   |                                   terraform-provider-cloudflare_v5.19.1.exe
+|   |   |                                   
+|   |   +---database
+|   |   |   |   .terraform.lock.hcl
+|   |   |   |   main.tf
+|   |   |   |   outputs.tf
+|   |   |   |   tfplan
+|   |   |   |   variables.tf
+|   |   |   |   
+|   |   |   \---.terraform
+|   |   |       |   terraform.tfstate
+|   |   |       |   
+|   |   |       \---providers
+|   |   |           \---registry.terraform.io
+|   |   |               \---ubicloud
+|   |   |                   \---ubicloud
+|   |   |                       \---0.1.3
+|   |   |                           +---linux_amd64
+|   |   |                           |       LICENSE
+|   |   |                           |       README.md
+|   |   |                           |       terraform-provider-ubicloud_v0.1.3
+|   |   |                           |       
+|   |   |                           \---windows_amd64
+|   |   |                                   LICENSE
+|   |   |                                   README.md
+|   |   |                                   terraform-provider-ubicloud_v0.1.3.exe
+|   |   |                                   
+|   |   +---modules
+|   |   |   \---project-baseline
+|   |   |           main.tf
+|   |   |           outputs.tf
+|   |   |           variables.tf
+|   |   |           
+|   |   +---projects
+|   |   |   +---identity
+|   |   |   |       main.tf
+|   |   |   |       
+|   |   |   +---ops
+|   |   |   |       main.tf
+|   |   |   |       vault_cluster.tf
+|   |   |   |       
+|   |   |   +---registry
+|   |   |   |       main.tf
+|   |   |   |       
+|   |   |   +---staging
+|   |   |   |       main.tf
+|   |   |   |       
+|   |   |   \---update
+|   |   |           main.tf
+|   |   |           
+|   |   +---s3
+|   |   |   |   .terraform.lock.hcl
+|   |   |   |   main.tf
+|   |   |   |   tfplan
+|   |   |   |   
+|   |   |   \---.terraform
+|   |   |       |   terraform.tfstate
+|   |   |       |   
+|   |   |       \---providers
+|   |   |           \---registry.terraform.io
+|   |   |               \---hashicorp
+|   |   |                   \---aws
+|   |   |                       \---5.100.0
+|   |   |                           +---linux_amd64
+|   |   |                           |       LICENSE.txt
+|   |   |                           |       terraform-provider-aws_v5.100.0_x5
+|   |   |                           |       
+|   |   |                           \---windows_amd64
+|   |   |                                   LICENSE.txt
+|   |   |                                   terraform-provider-aws_v5.100.0_x5.exe
+|   |   |                                   
+|   |   \---worker
+|   |       |   .terraform.lock.hcl
+|   |       |   cloud-init.yaml
+|   |       |   main.tf
+|   |       |   tfplan
+|   |       |   
+|   |       \---.terraform
+|   |           |   terraform.tfstate
+|   |           |   
+|   |           \---providers
+|   |               \---registry.terraform.io
+|   |                   +---hashicorp
+|   |                   |   \---local
+|   |                   |       \---2.9.0
+|   |                   |           +---linux_amd64
+|   |                   |           |       LICENSE.txt
+|   |                   |           |       terraform-provider-local_v2.9.0_x5
+|   |                   |           |       
+|   |                   |           \---windows_amd64
+|   |                   |                   LICENSE.txt
+|   |                   |                   terraform-provider-local_v2.9.0_x5.exe
+|   |                   |                   
+|   |                   \---hetznercloud
+|   |                       \---hcloud
+|   |                           \---1.64.0
+|   |                               +---linux_amd64
+|   |                               |       CHANGELOG.md
+|   |                               |       LICENSE
+|   |                               |       README.md
+|   |                               |       terraform-provider-hcloud_v1.64.0
+|   |                               |       
+|   |                               \---windows_amd64
+|   |                                       CHANGELOG.md
+|   |                                       LICENSE
+|   |                                       README.md
+|   |                                       terraform-provider-hcloud_v1.64.0.exe
+|   |                                       
+|   +---vault
+|   |   |   unseal-vault.hcl.j2
+|   |   |   unseal-vault.service
+|   |   |   vault.hcl.j2
+|   |   |   vault.logrotate
+|   |   |   vault.service
+|   |   |   
+|   |   +---policies
+|   |   |       api-node-agent.hcl
+|   |   |       autounseal.hcl
+|   |   |       backup.hcl
+|   |   |       cosign.hcl
+|   |   |       deployer.hcl
+|   |   |       identity-service.hcl
+|   |   |       integration-tests.hcl
+|   |   |       monitoring.hcl
+|   |   |       nomad-node-pki.hcl
+|   |   |       nomad-server.hcl
+|   |   |       registry-api.hcl
+|   |   |       registry-autoscaler.hcl
+|   |   |       registry-worker.hcl
+|   |   |       update-service.hcl
+|   |   |       workload-identity.hcl
+|   |   |       
+|   |   \---scripts
+|   |           backup-unseal.sh
+|   |           backup.sh
+|   |           init-unseal.sh
+|   |           init.sh
+|   |           restore-test.sh
+|   |           seed.sh
+|   |           
+|   \---worker
+|           build-rootfs.sh
+|           Makefile
+|           setup-host.sh
+|           
++---docs
+|   |   authz.md
+|   |   backend_architecture_and_test_spec.md
+|   |   chip_contribution_guide.md
+|   |   compiler_arch_1.md
+|   |   devops_worker_architecture.md
+|   |   release.md
+|   |   worker_architecture.md
+|   |   worker_lifecycle_management.md
+|   |   worker_vm_compiler_lifecycle.md
+|   |   
+|   \---runbooks
+|           APIHighErrorRate.md
+|           APIHighLatency.md
+|           AutoscalerIneffective.md
+|           BackupStale.md
+|           DBFirewallCleanupStale.md
+|           DiskSpaceFillingUp.md
+|           InstanceDown.md
+|           NomadJobFailed.md
+|           NomadTLSRotationFailed.md
+|           OriginEndpointDown.md
+|           PostgresDown.md
+|           PostgresTooManyConnections.md
+|           PublicEndpointDown.md
+|           QueueDepthHigh.md
+|           SSLCertExpiringSoon.md
+|           SystemdServiceFailed.md
+|           TokenTTLLow.md
+|           VaultSealed.md
+|           VaultSealedExternal.md
+|           VersionDivergence.md
+|           Watchdog.md
+|           
++---internal
+|   +---archiveutil
+|   |       archiveutil.go
+|   |       
+|   +---autoscaler
+|   |       autoscaler.go
+|   |       autoscaler_test.go
+|   |       cloudinit.go
+|   |       config.go
+|   |       hetzner.go
+|   |       nomad.go
+|   |       user_data.yaml.tmpl
+|   |       vault.go
+|   |       
+|   +---domain
+|   |       admin.go
+|   |       advisory.go
+|   |       audit.go
+|   |       ecosystem.go
+|   |       errors.go
+|   |       job.go
+|   |       matrix.go
+|   |       organization.go
+|   |       package.go
+|   |       package_test.go
+|   |       permission.go
+|   |       permission_test.go
+|   |       plan.go
+|   |       plan_test.go
+|   |       publish_job.go
+|   |       registry.go
+|   |       release.go
+|   |       release_job.go
+|   |       revision.go
+|   |       user.go
+|   |       vmresult.go
+|   |       
+|   +---envutil
+|   |       envutil.go
+|   |       
+|   +---jobtoken
+|   |       jobtoken.go
+|   |       
+|   +---logx
+|   +---matrixgen
+|   |       generator.go
+|   |       generator_test.go
+|   |       
+|   +---ops
+|   |   +---dashboard
+|   |   |       dashboard.go
+|   |   |       poller.go
+|   |   |       render.go
+|   |   |       
+|   |   +---engine
+|   |   |       engine.go
+|   |   |       envcheck.go
+|   |   |       stage.go
+|   |   |       state.go
+|   |   |       
+|   |   +---exec
+|   |   |       capture.go
+|   |   |       capture_test.go
+|   |   |       runner.go
+|   |   |       
+|   |   +---stages
+|   |   |       ansible.go
+|   |   |       artifacts.go
+|   |   |       config.go
+|   |   |       deploy.go
+|   |   |       env_safety_test.go
+|   |   |       packer.go
+|   |   |       prereqs.go
+|   |   |       terraform.go
+|   |   |       verify.go
+|   |   |       vpn.go
+|   |   |       workers.go
+|   |   |       
+|   |   +---testrunner
+|   |   |       runner.go
+|   |   |       
+|   |   +---topology
+|   |   |       topology.go
+|   |   |       topology_test.go
+|   |   |       
+|   |   \---ui
+|   |           color.go
+|   |           output.go
+|   |           prompt.go
+|   |           spinner.go
+|   |           stage.go
+|   |           
+|   +---retry
+|   |       retry.go
+|   |       
+|   +---server
+|   |   +---app
+|   |   |       app.go
+|   |   |       
+|   |   +---authz
+|   |   |       policy.go
+|   |   |       policy_test.go
+|   |   |       
+|   |   +---cache
+|   |   |       registry.go
+|   |   |       registry_test.go
+|   |   |       
+|   |   +---cloudflare
+|   |   |       client.go
+|   |   |       
+|   |   +---config
+|   |   |       config.go
+|   |   |       
+|   |   +---crypto
+|   |   |       signer.go
+|   |   |       
+|   |   +---github
+|   |   |       client.go
+|   |   |       
+|   |   +---handler
+|   |   |   |   admin_cache.go
+|   |   |   |   admin_dashboard.go
+|   |   |   |   admin_jobs.go
+|   |   |   |   admin_matrix.go
+|   |   |   |   admin_packages.go
+|   |   |   |   admin_plan.go
+|   |   |   |   admin_releases.go
+|   |   |   |   auth.go
+|   |   |   |   billing.go
+|   |   |   |   compiler.go
+|   |   |   |   download.go
+|   |   |   |   health.go
+|   |   |   |   helper.go
+|   |   |   |   mock_github.go
+|   |   |   |   notification.go
+|   |   |   |   organization.go
+|   |   |   |   packages.go
+|   |   |   |   profile.go
+|   |   |   |   publish.go
+|   |   |   |   registry.go
+|   |   |   |   release_download.go
+|   |   |   |   resolve.go
+|   |   |   |   response.go
+|   |   |   |   scope.go
+|   |   |   |   search.go
+|   |   |   |   sync.go
+|   |   |   |   tokens.go
+|   |   |   |   webhook.go
+|   |   |   |   webhook_test.go
+|   |   |   |   worker.go
+|   |   |   |   worker_publish.go
+|   |   |   |   worker_release.go
+|   |   |   |   worker_release_sync.go
+|   |   |   |   worker_validation.go
+|   |   |   |   
+|   |   |   \---assets
+|   |   |           oob.html
+|   |   |           
+|   |   +---ingest
+|   |   |       ingest.go
+|   |   |       tarball_validate.go
+|   |   |       tarball_validate_test.go
+|   |   |       
+|   |   +---metrics
+|   |   |       collectors.go
+|   |   |       metrics.go
+|   |   |       middleware.go
+|   |   |       middleware_test.go
+|   |   |       
+|   |   +---middleware
+|   |   |       auth.go
+|   |   |       auth_test.go
+|   |   |       bodylimit.go
+|   |   |       compress.go
+|   |   |       edge_cache.go
+|   |   |       logging.go
+|   |   |       mtls.go
+|   |   |       ratelimit.go
+|   |   |       recovery.go
+|   |   |       scope.go
+|   |   |       timeout.go
+|   |   |       webhook.go
+|   |   |       
+|   |   +---mirror
+|   |   |       pusher.go
+|   |   |       
+|   |   +---notify
+|   |   |       webhook.go
+|   |   |       
+|   |   +---postgres
+|   |   |       advisories.go
+|   |   |       audit.go
+|   |   |       dashboard.go
+|   |   |       db.go
+|   |   |       ecosystem.go
+|   |   |       jobs.go
+|   |   |       matrix.go
+|   |   |       notifications.go
+|   |   |       oauth.go
+|   |   |       organizations.go
+|   |   |       packages.go
+|   |   |       packages_authz.go
+|   |   |       packages_lifecycle.go
+|   |   |       packages_publish.go
+|   |   |       packages_read.go
+|   |   |       publish_jobs.go
+|   |   |       release_jobs.go
+|   |   |       revisions.go
+|   |   |       stores.go
+|   |   |       sync_log.go
+|   |   |       users.go
+|   |   |       
+|   |   +---router
+|   |   |       cache_sync.go
+|   |   |       middleware.go
+|   |   |       router.go
+|   |   |       routes_admin.go
+|   |   |       routes_auth.go
+|   |   |       routes_org.go
+|   |   |       routes_public.go
+|   |   |       routes_publish.go
+|   |   |       
+|   |   +---signing
+|   |   |       transit.go
+|   |   |       
+|   |   +---storage
+|   |   |       object.go
+|   |   |       s3.go
+|   |   |       
+|   |   \---vault
+|   |           client.go
+|   |           
+|   +---strutil
+|   |       strutil.go
+|   |       
+|   +---subsystem
+|   |       subsystem.go
+|   |       subsystem_test.go
+|   |       
+|   +---validate
+|   |       diffbump.go
+|   |       integrity.go
+|   |       integrity_test.go
+|   |       manifest.go
+|   |       rules.go
+|   |       rules_test.go
+|   |       security.go
+|   |       step.go
+|   |       
+|   \---worker
+|       +---config
+|       |       config.go
+|       |       
+|       \---daemon
+|               apiclient.go
+|               archive.go
+|               archive_test.go
+|               cleanup.go
+|               daemon.go
+|               firecracker.go
+|               firecracker_test.go
+|               git.go
+|               release.go
+|               rootfs.go
+|               snapshot.go
+|               validation.go
+|               vmapi.go
+|               
++---migrations
+|       001_initial.up.sql
+|       002_validation_jobs.up.sql
+|       003_security_lifecycle.up.sql
+|       004_worker_status.up.sql
+|       005_job_tokens.up.sql
+|       006_api_tokens.up.sql
+|       007_search_index.up.sql
+|       008_download_stats.up.sql
+|       009_staging_feedback.up.sql
+|       010_testing_stage.up.sql
+|       011_id_based_tracking.up.sql
+|       012_add_error_summary.up.sql
+|       013_organizations.up.sql
+|       014_oauth_sessions.up.sql
+|       015_oauth_sessions_grace.up.sql
+|       016_hash_job_tokens.up.sql
+|       017_db_fixes.up.sql
+|       018_org_roles.up.sql
+|       019_user_plans.up.sql
+|       020_enforce_package_stage_transitions.up.sql
+|       021_release_jobs.up.sql
+|       022_release_hardening.up.sql
+|       023_worker_metrics.up.sql
+|       024_ecosystem_deprecation.up.sql
+|       025_add_port_category.up.sql
+|       026_cleanup_port_category.up.sql
+|       027_release_jobs_retry_count.up.sql
+|       028_release_jobs_heartbeat.up.sql
+|       029_ecosystem_releases_published.up.sql
+|       030_rename_publisher_to_user.up.sql
+|       031_matrix_entries_pending_index.up.sql
+|       032_compiler_versions.up.sql
+|       migrations.go
+|       
++---registry
+|   |   compatibility_matrix.json
+|   |   crypto_categories.json
+|   |   driver_categories.json
+|   |   registry.json
+|   |   version_index.json
+|   |   
+|   +---arch
+|   |   \---riscv32
+|   |       |   arch_manifest.json
+|   |       |   arch_timer.c
+|   |       |   arch_trap.c
+|   |       |   
+|   |       \---include
+|   |               arch_riscv.h
+|   |               
+|   +---chips
+|   |   \---esp32c6
+|   |       |   chip_manifest.json
+|   |       |   efuse.h
+|   |       |   efuse_mock.c
+|   |       |   efuse_real.c
+|   |       |   esp32c6_stage1.ld
+|   |       |   hardware.json
+|   |       |   startup.c
+|   |       |   template_device.toml
+|   |       |   
+|   |       \---builds
+|   +---crypto
+|   |   +---backend
+|   |   |   \---monocypher
+|   |   |           crypto_manifest.json
+|   |   |           crypto_monocypher.c
+|   |   |           crypto_monocypher.h
+|   |   |           monocypher-ed25519.c
+|   |   |           monocypher-ed25519.h
+|   |   |           monocypher.c
+|   |   |           monocypher.h
+|   |   |           
+|   |   +---hash
+|   |   |   \---sha256_sw
+|   |   |           crypto_manifest.json
+|   |   |           crypto_sha256.c
+|   |   |           sha256.c
+|   |   |           sha256.h
+|   |   |           
+|   |   \---pqc
+|   |       \---ml_dsa_65
+|   |               crypto_manifest.json
+|   |               ml_dsa_65.c
+|   |               
+|   +---drivers
+|   |   +---clock
+|   |   |   \---esp_systimer
+|   |   |           driver_manifest.json
+|   |   |           reset_reason.c
+|   |   |           
+|   |   +---flash
+|   |   |   \---esp_rom_spi
+|   |   |           driver_manifest.json
+|   |   |           flash.c
+|   |   |           
+|   |   +---rtc
+|   |   |   \---esp_rtc_mem
+|   |   |           confirm.c
+|   |   |           driver_manifest.json
+|   |   |           
+|   |   +---slot
+|   |   |   \---esp_mmu_remap
+|   |   |           driver_manifest.json
+|   |   |           esp_mmu_remap.h
+|   |   |           slot.c
+|   |   |           
+|   |   +---uart
+|   |   |   \---esp_uart_v1
+|   |   |           console.c
+|   |   |           driver_manifest.json
+|   |   |           
+|   |   \---wdt
+|   |       \---esp_rwdt_with_swd
+|   |               driver_manifest.json
+|   |               wdt.c
+|   |               
+|   +---integrations
+|   |   +---baremetal
+|   |   |   |   integration_manifest.json
+|   |   |   |   
+|   |   |   \---files
+|   |   |           CMakeLists.txt.snippet
+|   |   |           INTEGRATION_GUIDE.md
+|   |   |           rtos_glue.c
+|   |   |           toob_hooks.c
+|   |   |           
+|   |   +---espidf
+|   |   |   |   integration_manifest.json
+|   |   |   |   
+|   |   |   \---files
+|   |   |           INTEGRATION_GUIDE.md
+|   |   |           partitions.csv
+|   |   |           rtos_glue.c
+|   |   |           rtos_http.c
+|   |   |           toob_hooks.c
+|   |   |           
+|   |   +---freertos
+|   |   |   |   integration_manifest.json
+|   |   |   |   
+|   |   |   \---files
+|   |   |           INTEGRATION_GUIDE.md
+|   |   |           rtos_glue.c
+|   |   |           rtos_http.c
+|   |   |           toob_hooks.c
+|   |   |           
+|   |   \---zephyr
+|   |       |   integration_manifest.json
+|   |       |   
+|   |       \---files
+|   |               app.overlay
+|   |               INTEGRATION_GUIDE.md
+|   |               rtos_glue.c
+|   |               rtos_http.c
+|   |               toob_hooks.c
+|   |               
+|   +---soc
+|   |   \---esp
+|   |       \---include
+|   |               esp_common.h
+|   |               
+|   \---toolchains
+|       \---riscv32-esp-elf
+|               toolchain.cmake
+|               toolchain_manifest.json
+|               
++---scratch
+|       api_coverage_report.txt
+|       check_alloc.py
+|       check_nomad.py
+|       inspect_docker_container.py
+|       nomad-ca.pem
+|       read_server_logs.py
+|       read_vault_key.py
+|       registry_all_files.txt
+|       test_find_snapshot.go
+|       verify_api_coverage.py
+|       
++---scripts
+|       export_api.ps1
+|       export_compiler_pipeline.ps1
+|       export_deploy.ps1
+|       export_deploy_plus.ps1
+|       export_infra_repo.sh
+|       export_ops.ps1
+|       export_registry.ps1
+|       export_registry_full.ps1
+|       export_registry_source.ps1
+|       export_toobloader.ps1
+|       generate_runbooks.py
+|       test-restore-db.sh
+|       test-restore-raft.sh
+|       
++---test
+|   |   auth_test.go
+|   |   decoupling_test.go
+|   |   orgs_test.go
+|   |   publish_test.go
+|   |   
+|   \---integration
+|       |   main_test.go
+|       |   orchestrator_test.go
+|       |   
+|       +---harness
+|       |       client_public.go
+|       |       client_worker.go
+|       |       context.go
+|       |       crypto.go
+|       |       db.go
+|       |       tarball.go
+|       |       vault.go
+|       |       
+|       \---phases
+|               phase00_harness.go
+|               phase01_smoke.go
+|               phase02_auth.go
+|               phase03_orgs.go
+|               phase04_publish.go
+|               phase05b_claiming.go
+|               phase05_lifecycle.go
+|               phase06_worker.go
+|               stubs.go
+|               
+\---_archived_scripts
+        build_registry.go
+        clear_unverified.go
+        generate_index.go
+        matrix_generator.go
+        semver_calc.go
+        sync_releases.go
+        update_ledger.go
+        

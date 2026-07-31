@@ -1,0 +1,3395 @@
+﻿=============================================================================
+TOOB REGISTRY - AUTH, USER AND IDENTITY CONTEXT EXPORT
+Generated at: 2026-07-31 04:33:17
+Files included: 27
+=============================================================================
+
+================================================================================
+FILE: toob-infra/internal/domain/user.go
+================================================================================
+package domain
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/json"
+	"encoding/hex"
+	"fmt"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+// Role determines a user's permissions in the registry.
+type Role string
+
+const (
+	RoleContributor Role = "contributor" // Can publish own packages (dev stage)
+	RoleCore        Role = "core"        // Can publish, promote, and administer
+)
+
+type ContextKey string
+
+const (
+	UserContextKey       ContextKey = "user"
+	TokenTypeContextKey  ContextKey = "token_type"
+	APITokenContextKey   ContextKey = "api_token"
+	ScopesContextKey     ContextKey = "scopes"
+)
+
+// User represents a registered developer identity.
+// Authentication is via GitHub OAuth; authorization via API keys.
+type User struct {
+	ID            string          `json:"id"`
+	GitHubID      int64           `json:"github_id"`
+	GitHubLogin   string          `json:"github_login"`
+	DisplayName   string          `json:"display_name"`
+	Role          Role            `json:"role"`
+	APIKeyHash    string          `json:"-"` // never leak to JSON
+	CreatedAt     time.Time       `json:"created_at"`
+	SuspendedAt   *time.Time      `json:"suspended_at,omitempty"`
+	PlanTier      PlanTier        `json:"plan_tier"`
+	PlanOverrides json.RawMessage `json:"plan_overrides,omitempty"`
+}
+
+// GenerateAPIKey creates a new API key for a user and its bcrypt hash.
+// Format: toob_v1_<UserUUID>_<64HexChars>
+func GenerateAPIKey(userID string) (plainKey string, hash string, err error) {
+	secretBytes := make([]byte, 32)
+	if _, err := rand.Read(secretBytes); err != nil {
+		return "", "", fmt.Errorf("generate random: %w", err)
+	}
+
+	secretStr := hex.EncodeToString(secretBytes)
+	plainKey = fmt.Sprintf("toob_v1_%s_%s", userID, secretStr)
+
+	h := sha256.Sum256([]byte(secretStr))
+	hash = "$sha256$" + hex.EncodeToString(h[:])
+
+	return plainKey, hash, nil
+}
+
+// VerifyAPIKey verifies if the provided secret matches the hash.
+func VerifyAPIKey(secretStr string, hash string) bool {
+	if strings.HasPrefix(hash, "$sha256$") {
+		expectedHashHex := strings.TrimPrefix(hash, "$sha256$")
+		expectedHash, err := hex.DecodeString(expectedHashHex)
+		if err != nil {
+			return false
+		}
+		actualHash := sha256.Sum256([]byte(secretStr))
+		return subtle.ConstantTimeCompare(actualHash[:], expectedHash) == 1
+	}
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(secretStr))
+	return err == nil
+}
+
+// IsActive returns true if the user account is not suspended.
+func (u *User) IsActive() bool {
+	return u.SuspendedAt == nil
+}
+
+// APIToken represents a scoped access token for CI environments.
+type APIToken struct {
+	ID         string     `json:"id"`
+	UserID     string     `json:"user_id"`
+	Name       string     `json:"name"`
+	TokenHash  string     `json:"-"`
+	Scopes     []string   `json:"scopes"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+}
+
+// GenerateAPIToken creates a new scoped API token and its hash.
+// Format: toob_ci_<TokenID>_<64HexChars>
+func GenerateAPIToken(tokenID string) (plainToken string, hash string, err error) {
+	secretBytes := make([]byte, 32)
+	if _, err := rand.Read(secretBytes); err != nil {
+		return "", "", fmt.Errorf("generate random: %w", err)
+	}
+
+	secretStr := hex.EncodeToString(secretBytes)
+	plainToken = fmt.Sprintf("toob_ci_%s_%s", tokenID, secretStr)
+
+	h := sha256.Sum256([]byte(secretStr))
+	hash = "$sha256$" + hex.EncodeToString(h[:])
+
+	return plainToken, hash, nil
+}
+
+// OAuthSession tracks temporary CLI authentication sessions.
+type OAuthSession struct {
+	ID            string    `json:"id"`
+	CLIState      string    `json:"cli_state"`
+	CodeChallenge string    `json:"code_challenge"`
+	RedirectURI   string    `json:"redirect_uri"`
+	GitHubState   string    `json:"github_state"`
+	Rotate        bool      `json:"rotate"`
+	UserID        *string   `json:"user_id,omitempty"`
+	Login         string    `json:"login,omitempty"`
+	Role          string    `json:"role,omitempty"`
+	APIKey        string    `json:"api_key,omitempty"`
+	HasAPIKey     bool      `json:"has_api_key"`
+	ExpiresAt     time.Time `json:"expires_at"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+
+================================================================================
+FILE: toob-infra/internal/domain/organization.go
+================================================================================
+package domain
+
+import "time"
+
+// OrgRole determines a member's permissions within an organization.
+type OrgRole string
+
+const (
+	OrgRoleOwner      OrgRole = "owner"      // Full control: manage members, manage roles
+	OrgRoleMaintainer OrgRole = "maintainer"  // Can add/remove members (not owners)
+	OrgRoleMember     OrgRole = "member"      // Can publish under org scope
+)
+
+// CanManageMembers returns true if the role permits adding or removing members.
+func (r OrgRole) CanManageMembers() bool {
+	return r == OrgRoleOwner || r == OrgRoleMaintainer
+}
+
+// CanManageRoles returns true if the role permits changing other members' roles.
+// Only owners can promote/demote roles.
+func (r OrgRole) CanManageRoles() bool {
+	return r == OrgRoleOwner
+}
+
+// Organization represents a team scope namespace (e.g., @esp-alliance).
+// Created by authenticated users via self-service POST /api/v1/orgs.
+type Organization struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// OrganizationMember links a user to an organization with a specific role.
+type OrganizationMember struct {
+	OrganizationID string    `json:"organization_id"`
+	UserID         string    `json:"user_id"`
+	Role           OrgRole   `json:"role"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+// OrgMembership represents a user's membership in an organization, including the org name.
+type OrgMembership struct {
+	OrganizationID   string    `json:"organization_id"`
+	OrganizationName string    `json:"organization_name"`
+	UserID           string    `json:"user_id"`
+	Role             OrgRole   `json:"role"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+
+================================================================================
+FILE: toob-infra/internal/domain/permission.go
+================================================================================
+package domain
+
+import "context"
+
+// Permission represents an atomic permission in the system.
+type Permission string
+
+const (
+	// Package-Level Permissions
+	PermPackagePublish   Permission = "package:publish"
+	PermPackageUnpublish Permission = "package:unpublish"
+
+	// Org-Level Permissions
+	PermOrgCreate Permission = "org:create"
+	PermOrgDelete Permission = "org:delete"
+	PermOrgView   Permission = "org:view"
+
+	// Admin-Bypass & Override Permissions
+	PermOrgAdminBypass Permission = "org:admin_bypass"
+
+	// Registry & Admin Permissions
+	PermRegistryRelease   Permission = "registry:release"
+	PermRegistryRevoke    Permission = "registry:revoke"
+	PermRegistryMirror    Permission = "registry:mirror"
+	PermAdminDashboard    Permission = "admin:dashboard"
+	PermAdminMatrixUpdate Permission = "admin:matrix_update"
+	PermAdminCachePurge   Permission = "admin:cache_purge"
+	PermAdminRelease     Permission = "admin:release"
+)
+
+// RolePermissions maps global roles to their allowed atomic permissions.
+var RolePermissions = map[Role][]Permission{
+	RoleContributor: {
+		PermPackagePublish,
+		PermPackageUnpublish,
+		PermOrgCreate,
+	},
+	RoleCore: {
+		PermPackagePublish,
+		PermPackageUnpublish,
+		PermOrgCreate,
+		PermOrgDelete,
+		PermOrgView,
+		PermOrgAdminBypass,
+		PermRegistryRelease,
+		PermRegistryRevoke,
+		PermRegistryMirror,
+		PermAdminDashboard,
+		PermAdminMatrixUpdate,
+		PermAdminCachePurge,
+		PermAdminRelease,
+	},
+}
+
+// HasPermission returns true if the user has the specified global permission.
+func HasPermission(user *User, perm Permission) bool {
+	if user == nil {
+		return false
+	}
+	perms, ok := RolePermissions[user.Role]
+	if !ok {
+		return false
+	}
+	for _, p := range perms {
+		if p == perm {
+			return true
+		}
+	}
+	return false
+}
+
+// OrgAction determines the organization-level operation being performed.
+type OrgAction string
+
+const (
+	OrgActionDelete        OrgAction = "delete"
+	OrgActionManageMembers OrgAction = "manage_members"
+	OrgActionManageRoles   OrgAction = "manage_roles"
+	OrgActionViewMembers   OrgAction = "view_members"
+	OrgActionPublish       OrgAction = "publish"
+)
+
+// PackageAction determines the package-level operation being performed.
+type PackageAction string
+
+const (
+	PackageActionRead      PackageAction = "read"
+	PackageActionPublish   PackageAction = "publish"
+	PackageActionUnpublish PackageAction = "unpublish"
+	PackageActionPromote   PackageAction = "promote"
+)
+
+// PublishJobAction determines the validation-job-level operation being performed.
+type PublishJobAction string
+
+const (
+	PublishJobActionView   PublishJobAction = "view"
+	PublishJobActionStream PublishJobAction = "stream"
+)
+
+// AuthzDecision wraps an authorization query outcome.
+type AuthzDecision struct {
+	Allowed     bool
+	ViaOverride bool
+	Role        OrgRole // Only relevant/set for org actions
+}
+
+// Authorizer defines the interface for evaluating user access controls.
+type Authorizer interface {
+	AuthorizeOrgAction(ctx context.Context, user *User, orgID string, action OrgAction) (AuthzDecision, error)
+	AuthorizePackageAction(ctx context.Context, user *User, pkg *Package, action PackageAction) (AuthzDecision, error)
+	AuthorizePublishJobAction(ctx context.Context, user *User, job *PublishJob, action PublishJobAction) (AuthzDecision, error)
+	AuthorizeScopeClaim(ctx context.Context, user *User, packageName string) (AuthzDecision, error)
+	AuthorizeNameClaim(ctx context.Context, user *User, packageName string, ownerUserID string) (AuthzDecision, error)
+}
+
+
+
+================================================================================
+FILE: toob-infra/internal/domain/admin.go
+================================================================================
+package domain
+
+import "time"
+
+type StagingDashboard struct {
+	StagingPackages     []PackageDashboardEntry     `json:"staging_packages"`
+	PendingPRs          []PendingPRDashboardEntry   `json:"pending_prs"`
+	ValidationJobsStats JobsStats                   `json:"validation_jobs_stats"`
+	PublishJobsStats    JobsStats                   `json:"publish_jobs_stats"`
+}
+
+type PackageDashboardEntry struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Version   string    `json:"version"`
+	Category  string    `json:"category"`
+	Publisher string    `json:"publisher"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type PendingPRDashboardEntry struct {
+	ID        int64     `json:"id"`
+	PRNumber  int       `json:"pr_number"`
+	Repo      string    `json:"repo"`
+	HeadSHA   string    `json:"head_sha"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type JobsStats struct {
+	Queued      int     `json:"queued"`
+	Running     int     `json:"running"`
+	Passed      int     `json:"passed"`
+	Failed      int     `json:"failed"`
+	Total       int     `json:"total"`
+	FailureRate float64 `json:"failure_rate"`
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/handler/auth.go
+================================================================================
+package handler
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"embed"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"net"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+	"github.com/Toob-Boot/Toob-Registry/internal/server/config"
+)
+
+// oauthHTTPClient is the dedicated HTTP client for GitHub OAuth requests.
+// Uses explicit timeouts to prevent goroutine leaks when GitHub is degraded.
+var oauthHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   3 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   3 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+		MaxIdleConnsPerHost:   10,
+	},
+}
+
+//go:embed assets/oob.html
+var authAssets embed.FS
+
+var oobTemplate = template.Must(template.ParseFS(authAssets, "assets/oob.html"))
+
+type userUpserter interface {
+	UpsertGitHubUser(ctx context.Context, githubID int64, login, apiKeyHash string) (*domain.User, error)
+	InvalidateAPIKey(ctx context.Context, id string) error
+}
+
+type oauthSessionTracker interface {
+	CreateOAuthSession(ctx context.Context, cliState, codeChallenge, redirectURI, githubState string, rotate bool) (string, error)
+	GetOAuthSession(ctx context.Context, githubState string) (*domain.OAuthSession, error)
+	AssociateUserWithSession(ctx context.Context, githubState, userID, login, role, apiKey string, hasApiKey bool) error
+	ExchangeOAuthCode(ctx context.Context, id string) (*domain.OAuthSession, error)
+}
+
+type AuthHandler struct {
+	cfg      *config.Config
+	users    userUpserter
+	sessions oauthSessionTracker
+}
+
+func NewAuthHandler(cfg *config.Config, u userUpserter, s oauthSessionTracker) *AuthHandler {
+	return &AuthHandler{
+		cfg:      cfg,
+		users:    u,
+		sessions: s,
+	}
+}
+
+// PrepareOAuthRedirect redirects GET requests to GitHub's authorization page.
+// GET /api/v1/auth/github
+func (h *AuthHandler) PrepareOAuthRedirect(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.GitHubClientID == "" {
+		writeError(w, http.StatusNotImplemented, "GitHub OAuth is not configured")
+		return
+	}
+
+	cliState := r.URL.Query().Get("state")
+	codeChallenge := r.URL.Query().Get("code_challenge")
+	redirectURI := r.URL.Query().Get("redirect_uri")
+	rotate := r.URL.Query().Get("rotate") == "true"
+
+	if cliState == "" || codeChallenge == "" || redirectURI == "" {
+		writeError(w, http.StatusBadRequest, "missing state, code_challenge, or redirect_uri")
+		return
+	}
+
+	if !isValidRedirectURI(redirectURI) {
+		writeError(w, http.StatusBadRequest, "unauthorized redirect_uri (must be a loopback callback address)")
+		return
+	}
+
+	githubState, err := generateRandomState()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate session state")
+		return
+	}
+
+	_, err = h.sessions.CreateOAuthSession(r.Context(), cliState, codeChallenge, redirectURI, githubState, rotate)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to initialize auth session: "+err.Error())
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_state",
+		Value:    githubState,
+		Path:     "/",
+		MaxAge:   300, // 5 minutes
+		HttpOnly: true,
+		Secure:   r.URL.Scheme == "https" || r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	githubURL := h.cfg.GitHubURL
+	if githubURL == "" {
+		githubURL = "https://github.com"
+	}
+	redirectURL := fmt.Sprintf("%s/login/oauth/authorize?client_id=%s&state=%s&scope=read:user", githubURL, h.cfg.GitHubClientID, githubState)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+// OAuthCallback handles GitHub's redirect callback, registers the user, and redirects to the CLI local callback.
+// GET /api/v1/auth/github/callback
+func (h *AuthHandler) OAuthCallback(w http.ResponseWriter, r *http.Request) {
+	githubCode := r.URL.Query().Get("code")
+	githubState := r.URL.Query().Get("state")
+	if githubCode == "" || githubState == "" {
+		writeError(w, http.StatusBadRequest, "missing code or state parameter")
+		return
+	}
+
+	cookie, err := r.Cookie("oauth_state")
+	if err != nil || cookie.Value != githubState {
+		writeError(w, http.StatusBadRequest, "invalid or expired session state")
+		return
+	}
+
+	// Clear the cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_state",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   r.URL.Scheme == "https" || r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	ctx := r.Context()
+
+	session, err := h.sessions.GetOAuthSession(ctx, githubState)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query session: "+err.Error())
+		return
+	}
+	if session == nil {
+		writeError(w, http.StatusBadRequest, "invalid or expired session state")
+		return
+	}
+
+	token, err := h.exchangeCodeForToken(ctx, githubCode)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "failed to exchange code: "+err.Error())
+		return
+	}
+
+	githubUser, err := h.fetchGitHubUser(ctx, token)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to fetch user info: "+err.Error())
+		return
+	}
+
+	usr, err := h.users.UpsertGitHubUser(ctx, githubUser.ID, githubUser.Login, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to upsert user: "+err.Error())
+		return
+	}
+
+	var plainKey string
+	var hasApiKey bool
+
+	if session.Rotate || usr.APIKeyHash == "" {
+		var hash string
+		plainKey, hash, err = domain.GenerateAPIKey(usr.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to generate key: "+err.Error())
+			return
+		}
+		usr, err = h.users.UpsertGitHubUser(ctx, githubUser.ID, githubUser.Login, hash)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save key: "+err.Error())
+			return
+		}
+		hasApiKey = true
+	} else {
+		hasApiKey = usr.APIKeyHash != ""
+	}
+
+	err = h.sessions.AssociateUserWithSession(ctx, githubState, usr.ID, usr.GitHubLogin, string(usr.Role), plainKey, hasApiKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to complete authorization: "+err.Error())
+		return
+	}
+
+	if session.RedirectURI == "urn:ietf:wg:oauth:2.0:oob" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+
+		data := struct {
+			SessionID string
+		}{
+			SessionID: session.ID,
+		}
+		if err := oobTemplate.Execute(w, data); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to render authentication page: "+err.Error())
+		}
+	} else {
+		redirectURL := fmt.Sprintf("%s?code=%s&state=%s", session.RedirectURI, url.QueryEscape(session.ID), url.QueryEscape(session.CLIState))
+		http.Redirect(w, r, redirectURL, http.StatusFound)
+	}
+}
+
+// TokenExchange exchanges the temporary session code and PKCE verifier for the final API key.
+// POST /api/v1/auth/token
+func (h *AuthHandler) TokenExchange(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code         string `json:"code"`
+		CodeVerifier string `json:"code_verifier"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" || req.CodeVerifier == "" {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	session, err := h.sessions.ExchangeOAuthCode(r.Context(), req.Code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to exchange oauth code: "+err.Error())
+		return
+	}
+	if session == nil {
+		writeError(w, http.StatusBadRequest, "invalid or expired authorization code")
+		return
+	}
+
+	hash := sha256.Sum256([]byte(req.CodeVerifier))
+	computedChallenge := base64.RawURLEncoding.EncodeToString(hash[:])
+	if subtle.ConstantTimeCompare([]byte(computedChallenge), []byte(session.CodeChallenge)) != 1 {
+		writeError(w, http.StatusForbidden, "invalid PKCE verifier")
+		return
+	}
+
+	resp := map[string]any{
+		"user_id":     session.UserID,
+		"login":       session.Login,
+		"role":        session.Role,
+		"has_api_key": session.HasAPIKey,
+	}
+	if session.APIKey != "" {
+		resp["api_key"] = session.APIKey
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// GitHubLogin exchanges an OAuth code for a GitHub token, gets the user info,
+// upserts the Publisher in the DB, and returns a new API Key (backwards compatible).
+// POST /api/v1/auth/github
+func (h *AuthHandler) GitHubLogin(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.GitHubClientID == "" || h.cfg.GitHubClientSecret == "" {
+		writeError(w, http.StatusNotImplemented, "GitHub OAuth is not configured")
+		return
+	}
+
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	token, err := h.exchangeCodeForToken(r.Context(), req.Code)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "failed to exchange code")
+		return
+	}
+
+	githubUser, err := h.fetchGitHubUser(r.Context(), token)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to fetch user info")
+		return
+	}
+
+	usr, err := h.users.UpsertGitHubUser(r.Context(), githubUser.ID, githubUser.Login, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to upsert user")
+		return
+	}
+
+	var plainKey string
+	if usr.APIKeyHash == "" {
+		var hash string
+		plainKey, hash, err = domain.GenerateAPIKey(usr.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to generate api key")
+			return
+		}
+		usr, err = h.users.UpsertGitHubUser(r.Context(), githubUser.ID, githubUser.Login, hash)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save api key")
+			return
+		}
+	}
+
+	resp := map[string]any{
+		"user_id":     usr.ID,
+		"login":       usr.GitHubLogin,
+		"role":        usr.Role,
+		"has_api_key": usr.APIKeyHash != "",
+	}
+	if plainKey != "" {
+		resp["api_key"] = plainKey
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// RotateKey exchanges an OAuth code for a GitHub token and generates a new API Key,
+// invalidating the old one (backwards compatible).
+// POST /api/v1/auth/rotate-key
+func (h *AuthHandler) RotateKey(w http.ResponseWriter, r *http.Request) {
+	if h.cfg.GitHubClientID == "" || h.cfg.GitHubClientSecret == "" {
+		writeError(w, http.StatusNotImplemented, "GitHub OAuth is not configured")
+		return
+	}
+
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Code == "" {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	token, err := h.exchangeCodeForToken(r.Context(), req.Code)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "failed to exchange code")
+		return
+	}
+
+	githubUser, err := h.fetchGitHubUser(r.Context(), token)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to fetch user info")
+		return
+	}
+
+	usr, err := h.users.UpsertGitHubUser(r.Context(), githubUser.ID, githubUser.Login, "")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to upsert user")
+		return
+	}
+
+	plainKey, hash, err := domain.GenerateAPIKey(usr.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate api key")
+		return
+	}
+
+	usr, err = h.users.UpsertGitHubUser(r.Context(), githubUser.ID, githubUser.Login, hash)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save api key")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"api_key": plainKey,
+		"user_id": usr.ID,
+		"login":   usr.GitHubLogin,
+		"role":    usr.Role,
+	})
+}
+
+// Logout invalidates the publisher's API key.
+// POST /api/v1/auth/logout
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	usr := getUser(r)
+	if usr == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if err := h.users.InvalidateAPIKey(r.Context(), usr.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to logout")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
+}
+
+func (h *AuthHandler) exchangeCodeForToken(ctx context.Context, code string) (string, error) {
+	body, _ := json.Marshal(map[string]string{
+		"client_id":     h.cfg.GitHubClientID,
+		"client_secret": h.cfg.GitHubClientSecret,
+		"code":          code,
+	})
+
+	githubURL := h.cfg.GitHubURL
+	if githubURL == "" {
+		githubURL = "https://github.com"
+	}
+	req, _ := http.NewRequestWithContext(ctx, "POST", githubURL+"/login/oauth/access_token", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if result.Error != "" {
+		return "", fmt.Errorf("github error: %s", result.Error)
+	}
+	return result.AccessToken, nil
+}
+
+type githubUser struct {
+	ID    int64  `json:"id"`
+	Login string `json:"login"`
+}
+
+func (h *AuthHandler) fetchGitHubUser(ctx context.Context, token string) (*githubUser, error) {
+	githubAPIURL := h.cfg.GitHubAPIURL
+	if githubAPIURL == "" {
+		githubAPIURL = "https://api.github.com"
+	}
+	req, _ := http.NewRequestWithContext(ctx, "GET", githubAPIURL+"/user", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := oauthHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("failed to fetch user: %s", resp.Status)
+	}
+
+	var user githubUser
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func generateRandomState() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
+}
+
+func isValidRedirectURI(uri string) bool {
+	if uri == "urn:ietf:wg:oauth:2.0:oob" {
+		return true
+	}
+	u, err := url.Parse(uri)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" {
+		return false
+	}
+	host := u.Hostname()
+	if host != "localhost" && host != "127.0.0.1" {
+		return false
+	}
+	if u.Path != "/callback" {
+		return false
+	}
+	return true
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/handler/organization.go
+================================================================================
+package handler
+
+import (
+	"context"
+	"errors"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+	"github.com/Toob-Boot/Toob-Registry/internal/validate"
+)
+
+// orgStore is the interface required by OrganizationHandler for member and lifecycle management.
+type orgStore interface {
+	GetOrgByName(ctx context.Context, name string) (*domain.Organization, error)
+	GetMemberRole(ctx context.Context, orgID, userID string) (domain.OrgRole, error)
+	ListMembers(ctx context.Context, orgID string) ([]domain.OrganizationMember, error)
+	AddOrgMember(ctx context.Context, orgID, userID string, role domain.OrgRole) error
+	RemoveOrgMember(ctx context.Context, orgID, userID string) error
+	CreateOrganization(ctx context.Context, name string) (*domain.Organization, error)
+	CountByOwner(ctx context.Context, userID string) (int, error)
+	Delete(ctx context.Context, orgID string) error
+	ListByUser(ctx context.Context, userID string) ([]domain.OrgMembership, error)
+}
+
+// OrganizationHandler serves self-service organization management endpoints.
+type OrganizationHandler struct {
+	orgs  orgStore
+	authz domain.Authorizer
+}
+
+func NewOrganizationHandler(orgs orgStore, authz domain.Authorizer) *OrganizationHandler {
+	return &OrganizationHandler{orgs: orgs, authz: authz}
+}
+
+// Create adds a new organization and sets the caller as owner.
+// POST /api/v1/orgs
+func (h *OrganizationHandler) Create(w http.ResponseWriter, r *http.Request) {
+	pub := getUser(r)
+	if pub == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if !domain.HasPermission(pub, domain.PermOrgCreate) {
+		writeError(w, http.StatusForbidden, "forbidden: organization creation permission required")
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	orgName := strings.TrimSpace(req.Name)
+
+	// Validate organization name rules
+	if err := validate.ValidateOrgName(orgName); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid organization name: "+err.Error())
+		return
+	}
+
+	// Check name uniqueness (does organization already exist?)
+	existing, err := h.orgs.GetOrgByName(r.Context(), orgName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check organization uniqueness")
+		return
+	}
+	if existing != nil {
+		writeError(w, http.StatusConflict, fmt.Sprintf("organization %q already exists", orgName))
+		return
+	}
+
+	// Quota check: Limit max orgs based on plan
+	plan := domain.ResolvePlan(pub.PlanTier, pub.PlanOverrides)
+	orgCount, err := h.orgs.CountByOwner(r.Context(), pub.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check organization quota")
+		return
+	}
+
+	if orgCount >= plan.MaxOrgs {
+		writeError(w, http.StatusForbidden, fmt.Sprintf("organization limit reached (%d/%d under plan %s)", orgCount, plan.MaxOrgs, plan.Tier))
+		return
+	}
+
+	// Create org
+	org, err := h.orgs.CreateOrganization(r.Context(), orgName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create organization: "+err.Error())
+		return
+	}
+
+	// Assign creator as owner
+	if err := h.orgs.AddOrgMember(r.Context(), org.ID, pub.ID, domain.OrgRoleOwner); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to assign owner: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, org)
+}
+
+// Get returns basic info of an organization.
+// GET /api/v1/orgs/{name}
+func (h *OrganizationHandler) Get(w http.ResponseWriter, r *http.Request) {
+	orgName := r.PathValue("name")
+	if orgName == "" {
+		writeError(w, http.StatusBadRequest, "organization name is required")
+		return
+	}
+
+	org, err := h.orgs.GetOrgByName(r.Context(), orgName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lookup organization")
+		return
+	}
+	if org == nil {
+		writeError(w, http.StatusNotFound, "organization not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, org)
+}
+
+// Delete deletes the organization. Only owner or system admin can perform this.
+// DELETE /api/v1/orgs/{name}
+func (h *OrganizationHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	pub, org, _, errStatus, errMsg := h.resolveOrgMembership(r, domain.OrgActionDelete)
+	if pub == nil {
+		writeError(w, errStatus, errMsg)
+		return
+	}
+
+	if err := h.orgs.Delete(r.Context(), org.ID); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "organization not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to delete organization: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ListMyOrgs lists memberships of the current user.
+// GET /api/v1/orgs/mine
+func (h *OrganizationHandler) ListMyOrgs(w http.ResponseWriter, r *http.Request) {
+	pub := getUser(r)
+	if pub == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	memberships, err := h.orgs.ListByUser(r.Context(), pub.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load organization memberships")
+		return
+	}
+
+	type orgInfo struct {
+		ID   string         `json:"id"`
+		Name string         `json:"name"`
+		Role domain.OrgRole `json:"role"`
+	}
+
+	result := make([]orgInfo, 0, len(memberships))
+	for _, m := range memberships {
+		result = append(result, orgInfo{
+			ID:   m.OrganizationID,
+			Name: m.OrganizationName,
+			Role: m.Role,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ListMembers returns all members and their roles for an organization.
+// GET /api/v1/orgs/{name}/members
+//
+// Accessible to any member of the organization.
+func (h *OrganizationHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
+	pub, org, _, errStatus, errMsg := h.resolveOrgMembership(r, domain.OrgActionViewMembers)
+	if pub == nil {
+		writeError(w, errStatus, errMsg)
+		return
+	}
+
+	members, err := h.orgs.ListMembers(r.Context(), org.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list members")
+		return
+	}
+
+	type memberEntry struct {
+		UserID    string         `json:"user_id"`
+		Role      domain.OrgRole `json:"role"`
+		CreatedAt string         `json:"created_at"`
+	}
+
+	result := make([]memberEntry, 0, len(members))
+	for _, m := range members {
+		result = append(result, memberEntry{
+			UserID:    m.UserID,
+			Role:      m.Role,
+			CreatedAt: m.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"organization": org.Name,
+		"members":      result,
+	})
+}
+
+// AddMember adds a publisher to the organization or updates their role.
+// POST /api/v1/orgs/{name}/members
+//
+// Requires owner or maintainer role. Maintainers cannot assign the owner role.
+func (h *OrganizationHandler) AddMember(w http.ResponseWriter, r *http.Request) {
+	pub, org, _, errStatus, errMsg := h.resolveOrgMembership(r, domain.OrgActionManageMembers)
+	if pub == nil {
+		writeError(w, errStatus, errMsg)
+		return
+	}
+
+	var req struct {
+		UserID string         `json:"user_id"`
+		Role   domain.OrgRole `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.UserID == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+
+	// Default role is member
+	if req.Role == "" {
+		req.Role = domain.OrgRoleMember
+	}
+
+	// Validate the role value
+	switch req.Role {
+	case domain.OrgRoleOwner, domain.OrgRoleMaintainer, domain.OrgRoleMember:
+	default:
+		writeError(w, http.StatusBadRequest, "role must be one of: owner, maintainer, member")
+		return
+	}
+
+	// Only owners can assign the owner or maintainer role
+	if req.Role != domain.OrgRoleMember {
+		dec, err := h.authz.AuthorizeOrgAction(r.Context(), pub, org.ID, domain.OrgActionManageRoles)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if !dec.Allowed {
+			writeError(w, http.StatusForbidden, "only owners can assign owner or maintainer roles")
+			return
+		}
+	}
+
+	if err := h.orgs.AddOrgMember(r.Context(), org.ID, req.UserID, req.Role); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to add member: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "member_added"})
+}
+
+// RemoveMember removes a user from the organization.
+// DELETE /api/v1/orgs/{name}/members/{user_id}
+//
+// Requires owner or maintainer role. Maintainers cannot remove owners.
+// Members can remove themselves.
+func (h *OrganizationHandler) RemoveMember(w http.ResponseWriter, r *http.Request) {
+	pub, org, callerRole, errStatus, errMsg := h.resolveOrgMembership(r, domain.OrgActionViewMembers)
+	if pub == nil {
+		writeError(w, errStatus, errMsg)
+		return
+	}
+
+	targetID := r.PathValue("user_id")
+	if targetID == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+
+	isSelfRemoval := targetID == pub.ID
+
+	if isSelfRemoval {
+		if callerRole == domain.OrgRoleOwner {
+			members, err := h.orgs.ListMembers(r.Context(), org.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to list organization members")
+				return
+			}
+			ownerCount := 0
+			for _, m := range members {
+				if m.Role == domain.OrgRoleOwner {
+					ownerCount++
+				}
+			}
+			if ownerCount <= 1 {
+				writeError(w, http.StatusConflict, "cannot remove the last owner of the organization; transfer ownership first")
+				return
+			}
+		}
+	} else {
+		dec, err := h.authz.AuthorizeOrgAction(r.Context(), pub, org.ID, domain.OrgActionManageMembers)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		}
+		if !dec.Allowed {
+			writeError(w, http.StatusForbidden, "only owners and maintainers can remove other members")
+			return
+		}
+
+		// Maintainers cannot remove owners (unless admin override)
+		if callerRole == domain.OrgRoleMaintainer && !dec.ViaOverride {
+			targetRole, err := h.orgs.GetMemberRole(r.Context(), org.ID, targetID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to check target role")
+				return
+			}
+			if targetRole == domain.OrgRoleOwner {
+				writeError(w, http.StatusForbidden, "maintainers cannot remove owners")
+				return
+			}
+		}
+	}
+
+	if err := h.orgs.RemoveOrgMember(r.Context(), org.ID, targetID); err != nil {
+		if errors.Is(err, domain.ErrMemberNotFound) {
+			writeError(w, http.StatusNotFound, "member not found in organization")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to remove member: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "member_removed"})
+}
+
+// resolveOrgMembership is a shared helper that extracts the authenticated user,
+// resolves the organization from the URL, and verifies the caller is a member.
+// Returns (user, org, callerRole, httpStatus, errorMsg).
+func (h *OrganizationHandler) resolveOrgMembership(r *http.Request, action domain.OrgAction) (*domain.User, *domain.Organization, domain.OrgRole, int, string) {
+	pub := getUser(r)
+	if pub == nil {
+		return nil, nil, "", http.StatusUnauthorized, "unauthorized"
+	}
+
+	orgName := r.PathValue("name")
+	if orgName == "" {
+		return nil, nil, "", http.StatusBadRequest, "organization name is required"
+	}
+
+	org, err := h.orgs.GetOrgByName(r.Context(), orgName)
+	if err != nil {
+		return nil, nil, "", http.StatusInternalServerError, "failed to lookup organization"
+	}
+	if org == nil {
+		return nil, nil, "", http.StatusNotFound, "organization not found"
+	}
+
+	dec, err := h.authz.AuthorizeOrgAction(r.Context(), pub, org.ID, action)
+	if err != nil {
+		if errors.Is(err, domain.ErrUnauthorized) {
+			return nil, nil, "", http.StatusUnauthorized, "unauthorized"
+		}
+		return nil, nil, "", http.StatusInternalServerError, "internal server error"
+	}
+	if !dec.Allowed {
+		return nil, nil, "", http.StatusForbidden, "forbidden"
+	}
+
+	return pub, org, dec.Role, 0, ""
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/handler/tokens.go
+================================================================================
+package handler
+
+import (
+	"context"
+	"errors"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+	"github.com/google/uuid"
+)
+
+type tokenManager interface {
+	CreateAPIToken(ctx context.Context, t *domain.APIToken) error
+	ListAPITokens(ctx context.Context, userID string) ([]domain.APIToken, error)
+	RevokeAPIToken(ctx context.Context, id, userID string) error
+}
+
+type TokenHandler struct {
+	tokens tokenManager
+}
+
+func NewTokenHandler(t tokenManager) *TokenHandler {
+	return &TokenHandler{tokens: t}
+}
+
+// CreateToken handles POST /api/v1/tokens
+func (h *TokenHandler) CreateToken(w http.ResponseWriter, r *http.Request) {
+	user := getUser(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req struct {
+		Name      string   `json:"name"`
+		Scopes    []string `json:"scopes"`
+		ExpiresIn *int     `json:"expires_in_days"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Name == "" || len(req.Scopes) == 0 {
+		writeError(w, http.StatusBadRequest, "name and scopes are required")
+		return
+	}
+
+	tokenID := uuid.New().String()
+	plainToken, hash, err := domain.GenerateAPIToken(tokenID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+
+	var expiresAt *time.Time
+	if req.ExpiresIn != nil && *req.ExpiresIn > 0 {
+		t := time.Now().AddDate(0, 0, *req.ExpiresIn)
+		expiresAt = &t
+	}
+
+	apiToken := &domain.APIToken{
+		ID:        tokenID,
+		UserID:    user.ID,
+		Name:      req.Name,
+		TokenHash: hash,
+		Scopes:    req.Scopes,
+		CreatedAt: time.Now(),
+		ExpiresAt: expiresAt,
+	}
+
+	if err := h.tokens.CreateAPIToken(r.Context(), apiToken); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to save token: %v", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token": plainToken,
+		"id":    apiToken.ID,
+		"name":  apiToken.Name,
+	})
+}
+
+// ListTokens handles GET /api/v1/tokens
+func (h *TokenHandler) ListTokens(w http.ResponseWriter, r *http.Request) {
+	user := getUser(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	tokens, err := h.tokens.ListAPITokens(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list tokens")
+		return
+	}
+
+	// Safe serialization (TokenHash is "-" so it won't leak)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tokens": tokens,
+	})
+}
+
+// RevokeToken handles DELETE /api/v1/tokens/{id}
+func (h *TokenHandler) RevokeToken(w http.ResponseWriter, r *http.Request) {
+	user := getUser(r)
+	if user == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "token id is required")
+		return
+	}
+
+	if err := h.tokens.RevokeAPIToken(r.Context(), id, user.ID); err != nil {
+		if errors.Is(err, domain.ErrTokenNotFound) {
+			writeError(w, http.StatusNotFound, "token not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to revoke token")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/handler/profile.go
+================================================================================
+package handler
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+)
+
+type profileOrgStore interface {
+	ListByUser(ctx context.Context, userID string) ([]domain.OrgMembership, error)
+}
+
+type ProfileHandler struct {
+	orgs profileOrgStore
+}
+
+func NewProfileHandler(orgs profileOrgStore) *ProfileHandler {
+	return &ProfileHandler{orgs: orgs}
+}
+
+// Me returns the current authenticated user's details, including their resolved plan limits and memberships.
+// GET /api/v1/me
+func (h *ProfileHandler) Me(w http.ResponseWriter, r *http.Request) {
+	usr := getUser(r)
+	if usr == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	memberships, err := h.orgs.ListByUser(r.Context(), usr.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load organization memberships")
+		return
+	}
+
+	// Resolve the dynamic user plan
+	plan := domain.ResolvePlan(usr.PlanTier, usr.PlanOverrides)
+
+	type orgInfo struct {
+		ID   string         `json:"id"`
+		Name string         `json:"name"`
+		Role domain.OrgRole `json:"role"`
+	}
+
+	orgsList := make([]orgInfo, 0, len(memberships))
+	for _, m := range memberships {
+		orgsList = append(orgsList, orgInfo{
+			ID:   m.OrganizationID,
+			Name: m.OrganizationName,
+			Role: m.Role,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":           usr.ID,
+		"github_login": usr.GitHubLogin,
+		"display_name": usr.DisplayName,
+		"role":         usr.Role,
+		"plan":         plan,
+		"orgs":         orgsList,
+	})
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/middleware/auth.go
+================================================================================
+package middleware
+
+import (
+	"context"
+	"crypto/sha256"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+)
+
+// userReader is the interface required by the auth middleware to fetch users.
+type userReader interface {
+	GetByID(ctx context.Context, id string) (*domain.User, error)
+	GetUserByTokenID(ctx context.Context, tokenID string) (*domain.APIToken, *domain.User, error)
+}
+
+type cacheEntry struct {
+	valid     bool
+	expiresAt time.Time
+}
+
+// maxCacheGenSize is the maximum number of entries per cache generation.
+// When the current generation reaches this limit, it is promoted to the
+// previous slot while a fresh generation is created. Total memory is
+// bounded to 2Ã—maxCacheGenSize entries.
+const maxCacheGenSize = 2500
+
+// AuthMiddleware handles API key and CI token verification with a
+// double-buffered credential cache to prevent bcrypt CPU-DoS attacks.
+type AuthMiddleware struct {
+	users userReader
+
+	// Double-buffered cache: reads check both maps so valid entries survive
+	// one rotation cycle even under garbage-key floods.
+	verifyCacheMu sync.RWMutex
+	cacheCurrent  map[[32]byte]cacheEntry
+	cachePrevious map[[32]byte]cacheEntry
+}
+
+func NewAuthMiddleware(users userReader) *AuthMiddleware {
+	return &AuthMiddleware{
+		users:         users,
+		cacheCurrent:  make(map[[32]byte]cacheEntry),
+		cachePrevious: make(map[[32]byte]cacheEntry),
+	}
+}
+
+// verifyCached checks if the API key secret matches the stored hash.
+//
+// Defence against bcrypt CPU-DoS: The cache uses two map generations
+// ("current" and "previous"). Reads check both; writes go to "current".
+// When "current" fills up, "previous" is discarded, "current" becomes
+// "previous", and a new "current" is created. An attacker flooding
+// garbage keys can only evict the "previous" generation â€” valid entries
+// in "current" survive and continue to bypass bcrypt.
+func (am *AuthMiddleware) verifyCached(secret, hash string) bool {
+	h := sha256.New()
+	h.Write([]byte(secret))
+	h.Write([]byte(":"))
+	h.Write([]byte(hash))
+	var key [32]byte
+	copy(key[:], h.Sum(nil))
+
+	now := time.Now()
+
+	// Read from both generations (read lock only)
+	am.verifyCacheMu.RLock()
+	if entry, ok := am.cacheCurrent[key]; ok && now.Before(entry.expiresAt) {
+		am.verifyCacheMu.RUnlock()
+		return entry.valid
+	}
+	if entry, ok := am.cachePrevious[key]; ok && now.Before(entry.expiresAt) {
+		am.verifyCacheMu.RUnlock()
+		return entry.valid
+	}
+	am.verifyCacheMu.RUnlock()
+
+	valid := domain.VerifyAPIKey(secret, hash)
+
+	am.verifyCacheMu.Lock()
+	am.cacheCurrent[key] = cacheEntry{
+		valid:     valid,
+		expiresAt: now.Add(60 * time.Second),
+	}
+	// Rotate generations: discard previous, promote current, create fresh.
+	if len(am.cacheCurrent) >= maxCacheGenSize {
+		am.cachePrevious = am.cacheCurrent
+		am.cacheCurrent = make(map[[32]byte]cacheEntry, maxCacheGenSize/2)
+	}
+	am.verifyCacheMu.Unlock()
+
+	return valid
+}// authenticate parses the Authorization header and verifies the token.
+// Returns the user, optional api token, token type, and any http status / error message on failure.
+func (am *AuthMiddleware) authenticate(r *http.Request) (*domain.User, *domain.APIToken, string, int, string) {
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return nil, nil, "", http.StatusUnauthorized, "unauthorized"
+	}
+
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	parts := strings.SplitN(token, "_", 4)
+	if len(parts) != 4 || parts[0] != "toob" {
+		return nil, nil, "", http.StatusUnauthorized, "invalid token format"
+	}
+
+	tokenType := parts[1] // "v1" (session) or "ci" (scoped token)
+	uuid := parts[2]
+	secret := parts[3]
+
+	var usr *domain.User
+	var apiToken *domain.APIToken
+
+	switch tokenType {
+	case "v1":
+		var err error
+		usr, err = am.users.GetByID(r.Context(), uuid)
+		if err != nil {
+			return nil, nil, "", http.StatusInternalServerError, "internal server error"
+		}
+		if usr == nil || !usr.IsActive() {
+			return nil, nil, "", http.StatusUnauthorized, "unauthorized"
+		}
+		if !am.verifyCached(secret, usr.APIKeyHash) {
+			return nil, nil, "", http.StatusUnauthorized, "unauthorized"
+		}
+	case "ci":
+		var err error
+		apiToken, usr, err = am.users.GetUserByTokenID(r.Context(), uuid)
+		if err != nil {
+			return nil, nil, "", http.StatusInternalServerError, "internal server error"
+		}
+		if usr == nil || apiToken == nil || !usr.IsActive() {
+			return nil, nil, "", http.StatusUnauthorized, "unauthorized"
+		}
+		if !am.verifyCached(secret, apiToken.TokenHash) {
+			return nil, nil, "", http.StatusUnauthorized, "unauthorized"
+		}
+	default:
+		return nil, nil, "", http.StatusUnauthorized, "invalid token type"
+	}
+
+	return usr, apiToken, tokenType, 0, ""
+}
+
+// RequireAuth is a middleware that verifies the Bearer API Key.
+// Format: Authorization: Bearer toob_v1_<UUID>_<SECRET>
+func (am *AuthMiddleware) RequireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usr, apiToken, tokenType, status, errStr := am.authenticate(r)
+		if errStr != "" {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, errStr), status)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), domain.UserContextKey, usr)
+		ctx = context.WithValue(ctx, domain.TokenTypeContextKey, tokenType)
+		if apiToken != nil {
+			ctx = context.WithValue(ctx, domain.APITokenContextKey, apiToken)
+			ctx = context.WithValue(ctx, domain.ScopesContextKey, apiToken.Scopes)
+		} else {
+			ctx = context.WithValue(ctx, domain.ScopesContextKey, []string{"*"})
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// OptionalAuth is a middleware that verifies the Bearer API Key if present.
+// If missing, it continues without injecting a user. If present but invalid, it fails.
+func (am *AuthMiddleware) OptionalAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		usr, apiToken, tokenType, status, errStr := am.authenticate(r)
+		if errStr != "" {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, errStr), status)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), domain.UserContextKey, usr)
+		ctx = context.WithValue(ctx, domain.TokenTypeContextKey, tokenType)
+		if apiToken != nil {
+			ctx = context.WithValue(ctx, domain.APITokenContextKey, apiToken)
+			ctx = context.WithValue(ctx, domain.ScopesContextKey, apiToken.Scopes)
+		} else {
+			ctx = context.WithValue(ctx, domain.ScopesContextKey, []string{"*"})
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// RequirePermission ensures the authenticated user has a specific permission.
+// Must be chained AFTER RequireAuth.
+func RequirePermission(perm domain.Permission) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			usr, ok := r.Context().Value(domain.UserContextKey).(*domain.User)
+			if !ok || usr == nil {
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+
+			if !domain.HasPermission(usr, perm) {
+				http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequireSessionToken ensures the token used is a session token (rejecting "ci" tokens).
+// Must be chained AFTER RequireAuth.
+func RequireSessionToken() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenType, _ := r.Context().Value(domain.TokenTypeContextKey).(string)
+			if tokenType == "ci" {
+				http.Error(w, `{"error":"forbidden: administrative actions require a session token"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/middleware/scope.go
+================================================================================
+package middleware
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+)
+
+// RequireScope enforces that tokens have the required scope.
+// Wildcard scope (*) grants unrestricted access.
+//
+// Scope matching uses prefix semantics: a token with scope "publish"
+// satisfies both RequireScope("publish") and RequireScope("publish:promote").
+// Must be chained AFTER RequireAuth.
+func RequireScope(scope string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scopes, _ := r.Context().Value(domain.ScopesContextKey).([]string)
+
+			if !hasScope(scopes, scope) {
+				http.Error(w, `{"error":"insufficient scope"}`, http.StatusForbidden)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// hasScope checks whether the token's scopes satisfy the required scope.
+// Uses prefix matching: scope "publish" covers "publish", "publish:promote", etc.
+func hasScope(scopes []string, required string) bool {
+	for _, s := range scopes {
+		if s == required || strings.HasPrefix(required, s+":") {
+			return true
+		}
+		// Wildcard scope
+		if s == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/authz/policy.go
+================================================================================
+package authz
+
+import (
+	"context"
+	"log/slog"
+	"strings"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+)
+
+var (
+	ErrUnauthorized = domain.ErrUnauthorized
+	ErrForbidden    = domain.ErrForbidden
+)
+
+// OrgMemberReader retrieves member roles and checks team scope membership.
+type OrgMemberReader interface {
+	GetMemberRole(ctx context.Context, orgID, userID string) (domain.OrgRole, error)
+	IsOrgMember(ctx context.Context, orgName, userID string) (bool, error)
+}
+
+// PackageAccessReader retrieves custom package sharing grants.
+type PackageAccessReader interface {
+	GetPackageAccessUsers(ctx context.Context, packageID string) ([]string, error)
+}
+
+// PolicyEngine evaluates authorization logic dynamically.
+type PolicyEngine struct {
+	orgs OrgMemberReader
+	pkgs PackageAccessReader
+}
+
+// NewPolicyEngine instantiates a PolicyEngine.
+func NewPolicyEngine(orgs OrgMemberReader, pkgs PackageAccessReader) *PolicyEngine {
+	return &PolicyEngine{
+		orgs: orgs,
+		pkgs: pkgs,
+	}
+}
+
+var _ domain.Authorizer = (*PolicyEngine)(nil)
+// AuthorizeOrgAction checks access controls for organization administration actions.
+func (e *PolicyEngine) AuthorizeOrgAction(ctx context.Context, usr *domain.User, orgID string, action domain.OrgAction) (domain.AuthzDecision, error) {
+	if usr == nil {
+		return domain.AuthzDecision{}, ErrUnauthorized
+	}
+
+	role, err := e.orgs.GetMemberRole(ctx, orgID, usr.ID)
+	if err != nil {
+		return domain.AuthzDecision{}, err
+	}
+
+	if role != "" {
+		// User is an organization member. First evaluate their normal role authority.
+		switch action {
+		case domain.OrgActionDelete:
+			if role == domain.OrgRoleOwner {
+				return domain.AuthzDecision{Allowed: true, Role: role}, nil
+			}
+			if domain.HasPermission(usr, domain.PermOrgDelete) || domain.HasPermission(usr, domain.PermOrgAdminBypass) {
+				slog.Info("AUDIT: OrgActionDelete performed via admin override bypass",
+					slog.String("github_login", usr.GitHubLogin),
+					slog.String("user_id", usr.ID),
+					slog.String("org_id", orgID),
+				)
+				return domain.AuthzDecision{Allowed: true, ViaOverride: true, Role: role}, nil
+			}
+		case domain.OrgActionManageMembers:
+			if role.CanManageMembers() {
+				return domain.AuthzDecision{Allowed: true, Role: role}, nil
+			}
+			if domain.HasPermission(usr, domain.PermOrgAdminBypass) {
+				slog.Info("AUDIT: OrgActionManageMembers performed via admin override bypass",
+					slog.String("github_login", usr.GitHubLogin),
+					slog.String("user_id", usr.ID),
+					slog.String("org_id", orgID),
+				)
+				return domain.AuthzDecision{Allowed: true, ViaOverride: true, Role: role}, nil
+			}
+		case domain.OrgActionManageRoles:
+			if role.CanManageRoles() {
+				return domain.AuthzDecision{Allowed: true, Role: role}, nil
+			}
+			if domain.HasPermission(usr, domain.PermOrgAdminBypass) {
+				slog.Info("AUDIT: OrgActionManageRoles performed via admin override bypass",
+					slog.String("github_login", usr.GitHubLogin),
+					slog.String("user_id", usr.ID),
+					slog.String("org_id", orgID),
+				)
+				return domain.AuthzDecision{Allowed: true, ViaOverride: true, Role: role}, nil
+			}
+		case domain.OrgActionViewMembers, domain.OrgActionPublish:
+			return domain.AuthzDecision{Allowed: true, Role: role}, nil
+		}
+		return domain.AuthzDecision{Allowed: false, Role: role}, nil
+	}
+
+	// User is not a member. Verify if they possess global administrative override permissions.
+	if domain.HasPermission(usr, domain.PermOrgAdminBypass) {
+		slog.Info("AUDIT: non-member action performed via admin override bypass",
+			slog.String("github_login", usr.GitHubLogin),
+			slog.String("user_id", usr.ID),
+			slog.Any("action", action),
+			slog.String("org_id", orgID),
+		)
+		return domain.AuthzDecision{Allowed: true, ViaOverride: true, Role: domain.OrgRoleOwner}, nil
+	}
+
+	return domain.AuthzDecision{Allowed: false}, nil
+}
+
+// AuthorizeScopeClaim verifies if a user is authorized to claim a scope.
+func (e *PolicyEngine) AuthorizeScopeClaim(ctx context.Context, usr *domain.User, packageName string) (domain.AuthzDecision, error) {
+	if usr == nil {
+		return domain.AuthzDecision{}, ErrUnauthorized
+	}
+	if !domain.IsScoped(packageName) {
+		return domain.AuthzDecision{Allowed: true}, nil
+	}
+	scope, _ := domain.ParseScope(packageName)
+	orgName := strings.TrimPrefix(scope, "@")
+	if strings.EqualFold(orgName, usr.GitHubLogin) {
+		return domain.AuthzDecision{Allowed: true}, nil
+	}
+	isMember, err := e.orgs.IsOrgMember(ctx, orgName, usr.ID)
+	if err != nil {
+		return domain.AuthzDecision{}, err
+	}
+	if isMember {
+		return domain.AuthzDecision{Allowed: true}, nil
+	}
+	return domain.AuthzDecision{Allowed: false}, nil
+}
+
+// AuthorizeNameClaim verifies if a user is authorized to claim or write to a package name (handling ownership).
+func (e *PolicyEngine) AuthorizeNameClaim(ctx context.Context, usr *domain.User, packageName string, ownerUserID string) (domain.AuthzDecision, error) {
+	if usr == nil {
+		return domain.AuthzDecision{}, ErrUnauthorized
+	}
+	if ownerUserID == "" || ownerUserID == usr.ID {
+		return e.AuthorizeScopeClaim(ctx, usr, packageName)
+	}
+	if domain.IsScoped(packageName) {
+		dec, err := e.AuthorizeScopeClaim(ctx, usr, packageName)
+		if err != nil {
+			return domain.AuthzDecision{}, err
+		}
+		if dec.Allowed {
+			return dec, nil
+		}
+	}
+	if domain.HasPermission(usr, domain.PermOrgAdminBypass) {
+		slog.Info("AUDIT: package ownership check bypassed via admin override bypass",
+			slog.String("github_login", usr.GitHubLogin),
+			slog.String("user_id", usr.ID),
+			slog.String("package_name", packageName),
+			slog.String("owner_user_id", ownerUserID),
+		)
+		return domain.AuthzDecision{Allowed: true, ViaOverride: true}, nil
+	}
+	return domain.AuthzDecision{Allowed: false}, nil
+}
+
+// AuthorizePackageAction checks access controls for package read and write actions.
+func (e *PolicyEngine) AuthorizePackageAction(ctx context.Context, usr *domain.User, pkg *domain.Package, action domain.PackageAction) (domain.AuthzDecision, error) {
+	if action == domain.PackageActionRead {
+		// Stable packages are publicly readable
+		if pkg.Stage == domain.StageStable {
+			return domain.AuthzDecision{Allowed: true}, nil
+		}
+
+		if usr == nil {
+			return domain.AuthzDecision{}, ErrUnauthorized
+		}
+
+		// Check package ownership
+		if pkg.PublisherID != nil && *pkg.PublisherID == usr.ID {
+			return domain.AuthzDecision{Allowed: true}, nil
+		}
+
+		// Check admin override bypass
+		if domain.HasPermission(usr, domain.PermOrgAdminBypass) {
+			slog.Info("AUDIT: package read via admin override bypass",
+				slog.String("github_login", usr.GitHubLogin),
+				slog.String("user_id", usr.ID),
+				slog.String("package_name", pkg.Name),
+			)
+			return domain.AuthzDecision{Allowed: true, ViaOverride: true}, nil
+		}
+
+		// Check custom package access grants
+		grantedUsers, err := e.pkgs.GetPackageAccessUsers(ctx, pkg.ID)
+		if err != nil {
+			// Propagate DB error to avoid silent failures
+			return domain.AuthzDecision{}, err
+		}
+		for _, uID := range grantedUsers {
+			if uID == usr.ID {
+				return domain.AuthzDecision{Allowed: true}, nil
+			}
+		}
+
+		return domain.AuthzDecision{Allowed: false}, nil
+	}
+
+	// Write/publish/promote/unpublish actions
+	if usr == nil {
+		return domain.AuthzDecision{}, ErrUnauthorized
+	}
+
+	var ownerID string
+	if pkg.PublisherID != nil {
+		ownerID = *pkg.PublisherID
+	}
+	return e.AuthorizeNameClaim(ctx, usr, pkg.Name, ownerID)
+}
+
+// AuthorizePublishJobAction checks access controls for validation jobs.
+func (e *PolicyEngine) AuthorizePublishJobAction(ctx context.Context, usr *domain.User, job *domain.PublishJob, action domain.PublishJobAction) (domain.AuthzDecision, error) {
+	if usr == nil {
+		return domain.AuthzDecision{}, ErrUnauthorized
+	}
+
+	// Creator has direct access
+	if job.PublisherID == usr.ID {
+		return domain.AuthzDecision{Allowed: true}, nil
+	}
+
+	// Admin bypass
+	if domain.HasPermission(usr, domain.PermOrgAdminBypass) {
+		slog.Info("AUDIT: job action performed via admin override bypass",
+			slog.String("github_login", usr.GitHubLogin),
+			slog.String("user_id", usr.ID),
+			slog.Any("action", action),
+			slog.Int64("job_id", job.ID),
+		)
+		return domain.AuthzDecision{Allowed: true, ViaOverride: true}, nil
+	}
+
+	// For scoped packages, members of the organization can view/stream the jobs
+	if domain.IsScoped(job.PackageName) {
+		dec, err := e.AuthorizeScopeClaim(ctx, usr, job.PackageName)
+		if err != nil {
+			return domain.AuthzDecision{}, err
+		}
+		if dec.Allowed {
+			return domain.AuthzDecision{Allowed: true}, nil
+		}
+	}
+
+	return domain.AuthzDecision{Allowed: false}, nil
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/postgres/users.go
+================================================================================
+package postgres
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// UserStore handles user identity and authentication queries.
+type UserStore struct {
+	pool *pgxpool.Pool
+}
+
+func NewUserStore(pool *pgxpool.Pool) *UserStore {
+	return &UserStore{pool: pool}
+}
+
+// GetByID fetches a user by their UUID.
+// This is used by the Auth Middleware to load the user in O(1) time
+// before comparing the bcrypt hash.
+func (s *UserStore) GetByID(ctx context.Context, id string) (*domain.User, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, github_id, github_login, display_name, role, api_key_hash, created_at, suspended_at, plan_tier, plan_overrides
+		 FROM users WHERE id = $1`,
+		id,
+	)
+
+	var u domain.User
+	err := row.Scan(
+		&u.ID, &u.GitHubID, &u.GitHubLogin, &u.DisplayName, &u.Role,
+		&u.APIKeyHash, &u.CreatedAt, &u.SuspendedAt, &u.PlanTier, &u.PlanOverrides,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return &u, err
+}
+
+// UpsertGitHubUser creates or updates a user record after a successful GitHub OAuth login.
+func (s *UserStore) UpsertGitHubUser(
+	ctx context.Context,
+	githubID int64,
+	login string,
+	apiKeyHash string,
+) (*domain.User, error) {
+	row := s.pool.QueryRow(ctx,
+		`INSERT INTO users (github_id, github_login, display_name, api_key_hash)
+		 VALUES ($1, $2, $2, $3)
+		 ON CONFLICT (github_id) DO UPDATE SET
+		 	github_login = EXCLUDED.github_login,
+		 	api_key_hash = COALESCE(NULLIF(EXCLUDED.api_key_hash, ''), users.api_key_hash)
+		 RETURNING id, github_id, github_login, display_name, role, api_key_hash, created_at, suspended_at, plan_tier, plan_overrides`,
+		githubID, login, apiKeyHash,
+	)
+
+	var u domain.User
+	err := row.Scan(
+		&u.ID, &u.GitHubID, &u.GitHubLogin, &u.DisplayName, &u.Role,
+		&u.APIKeyHash, &u.CreatedAt, &u.SuspendedAt, &u.PlanTier, &u.PlanOverrides,
+	)
+	return &u, err
+}
+
+// GetByGitHubID fetches a user by their GitHub User ID.
+func (s *UserStore) GetByGitHubID(ctx context.Context, githubID int64) (*domain.User, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, github_id, github_login, display_name, role, api_key_hash, created_at, suspended_at, plan_tier, plan_overrides
+		 FROM users WHERE github_id = $1`,
+		githubID,
+	)
+
+	var u domain.User
+	err := row.Scan(
+		&u.ID, &u.GitHubID, &u.GitHubLogin, &u.DisplayName, &u.Role,
+		&u.APIKeyHash, &u.CreatedAt, &u.SuspendedAt, &u.PlanTier, &u.PlanOverrides,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return &u, err
+}
+
+// InvalidateAPIKey removes the API key hash for a user, effectively logging them out.
+func (s *UserStore) InvalidateAPIKey(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE users SET api_key_hash = '' WHERE id = $1`,
+		id,
+	)
+	return err
+}
+
+// CreateAPIToken inserts a new CI token for a user.
+func (s *UserStore) CreateAPIToken(ctx context.Context, t *domain.APIToken) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO api_tokens (id, user_id, name, token_hash, scopes, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		t.ID, t.UserID, t.Name, t.TokenHash, t.Scopes, t.ExpiresAt,
+	)
+	return err
+}
+
+// ListAPITokens returns all tokens for a user.
+func (s *UserStore) ListAPITokens(ctx context.Context, userID string) ([]domain.APIToken, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, user_id, name, scopes, created_at, last_used_at, expires_at
+		 FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []domain.APIToken
+	for rows.Next() {
+		var t domain.APIToken
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Name, &t.Scopes, &t.CreatedAt, &t.LastUsedAt, &t.ExpiresAt); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
+}
+
+// RevokeAPIToken deletes a specific token.
+func (s *UserStore) RevokeAPIToken(ctx context.Context, id, userID string) error {
+	cmd, err := s.pool.Exec(ctx,
+		`DELETE FROM api_tokens WHERE id = $1 AND user_id = $2`,
+		id, userID,
+	)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return domain.ErrTokenNotFound
+	}
+	return nil
+}
+
+// GetUserByTokenID fetches the token and its associated user by the token ID.
+func (s *UserStore) GetUserByTokenID(ctx context.Context, tokenID string) (*domain.APIToken, *domain.User, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT t.id, t.user_id, t.name, t.token_hash, t.scopes, t.created_at, t.last_used_at, t.expires_at,
+		        u.id, u.github_id, u.github_login, u.display_name, u.role, u.created_at, u.suspended_at, u.plan_tier, u.plan_overrides
+		 FROM api_tokens t
+		 JOIN users u ON t.user_id = u.id
+		 WHERE t.id = $1 AND (t.expires_at IS NULL OR t.expires_at > now())`,
+		tokenID,
+	)
+
+	var t domain.APIToken
+	var u domain.User
+	err := row.Scan(
+		&t.ID, &t.UserID, &t.Name, &t.TokenHash, &t.Scopes, &t.CreatedAt, &t.LastUsedAt, &t.ExpiresAt,
+		&u.ID, &u.GitHubID, &u.GitHubLogin, &u.DisplayName, &u.Role, &u.CreatedAt, &u.SuspendedAt, &u.PlanTier, &u.PlanOverrides,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Update last_used_at synchronously. This is a cheap UPDATE that runs at most
+	// once per 5 minutes per token, so async overhead is not justified.
+	if t.LastUsedAt == nil || time.Since(*t.LastUsedAt) > 5*time.Minute {
+		updateCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		_ = s.UpdateTokenLastUsed(updateCtx, tokenID)
+		cancel()
+	}
+
+	return &t, &u, nil
+}
+
+// UpdateTokenLastUsed updates the last_used_at timestamp.
+func (s *UserStore) UpdateTokenLastUsed(ctx context.Context, tokenID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE api_tokens SET last_used_at = now() WHERE id = $1`,
+		tokenID,
+	)
+	return err
+}
+
+// UpdatePlan updates a user's plan tier and plan overrides in the database.
+func (s *UserStore) UpdatePlan(ctx context.Context, userID string, tier domain.PlanTier, overrides json.RawMessage) error {
+	cmd, err := s.pool.Exec(ctx,
+		`UPDATE users SET plan_tier = $2, plan_overrides = $3 WHERE id = $1`,
+		userID, string(tier), overrides,
+	)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/postgres/oauth.go
+================================================================================
+package postgres
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"time"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// OAuthStore handles database session tracking for OAuth flows.
+// The AES key is loaded from Vault KV at startup and shared across all nodes.
+type OAuthStore struct {
+	pool   *pgxpool.Pool
+	aesKey []byte // 32-byte AES-256-GCM key
+}
+
+func NewOAuthStore(pool *pgxpool.Pool, aesKey []byte) *OAuthStore {
+	if len(aesKey) != 32 {
+		panic("oauth AES key must be exactly 32 bytes")
+	}
+	return &OAuthStore{pool: pool, aesKey: aesKey}
+}
+
+// CreateOAuthSession inserts a new OAuth session with a 5-minute expiry.
+func (s *OAuthStore) CreateOAuthSession(ctx context.Context, cliState, codeChallenge, redirectURI, githubState string, rotate bool) (string, error) {
+	expiresAt := time.Now().Add(5 * time.Minute)
+	var sessionID string
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO oauth_sessions (cli_state, code_challenge, redirect_uri, github_state, rotate, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id`,
+		cliState, codeChallenge, redirectURI, githubState, rotate, expiresAt,
+	).Scan(&sessionID)
+	if err != nil {
+		return "", fmt.Errorf("failed to create oauth session: %w", err)
+	}
+	return sessionID, nil
+}
+
+// GetOAuthSession retrieves a session by github_state.
+func (s *OAuthStore) GetOAuthSession(ctx context.Context, githubState string) (*domain.OAuthSession, error) {
+	var session domain.OAuthSession
+	var userID *string
+
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, cli_state, code_challenge, redirect_uri, github_state, rotate, user_id, login, role, api_key, has_api_key, expires_at, created_at
+		 FROM oauth_sessions
+		 WHERE github_state = $1 AND expires_at > now()`,
+		githubState,
+	).Scan(
+		&session.ID, &session.CLIState, &session.CodeChallenge, &session.RedirectURI,
+		&session.GitHubState, &session.Rotate, &userID, &session.Login,
+		&session.Role, &session.APIKey, &session.HasAPIKey, &session.ExpiresAt, &session.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get oauth session: %w", err)
+	}
+	session.UserID = userID
+
+	if session.APIKey != "" {
+		decrypted, err := s.decrypt(session.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt api_key: %w", err)
+		}
+		session.APIKey = decrypted
+	}
+
+	return &session, nil
+}
+
+// AssociateUserWithSession stores authenticated credentials in the session row.
+func (s *OAuthStore) AssociateUserWithSession(ctx context.Context, githubState, userID, login, role, apiKey string, hasApiKey bool) error {
+	var encryptedKey string
+	var err error
+	if apiKey != "" {
+		encryptedKey, err = s.encrypt(apiKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt api_key: %w", err)
+		}
+	}
+
+	var keyPtr *string
+	if encryptedKey != "" {
+		keyPtr = &encryptedKey
+	}
+
+	cmd, err := s.pool.Exec(ctx,
+		`UPDATE oauth_sessions
+		 SET user_id = $1, login = $2, role = $3, api_key = $4, has_api_key = $5
+		 WHERE github_state = $6 AND expires_at > now()`,
+		userID, login, role, keyPtr, hasApiKey, githubState,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to associate user with session: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return fmt.Errorf("oauth session not found or expired")
+	}
+	return nil
+}
+
+// ExchangeOAuthCode atomically retrieves and marks the session as exchanged,
+// permitting a 10-second grace window for concurrent retries before locking.
+func (s *OAuthStore) ExchangeOAuthCode(ctx context.Context, id string) (*domain.OAuthSession, error) {
+	var session domain.OAuthSession
+	var userID *string
+
+	err := s.pool.QueryRow(ctx,
+		`UPDATE oauth_sessions
+		 SET exchanged_at = now()
+		 WHERE id = $1 AND expires_at > now() AND exchanged_at IS NULL
+		 RETURNING id, cli_state, code_challenge, redirect_uri, github_state, rotate, user_id, login, role, api_key, has_api_key, expires_at, created_at`,
+		id,
+	).Scan(
+		&session.ID, &session.CLIState, &session.CodeChallenge, &session.RedirectURI,
+		&session.GitHubState, &session.Rotate, &userID, &session.Login,
+		&session.Role, &session.APIKey, &session.HasAPIKey, &session.ExpiresAt, &session.CreatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to exchange oauth code: %w", err)
+	}
+	session.UserID = userID
+
+	if session.APIKey != "" {
+		decrypted, err := s.decrypt(session.APIKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt api_key: %w", err)
+		}
+		session.APIKey = decrypted
+	}
+
+	return &session, nil
+}
+
+// CleanupExpiredSessions deletes all sessions that have passed their expiration.
+func (s *OAuthStore) CleanupExpiredSessions(ctx context.Context) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM oauth_sessions WHERE expires_at <= now()`)
+	return err
+}
+
+func (s *OAuthStore) encrypt(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	block, err := aes.NewCipher(s.aesKey)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return hex.EncodeToString(ciphertext), nil
+}
+
+func (s *OAuthStore) decrypt(ciphertextHex string) (string, error) {
+	if ciphertextHex == "" {
+		return "", nil
+	}
+	ciphertext, err := hex.DecodeString(ciphertextHex)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(s.aesKey)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	nonce, actualCiphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, actualCiphertext, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/postgres/organizations.go
+================================================================================
+package postgres
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// OrganizationStore handles team scopes and membership queries.
+type OrganizationStore struct {
+	pool *pgxpool.Pool
+}
+
+func NewOrganizationStore(pool *pgxpool.Pool) *OrganizationStore {
+	return &OrganizationStore{pool: pool}
+}
+
+// CreateOrganization inserts a new organization scope profile.
+func (s *OrganizationStore) CreateOrganization(ctx context.Context, name string) (*domain.Organization, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return nil, fmt.Errorf("organization name cannot be empty")
+	}
+
+	var org domain.Organization
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO organizations (name) VALUES ($1)
+		 RETURNING id, name, created_at`,
+		name,
+	).Scan(&org.ID, &org.Name, &org.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &org, nil
+}
+
+// AddOrgMember maps a user as a member of the organization with the given role.
+func (s *OrganizationStore) AddOrgMember(ctx context.Context, orgID, userID string, role domain.OrgRole) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO organization_members (organization_id, user_id, role)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+		orgID, userID, string(role),
+	)
+	return err
+}
+
+// RemoveOrgMember removes a user from the organization.
+func (s *OrganizationStore) RemoveOrgMember(ctx context.Context, orgID, userID string) error {
+	cmd, err := s.pool.Exec(ctx,
+		`DELETE FROM organization_members
+		 WHERE organization_id = $1 AND user_id = $2`,
+		orgID, userID,
+	)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return domain.ErrMemberNotFound
+	}
+	return nil
+}
+
+// IsOrgMember checks if the given user ID is a member of the specified organization.
+func (s *OrganizationStore) IsOrgMember(ctx context.Context, orgName, userID string) (bool, error) {
+	orgName = strings.ToLower(strings.TrimSpace(orgName))
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM organization_members om
+			JOIN organizations o ON om.organization_id = o.id
+			WHERE o.name = $1 AND om.user_id = $2
+		)`,
+		orgName, userID,
+	).Scan(&exists)
+	return exists, err
+}
+
+// GetMemberRole returns the role of a user within a specific organization.
+// Returns empty string and nil if the user is not a member.
+func (s *OrganizationStore) GetMemberRole(ctx context.Context, orgID, userID string) (domain.OrgRole, error) {
+	var role string
+	err := s.pool.QueryRow(ctx,
+		`SELECT role FROM organization_members
+		 WHERE organization_id = $1 AND user_id = $2`,
+		orgID, userID,
+	).Scan(&role)
+	if err == pgx.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return domain.OrgRole(role), nil
+}
+
+// ListMembers returns all members of an organization with their roles.
+func (s *OrganizationStore) ListMembers(ctx context.Context, orgID string) ([]domain.OrganizationMember, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT organization_id, user_id, role, created_at
+		 FROM organization_members
+		 WHERE organization_id = $1
+		 ORDER BY created_at ASC`,
+		orgID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var members []domain.OrganizationMember
+	for rows.Next() {
+		var m domain.OrganizationMember
+		if err := rows.Scan(&m.OrganizationID, &m.UserID, &m.Role, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		members = append(members, m)
+	}
+	return members, rows.Err()
+}
+
+// GetOrgByName retrieves organization profile by case-insensitive name.
+func (s *OrganizationStore) GetOrgByName(ctx context.Context, name string) (*domain.Organization, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var org domain.Organization
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, name, created_at FROM organizations WHERE name = $1`,
+		name,
+	).Scan(&org.ID, &org.Name, &org.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return &org, err
+}
+
+// CountByOwner returns the number of organizations where the user is an owner.
+func (s *OrganizationStore) CountByOwner(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM organization_members
+		 WHERE user_id = $1 AND role = 'owner'`,
+		userID,
+	).Scan(&count)
+	return count, err
+}
+
+// Delete removes an organization.
+func (s *OrganizationStore) Delete(ctx context.Context, orgID string) error {
+	cmd, err := s.pool.Exec(ctx,
+		`DELETE FROM organizations WHERE id = $1`,
+		orgID,
+	)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+// ListByUser returns all organizations a user is a member of.
+func (s *OrganizationStore) ListByUser(ctx context.Context, userID string) ([]domain.OrgMembership, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT om.organization_id, o.name, om.user_id, om.role, om.created_at
+		 FROM organization_members om
+		 JOIN organizations o ON om.organization_id = o.id
+		 WHERE om.user_id = $1
+		 ORDER BY om.created_at ASC`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memberships []domain.OrgMembership
+	for rows.Next() {
+		var m domain.OrgMembership
+		if err := rows.Scan(&m.OrganizationID, &m.OrganizationName, &m.UserID, &m.Role, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		memberships = append(memberships, m)
+	}
+	return memberships, rows.Err()
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/postgres/packages_authz.go
+================================================================================
+package postgres
+
+import (
+	"context"
+
+	"github.com/Toob-Boot/Toob-Registry/internal/domain"
+	"github.com/jackc/pgx/v5"
+)
+
+// CountByPublisherAndStage returns the number of packages a publisher has at a specific stage.
+func (s *PackageStore) CountByPublisherAndStage(ctx context.Context, publisherID string, stage domain.Stage) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM packages WHERE publisher_id = $1 AND stage = $2 AND yanked_at IS NULL`,
+		publisherID, string(stage),
+	).Scan(&count)
+	return count, err
+}
+
+// CheckNameAvailable verifies if a package name is free to be claimed in staging.
+func (s *PackageStore) CheckNameAvailable(ctx context.Context, name string, publisherID string) (bool, error) {
+	var count int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM packages
+		 WHERE name = $1
+		   AND stage IN ('staging', 'stable')
+		   AND yanked_at IS NULL
+		   AND (publisher_id != $2 OR publisher_id IS NULL)`,
+		name, publisherID,
+	).Scan(&count)
+	return count == 0, err
+}
+
+// GetPackageAccessUsers returns the IDs of users who have been granted access to a package.
+func (s *PackageStore) GetPackageAccessUsers(ctx context.Context, packageID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT user_id::text FROM package_access WHERE package_id = $1::uuid`,
+		packageID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
+}
+
+// GetPackageOwner returns the publisher_id of the package owner (if any staging/stable version exists).
+func (s *PackageStore) GetPackageOwner(ctx context.Context, name string) (string, bool, error) {
+	var ownerID *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT publisher_id FROM packages
+		 WHERE name = $1 AND stage IN ('staging', 'stable')
+		 ORDER BY created_at ASC
+		 LIMIT 1`,
+		name,
+	).Scan(&ownerID)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if ownerID == nil {
+		return "", true, nil
+	}
+	return *ownerID, true, nil
+}
+
+// AllNames returns a list of all distinct package names in the registry.
+func (s *PackageStore) AllNames(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT name FROM packages`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+
+================================================================================
+FILE: toob-infra/internal/server/postgres/db.go
+================================================================================
+package postgres
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// DB wraps a PostgreSQL connection pool with health checking and migration.
+type DB struct {
+	Pool *pgxpool.Pool
+}
+
+// Connect creates a connection pool and verifies reachability.
+func Connect(ctx context.Context, databaseURL string, maxConns int) (*DB, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse database URL: %w", err)
+	}
+
+	cfg.MaxConns = int32(maxConns)
+	cfg.MinConns = 2
+	cfg.MaxConnLifetime = 30 * time.Minute
+	cfg.MaxConnIdleTime = 5 * time.Minute
+
+	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialer := &net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create pool: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ping database: %w", err)
+	}
+
+	return &DB{Pool: pool}, nil
+}
+
+// Migrate runs the provided SQL migrations sequentially, tracking version history
+// in a schema_migrations table to avoid redundant executions.
+// Uses pg_advisory_lock to prevent concurrent DDL from parallel instances.
+func (db *DB) Migrate(ctx context.Context, migrations []string) error {
+	conn, err := db.Pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection for migration: %w", err)
+	}
+	defer conn.Release()
+
+	// Advisory lock ID 42001 is reserved for schema migrations.
+	// This blocks until the lock is acquired, preventing concurrent DDL.
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock(42001)"); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cleanupCancel()
+		_, _ = conn.Exec(cleanupCtx, "SELECT pg_advisory_unlock(42001)")
+	}()
+
+	// 1. Create schema_migrations table if not exists
+	if _, err := conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version integer PRIMARY KEY,
+			applied_at timestamp with time zone DEFAULT now()
+		)
+	`); err != nil {
+		return fmt.Errorf("create schema_migrations table: %w", err)
+	}
+
+	// 2. Query already applied migrations
+	rows, err := conn.Query(ctx, "SELECT version FROM schema_migrations")
+	if err != nil {
+		return fmt.Errorf("query applied migrations: %w", err)
+	}
+	applied := make(map[int]bool)
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan applied migration version: %w", err)
+		}
+		applied[v] = true
+	}
+	rows.Close()
+
+	for i, sql := range migrations {
+		version := i + 1
+		if applied[version] {
+			continue
+		}
+
+		// Run migration in a transaction so we record it cleanly
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin tx for migration %d: %w", version, err)
+		}
+
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			tx.Rollback(ctx)
+			return fmt.Errorf("migration %d: %w", version, err)
+		}
+
+		if _, err := tx.Exec(ctx, "INSERT INTO schema_migrations (version) VALUES ($1)", version); err != nil {
+			tx.Rollback(ctx)
+			return fmt.Errorf("insert migration version %d: %w", version, err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit tx for migration %d: %w", version, err)
+		}
+	}
+	return nil
+}
+
+// Healthy returns nil if the database is reachable.
+func (db *DB) Healthy(ctx context.Context) error {
+	return db.Pool.Ping(ctx)
+}
+
+// Close drains and shuts down the pool.
+func (db *DB) Close() {
+	db.Pool.Close()
+}
+
+
+================================================================================
+FILE: toob-infra/migrations/001_initial.up.sql
+================================================================================
+-- Toob Registry: Initial Schema
+-- Applies idempotently via CREATE TABLE IF NOT EXISTS.
+
+-- 1. Revision tracking (monotonic integer, replaces SemVer)
+CREATE TABLE IF NOT EXISTS revisions (
+    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    format_version  INT NOT NULL DEFAULT 1,
+    commit_sha      TEXT NOT NULL,
+    changelog       JSONB NOT NULL DEFAULT '[]',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Historical audit: full registry snapshot per revision
+CREATE TABLE IF NOT EXISTS revision_snapshots (
+    revision_id BIGINT PRIMARY KEY REFERENCES revisions(id),
+    snapshot    JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 2. Publisher identity (GitHub OAuth)
+CREATE TABLE IF NOT EXISTS publishers (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    github_id    BIGINT UNIQUE NOT NULL,
+    github_login TEXT NOT NULL,
+    display_name TEXT,
+    role         TEXT NOT NULL DEFAULT 'contributor'
+                     CHECK (role IN ('core', 'contributor')),
+    api_key_hash TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    suspended_at TIMESTAMPTZ
+);
+
+-- 3. Packages (unified across all category types)
+CREATE TABLE IF NOT EXISTS packages (
+    name          TEXT NOT NULL,
+    version       TEXT NOT NULL,
+    category      TEXT NOT NULL CHECK (category IN (
+                      'chip', 'driver', 'crypto', 'arch',
+                      'toolchain', 'integration', 'soc'
+                  )),
+    subcategory   TEXT,
+    stage         TEXT NOT NULL DEFAULT 'dev'
+                      CHECK (stage IN ('dev', 'staging', 'stable', 'archived', 'revoked')),
+    staging_status TEXT CHECK (staging_status IN ('pending', 'accepted', 'rejected')),
+    author        TEXT,
+    description   TEXT,
+    license       TEXT,
+    publisher_id  UUID REFERENCES publishers(id),
+    revision      BIGINT REFERENCES revisions(id),
+    manifest      JSONB NOT NULL,
+    path          TEXT,
+    tarball_key   TEXT,
+    tarball_sha   TEXT,
+    signature     TEXT,
+    promoted_at   TIMESTAMPTZ,
+    yanked_at     TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (name, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_packages_category ON packages(category);
+CREATE INDEX IF NOT EXISTS idx_packages_stage    ON packages(stage);
+CREATE INDEX IF NOT EXISTS idx_packages_revision ON packages(revision);
+
+-- 4. Package access control (dev-stage visibility)
+CREATE TABLE IF NOT EXISTS package_access (
+    package_name TEXT NOT NULL,
+    publisher_id UUID NOT NULL REFERENCES publishers(id),
+    granted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (package_name, publisher_id)
+);
+
+-- 5. Compatibility matrix
+CREATE TABLE IF NOT EXISTS matrix_entries (
+    id              BIGSERIAL PRIMARY KEY,
+    chip            TEXT NOT NULL,
+    chip_version    TEXT NOT NULL,
+    env_hash        TEXT NOT NULL,
+    dependencies    JSONB NOT NULL DEFAULT '{}',
+    combination_key TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'PENDING'
+                        CHECK (status IN ('PENDING', 'RUNNING', 'VERIFIED', 'FAILED')),
+    tested_at       TIMESTAMPTZ,
+    revision        BIGINT REFERENCES revisions(id),
+    UNIQUE (chip, chip_version, combination_key)
+);
+
+-- 6. Ecosystem releases (CLI, Core SDK, Compiler)
+CREATE TABLE IF NOT EXISTS ecosystem_releases (
+    component   TEXT NOT NULL CHECK (component IN ('registry', 'cli', 'core_sdk', 'compiler')),
+    version     TEXT NOT NULL,
+    source_url  TEXT,
+    snapshot_id BIGINT REFERENCES revisions(id),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (component, version)
+);
+
+-- 7. Allowed subcategories (seeded from crypto_categories.json / driver_categories.json)
+CREATE TABLE IF NOT EXISTS allowed_subcategories (
+    category    TEXT NOT NULL,
+    subcategory TEXT NOT NULL,
+    PRIMARY KEY (category, subcategory)
+);
+
+-- Seed data: driver subcategories
+INSERT INTO allowed_subcategories (category, subcategory) VALUES
+    ('driver', 'clock'),
+    ('driver', 'rtc'),
+    ('driver', 'storage'),
+    ('driver', 'crypto'),
+    ('driver', 'console'),
+    ('driver', 'power'),
+    ('driver', 'wdt'),
+    ('driver', 'bus'),
+    ('driver', 'network'),
+    ('driver', 'display'),
+    ('driver', 'sensor'),
+    ('driver', 'flash'),
+    ('driver', 'uart')
+ON CONFLICT DO NOTHING;
+
+-- Seed data: crypto subcategories
+INSERT INTO allowed_subcategories (category, subcategory) VALUES
+    ('crypto', 'backend'),
+    ('crypto', 'hash'),
+    ('crypto', 'pqc')
+ON CONFLICT DO NOTHING;
+
+
+================================================================================
+FILE: toob-infra/migrations/006_api_tokens.up.sql
+================================================================================
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id TEXT PRIMARY KEY,
+    publisher_id UUID NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    scopes TEXT[] NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_tokens_publisher ON api_tokens(publisher_id);
+
+
+================================================================================
+FILE: toob-infra/migrations/013_organizations.up.sql
+================================================================================
+-- Migration 013: Add organizations and members
+CREATE TABLE IF NOT EXISTS organizations (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name       TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS organization_members (
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    publisher_id    UUID NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (organization_id, publisher_id)
+);
+
+
+================================================================================
+FILE: toob-infra/migrations/014_oauth_sessions.up.sql
+================================================================================
+-- Migration 014: Add oauth_sessions table for PKCE and local callback login flow
+CREATE TABLE IF NOT EXISTS oauth_sessions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    cli_state       TEXT NOT NULL,
+    code_challenge  TEXT NOT NULL,
+    redirect_uri    TEXT NOT NULL,
+    github_state    TEXT UNIQUE NOT NULL,
+    rotate          BOOLEAN NOT NULL DEFAULT false,
+    publisher_id    UUID REFERENCES publishers(id) ON DELETE CASCADE,
+    login           TEXT,
+    role            TEXT,
+    api_key         TEXT,
+    has_api_key     BOOLEAN NOT NULL DEFAULT false,
+    expires_at      TIMESTAMPTZ NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Index for clean-up query
+CREATE INDEX IF NOT EXISTS idx_oauth_sessions_expires ON oauth_sessions(expires_at);
+
+
+================================================================================
+FILE: toob-infra/migrations/018_org_roles.up.sql
+================================================================================
+-- Migration 018: Add role to organization members
+--
+-- Org roles: owner (full control), maintainer (manage members), member (publish only).
+-- Existing members are grandfathered as 'member' (least privilege).
+
+ALTER TABLE organization_members
+    ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'member';
+
+
+================================================================================
+FILE: toob-infra/migrations/019_user_plans.up.sql
+================================================================================
+-- Migration 019: Add plan_tier and plan_overrides to publishers
+--
+-- plan_tier: free, pro, or enterprise (defaults to free).
+-- plan_overrides: JSONB object with overrides for package or organization limits.
+
+ALTER TABLE publishers
+    ADD COLUMN IF NOT EXISTS plan_tier TEXT NOT NULL DEFAULT 'free',
+    ADD COLUMN IF NOT EXISTS plan_overrides JSONB;
+
+
+================================================================================
+FILE: toob-infra/migrations/030_rename_publisher_to_user.up.sql
+================================================================================
+-- Migration 030: Rename publishers to users and update referencing columns
+
+-- 1. Rename core table
+ALTER TABLE publishers RENAME TO users;
+
+-- 2. Table: package_access
+ALTER TABLE package_access RENAME COLUMN publisher_id TO user_id;
+
+-- 3. Table: sync_log
+ALTER TABLE sync_log RENAME COLUMN publisher_id TO user_id;
+
+-- 4. Table: notifications
+ALTER TABLE notifications RENAME COLUMN publisher_id TO user_id;
+DROP INDEX IF EXISTS idx_notifications_undelivered;
+CREATE INDEX IF NOT EXISTS idx_notifications_undelivered
+    ON notifications(user_id) WHERE delivered = FALSE;
+
+-- 5. Table: api_tokens
+ALTER TABLE api_tokens RENAME COLUMN publisher_id TO user_id;
+DROP INDEX IF EXISTS idx_api_tokens_publisher;
+CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+
+-- 6. Table: organization_members
+ALTER TABLE organization_members RENAME COLUMN publisher_id TO user_id;
+
+-- 7. Table: oauth_sessions
+ALTER TABLE oauth_sessions RENAME COLUMN publisher_id TO user_id;
+
+
+================================================================================
+FILE: toob-infra/deploy/ansible/roles/zitadel/tasks/main.yml
+================================================================================
+---
+# =============================================================================
+# Ansible Role: zitadel (OPS-051)
+# =============================================================================
+# Installs and manages Zitadel Identity Provider systemd service and Caddy
+# reverse proxy on toob-identity nodes (id-fsn1, id-hel1).
+# =============================================================================
+
+- name: Create zitadel system group
+  group:
+    name: zitadel
+    system: yes
+
+- name: Create zitadel system user
+  user:
+    name: zitadel
+    group: zitadel
+    system: yes
+    create_home: yes
+    home: /var/lib/zitadel
+    shell: /sbin/nologin
+
+- name: Create Zitadel configuration directory
+  file:
+    path: /etc/zitadel
+    state: directory
+    owner: root
+    group: zitadel
+    mode: '0750'
+
+- name: Deploy Zitadel systemd service unit
+  copy:
+    dest: /etc/systemd/system/zitadel.service
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      [Unit]
+      Description=Zitadel Identity Provider Daemon (OPS-051)
+      After=network-online.target
+      Wants=network-online.target
+      OnFailure=notify-failure@%n.service
+
+      [Service]
+      Type=simple
+      User=zitadel
+      Group=zitadel
+      WorkingDirectory=/var/lib/zitadel
+      ExecStart=/usr/local/bin/zitadel start --config /etc/zitadel/config.yaml
+      ExecStartPost=-/bin/rm -f /var/lib/prometheus/node-exporter/service_failure_%n.prom
+      Restart=on-failure
+      RestartSec=5
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Reload systemd daemon for Zitadel service
+  systemd:
+    daemon_reload: yes
+
+
+================================================================================
+FILE: toob-infra/deploy/terraform/projects/identity/main.tf
+================================================================================
+# =============================================================================
+# Terraform Project: toob-identity (OPS-050)
+# =============================================================================
+# Provisions 2 HA nodes (id-fsn1, id-hel1) in subnet 10.20.1.0/24 (network 10.20.0.0/16)
+# and Ubicloud PostgreSQL instance (toob-idp-db) for Zitadel Identity Provider.
+# =============================================================================
+
+terraform {
+  required_version = ">= 1.5.0"
+  required_providers {
+    hcloud = {
+      source  = "hetznercloud/hcloud"
+      version = "~> 1.45.0"
+    }
+    cloudflare = {
+      source  = "cloudflare/cloudflare"
+      version = "~> 4.0"
+    }
+  }
+}
+
+variable "environment" {
+  type    = string
+  default = "production"
+}
+
+variable "network_cidr" {
+  type    = string
+  default = "10.20.0.0/16"
+}
+
+variable "subnet_cidr" {
+  type    = string
+  default = "10.20.1.0/24"
+}
+
+variable "domain" {
+  type    = string
+  default = "id.the-toob.com"
+}
+
+output "identity_nodes" {
+  value = {
+    id_fsn1 = "10.20.1.10"
+    id_hel1 = "10.20.1.11"
+  }
+}
+
+output "identity_domain" {
+  value = var.domain
+}
+
+
+================================================================================
+FILE: toob-infra/deploy/monitoring/prometheus/rules/identity.yml
+================================================================================
+groups:
+  - name: ToobIdentityAlerts
+    rules:
+      - alert: IdentityServiceDown
+        expr: up{job="identity-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          project: identity
+        annotations:
+          summary: "Identity Service {{ $labels.instance }} Offline"
+          description: "The Zitadel / Identity Service on {{ $labels.instance }} is unreachable. User authentication and token issuance may be degraded."
+          runbook_url: "https://github.com/Toob-Boot/Toob-Registry/blob/main/docs/runbooks/IdentityServiceDown.md"
+
+      - alert: ZitadelAuthFailureRate
+        expr: rate(zitadel_auth_requests_total{status="failure"}[5m]) / rate(zitadel_auth_requests_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          project: identity
+        annotations:
+          summary: "High Authentication Failure Rate on {{ $labels.instance }}"
+          description: "Zitadel authentication failure rate has exceeded 10% over the last 5 minutes."
+          runbook_url: "https://github.com/Toob-Boot/Toob-Registry/blob/main/docs/runbooks/ZitadelAuthFailureRate.md"
+
+
+================================================================================
+FILE: toob-infra/internal/ops/topology/topology.go
+================================================================================
+package topology
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+)
+
+// CIDR Allocation Plan (OPS-006)
+//
+//   10.0.0.0/16  registry / production (Bestand)
+//   10.1.0.0/16  registry / dev        (Bestand)
+//   10.2.0.0/16  registry / staging    (Bestand)
+//   10.9.0.0/16  ops                   (Kontrollebene, einmalig ohne Umgebungsvariante)
+//   10.20.0.0/16 identity / production
+//   10.21.0.0/16 identity / dev
+//   10.30.0.0/16 update / production
+//   10.31.0.0/16 update / dev
+
+type Node struct {
+	Location  string `json:"location"`
+	PrivateIP string `json:"private_ip"`
+}
+
+type Config struct {
+	Environment   string          `json:"environment"`
+	NetworkCIDR   string          `json:"network_cidr"`
+	SubnetCIDR    string          `json:"subnet_cidr"`
+	UnsealVaultIP string          `json:"unseal_vault_ip"`
+	APINodes      map[string]Node `json:"api_nodes"`
+	Domain        string          `json:"domain"`
+	WorkerIPStart int             `json:"worker_ip_start"`
+
+	// Ops Control Plane (OPS-006, OPS-010 ... OPS-014)
+	OpsNetworkCIDR string `json:"ops_network_cidr"`
+	OpsSubnetCIDR  string `json:"ops_subnet_cidr"`
+	OpsHubIP       string `json:"ops_hub_ip"`
+	OpsCIIP        string `json:"ops_ci_ip"`
+}
+
+// Environments enumerates all known environment names.
+var Environments = []string{"production", "staging", "dev"}
+
+// ProjectCIDRMap defines the binding network allocation for all projects (OPS-006).
+var ProjectCIDRMap = map[string]string{
+	"registry/production": "10.0.0.0/16",
+	"registry/dev":        "10.1.0.0/16",
+	"registry/staging":    "10.2.0.0/16",
+	"ops":                 "10.9.0.0/16",
+	"identity/production": "10.20.0.0/16",
+	"identity/dev":        "10.21.0.0/16",
+	"update/production":   "10.30.0.0/16",
+	"update/dev":          "10.31.0.0/16",
+}
+
+func Get(env string) Config {
+	opsCIDR := "10.9.0.0/16"
+	opsSubnet := "10.9.1.0/24"
+	opsHub := "10.9.1.2"
+	opsCI := "10.9.1.3"
+
+	if env == "production" {
+		return Config{
+			Environment:    "production",
+			NetworkCIDR:    "10.0.0.0/16",
+			SubnetCIDR:     "10.0.1.0/24",
+			UnsealVaultIP:  "10.0.1.12",
+			Domain:         "registry.the-toob.com",
+			WorkerIPStart:  20,
+			OpsNetworkCIDR: opsCIDR,
+			OpsSubnetCIDR:  opsSubnet,
+			OpsHubIP:       opsHub,
+			OpsCIIP:        opsCI,
+			APINodes: map[string]Node{
+				"api-fsn1": {Location: "fsn1", PrivateIP: "10.0.1.10"},
+				"api-hel1": {Location: "hel1", PrivateIP: "10.0.1.11"},
+			},
+		}
+	}
+	if env == "staging" {
+		return Config{
+			Environment:    "staging",
+			NetworkCIDR:    "10.2.0.0/16",
+			SubnetCIDR:     "10.2.1.0/24",
+			UnsealVaultIP:  "10.2.1.12",
+			Domain:         "staging.registry.the-toob.com",
+			WorkerIPStart:  20,
+			OpsNetworkCIDR: opsCIDR,
+			OpsSubnetCIDR:  opsSubnet,
+			OpsHubIP:       opsHub,
+			OpsCIIP:        opsCI,
+			APINodes: map[string]Node{
+				"api-fsn1": {Location: "fsn1", PrivateIP: "10.2.1.10"},
+			},
+		}
+	}
+	return Config{
+		Environment:    "dev",
+		NetworkCIDR:    "10.1.0.0/16",
+		SubnetCIDR:     "10.1.1.0/24",
+		UnsealVaultIP:  "10.1.1.12",
+		Domain:         "dev.registry.the-toob.com",
+		WorkerIPStart:  20,
+		OpsNetworkCIDR: opsCIDR,
+		OpsSubnetCIDR:  opsSubnet,
+		OpsHubIP:       opsHub,
+		OpsCIIP:        opsCI,
+		APINodes: map[string]Node{
+			"api-fsn1": {Location: "fsn1", PrivateIP: "10.1.1.10"},
+		},
+	}
+}
+
+func (c Config) APINodesJSON() string {
+	data, err := json.Marshal(c.APINodes)
+	if err != nil {
+		panic("topology: failed to marshal APINodes: " + err.Error())
+	}
+	return string(data)
+}
+
+// ValidateNoOverlap checks all CIDRs defined in ProjectCIDRMap for any subnet overlaps (OPS-006).
+func ValidateNoOverlap() error {
+	type parsedNet struct {
+		name string
+		net  *net.IPNet
+	}
+	var nets []parsedNet
+
+	for name, cidrStr := range ProjectCIDRMap {
+		_, ipNet, err := net.ParseCIDR(cidrStr)
+		if err != nil {
+			return fmt.Errorf("invalid CIDR for %s (%s): %w", name, cidrStr, err)
+		}
+		nets = append(nets, parsedNet{name: name, net: ipNet})
+	}
+
+	for i := 0; i < len(nets); i++ {
+		for j := i + 1; j < len(nets); j++ {
+			if nets[i].net.Contains(nets[j].net.IP) || nets[j].net.Contains(nets[i].net.IP) {
+				return fmt.Errorf("CIDR overlap detected between %s (%s) and %s (%s)",
+					nets[i].name, nets[i].net.String(), nets[j].name, nets[j].net.String())
+			}
+		}
+	}
+
+	return nil
+}
+
+

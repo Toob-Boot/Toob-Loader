@@ -3,10 +3,17 @@
 **Ziel:** `ARCHITEKTUR-devops.md`
 **Ausgangspunkt:** Der bestehende `deploy/`-Stack im Repository `toob-registry`.
 
-**Quellenlage:** Dieses Backlog stützt sich auf das DevOps-Runbook der Registry (Packer,
-5 Terraform-Module, das Monolith-Playbook, Nomad-Jobs, `deploy.sh`). Tickets, für die ich den
-tatsächlichen Dateiinhalt bräuchte, sind mit **[Dateien nötig]** markiert — dort ist die
-Schätzung unsicher, nicht die Richtung.
+**Quellenlage:** Ursprünglich auf Basis des DevOps-Runbooks geschrieben, danach gegen den
+tatsächlichen Code nachgezogen (`deploy/` und `internal/ops/`). Die ehemaligen
+**[Dateien nötig]**-Markierungen sind aufgelöst; die betroffenen Tickets sind mit
+**⟳ nachgezogen** gekennzeichnet und tragen die konkreten Datei- und Funktionsverweise.
+
+**Begleitdokument:** `BACKLOG-devops-befunde.md` enthält zwanzig Punktbefunde aus demselben
+Code-Durchgang (Präfix `BEF-`). Zwei davon sind Vorbedingungen für diesen Umbau und stehen
+dort mit Begründung: **BEF-003** (der Teardown-Pfad löscht Produktions-Vault-Backups) und
+**BEF-006** (der Backup-Bucket ist nicht umgebungsgetrennt). Beide müssen vor EPIC C erledigt
+sein, weil sonst der Restore-Test auf einem Bucket aufsetzt, den ein Dev-Teardown wegräumen
+kann.
 
 **Leitgedanke der Reihenfolge:** Der Vault-Umzug (EPIC D) ist der einzige Schritt, der etwas
 Unwiederbringliches anfassen kann. Alles davor existiert nur, um ihn zu entschärfen. Insbesondere
@@ -42,6 +49,12 @@ dort das einzige Mal billig herauskommt, ob der Snapshot überhaupt zurückspiel
 | OPS-003 | `api_origins` über `terraform_remote_state` | P2 | ○ | S |
 | OPS-004 | Golden Image von Registry-Artefakten entkoppeln | P1 | ○ | M |
 | OPS-005 | Monolith-Playbook in Rollen zerlegen | P1 | ○ | L |
+| OPS-006 | Verbindlicher CIDR-Plan | **P0** | ○ | S |
+| OPS-007 | `topology` um eine Projektdimension erweitern | **P0** | ○ | L |
+| OPS-008 | `--project`-Flag, State-Dateien, Stage-Profile | **P0** | ○ | L |
+| OPS-009 | Stages an Hub-and-Spoke anpassen | P1 | ○ | L |
+| OPS-00A | Dashboards und Alert-Regeln projektfähig machen | P1 | ○ | M |
+| OPS-00B | Cloudflare-Modul mehrprojektfähig | P1 | ◐ | M |
 | **EPIC B — Kontrollebene aufbauen** |||||
 | OPS-010 | Projekt `toob-ops`, Netz, Firewall-Baseline | P1 | ○ | M |
 | OPS-011 | `ops-hub` mit WireGuard-Hub | P1 | ○ | M |
@@ -133,12 +146,40 @@ Infrastruktur-Repo ist die Historie der eigentliche Wert.
 `deploy/compiler/`, `deploy/worker/Makefile`). Die Grenze verläuft entlang „baut das Produkt"
 gegen „stellt das Produkt bereit".
 
+**⟳ nachgezogen — der exakte Schnitt**
+
+| Bleibt in `toob-registry` | Wandert nach `toob-infra` |
+|---|---|
+| `deploy/api/Dockerfile.api` | `deploy/api/deploy.sh`, `seccomp-api.json`, `toob-api-hardening.service` |
+| `deploy/compiler/` (vollständig) | `deploy/packer/`, `deploy/terraform/`, `deploy/ansible/` |
+| `deploy/worker/Makefile` | `deploy/nomad/`, `deploy/caddy/`, `deploy/monitoring/`, `deploy/vault/` |
+
+**Die offene Frage, die das Ticket bisher nicht stellte: wohin gehört `internal/ops/`?**
+
+Die `toob-ops`-CLI liegt heute in `toob-registry` und ist an zwei Stellen an dessen
+Domänenmodell gekoppelt: `cmd/toob-ops/list_compilers.go` importiert
+`internal/domain.CompilerVersion`, `test_build.go` zusätzlich `domain.RegistryIndex` und
+`domain.VMResult`. Alles andere — `engine`, `stages`, `topology`, `ui`, `exec`, `dashboard` —
+ist produktunabhängig.
+
+Drei Optionen:
+
+| | Vorgehen | Bewertung |
+|---|---|---|
+| A | CLI bleibt in `toob-registry`, `toob-infra` wird nur Datenhaltung | Verfehlt den Zweck — Update-Deploys bräuchten weiter Registry-Checkout |
+| B | CLI vollständig nach `toob-infra`, `list-compilers`/`test-build` entfallen dort | Diese beiden Kommandos sind registry-spezifische Verifikationswerkzeuge und gehören ohnehin nicht in ein Plattformwerkzeug |
+| C | CLI nach `toob-infra`, Domänentypen in ein geteiltes `toob-types`-Modul | Drittes Repository für drei Structs |
+
+**Empfehlung: B.** `list-compilers` und `test-build` bleiben als
+`cmd/toob-registry-verify` im Registry-Repo — sie prüfen Compiler-Images und Rootfs-Builds,
+also Registry-Produktfunktionen, nicht Infrastruktur. Der Rest der CLI wird produktneutral und
+verliert damit seine einzige Kopplung.
+
 **Akzeptanzkriterien**
 - [ ] `terraform plan` aus dem neuen Repo zeigt für alle bestehenden Module keine Änderung.
 - [ ] Ein Ansible-Lauf aus dem neuen Repo ist idempotent gegen den Bestand.
 - [ ] `toob-registry` enthält kein Terraform mehr.
-
-**[Dateien nötig]** für den exakten Schnitt zwischen Build- und Deploy-Artefakten.
+- [ ] `toob-infra` importiert nichts aus `github.com/Toob-Boot/Toob-Registry/internal/domain`.
 
 ---
 
@@ -146,16 +187,38 @@ gegen „stellt das Produkt bereit".
 
 **Prio:** P0 · **Risiko:** ◐ · **Aufwand:** S
 
-**Problem**
-`terraform/cloudflare`, `terraform/database` und `terraform/s3` laufen laut Runbook auf lokalem
-State. Damit liegt der State für DNS, Load-Balancer, die Produktionsdatenbank und den
-Paket-Bucket auf einem Laptop. Geht er verloren, sind die Ressourcen verwaist — Terraform kennt
-sie nicht mehr und ein `apply` versucht, sie neu anzulegen. Bei `database` ist das ein
-Datenverlust-Szenario ohne Angreifer.
+**⟳ nachgezogen — weitgehend erledigt, Ticket wird zur Verifikation**
 
-**Lösung**
-`backend "s3"` je Modul mit eigenem Key im vorhandenen `toob-terraform-state`-Bucket, dann
-`terraform init -migrate-state`.
+Das Runbook beschrieb einen älteren Stand. Im Code ist der Remote-State bereits verdrahtet:
+`terraform/cloudflare/main.tf` enthält `backend "s3" {}`, und `stages/terraform.go` übergibt
+die Konfiguration zur Laufzeit für **jedes** Modul der Liste
+`{s3, database, control-plane, cloudflare}`:
+
+```go
+initArgs := []string{
+    "init",
+    fmt.Sprintf("-backend-config=bucket=%s", bucket),   // toob-terraform-state-<env>
+    fmt.Sprintf("-backend-config=key=%s", key),         // <env>/<modul>/terraform.tfstate
+    "-backend-config=region=fsn1",
+    …
+    "-reconfigure",
+}
+```
+
+Zusätzlich legt `bootstrapStateBucket` den Bucket an und aktiviert Versionierung — der
+Henne-Ei-Schritt aus dem Runbook ist automatisiert.
+
+**Was bleibt**
+1. Bestätigen, dass `database/main.tf` und `s3/main.tf` ebenfalls eine `backend "s3" {}`-Stanza
+   haben. Ohne sie ignoriert Terraform die `-backend-config`-Flags stillschweigend und schreibt
+   weiter lokal — das ist genau der Fall, den man nicht sieht, bis der State weg ist.
+2. `terraform plan` aus einer **frischen** Arbeitskopie je Modul. Nur das beweist, dass der
+   Remote-State vollständig ist.
+3. Etwaige verbliebene `terraform.tfstate`-Dateien im Arbeitsverzeichnis sichern und entfernen.
+
+**Nachrangig, aber im selben Zug:** `terraform/cloudflare/tfplan` liegt als Binärdatei im
+Repository. Ein Plan-File enthält aufgelöste Variablenwerte — bei diesem Modul unter anderem
+das Cloudflare-API-Token. Löschen und in `.gitignore` aufnehmen (siehe `BEF-002`).
 
 ```
 control-plane/terraform.tfstate      (bestehend)
@@ -252,13 +315,274 @@ Rollen mit klaren Grenzen:
 Die beiden Vault-Zeremonien (Runbook 5.3 und 5.4) bleiben unverändert als Abbruchpunkte
 erhalten — sie sind kein Umbaukandidat.
 
+**⟳ nachgezogen — der eigentliche Blocker**
+
+Der Aufwand liegt nicht in der Zahl der Plays, sondern in einem durchgehenden Muster:
+**Rollenzuordnung erfolgt über den hartkodierten Hostnamen `toob-api-fsn1`**, nicht über
+Gruppen oder Variablen. Das Konstrukt
+
+```yaml
+when: inventory_hostname == 'toob-api-fsn1'
+```
+
+steht über das gesamte Playbook verteilt und entscheidet, wer Vault initialisiert, wer den
+Monitoring-Stack bekommt, wer die Backup-Timer bekommt, wer den Token-TTL-Exporter bekommt
+und wer den Nomad-ACL-Bootstrap ausführt. Dieselbe Kopplung steckt in der Nomad-Konfiguration
+(`server.hcl` vs. `client.hcl` werden nach demselben Vergleich verteilt) und in
+`stages/ansible.go`, das `inventory.ini` mit genau diesen Namen generiert.
+
+Für fünf Projekte ist das nicht teilbar: `ops-vault-1` müsste „`toob-api-fsn1` sein", um die
+Vault-Rolle zu bekommen.
+
+**Zusätzlich zu entflechten:** Der Play „Setup and Initialize Primary Vault Nodes" vermischt
+vier Belange — Vault-Init und -Seeding, den kompletten Monitoring-Compose-Stack, die
+Backup-Timer für Vault und Nomad, und den Token-TTL-Exporter. In der Zielarchitektur landen
+diese auf **zwei verschiedenen Projekten** (`ops-vault-*` und `ops-hub`).
+
+**Vorgehen in dieser Reihenfolge**
+1. `inventory_hostname ==`-Vergleiche durch Gruppen- oder Rollenzugehörigkeit ersetzen
+   (`when: "'vault_primary' in group_names"`). Rein mechanisch, gegen den Bestand testbar.
+2. Den großen Vault-Play entlang der vier Belange aufteilen.
+3. Erst dann Rollen extrahieren.
+
+Schritt 1 ist die Voraussetzung dafür, dass Schritt 3 überhaupt Sinn ergibt — und er ist
+einzeln gegen die bestehende Dev-Umgebung verifizierbar.
+
 **Akzeptanzkriterien**
+- [ ] Kein `inventory_hostname ==`-Vergleich mehr im Playbook (Grep-Test).
 - [ ] Der Bestand lässt sich mit den neuen Rollen idempotent reprovisionieren.
 - [ ] Ein Play für `ops-hub` läuft ohne Nomad- und ohne Vault-Rolle durch.
 - [ ] Keine Rolle setzt `/etc/hosts`-Einträge fremder Projekte.
 
-**[Dateien nötig]** — das ist das Ticket, bei dem der tatsächliche Playbook-Inhalt den Aufwand
-bestimmt.
+**Verwandt:** `BEF-012` (Regex-`replace` auf Nomad-Konfigurationen) gehört in denselben
+Arbeitsgang — die fünf `replace`-Tasks fallen weg, sobald `server.hcl` und `client.hcl`
+Templates sind.
+
+---
+
+### OPS-006 — Verbindlicher CIDR-Plan
+
+**Prio:** P0 · **Risiko:** ○ · **Aufwand:** S
+
+**Problem**
+Die Projektnetze wurden bisher pro Ticket vergeben. Zwei Kollisionen sind so entstanden:
+`toob-identity` auf `10.2.1.0/24` (belegt von registry/staging) und `toob-update` auf
+`10.1.1.0/24` — bitgenau das Subnetz von registry/dev.
+
+Am WireGuard-Hub ist das nicht heilbar: zwei Peers mit identischem `AllowedIPs` sind nicht
+routbar, und WireGuard meldet keinen Fehler, sondern liefert an den zuletzt passenden Peer.
+Der Fehler fällt als sporadisch nicht erreichbarer Knoten auf, nicht als Konfigurationsfehler.
+
+**Lösung**
+Ein Plan, festgeschrieben in `topology.go` und in `ARCHITEKTUR-devops.md`:
+
+| Bereich | Belegung |
+|---|---|
+| `10.0.0.0/16` | registry / production (Bestand) |
+| `10.1.0.0/16` | registry / dev (Bestand) |
+| `10.2.0.0/16` | registry / staging (Bestand) |
+| `10.9.0.0/16` | **ops** — einmalig, ohne Umgebungsvariante |
+| `10.20.0.0/16` | identity / production |
+| `10.21.0.0/16` | identity / dev |
+| `10.30.0.0/16` | update / production |
+| `10.31.0.0/16` | update / dev |
+
+**Warum die Kontrollebene keine Dev-Variante bekommt:** Sie bedient alle Projekte einschließlich
+deren Dev-Umgebungen. Ein zweiter Vault-Cluster und ein zweiter Hub nur für Dev-Spokes würden
+die Zeremonien verdoppeln, ohne etwas zu isolieren — die Trennung läuft über Vault-Pfade und
+Peer-`AllowedIPs`. Das entspricht dem Bestand, in dem ein Vault über `VAULT_ENV` alle
+Umgebungen bedient.
+
+**Akzeptanzkriterien**
+- [ ] Eine Testfunktion in `topology` prüft alle Paare auf Überschneidung und schlägt fehl,
+      wenn eine hinzukommt.
+- [ ] Kein Ticket vergibt mehr ein Netz außerhalb dieses Plans.
+
+---
+
+### OPS-007 — `topology` um eine Projektdimension erweitern
+
+**Prio:** P0 · **Risiko:** ○ · **Aufwand:** L
+**Datei:** `internal/ops/topology/topology.go`
+
+**Problem**
+`topology.Get(env)` liefert eine feste Struktur mit `BastionIP`, `UnsealVaultIP` und
+`APINodes` — ein Modell mit genau einem Produkt und drei festen Rollen. Jede Stage liest
+daraus: `terraform.go`, `ansible.go`, `vpn.go`, `verify.go`, `deploy.go`, `workers.go` und
+`dashboard/poller.go`.
+
+Solange das so bleibt, ist `toob-ops wizard --project identity` nicht aufrufbar, und die
+Projekte aus EPIC F bis H müssten von Hand provisioniert werden — was `OPS-060` (Modul) und
+`OPS-061` (Nachweis) ihren Sinn nimmt.
+
+**Lösung**
+```go
+type Project struct {
+    Name        string
+    Environment string
+    NetworkCIDR string
+    SubnetCIDR  string
+    Nodes       map[string]Node   // rolle → knoten
+    Hostnames   map[string]string // zweck → fqdn
+    Buckets     map[string]string
+}
+
+func Get(project, env string) Project
+```
+
+`Node` bekommt `Roles []string`, damit `reg-api-fsn1` gleichzeitig `nomad-server`, `caddy` und
+`wg-peer` sein kann — genau die Mehrfachrolle, die heute über
+`inventory_hostname == 'toob-api-fsn1'` ausgedrückt wird und in `OPS-005` verschwindet.
+
+Die drei Bestandsumgebungen werden zu `Get("registry", env)` mit bitidentischen Werten. Die
+Migration läuft damit in zwei Schritten: erst Struktur ohne Verhaltensänderung, dann neue
+Projekte.
+
+**Akzeptanzkriterien**
+- [ ] `Get("registry", "dev")` liefert exakt die heutigen Werte.
+- [ ] Ein Dev-Deployment nach dem Refactor erzeugt identische Terraform-Pläne.
+- [ ] Keine IP-Literale mehr außerhalb des `topology`-Pakets (Grep-Test im CI).
+
+---
+
+### OPS-008 — `--project`-Flag, State-Dateien, Stage-Profile
+
+**Prio:** P0 · **Risiko:** ○ · **Aufwand:** L
+**Dateien:** `cmd/toob-ops/main.go`, `internal/ops/engine/state.go`, `internal/ops/stages/prereqs.go`
+
+**Problem**
+Vier Stellen in der CLI sind auf ein Produkt festgelegt:
+
+| Stelle | Heute | Problem |
+|---|---|---|
+| `DefaultStatePath(deployDir, env)` | `.toob-ops-state.<env>.json` | Kollidiert zwischen Projekten |
+| `main.go` Stage-Registrierung | alle neun Stages, unbedingt | `ops-hub` braucht kein Packer, kein Workers |
+| `AllEnvRequirements()` | ~40 Variablen, projektunabhängig `Required` | Ein Identity-Spoke bräuchte `SEED_GH_APP_ID`, `SEED_DOCKERHUB_*`, `NOMAD_GOSSIP_KEY` — Phase 0 blockiert |
+| `mapCredentials()` | hartkodierte Key-Liste, Präfixe `TOOB_DEV_`/`TOOB_STAGING_`/`TOOB_PROD_` | Keine Projektdimension |
+
+**Lösung**
+1. `--project` mit Default `registry`, State- und Secrets-Pfad
+   `.toob-ops-<project>.<env>.json`. Die Mismatch-Prüfung in `runWizard`
+   (`state environment mismatch`) hat sich bewährt und wird um das Projekt erweitert.
+2. Stage-Profil je Projekt:
+
+   | Projekt | Stages |
+   |---|---|
+   | `registry` | alle neun, unverändert |
+   | `ops` | prereqs, terraform, vpn, ansible, verify |
+   | `identity` | prereqs, terraform, ansible, deploy, verify |
+   | `update` | prereqs, terraform, ansible, deploy, verify |
+
+   Die Phasennummern bleiben stabil — Einträge entfallen, sie verschieben sich nicht, damit
+   State-Dateien und Logverzeichnisse vergleichbar bleiben.
+3. `EnvRequirement` bekommt ein Feld `Projects []string`. Fehlt es, gilt die Variable für alle.
+4. `mapCredentials` liest die Key-Liste aus dem Profil statt aus einem Literal.
+
+**Akzeptanzkriterien**
+- [ ] `--project registry` verhält sich in allen neun Phasen exakt wie heute.
+- [ ] `--project identity` verlangt in Phase 0 keine Registry-spezifischen Variablen.
+- [ ] Ein Profil ohne Packer-Stage läuft durch, ohne dass eine Precondition auf Phase 2 wartet.
+
+---
+
+### OPS-009 — Stages an Hub-and-Spoke anpassen
+
+**Prio:** P1 · **Risiko:** ○ · **Aufwand:** L
+**Dateien:** `stages/vpn.go`, `stages/verify.go`, `stages/packer.go`, `dashboard/`
+
+**Problem**
+Vier Stellen setzen die heutige Topologie voraus und funktionieren nach dem Umbau nicht mehr:
+
+**`stages/vpn.go`** — `EnsureVPN` und `ensureVPNForStatus` sondieren `topo.UnsealVaultIP:22`
+und starten `wg-quick up wg0.<env>.conf`. Mit Dial-Out-Peers und zentralem Hub entfällt das
+projektspezifische Client-Profil; die Sonde muss gegen einen Knoten des jeweiligen Projekts
+gehen. Zusätzlich schreiben `ensureHostsMapping` und `setupHostsForStatus` fest
+`vault.the-toob.com` → `api-fsn1` in `/etc/hosts` — nach `OPS-031` zeigt der Name auf
+`ops-vault-*`.
+
+**`stages/verify.go`** — prüft Vault-Seal-Status über `topo.APINodes` und die
+Nomad-Erreichbarkeit unbedingt. Für Projekte ohne Vault und ohne Nomad muss die Prüfliste aus
+dem Profil kommen.
+
+**`stages/packer.go`** — `findExistingHetznerSnapshot` sucht nach Description
+`toob-golden-image-<env>` und den Labels `name=toob-golden-image`. Mit `toob-base` und
+`toob-worker` aus `OPS-004` braucht das eine Imagedimension, sonst wird das falsche Snapshot
+wiederverwendet.
+
+**`dashboard/render.go`** — baut die Knotenkarte aus den Literalen `toob-unseal-vault`,
+`<prefix>-api-fsn1` und `<prefix>-api-hel1`. Für andere Projekte zeigt das Dashboard nichts.
+
+**Lösung**
+Alle vier auf `topology.Project` und das Stage-Profil aus `OPS-008` umstellen. Das Dashboard
+rendert Knoten und deren Rollen generisch aus `Nodes`, statt sie zu erraten.
+
+**Akzeptanzkriterien**
+- [ ] `toob-ops status --project identity` zeigt die Identity-Knoten mit ihren Rollen.
+- [ ] `verify` prüft für ein Projekt ohne Vault keine Seal-Status.
+- [ ] Ein `toob-base`-Rebuild macht ein bestehendes `toob-worker`-Snapshot nicht ungültig.
+
+---
+
+### OPS-00A — Dashboards und Alert-Regeln projektfähig machen
+
+**Prio:** P1 · **Risiko:** ○ · **Aufwand:** M
+**Dateien:** `monitoring/prometheus/alert.rules.yml`, `monitoring/grafana/dashboards/*.json`
+
+**Problem**
+`OPS-043` routet Alarme über ein `project`-Label — das keine der 21 Regeln setzt. Ohne dieses
+Ticket landet nach dem Umbau alles im Default-Empfänger.
+
+Zusätzlich brechen mehrere Panels und Regeln durch den Umbau selbst:
+
+| Stelle | Bricht durch |
+|---|---|
+| `ops-home.json`: `up{job="node-exporter", instance="bastion"}` | `OPS-090` (Bastion-Abbau) → dauerhaft rot |
+| `ops-home.json`: `instance="unseal-vault"` | `OPS-030` → Knoten heißt `ops-kms` |
+| `alert.rules.yml`: `blackbox-public` auf `registry.the-toob.com` | weitere Hostnames kommen dazu |
+| `AutoscalerIneffective`: `job="registry-worker"` | bleibt registry-spezifisch, braucht Projektfilter |
+| `VaultSealed`, `NomadTLSRotationFailed` | gelten nur für Projekte mit Vault bzw. Nomad |
+
+**Lösung**
+Regeln nach `common` (InstanceDown, DiskSpace, Backup, Watchdog) und projektspezifisch
+aufteilen. `project` als Pflichtlabel in jeder Regelgruppe. Dashboards mit einer
+`project`-Template-Variablen statt fester Instanznamen; die Statusmatrix rendert Zeilen aus
+den vorhandenen Zielen, statt sie zu benennen.
+
+**Akzeptanzkriterien**
+- [ ] Jede Regel trägt ein `project`-Label.
+- [ ] Nach dem Bastion-Abbau ist kein Panel dauerhaft rot.
+- [ ] Ein neues Projekt erscheint im Ops-Home-Dashboard, ohne dass es angepasst wird.
+
+---
+
+### OPS-00B — Cloudflare-Modul mehrprojektfähig
+
+**Prio:** P1 · **Risiko:** ◐ · **Aufwand:** M
+**Datei:** `terraform/cloudflare/main.tf`
+
+**Problem**
+Das Modul ist auf die Registry zugeschnitten:
+- `local.domain_map` kennt nur `registry.the-toob.com` und dessen Staging-/Dev-Varianten
+- Load-Balancer, SSL-Einstellungen und Rate-Limits entstehen nur bei
+  `var.environment == "production"` — Dev und Staging haben deshalb weder `ssl = strict` noch
+  Rate-Limits
+- `cloudflare_dns_record.cdn` zeigt fest auf `${name_prefix}-packages`
+- Die Cache-Regel greift auf `/download`, was für `fw.` nicht passt
+
+Die Hostnames `id.`, `ota.`, `api.` und `fw.` aus EPIC F bis H haben damit kein Modul, das sie
+anlegt. `OPS-072` beschreibt die Regeln für `fw.`, aber nicht, wer sie erzeugt.
+
+**Lösung**
+Modul auf eine Hostname-Liste umstellen, die aus `topology.Project.Hostnames` gespeist wird.
+Je Eintrag: Typ (LB oder CNAME), Ziel, Cache-Policy, Rate-Limit, Ruleset. Die
+Zone-Einstellungen (`ssl = strict`, min TLS, TLS 1.3) sind zonenweit und gehören aus der
+`environment == "production"`-Bedingung heraus — dass Dev heute ohne `strict` läuft, ist
+vermutlich nicht beabsichtigt.
+
+**Akzeptanzkriterien**
+- [ ] `id.`, `ota.`, `api.` und `fw.` entstehen aus dem Modul, nicht von Hand.
+- [ ] `fw.` hat Compress off, `immutable`, kein Redirect (Prüfung aus `OPS-072`).
+- [ ] Getrennte Rulesets pro Hostname — ein WAF-Fehler auf `ci.` trifft `ota.` nicht.
 
 ---
 
@@ -291,7 +615,8 @@ außen, auch nicht temporär.
 **Prio:** P1 · **Risiko:** ○ · **Aufwand:** M
 
 **Lösung**
-CX32 aus `toob-base`. Hub-Konfiguration mit einem Peer je Projekt plus Admin-Peers:
+CX32 aus `toob-base`. Hub-Konfiguration mit einem Peer je **Projekt-Umgebung-Paar** plus
+Admin-Peers:
 
 ```ini
 [Interface]
@@ -299,13 +624,38 @@ Address = 10.9.9.1/24
 ListenPort = 51820
 PostUp = iptables -A FORWARD -i %i -o %i -j DROP
 
-[Peer]                      # registry
+[Peer]                      # registry / production
 AllowedIPs = 10.9.9.10/32, 10.0.1.0/24
-[Peer]                      # update
+[Peer]                      # registry / dev
 AllowedIPs = 10.9.9.11/32, 10.1.1.0/24
-[Peer]                      # identity
+[Peer]                      # registry / staging
 AllowedIPs = 10.9.9.12/32, 10.2.1.0/24
+[Peer]                      # identity / production
+AllowedIPs = 10.9.9.20/32, 10.20.1.0/24
+[Peer]                      # identity / dev
+AllowedIPs = 10.9.9.21/32, 10.21.1.0/24
+[Peer]                      # update / production
+AllowedIPs = 10.9.9.30/32, 10.30.1.0/24
+[Peer]                      # update / dev
+AllowedIPs = 10.9.9.31/32, 10.31.1.0/24
 ```
+
+**⟳ nachgezogen — zwei Korrekturen**
+
+Die erste Fassung listete drei Peers mit den Netzen `10.0.1.0/24`, `10.1.1.0/24` und
+`10.2.1.0/24` für registry, update und identity. Beide Annahmen waren falsch:
+
+1. **Die Netze waren die der Registry-Umgebungen**, nicht die neuer Projekte. `10.1.1.0/24`
+   ist registry/dev, `10.2.1.0/24` ist registry/staging. Der Hub hätte Update- und
+   Identity-Verkehr in die Registry-Netze geroutet.
+2. **Es ist ein Peer pro Projekt-Umgebung-Paar, nicht pro Projekt.** `mapCredentials` in
+   `main.go` mappt `TOOB_DEV_HCLOUD_TOKEN`, `TOOB_STAGING_HCLOUD_TOKEN` und
+   `TOOB_PROD_HCLOUD_TOKEN` — die drei Registry-Umgebungen sind bereits heute drei getrennte
+   Hetzner-Projekte mit eigenen Netzen. Der Hub bedient also sieben Peers, nicht drei.
+
+Die IP-Vergabe im Hub-Netz folgt demselben Schema wie die Subnetze: Zehnerblock pro Produkt,
+Einerstelle pro Umgebung. Damit ist aus `10.9.9.31` ohne Nachschlagen ablesbar, dass es
+update/dev ist.
 
 Die `PostUp`-Regel ist der Kern: Sie unterbindet Peer-zu-Peer-Routing. Ohne sie kann ein
 kompromittierter Registry-Knoten über den Hub ins Update-Netz.
@@ -385,24 +735,73 @@ ist — nicht, ob sie etwas enthält, das sich zurückspielen lässt.
 
 **Vor OPS-031 ist das die einzige Absicherung, die zählt.**
 
-**Lösung**
-Monatlicher Job auf `ops-hub`:
+**⟳ nachgezogen — Korrektur am ursprünglichen Entwurf**
+
+Die erste Fassung dieses Tickets schrieb „Wegwerf-Vault-Container starten (File-Storage,
+**eigener Unseal-Key**)". Das funktioniert nicht.
+
+Ein Raft-Snapshot enthält den verschlüsselten Barrier-Zustand einschließlich des gewrappten
+Master-Keys. Der Primary-Vault ist über `seal "transit"` gegen `ops-kms` versiegelt
+(Key `autounseal-toob-registry`). Ein Ziel-Vault mit eigenem Unseal-Key kann diesen Master-Key
+nicht auspacken — `snapshot restore -force` überspringt nur die *Konsistenzprüfung*, nicht die
+kryptografische Voraussetzung. Das Ergebnis wäre ein Vault, der nach dem Restore unbrauchbar
+ist, und ein Test, der zuverlässig rot leuchtet, ohne etwas über die Backups auszusagen.
+
+**Korrigiertes Vorgehen**
 
 ```
-1. Neuesten Snapshot aus toob-vault-backups ziehen
-2. Wegwerf-Vault-Container starten (File-Storage, eigener Unseal-Key)
-3. vault operator raft snapshot restore -force
-4. Prüfen: entsiegelt sich, und secret/platform/canary ist lesbar
+1. Neuesten Snapshot aus toob-vault-backups-<env> ziehen
+2. Wegwerf-Vault-Container starten, konfiguriert mit derselben
+   seal "transit"-Stanza wie der Primary (ops-kms, gleicher Key)
+3. vault operator raft snapshot restore
+4. Prüfen: entsiegelt sich automatisch, secret/platform/canary lesbar,
+   und transit/keys/toob-image-signing-<env> liefert denselben
+   öffentlichen Schlüssel wie der Produktivcluster
 5. Container zerstören, Ergebnis als Prometheus-Metrik
 ```
 
-Der Kanarienvogel-Wert wird beim Seeding angelegt und nie geändert. Alarm bei Fehlschlag **und**
-bei Ausbleiben des Laufs — ein Test, der nicht läuft, sieht sonst aus wie ein Test, der besteht.
+Schritt 4 prüft bewusst auch den Transit-Key: das ist der Wert, dessen Verlust in OPS-031
+irreversibel wäre, und ein Snapshot, der ihn nicht mitbringt, ist für den Umzug wertlos.
+
+**Was der Test damit beweist — und was nicht**
+
+| Szenario | Abgedeckt |
+|---|---|
+| Primary-Cluster verloren, `ops-kms` lebt | ✓ automatisiert, monatlich |
+| Primary **und** `ops-kms` verloren | ✗ — braucht das 3-von-5-PGP-Quorum |
+
+Der zweite Fall lässt sich nicht automatisieren, weil er drei Menschen mit ihren PGP-Keys
+erfordert. Er gehört deshalb in die halbjährliche Übung aus **OPS-022** und nicht hierher.
+Beide zusammen ergeben die Aussage „wir könnten wiederherstellen"; einer allein nicht.
+
+**Verwendbare Bausteine im Bestand**
+- `vault/scripts/backup.sh` authentifiziert sich per `backup`-AppRole
+  (`/opt/vault/config/backup-role-id` und `-secret-id`) und holt die S3-Credentials über
+  `vault kv get secret/s3`. Der Restore-Test kann dieselbe AppRole nutzen.
+- Das Textfile-Collector-Muster ist etabliert (`last_backup_timestamp_seconds`,
+  `nomad_tls_rotation_timestamp_seconds`, `last_db_firewall_cleanup_success_timestamp_seconds`)
+  und wird hier nur fortgesetzt.
+- Der Kanarienvogel-Wert wird in `seed.sh` angelegt und nie geändert.
+
+**Der KMS-Snapshot ist ein anderer Fall.** `backup-unseal.sh` sichert kein Raft-Snapshot,
+sondern ein tar des File-Storage-Verzeichnisses, mit statischen S3-Credentials aus
+`/etc/vault.d/backup-s3.env` — notwendigerweise, weil der KMS sich nicht selbst entsiegeln
+kann, um sie aus Vault zu holen. Sein Restore-Test ist entsprechend simpler: entpacken,
+starten, entsiegeln, prüfen dass `transit/keys/autounseal-toob-registry` existiert. Er gehört
+mit ins Ticket, weil OPS-030 auf genau diesem Tarball aufsetzt.
 
 **Akzeptanzkriterien**
 - [ ] Der Lauf ist mit einem absichtlich beschädigten Snapshot rot.
-- [ ] Metrik `vault_restore_test_success` existiert und hat ein Alter-Alert.
+- [ ] Der Lauf ist rot, wenn der Ziel-Vault eine abweichende Seal-Konfiguration hat
+      (Negativtest gegen den ursprünglichen Denkfehler).
+- [ ] Der wiederhergestellte Vault liefert denselben Transit-Public-Key wie der Produktivcluster.
+- [ ] Der KMS-Tarball ist ebenfalls testweise zurückgespielt.
+- [ ] Metrik `vault_restore_test_success` existiert und hat einen Alter-Alert.
 - [ ] Ein grüner Lauf liegt vor, **bevor** OPS-030 beginnt.
+
+**Abhängigkeit:** `BEF-006` (Backup-Bucket pro Umgebung trennen) und `BEF-003` (Teardown
+löscht den Bucket) müssen davor liegen — sonst testet man gegen einen Bucket, den der nächste
+Dev-Teardown entfernt.
 
 ---
 
@@ -493,12 +892,53 @@ einspielen, Entsiegelung über `ops-kms`.
 
 Danach die Clients umhängen: Vault-Agents auf den Registry-Knoten, `deploy.sh`, Backup-Skripte.
 
+**⟳ nachgezogen — es sind drei Cluster, nicht einer**
+
+Der Entwurf sprach von „dem Bestandscluster". Tatsächlich existieren nach `topology.go` drei
+vollständige Vault-Installationen, je eine pro Umgebung:
+
+| Umgebung | Primary | Unseal-Vault | Transit-Keys |
+|---|---|---|---|
+| production | `10.0.1.10` + `10.0.1.11` | `10.0.1.12` | `…-production` |
+| dev | `10.1.1.10` | `10.1.1.12` | `…-dev` |
+| staging | `10.2.1.10` | `10.2.1.12` | `…-staging` |
+
+**Drei Raft-Snapshots lassen sich nicht in einen Cluster restoren** — ein Restore ersetzt den
+gesamten Clusterzustand, er fügt nichts hinzu. Der Umzug ist deshalb kein einheitlicher
+Vorgang, sondern zwei verschiedene:
+
+**Produktion: Snapshot-Restore.** Nur hier sind die Transit-Keys unersetzbar — sie haben
+Images signiert, die deployt sind, und Pakete, die veröffentlicht wurden. Der Snapshot
+erhält sie.
+
+**Dev und Staging: Inhaltskopie, neue Keys.** KV-Secrets per `vault kv get | put` in die
+Pfade aus `OPS-032` übertragen, Transit-Keys neu erzeugen. Das ist zulässig, weil keine
+Dev- oder Staging-Signatur außerhalb der jeweiligen Umgebung Vertrauen genießt.
+
+> **Nebenwirkung, die ins Runbook gehört:** Nach dem Neuerzeugen der Dev-/Staging-Keys
+> schlägt `deploy.sh verify` für bereits gebaute Images fehl, weil deren Signatur gegen den
+> alten Schlüssel entstand. `deploy.sh all` ist unproblematisch — es signiert neu. Ein
+> isoliertes `deploy.sh deploy` ohne vorheriges `sign` bricht ab, und das ist richtig so.
+
+**Zusätzlich zu beachten — Schlüsseltypen unterscheiden sich:**
+`stages/deploy.go` prüft vor jedem Deploy, dass `transit/keys/toob-image-signing-<env>` vom
+Typ **`ecdsa-p256`** ist, und bricht sonst ab — Cosign unterstützt für Vault-Transit kein
+Ed25519. Der Firmware-Schlüssel aus `OPS-033` muss dagegen **Ed25519** sein, weil der
+Bootloader nichts anderes verifiziert. Wer beide über dieselbe Zeile anlegt, produziert
+entweder einen Deploy, der abbricht, oder eine Firmware, die kein Gerät akzeptiert.
+
+**Reihenfolge innerhalb des Tickets**
+1. Produktions-Snapshot restoren, Clients umhängen, verifizieren.
+2. Erst danach dev und staging inhaltlich übertragen — bei Problemen ist die Produktion
+   dann schon stabil.
+
 **Akzeptanzkriterien**
-- [ ] `vault read transit/keys/toob-package-signing` liefert dieselbe Key-Version und denselben
-      öffentlichen Schlüssel wie vorher.
-- [ ] Ein Cosign-Verify eines **vor** der Migration signierten Images ist danach gültig.
+- [ ] `vault read transit/keys/toob-package-signing-production` liefert dieselbe Key-Version
+      und denselben öffentlichen Schlüssel wie vorher.
+- [ ] Ein Cosign-Verify eines **vor** der Migration signierten Produktions-Images ist gültig.
+- [ ] Dev und Staging sind funktionsfähig, ihre Keys sind neu und als solche dokumentiert.
 - [ ] Ausfall eines Vault-Knotens beeinträchtigt den Betrieb nicht (aktiv getestet).
-- [ ] Angekündigtes Wartungsfenster, alter Cluster bleibt bis zur Bestätigung stehen.
+- [ ] Angekündigtes Wartungsfenster, alte Cluster bleiben bis zur Bestätigung stehen.
 
 ---
 
@@ -669,9 +1109,13 @@ Mandantenkontext. **Vor** der ersten Freischaltung für Kunden, nicht danach.
 **Prio:** P1 · **Risiko:** ○ · **Aufwand:** M
 
 **Lösung**
-Netz `10.2.1.0/24`, zwei CX22 aus `toob-base` mit `wg-peer`- und `caddy`-Rolle,
-Ubicloud-Instanz `toob-idp-db`. Cloudflare-Hostname `id.the-toob.com` mit Geo-LB über beide
-Knoten.
+Netz `10.20.0.0/16`, Subnetz `10.20.1.0/24`, zwei CX22 aus `toob-base` mit `wg-peer`- und
+`caddy`-Rolle, Ubicloud-Instanz `toob-idp-db`. Cloudflare-Hostname `id.the-toob.com` mit
+Geo-LB über beide Knoten.
+
+> **Korrektur:** Die erste Fassung sah `10.2.1.0/24` vor. Das kollidiert mit
+> `topology.Get("staging")`, das bereits `10.2.0.0/16` belegt. Verbindlicher Plan siehe
+> `OPS-006`.
 
 Zitadel liegt bewusst **nicht** in der Kontrollebene: Ein öffentlich erreichbarer Dienst mit
 eigenem CVE-Strom gehört nicht in dasselbe Netz wie Vault und der WireGuard-Hub.
@@ -788,8 +1232,18 @@ Digest** nach Produktion. Kein zweiter Build, kein „lokal ging es".
 
 **Prio:** P1 · **Risiko:** ○ · **Aufwand:** M
 
-Netz `10.1.1.0/24`, `upd-edge-fsn1`, `upd-edge-hel1`, `upd-fleet`, Ubicloud `toob-update-db`.
-Hostnames `ota.` (Geo-LB über beide Edge-Knoten) und `api.` (auf `upd-fleet`).
+Netz `10.30.0.0/16`, Subnetz `10.30.1.0/24`, `upd-edge-fsn1`, `upd-edge-hel1`, `upd-fleet`,
+Ubicloud `toob-update-db`. Hostnames `ota.` (Geo-LB über beide Edge-Knoten) und `api.`
+(auf `upd-fleet`).
+
+> **Korrektur, und die schwerwiegendste im ganzen Dokument:** Die erste Fassung sah
+> `10.1.1.0/24` vor. Das ist **bitgenau dasselbe Subnetz**, das `topology.Get("dev")` für die
+> Registry-Dev-Umgebung belegt — inklusive `10.1.1.10` für `api-fsn1` und `10.1.1.12` für den
+> Unseal-Vault. `upd-edge-fsn1` hätte dieselbe Adresse bekommen wie ein Registry-Dev-Knoten.
+>
+> Aufgefallen wäre das erst am WireGuard-Hub: Zwei Peers mit identischem `AllowedIPs` sind
+> nicht routbar, und WireGuard meldet das nicht als Fehler — es liefert Pakete an den zuletzt
+> passenden Peer. Verbindlicher Plan siehe `OPS-006`.
 
 ---
 

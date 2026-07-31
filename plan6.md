@@ -1,256 +1,1088 @@
-# Technische Architektur: Slot-Transport-Schicht (Backlog-Grundlage)
+# Backlog — Zitadel: Sicherheitsentwurf und Aufbau
 
-**Zweck:** Die im Masterplan beschriebene Zwei-Schichten-Architektur (chip-agnostischer
-Transactional Slot Manager + austauschbare Slot Transport Provider) auf Datei-, Interface- und
-Integrationsebene so konkret machen, dass sie direkt in einen großen Backlog zerlegt werden kann.
+**Grundlage:** `ARCHITEKTUR-identity-zitadel.md` (der Schnitt gegen die Produkte),
+`ARCHITEKTUR-devops.md` (der Identity-Spoke).
 
-**Leitprinzip:** *Der Core trägt die Algorithmen, der Registry-Treiber deklariert nur Fähigkeiten.*
-Ein generischer Chip braucht keinen Treiber-Code — nur eine `slot_caps_t`. Spezialhardware
-(Bank-Swap, MMU-Remap) liefert je eine winzige Primitive. Provider-Auswahl ist **Compile-Time**
-(Codegen wählt einen, `--gc-sections` strippt den Rest).
+**Was dieses Dokument zusätzlich leistet:** Es entwirft das Sicherheitsmodell aus dem
+Bedrohungsmodell heraus und leitet daraus die Tickets ab — nicht umgekehrt.
 
 ---
 
-## 1. Design-Iterationen (verworfene erste Entwürfe → finale Entscheidung)
+# TEIL 1 — Bedrohungsmodell und Entwurf
 
-Damit der Backlog auf der *gereiften* Architektur steht, hier die Punkte, an denen der naive
-Erstentwurf beißt und wie er aufgelöst wurde:
+## 1.1 Was auf dem Spiel steht
 
-**I1 — Runtime- vs. Compile-Time-Provider.** *Erst:* Provider-Registry mit Runtime-Negotiation
-(`select(caps)`). *Verworfen,* weil MCU-Firmware ein festes Target hat → Caps sind beim Build bekannt
-→ Runtime-Auswahl kostet Flash für ungenutzte Provider. *Final:* Codegen setzt
-`#define TOOB_TRANSPORT_PROVIDER …` aus den Caps; nur ein Provider wird gelinkt. Das Interface bleibt
-sauber, die Selektion ist statisch.
+Die Angriffskette ist kurz:
 
-**I2 — Eigener Boot-Pointer-Bereich vs. TMR-Feld.** *Erst:* separate A/B-Pointer-Region (Mailbox-
-Klon). *Verworfen,* weil die TMR bereits ein quorum-rotierender, brownout-sicherer A/B-Speicher ist —
-ein zweiter wäre redundant und ein weiterer Wear-/Korrektheits-Angriffspunkt. *Final:* aktiver
-App-Slot = TMR-Feld `active_app_slot`; Commit = `boot_journal_update_tmr` mit geflipptem Slot. Für
-HW-Tiers ist der „Pointer" das Hardware-Register; der Provider abstrahiert den Commit.
-
-**I3 — Delta-Output-Ziel.** *Erst:* Delta schreibt in Scratch, Swap nutzt Scratch als Temp (= der
-bestätigte Bug). *Final:* Der Provider besitzt die Ziel-Topologie. Dual-Slot: Delta-Output direkt in
-den inaktiven Slot → Flip. Single-Slot: dedizierter Output-Bereich → Two-Phase-One-Way. Die geteilte
-Adresse existiert nicht mehr.
-
-**I4 — Wie dünn ist der Treiber wirklich?** *Ziel geprüft:* generischer fixe-Adresse-Single-Slot-
-Chip → Treiber = **reine Daten** (`slot_caps_t`, kein Code). STM32-Dual-Bank → Caps + `bank_flip()`
-(~30 Zeilen). ESP32-C6 → Caps + `xip_remap_commit()`. Der Core carriert 100 % der Algorithmen.
-
-**I5 — Verifikation vs. Commit-Reihenfolge.** *Invariante, universell:* Das Ziel-Image wird
-verifiziert, *bevor* der Commit (Flip) es aktiv macht. Für Null-Kopie-Tiers: Secondary in-place
-verifizieren, dann flippen. Für Kopie-Tiers: Read-Back-CRC pro Effekt + Merkle-Verify des
-zusammengesetzten Images, dann committen. Der `EFF_FLIP` ist auf Verify-Erfolg gegated.
-
----
-
-## 2. Die Kern-Abstraktionen (neue Header)
-
-### `common/include/boot_slot_caps.h` (geteilt: Core + Treiber)
-
-```c
-typedef enum {
-  SLOT_EXEC_FIXED = 0,       /* muss von fixer physischer Adresse laufen */
-  SLOT_EXEC_RELOCATABLE,     /* Image läuft aus jedem Slot (dual-linked/PIC) */
-  SLOT_EXEC_XIP_REMAP,       /* Ausführungsadresse per MMU remappbar */
-  SLOT_EXEC_BANK_SWAP        /* HW-Dual-Bank-Flip */
-} slot_exec_model_t;
-
-typedef struct {
-  slot_exec_model_t exec_model;
-  uint8_t  slot_count;           /* 1 = in-place swap nötig; 2 = dual-slot */
-  bool     has_scratch;
-  uint32_t scratch_size;
-  uint32_t max_erase_cycles;     /* Endurance, für wear-aware Auswahl (Phase 5) */
-
-  /* Chip-Primitiven — NULL wenn nicht unterstützt. Nur diese liefert der Treiber. */
-  boot_status_t (*bank_flip)(uint32_t target_bank);
-  boot_status_t (*xip_remap_commit)(uint32_t slot_phys_addr);
-  boot_status_t (*exec_addr_select)(uint32_t slot_phys_addr); /* VTOR/Reset-Vector, Tier 1 */
-  boot_status_t (*get_active_slot)(uint32_t *out_slot);        /* HW-Tiers: Register lesen */
-} slot_caps_t;
-
-/* Vom generierten Treiber-Glue bereitgestellt (Registry-Package). */
-const slot_caps_t *boot_get_slot_caps(void);
+```
+Konto kompromittiert (release-manager)
+  → Artefakt hochladen
+  → Signing Service signiert (er signiert, was autorisierte Aufrufer verlangen)
+  → Channel publizieren
+  → jedes Gerät der Flotte lädt und installiert
+  → Signatur ist gültig, weil WIR sie erzeugt haben
 ```
 
-### `common/include/boot_slot_transport.h` (Provider-Interface)
+Der Bootloader schützt hier nicht. Er prüft Ed25519 gegen den eFuse-Anker, und die Signatur
+ist echt. Anti-Rollback greift nicht, weil die SVN höher ist. Das Gerät tut genau das, wofür
+es gebaut wurde.
 
-```c
-typedef struct {
-  uint32_t src_addr;         /* neues Image (Staging raw / Scratch delta) */
-  uint32_t dest_addr;        /* Ausführungs-Slot */
-  uint32_t backup_addr;      /* wohin die alte App gesichert wird (0 = nicht nötig) */
-  uint32_t length;
-  bool     src_is_delta_output;
-  boot_dest_slot_t dest_slot;
-  uint8_t  transport_id;     /* welcher Provider diese Txn fährt (Resume-Dispatch) */
-} slot_txn_t;
+**Konsequenz für den Entwurf:** Es genügt nicht, Kontoübernahme schwer zu machen. Ein
+einzelnes übernommenes Konto darf **nicht ausreichen**, um Firmware auszuliefern. Das ist
+der Unterschied zwischen einem gut konfigurierten IdP und einem, der dieser Verantwortung
+gerecht wird.
 
-typedef struct {
-  const char *name;
-  uint8_t     tier;
-  uint8_t     id;            /* stabile ID, landet im WAL für Resume-Dispatch */
-  boot_status_t (*apply)(const boot_platform_t *pf, const slot_caps_t *caps,
-                         slot_txn_t *txn, wal_entry_payload_t *open_txn,
-                         uint8_t *arena, size_t arena_len);
-  boot_status_t (*rollback)(const boot_platform_t *pf, const slot_caps_t *caps,
-                            slot_txn_t *txn, uint8_t *arena, size_t arena_len);
-} slot_transport_t;
+## 1.2 Angriffsflächen, systematisch
 
-/* Compile-Time gewählt; gibt den einen einkompilierten Provider zurück. */
-const slot_transport_t *boot_transport_active(void);
+| # | Klasse | Konkret | Gegenmaßnahme |
+|---|---|---|---|
+| A1 | Credential | Spraying, Stuffing, Wiederverwendung | **Kein Passwort** für privilegierte Rollen |
+| A2 | Phishing | AiTM-Proxy (Evilginx), relayed TOTP/Push | **WebAuthn** — Origin-gebunden, nicht relaybar |
+| A3 | Wiederherstellung | „Passwort vergessen" → E-Mail → Übernahme | Keine Selbstbedienung für privilegierte Rollen |
+| A4 | Sitzung | Token-Diebstahl, Replay, XSS | Kurze TTL, Step-up, Token-Bindung |
+| A5 | Registrierung | Selbstregistrierung, Enumeration | Einladung mit Ablauf, Genehmigung durch Owner |
+| A6 | Föderation | GitHub-Übernahme, Account-Linking-Angriff | Upstream reicht nicht für privilegierte Rollen |
+| A7 | Admin-Ebene | `IAM_OWNER` kann alles in allen Orgs | Break-Glass-Konto, nie im Alltag |
+| A8 | Insider | Toob-Mitarbeiter sehen Kundendaten | Zeitbegrenzte Impersonation, Kunde wird benachrichtigt |
+| A9 | Infrastruktur | Masterkey, DB, Backups | Vault, Verschlüsselung, getrennte Sicherung |
+| A10 | Lieferkette | Ein Konto → ganze Flotte | **Vier Augen + Verzögerung** |
+
+Die letzte Zeile ist die wichtigste. A1 bis A9 machen Übernahme schwer; A10 macht sie
+unzureichend.
+
+## 1.3 Die sieben Entwurfsentscheidungen
+
+### E1 — Drei Vertrauensstufen statt einer Hürde
+
+Ein Hardware-Schlüssel als Voraussetzung für den ersten Login klingt sicher und ist es nicht:
+Wer die Anmeldung zu schwer macht, erzeugt geteilte Konten. Ein Konto, das sich drei Personen
+teilen, ist schlechter als drei Konten mit Passwort.
+
+Deshalb ein Stufenmodell — die Stufe bestimmt, was man **darf** und was man **sieht**:
+
+| Stufe | Faktoren | Darf | Sieht |
+|---|---|---|---|
+| **L1** | Passwort **und** TOTP, E-Mail verifiziert | nichts verändern | nur Aggregate: „847 Geräte, 94 % aktuell" |
+| **L2** | ein Passkey | Releases vorbereiten, Reports, Mitglieder ansehen | vollständige Lesesicht |
+| **L3** | zwei Passkeys | `operator`, `release-manager`, `admin`, `owner` | alles der Rolle entsprechend |
+
+**Der reduzierte Sichtbereich auf L1 ist der eigentliche Kniff.** Statt den Zugang zu
+verweigern, bekommt L1 weniger zu sehen. Das nimmt den Anreiz zum Kontoteilen und ist trotzdem
+sicher — denn ein `viewer` in einem Flottenprodukt ist nicht harmlos. Er sieht Geräte-IDs,
+ausgerollte Firmware-Versionen, **SBOM-Digests** (also welche bekannten Schwachstellen im Feld
+leben) und Verschleißdaten (also welche Geräte nahe am Lebensende sind). Für einen Angreifer,
+der einen Lieferkettenangriff vorbereitet, ist genau das die Aufklärung, die er braucht.
+
+Ein L1-Konto liefert diese Karte nicht.
+
+### E2 — Aufstieg ist Selbstbedienung, Rollenvergabe nicht
+
+Von L1 auf L2 kommt man in zwanzig Sekunden: Passkey registrieren. Kein Ticket, keine
+Freigabe. Von L2 auf L3 ebenso — zweiten Authentikator registrieren.
+
+**Die Rolle bekommt man dadurch nicht.** `operator` und höher vergibt ein Org-Owner mit
+frischem Step-up (`IDP-033`). L3 ist die *Voraussetzung* für die Rolle, nicht ihre Ursache.
+
+### E3 — Faktoren registriert man nicht im Moment des Bedarfs
+
+Hier liegt die Falle im naheliegenden Entwurf „ohne Passkey anmelden, und beim Klick auf
+Publish fragt das System nach einem".
+
+**Das Registrieren eines Authentikators ist selbst eine privilegierte Operation** — es ist
+genau der Schritt, mit dem sich ein Angreifer nach einer Übernahme Persistenz verschafft. Wer
+erlaubt, aus einer schwachen Sitzung heraus einen Passkey anzulegen, hat die Stärke des
+Passkeys an die Stärke der schwachen Sitzung gekoppelt.
+
+Der Ablauf ist deshalb umgekehrt:
+
+```
+Nicht:   Publish klicken → „bitte Passkey einrichten" → Passkey aus L1-Sitzung anlegen
+Sondern: Passkey vorher anlegen → L3 erreicht → Owner vergibt Rolle → Publish möglich
 ```
 
----
+Das Anlegen des **ersten** Passkeys aus einer L1-Sitzung ist zulässig — mehr Schaden als L1
+ohnehin anrichten kann, entsteht dadurch nicht. Jeder **weitere** Authentikator erfordert
+Bestätigung mit einem bereits registrierten Passkey, und alle Org-Owner werden benachrichtigt
+(`IDP-071`).
 
-## 3. Die Provider (Core-seitig, je Tier — Algorithmen sind chip-agnostisch)
+### E4 — Kein Abstieg, wer oben war
 
-| Datei | Provider | Tier | Wear | Nutzt Caps-Primitive |
-|-------|----------|------|------|----------------------|
-| `boot_transport_pointer.c` | Bank-Flip / XIP-Remap / Dual-Slot-Pointer | 0–1 | 1 E + 1 W / neuem Sektor | `bank_flip` / `xip_remap_commit` / `exec_addr_select` |
-| `boot_transport_swapmove.c` | Swap-Move (in-place, kein Hotspot) | 2 | ~2 ops / Sektor | — |
-| `boot_transport_oneway.c` | Two-Phase One-Way (raw + delta) | 3 | 2 ops / Sektor | — |
-| `boot_transport_swapscratch.c` | Swap-Scratch (Fallback, aus altem `boot_swap.c`) | 4 | 3 ops / Sektor | — |
+Wer einmal L3 hatte, fällt nicht auf L1 zurück. Sonst lautet der Angriff: Operator verliert
+seine Schlüssel, das Konto fällt auf Passwort zurück, das Passwort wird angegriffen.
 
-Alle planen `flash_effect_t[]` und rufen den **gemeinsamen** `boot_effect_execute`. `boot_multiimage.c`
-ist bereits das One-Way-Muster → wird unter `boot_transport_oneway.c` subsumiert (oder bleibt als
-dessen Multi-Target-Variante). Resume: jeder Provider nutzt `open_txn->delta_chunk_id` +
-`transfer_bitmap` als Checkpoint; der `transport_id` im WAL sichert, dass Resume denselben Provider
-dispatcht.
+Verliert ein L3-Konto seine Authentikatoren, greift der Wiederherstellungsprozess aus
+`IDP-021` — nicht der Passwort-Pfad. Ein Konto, das jemals eine Geräterolle trug, kennt den
+Passwort-Login nicht mehr.
 
----
+### E5 — Nur phishing-resistente Faktoren, wo Geräte betroffen sind
 
-## 4. Effect-Engine-Erweiterung
+TOTP und Push sind gegen einen AiTM-Proxy wirkungslos: Der Proxy leitet den Code in Echtzeit
+weiter, der Nutzer merkt nichts. WebAuthn bindet die Assertion an den Origin — ein Proxy auf
+`id.the-toob.corn` bekommt keine gültige Signatur.
 
-`boot_effect.c/.h`: neuer Effekt-Typ **`EFF_FLIP`** (der universelle Commit). Ausführung je Realisierung:
-- Tier 0 Bank: `caps->bank_flip(target)`.
-- Tier 0 MMU: `caps->xip_remap_commit(slot_phys)`.
-- Tier 1 Pointer: `boot_journal_update_tmr` mit `active_app_slot = neu` (+ ggf. `exec_addr_select`).
+**Für L3 gilt WebAuthn ohne Rückfallebene.** Eine Rückfallebene macht die Maßnahme wertlos,
+weil der Angreifer sie wählt. Auf L1 ist TOTP zulässig, weil dort weder etwas veränderbar noch
+etwas Verwertbares sichtbar ist.
 
-`EFF_FLIP` ist der einzige Effekt mit „Commit-Semantik" — davor ist alles reversibel, danach ist das
-neue Image aktiv. `boot_effect_execute` gated `EFF_FLIP` auf vorausgegangenen Verify-Erfolg.
+### E6 — Wiederherstellung ist nie Selbstbedienung
 
----
+Der am häufigsten ausgenutzte Pfad in freier Wildbahn. Wer MFA erzwingt und dann einen Reset
+per E-Mail erlaubt, hat MFA nicht erzwungen — er hat sie an das E-Mail-Konto delegiert.
 
-## 5. Integrationspunkte im bestehenden Core (die kritischen Nähte)
+1. **Zwei Authentikatoren** sind für L3 ohnehin Pflicht. Verlust eines Schlüssels ist damit
+   kein Notfall, sondern ein Dienstagnachmittag.
+2. Verlust beider: Verifikation außerhalb des Kanals, **technisch erzwungene Wartezeit von
+   24 Stunden**, Benachrichtigung an alle Org-Owner. Die Wartezeit ist der eigentliche Schutz —
+   sie gibt dem echten Inhaber Zeit zu widersprechen.
+3. **Wiederherstellung senkt das Niveau nicht** (siehe E4).
 
-**N1 — `boot_state.c` / `stage_swap`.** Baut ein `slot_txn_t` (statt direkt `boot_swap_apply`) und
-ruft `boot_transport_active()->apply(...)`. Das Delta-Ziel wird hier aus den Caps aufgelöst (I3). Die
-Multi-Image-Sub-Images (Netcore/Recovery/Stage1) laufen weiter über den One-Way-Provider.
+### E7 — Step-up vor gefährlichen Operationen
 
-**N2 — `boot_state.c` / STEP 5 Handoff.** Die Ausführungsadresse kommt jetzt aus dem aktiven Slot
-(`caps->get_active_slot` bei HW-Tiers, `tmr.active_app_slot` bei Tier 1) statt fix
-`CHIP_APP_SLOT_ABS_ADDR`. Für Tier 0/1 mit zwei Slots wählt der Handoff den aktiven physischen Slot.
+Eine Sitzung ist nicht dasselbe wie eine Freigabe. Selbst ein gestohlenes L3-Session-Token
+soll nicht ausreichen, um Firmware zu publizieren.
 
-**N3 — `boot_state.c` / `_handle_rollback_flow`.** Ruft `boot_transport_active()->rollback(...)`
-statt `boot_rollback_trigger_revert` direkt. Für Tier 0/1 ist Rollback ein Re-Flip (0 Wear); für
-Kopie-Tiers die (bestehende) Reverse-Copy; Reverse-Delta (Phase 5) ist eine Provider-Rollback-Variante.
+Vor Publish, Channel-Wechsel und Rollout-Start: **frische Re-Authentifizierung mit dem
+Passkey**, maximal fünf Minuten alt. Der Angreifer mit gestohlenem Token kann lesen —
+ausliefern kann er nicht.
 
-**N4 — `boot_journal.h` / `wal_tmr_payload_t`.** Neues Feld `active_app_slot` (Tier-1-Pointer) aus dem
-`reserved`-Tail; `struct_version` bump; `WAL_TMR_POPULATED_SIZE` als eine Quelle der Wahrheit
-(dieselbe Disziplin wie beim Mailbox-Watermark). Optional `active_transport_id` für Resume-Robustheit.
+Das ist der Mechanismus, den „erst wenn man etwas Kritisches berührt" eigentlich meint. Er
+wirkt auf die **Aktion**, nicht auf die Faktor-Ausstattung — die muss vorher stehen (E3).
 
-**N5 — `wal_entry_payload_t`.** `transport_id` im offenen Txn, damit ein Brownout-Resume den richtigen
-Provider dispatcht (kein Provider-Wechsel mitten in einer Txn).
+### E8 — Ein Konto genügt nicht
 
-**N6 — `boot_delta.c`.** Das Delta-Output-Ziel ist jetzt ein Parameter vom TSM (dedizierter
-Secondary-Bereich), nicht mehr implizit der Swap-Scratch. Nur der Aufrufer (`stage_apply_delta`)
-ändert sich; die VM selbst bleibt.
+Für Produktions-Channels mit Geräten im Feld:
+- **Vier-Augen-Prinzip**: zwei verschiedene `release-manager` müssen freigeben, beide mit
+  frischem Step-up.
+- **Soak-Zeit**: zwischen Freigabe und Beginn der Auslieferung liegen mindestens 30 Minuten,
+  in denen jeder Org-Owner abbrechen kann. Ein erfolgreicher Angriff hat damit ein
+  Erkennungsfenster, bevor das erste Gerät installiert.
 
-**N7 — `boot_hal.h`.** `const slot_caps_t *slot_caps;` in `boot_platform_t` (oder via
-`boot_get_slot_caps()`), plus die optionalen Primitiven-Signaturen.
+Beides ist pro Mandant konfigurierbar, aber **Default an** für jeden Mandanten mit Geräten in
+Produktion.
 
----
+## 1.4 Was das nicht leistet
 
-## 6. Registry-Anbindung (Compile-Time-Treiber-Installation)
+Ehrlichkeit gehört zum Entwurf: Kein IdP ist unangreifbar. Was dieser Aufbau erreicht:
 
-**Fluss:** `device.toml` deklariert `chip = "stm32h743"` → Toob-Registry löst das Slot-Treiber-Package
-auf → Build linkt `drivers/stm32h743/slot_caps.c` → der Manifest-Compiler generiert
-`generated_slot_caps.h`/`.c` mit `boot_get_slot_caps()` **und** dem `#define TOOB_TRANSPORT_PROVIDER`
-(Provider-Selektion aus den Caps). Nur der gewählte Provider wird kompiliert.
+- Kontoübernahme erfordert **physischen Besitz** eines registrierten Authentikators.
+- Ein übernommenes Konto reicht **nicht** für Firmware-Auslieferung (E5).
+- Jeder erfolgreiche Angriff hat ein **Erkennungsfenster** vor der Wirkung.
+- Der Radius eines kompromittierten Toob-Mitarbeiters ist begrenzt und sichtbar.
 
-**Treiber-Package-Inhalt (das dünne Delta):**
-- `drivers/<chip>/slot_caps.c` — die `slot_caps_t`-Instanz + Primitiven-Impls, wo Hardware es verlangt.
-  - Generischer Cortex-M0 (1 Slot, fix): **reine Daten**, kein Code.
-  - STM32-Dual-Bank: Caps + `bank_flip()` (FLASH_OPTR BFB2).
-  - ESP32-C6: Caps + `xip_remap_commit()` (MMU-Table).
-  - Cortex-M dual-slot relocatable: Caps + `exec_addr_select()` (VTOR).
-- Optional `drivers/<chip>/README` + Conformance-Testvektoren.
-
-**Codegen (Manifest-Compiler):**
-- `generated_slot_caps.c` — `boot_get_slot_caps()` gibt die Chip-Caps zurück.
-- `generated_boot_config.h` — Slot-Geometrie, Secondary-/Backup-Adressen, Boot-Pointer-Semantik,
-  Scratch nur noch wo der gewählte Provider ihn braucht.
+Was bleibt: ein Angreifer mit physischem Zugriff auf zwei Authentikatoren einer Person, oder
+zwei kollaborierende Insider, oder eine Schwachstelle in Zitadel selbst. Gegen die ersten
+beiden hilft nur Organisation, gegen die dritte nur zeitnahes Patchen (`IDP-090`).
 
 ---
 
-## 7. Build-Co-Design (hebt fixe-Adresse-Chips nach Tier 1)
+# TEIL 2 — Backlog
 
-- **Linker:** Dual-Linked-Images (Slot-A- + Slot-B-Adresse), beide Fixup-Sätze im Image; oder
-  kompakte Boot-Time-Relocation-Tabelle.
-- **Image-Format (TBM1):** ein `slot_variant`-Feld / zweiter Vektor-Satz; der Bootloader wählt beim
-  Handoff den Satz des aktiven Slots (VTOR).
-- **`toob`-CLI / Pipeline:** emittiert dual-slot-fähige Images; verifiziert, dass beide Varianten
-  denselben Merkle-Root ergeben (identischer Code, nur Fixups).
+**Legende**
+**Prio:** P0 muss vor dem ersten echten Nutzer · P1 vor Produktivgang · P2 vor dem ersten
+Kunden mit Flotte · P3 danach
+**Typ:** `security` `config` `feature` `infra` `process` `detect`
 
----
-
-## 8. Datei-Übersicht (Backlog-Rohmaterial)
-
-**Neu (Core):**
-`common/include/boot_slot_caps.h`, `common/include/boot_slot_transport.h`,
-`toobloader/core/boot_transport.c/.h` (Selektions-Glue), `boot_transport_pointer.c`,
-`boot_transport_swapmove.c`, `boot_transport_oneway.c`, `boot_transport_swapscratch.c`.
-
-**Geändert (Core):**
-`boot_state.c` (N1/N2/N3), `boot_journal.h/.c` (N4), `boot_effect.c/.h` (EFF_FLIP),
-`boot_delta.c`-Aufrufer (N6), `boot_hal.h` (N7), `wal_wire.h` (N5), `generated_boot_config.h`.
-
-**Retiring / migriert:**
-`boot_swap.c` → `boot_transport_swapscratch.c`; `boot_multiimage.c` → One-Way-Provider;
-`boot_rollback.c` → Rollback-Pfad des jeweiligen Providers (Policy `boot_rollback_evaluate_os` bleibt).
-
-**Neu (Treiber/Registry):**
-`drivers/<chip>/slot_caps.c` je Chip; generiert `generated_slot_caps.c/.h`.
-
-**Neu (Build/Toolchain):**
-Dual-Slot-Linker-Skripte, TBM1-`slot_variant`, CLI-Dual-Image-Emission.
-
-**Neu (Test):**
-Provider-Resume+Rollback-Modelle (je Provider), TSM-Invarianten-Modellcheck
-(Atomarität / kein Halb-Boot / Rollback-immer-verfügbar), Roach-Motel-artige HW-Integrationstests.
+**Reihenfolgeprinzip:** Alles, was sich nicht ohne Zeitfenster nachrüsten lässt, kommt zuerst.
+Eine MFA-Policy nachträglich auf bestehende Konten anzuwenden, hinterlässt genau die Lücke,
+die ein Angreifer sucht.
 
 ---
 
-## 9. Epic-Struktur für den Backlog
+## Übersicht
 
-- **E0 — Sofortfix + Fundament.** Delta-Bug (Two-Phase-One-Way als erster Provider), vier
-  Swap-Sofortgewinne. Entkoppelt sofort, liefert Provider #1.
-- **E1 — Abstraktionen.** `boot_slot_caps.h`, `boot_slot_transport.h`, Effect-`EFF_FLIP`,
-  TMR-`active_app_slot` (N4), WAL-`transport_id` (N5).
-- **E2 — TSM-Refactor.** `boot_state.c` N1/N2/N3 auf die Transport-Schicht umstellen; `boot_swap.c`/
-  `boot_multiimage.c`/`boot_rollback.c` als Provider migrieren.
-- **E3 — Provider-Suite.** Swap-Scratch (Fallback), Swap-Move, One-Way (raw+delta), Pointer/Bank/MMU.
-  Jeder mit Resume- + Rollback-Modell.
-- **E4 — Capability-Codegen + Registry.** `slot_caps_t`-Treiber-Packages, Manifest-Compiler-Glue,
-  Compile-Time-Provider-Selektion, `--gc-sections`-Nachweis.
-- **E5 — Boot-Pointer-Commit.** Tier-0/1-Commit (TMR-Feld + HW-Primitiven), verify-before-flip-Gate,
-  Handoff-Slot-Auswahl.
-- **E6 — Build-Co-Design.** Dual-Linked-Images, TBM1-`slot_variant`, CLI-Emission, VTOR-Auswahl.
-- **E7 — Advanced Wear.** Reverse-Delta-Rollback, wear-aware Provider-Auswahl (TMR-Counter steuernd),
-  wear-gelevelter Scratch-Pool.
-- **E8 — Formale Verifikation.** TSM-Invarianten-Modellcheck, per-Provider-Sims, HW-Brownout-Matrix.
-
-**Reihenfolge:** E0 → E1 → E2/E3 (parallel) → E4/E5 → E6 → E7 → E8. E0 liefert sofort Nutzen und den
-ersten Provider; E1–E3 sind das Rückgrat; E4/E5 machen es chip-übergreifend; E6 hebt die breite
-Chip-Masse nach Tier 1; E7/E8 sind Perfektion + Absicherung.
+| ID | Titel | Prio | Typ |
+|---|---|---|---|
+| **EPIC A — Fundament, vor dem ersten Nutzer** |||
+| IDP-001 | Masterkey aus Vault, nie aus Datei | P0 | security |
+| IDP-002 | Datenbank: eigene Instanz, verschlüsselte Backups, getrennter Bucket | P0 | infra |
+| IDP-003 | Netz- und Edge-Härtung des Identity-Spokes | P0 | infra |
+| IDP-004 | Selbstregistrierung aus, Enumeration verhindern | P0 | config |
+| IDP-005 | Instanz-Policies vor der ersten Org festschreiben | P0 | config |
+| **EPIC B — Authentifizierung** |||
+| IDP-010 | Stufenmodell L1/L2/L3 umsetzen | P0 | config |
+| IDP-011 | Sichtbereich an die Stufe binden | P0 | feature |
+| IDP-011b | WebAuthn ohne Rückfallebene für L3 | P0 | config |
+| IDP-011c | Registrierung weiterer Faktoren absichern | P0 | security |
+| IDP-012 | Kein Abstieg für Konten, die L3 hatten | P0 | feature |
+| IDP-013 | Rollenabhängige Authentifizierungsanforderung durchsetzen | P1 | feature |
+| IDP-014 | Sitzungsdauer, Token-TTL, Refresh-Rotation | P1 | config |
+| IDP-015 | Token-Bindung (DPoP oder mTLS) prüfen und aktivieren | P2 | security |
+| **EPIC C — Wiederherstellung und Notfallzugang** |||
+| IDP-020 | Selbstbedienungs-Reset für privilegierte Rollen abschalten | P0 | config |
+| IDP-021 | Wiederherstellungsprozess mit Wartezeit und Benachrichtigung | P1 | process |
+| IDP-022 | `IAM_OWNER` als Break-Glass-Konto | P0 | security |
+| IDP-023 | Break-Glass-Übung und Protokoll | P2 | process |
+| **EPIC D — Organisationen, Einladungen, Rollen** |||
+| IDP-030 | Projekt- und Rollenmodell anlegen | P1 | config |
+| IDP-031 | Einladungsfluss: einmalig, ablaufend, E-Mail-gebunden | P1 | feature |
+| IDP-032 | Org-Namensregeln über Action durchsetzen | P1 | feature |
+| IDP-033 | Rollenvergabe erfordert Owner-Genehmigung | P1 | feature |
+| IDP-034 | Org-Spiegel in die Produkte pushen | P1 | feature |
+| **EPIC E — Step-up und Freigabe** |||
+| IDP-040 | Step-up-Authentifizierung vor Geräteoperationen | P1 | feature |
+| IDP-041 | Vier-Augen-Freigabe für Produktions-Channels | P2 | feature |
+| IDP-042 | Soak-Zeit zwischen Freigabe und Auslieferung | P2 | feature |
+| IDP-043 | Signing Service verlangt Freigabenachweis | P2 | security |
+| **EPIC F — Föderation** |||
+| IDP-050 | GitHub als Upstream-IdP, mit Rollenschranke | P1 | config |
+| IDP-051 | Bestandsnutzer vorverknüpfen | P1 | feature |
+| IDP-052 | Kunden-IdP über OIDC/SAML | P3 | feature |
+| IDP-053 | Workload-Identity-Federation für CI | P3 | feature |
+| **EPIC G — Insider und Support** |||
+| IDP-060 | Impersonation zeitbegrenzt, begründet, sichtbar | P2 | security |
+| IDP-061 | Toob-Mitarbeiter ohne stehende Kundenrechte | P2 | process |
+| **EPIC H — Erkennung** |||
+| IDP-070 | Audit-Log nach Loki, unveränderlich, projektgetrennt | P1 | detect |
+| IDP-071 | Alarme auf sicherheitsrelevante Ereignisse | P1 | detect |
+| IDP-072 | Anomalie-Alarme: neue Geografie, neuer Authentikator | P2 | detect |
+| IDP-073 | Rate-Limits ohne DoS-Nebenwirkung | P1 | security |
+| **EPIC I — Nachweis** |||
+| IDP-080 | Angriffssimulation: AiTM-Phishing | P2 | process |
+| IDP-081 | Externe Sicherheitsprüfung vor dem ersten Kunden | P2 | process |
+| IDP-090 | Patch-Prozess mit Frist | P1 | process |
 
 ---
 
-## 10. Die nicht verhandelbare Grenze
+# EPIC A — Fundament, vor dem ersten Nutzer
 
-Provider dürfen nur die **Kosten** variieren (Erases, Writes, Dauer), nie die **Sicherheit**. Der TSM
-erzwingt auf jedem Chip: Es bootet immer entweder das alte oder das neue *verifizierte* Image, nie ein
-Halbzustand, und bis zum Confirm ist der Rückweg garantiert. Jeder neue Provider muss diese
-Invarianten gegen ein Modell beweisen, bevor er in die Registry darf.
+---
+
+### IDP-001 — Masterkey aus Vault, nie aus Datei
+
+**Prio:** P0 · **Typ:** security
+
+**Problem**
+Zitadel verschlüsselt Secrets in der Datenbank mit einem Masterkey. Wer Masterkey **und**
+Datenbank hat, hat die Identitätsinfrastruktur — inklusive aller Client-Secrets und
+IdP-Konfigurationen.
+
+Der Standardweg legt ihn in eine Datei oder eine Umgebungsvariable. Beides landet in Backups,
+Prozesslisten und Log-Ausgaben.
+
+**Lösung**
+Masterkey aus `secret/projects/identity/masterkey`, per Vault-Agent in ein Template gerendert,
+Dateimodus `0400`, Eigentümer `zitadel`. Die Lease-Regel der Plattform gilt: **mindestens 30
+Tage**, damit ein Vault-Ausfall den IdP nicht stoppt (`OPS-060`).
+
+Der Schlüssel wird bei der Einrichtung genau einmal erzeugt und offline gesichert — er ist
+nicht rotierbar, ohne die Datenbank neu zu verschlüsseln.
+
+**Akzeptanzkriterien**
+- [ ] Der Masterkey steht in keiner Umgebungsvariablen und in keinem Ansible-Vault-freien Pfad.
+- [ ] `systemctl show zitadel` und `/proc/<pid>/environ` enthalten ihn nicht.
+- [ ] Offline-Sicherung existiert und ihr Ort ist im Runbook vermerkt.
+
+---
+
+### IDP-002 — Datenbank, Backups, Bucket
+
+**Prio:** P0 · **Typ:** infra
+
+**Lösung**
+Eigene Ubicloud-Instanz `toob-idp-db`, kein geteiltes Schema. `sslmode=verify-full` wie im
+Bestand. Firewall-Pinning über den zentralen Pruner.
+
+**Backups sind so sensibel wie der IdP selbst.** Eigener Bucket
+`toob-idp-backups-<env>` — nicht der geteilte Vault-Bucket, dessen Löschpfad in `BEF-003`
+auffiel. Verschlüsselung at rest, WORM, eigene Zugriffsschlüssel.
+
+**Akzeptanzkriterien**
+- [ ] Kein anderer Dienst hat Zugriff auf `toob-idp-db`.
+- [ ] Backup-Bucket ist umgebungspräfigiert und von keinem Teardown-Pfad erfasst.
+- [ ] Ein Restore ist getestet (analog `OPS-020`).
+
+---
+
+### IDP-003 — Netz- und Edge-Härtung
+
+**Prio:** P0 · **Typ:** infra
+
+**Lösung**
+- Cloudflare vor `id.the-toob.com`, Origin-Cert, Full Strict. Ursprungs-IPs nur von
+  CF-Ranges erreichbar (Hetzner-Firewall).
+- **Admin-Konsole nicht öffentlich**: Zitadels Console-Pfad nur aus dem WireGuard-Netz
+  erreichbar, per Caddy-Matcher auf Quell-IP. Der Login-Endpunkt bleibt öffentlich, die
+  Verwaltungsoberfläche nicht.
+- Security-Header wie im Registry-Caddyfile, CSP eng.
+- Keine Introspection-Endpunkte öffentlich, wenn sie nicht gebraucht werden.
+- WAF-Regel gegen bekannte Phishing-Kit-Signaturen und ungewöhnliche `redirect_uri`-Muster.
+
+**Akzeptanzkriterien**
+- [ ] Portscan von außen: nur 443.
+- [ ] Console-Pfad aus dem Internet: `403`.
+- [ ] Ein Aufruf mit fremdem `Host`-Header wird abgewiesen.
+
+---
+
+### IDP-004 — Selbstregistrierung aus, Enumeration verhindern
+
+**Prio:** P0 · **Typ:** config
+
+**Problem**
+Offene Selbstregistrierung erzeugt Konten, die später über Einladungsfehler oder Social
+Engineering in Organisationen wandern. Und unterschiedliche Fehlermeldungen für „Nutzer
+existiert nicht" gegenüber „falsches Passwort" verraten, wer Kunde ist — für einen
+gezielten Angriff auf einen bestimmten Hersteller ist das der erste Schritt.
+
+**Lösung**
+- Registrierung ausschließlich per Einladung (`IDP-031`).
+- Login-Antworten und -Zeiten für existierende und nicht existierende Konten ununterscheidbar.
+- Kein Hinweis darauf, welche Faktoren registriert sind, bevor die Identität feststeht.
+
+**Akzeptanzkriterien**
+- [ ] `POST` auf den Registrierungspfad ⇒ abgelehnt.
+- [ ] Antwortzeit für existierendes und nicht existierendes Konto unterscheidet sich nicht
+      messbar (Messung über 1000 Versuche).
+
+---
+
+### IDP-005 — Instanz-Policies vor der ersten Org
+
+**Prio:** P0 · **Typ:** config
+
+**Problem**
+Zitadel-Organisationen erben Policies von der Instanz, können sie aber überschreiben. Werden
+die Instanz-Defaults erst nach der ersten Org gesetzt, gilt für diese weiter der alte Stand —
+und niemand merkt es.
+
+**Lösung**
+Alle Instanz-Policies festschreiben, **bevor** die erste Organisation existiert: Login-Policy,
+Passwort-Policy (ungenutzt, aber restriktiv als Sicherheitsnetz), MFA-Policy, Lockout-Policy,
+Domain-Policy. Als Terraform oder als versionierte API-Aufrufe, nicht per Klick.
+
+Zusätzlich: **Org-eigene Policy-Überschreibung deaktivieren**, wo möglich. Ein Kunde soll die
+MFA-Anforderung nicht senken können.
+
+**Akzeptanzkriterien**
+- [ ] Die Policy-Konfiguration liegt als Code vor und ist reproduzierbar anwendbar.
+- [ ] Eine neu angelegte Org erbt alle Einschränkungen (Negativtest: Versuch, MFA in einer Org
+      abzuschalten, schlägt fehl).
+
+> **Zu verifizieren:** Welche Policies Zitadel org-seitig überschreibbar lässt und ob sich das
+> instanzweit sperren lässt. Falls nicht, muss eine Action die Änderung zurücksetzen und
+> alarmieren.
+
+---
+
+# EPIC B — Authentifizierung
+
+---
+
+### IDP-010 — Stufenmodell L1/L2/L3 umsetzen
+
+**Prio:** P0 · **Typ:** config · **Ref:** E1, E2
+
+**Lösung**
+Drei Vertrauensstufen, die sich aus den registrierten Faktoren **ergeben** — nicht gesetzt
+werden:
+
+| Stufe | Bedingung |
+|---|---|
+| L1 | E-Mail verifiziert, Passwort + TOTP |
+| L2 | mindestens ein Passkey |
+| L3 | mindestens zwei Passkeys |
+
+Der Passkey-Weg ist der vorgegebene: Die Anmeldemaske bietet ihn zuerst an, der
+Passwort-Weg steht darunter als „andere Möglichkeit". Wer aus einem Unternehmensnetz kommt,
+das WebAuthn blockiert, oder ein altes Gerät nutzt, wird nicht ausgesperrt — er landet auf L1.
+
+Die Stufe wird bei jeder Faktoränderung neu berechnet und als Claim ins Token geschrieben.
+
+**Akzeptanzkriterien**
+- [ ] Ein Nutzer, der einen Passkey registriert, ist unmittelbar danach L2 — ohne Ticket.
+- [ ] Entfernt er ihn wieder, fällt er auf L1 zurück (Ausnahme: E4, siehe `IDP-012`).
+- [ ] Die Stufe steht als Claim im Token und ist im Produkt auswertbar.
+
+---
+
+### IDP-011 — Sichtbereich an die Stufe binden
+
+**Prio:** P0 · **Typ:** feature · **Ref:** E1
+
+**Problem**
+Ein `viewer` im Flottenprodukt ist nicht harmlos. Er sieht Geräte-IDs, ausgerollte
+Firmware-Versionen, **SBOM-Digests** — also welche bekannten Schwachstellen im Feld leben —
+und `staging_slot_erase_count`, also welche Geräte nahe am Lebensende sind.
+
+Das ist exakt die Aufklärung, die ein Lieferkettenangriff braucht: Welche Geräte sind
+angreifbar, welche werden bald ersetzt, wann rollt der Hersteller normalerweise aus.
+
+Ein Konto mit Passwort und TOTP darf diese Karte nicht liefern.
+
+**Lösung**
+
+| Datum | L1 | L2+ |
+|---|---|---|
+| Gerätezahl, Erfolgsquote, Versionsverteilung | ✓ aggregiert | ✓ |
+| Geräte-IDs, Einzelstatus | — | ✓ |
+| SBOM-Digests, CVE-Zuordnung | — | ✓ |
+| Verschleißdaten je Gerät | — | ✓ |
+| Audit-Log | — | ✓ |
+| Artefakt-Digests, `blob_path` | — | ✓ |
+
+Durchgesetzt im **Produkt**, nicht in der UI — ein L1-Token bekommt die Felder auch über die
+API nicht.
+
+**Akzeptanzkriterien**
+- [ ] `GET /v1/management/devices` liefert mit L1-Token nur Aggregate.
+- [ ] Kein Endpunkt gibt mit L1-Token einen SBOM-Digest oder eine Geräte-ID heraus.
+- [ ] Die Prüfung sitzt in der Autorisierungsschicht, nicht im Handler.
+
+---
+
+### IDP-011b — WebAuthn ohne Rückfallebene für L3
+
+**Prio:** P0 · **Typ:** config · **Ref:** E5
+
+**Problem**
+TOTP und Push sind gegen AiTM-Proxys wirkungslos — der Proxy leitet den Code in Echtzeit
+weiter. WebAuthn bindet die Assertion an den Origin und ist deshalb nicht relaybar.
+
+**Eine Rückfallebene macht die Maßnahme wertlos**, weil der Angreifer sie wählt.
+
+**Lösung**
+Rollen mit Geräteauswirkung (`operator`, `release-manager`, `admin`, `owner`) setzen L3
+voraus, und L3 kennt ausschließlich WebAuthn. Es gibt keinen Pfad, auf dem ein solches Konto
+sich mit TOTP anmeldet.
+
+Bevorzugt Authentikatoren mit User-Verification (PIN oder Biometrie), damit ein gestohlener
+Schlüssel allein nicht genügt.
+
+**Akzeptanzkriterien**
+- [ ] Ein Konto mit `operator` kann sich nicht per TOTP anmelden — auch nicht, wenn TOTP
+      früher registriert wurde.
+- [ ] Der Versuch, für ein L3-Konto TOTP als Faktor zu ergänzen, wird abgelehnt.
+
+---
+
+### IDP-011c — Registrierung weiterer Faktoren absichern
+
+**Prio:** P0 · **Typ:** security · **Ref:** E3
+
+**Problem**
+Das Anlegen eines Authentikators ist der Schritt, mit dem sich ein Angreifer nach einer
+Übernahme Persistenz verschafft. Erlaubt man es aus einer schwachen Sitzung, ist der neue
+Passkey nur so stark wie die Sitzung, aus der er entstand.
+
+**Lösung**
+
+| Vorgang | Voraussetzung |
+|---|---|
+| **erster** Passkey (L1 → L2) | L1-Sitzung genügt — mehr Schaden als L1 kann, entsteht nicht |
+| **jeder weitere** Authentikator | Bestätigung mit einem bereits registrierten Passkey |
+| Entfernen eines Authentikators | Bestätigung mit einem verbleibenden Passkey |
+
+Jede Änderung an der Faktorliste benachrichtigt den Nutzer **und** alle Org-Owner
+(`IDP-071`). Das ist der wichtigste Einzelalarm des ganzen Systems: Ein neuer Authentikator,
+den der Inhaber nicht selbst angelegt hat, ist eine laufende Übernahme.
+
+**Akzeptanzkriterien**
+- [ ] Ein zweiter Passkey lässt sich aus einer Passwort-Sitzung nicht anlegen.
+- [ ] Jede Faktoränderung erzeugt binnen 60 Sekunden eine Benachrichtigung.
+
+---
+
+### IDP-012 — Kein Abstieg für Konten, die L3 hatten
+
+**Prio:** P0 · **Typ:** feature · **Ref:** E4
+
+**Problem**
+Ohne diese Regel lautet der Angriff: Operator verliert seine Schlüssel, das Konto fällt auf
+den Passwort-Pfad zurück, und das Passwort wird angegriffen. Die gesamte L3-Absicherung ist
+dann über einen Umweg umgangen.
+
+**Lösung**
+Ein Konto, das jemals L3 erreicht hat, trägt eine dauerhafte Markierung:
+- Der Passwort-Login ist für dieses Konto deaktiviert und nicht reaktivierbar.
+- Fällt die Zahl der Authentikatoren unter zwei, wird die Rolle **suspendiert** (nicht
+  entzogen), Nutzer und Org-Owner werden benachrichtigt, und das Konto verharrt auf L2.
+- Bei null Authentikatoren greift ausschließlich `IDP-021` — kein Selbstbedienungspfad.
+
+Die Zwei-Schlüssel-Anforderung aus dem Stufenmodell hat genau hier ihren Zweck: Sie sorgt
+dafür, dass der Verlust eines Schlüssels ein Dienstagnachmittag ist und kein Notfall, in dem
+jemand unter Druck eine Ausnahme genehmigt.
+
+**Akzeptanzkriterien**
+- [ ] Rollenvergabe an ein L2-Konto ist nicht möglich; die Meldung nennt den fehlenden zweiten
+      Faktor.
+- [ ] Entfernen des zweiten Authentikators suspendiert die Rolle und benachrichtigt alle Owner.
+- [ ] Ein Konto mit der L3-Markierung kann sich unter keinen Umständen per Passwort anmelden.
+
+---
+
+### IDP-013 — Rollenabhängige Anforderung durchsetzen
+
+**Prio:** P1 · **Typ:** feature
+
+**Problem**
+Die Anforderung aus `IDP-011` muss **zum Zeitpunkt der Aktion** gelten, nicht nur beim Login.
+Ein Nutzer, der als `viewer` mit TOTP eingeloggt ist und dann `operator` erhält, hat eine
+Sitzung mit zu schwachem Niveau.
+
+**Lösung**
+Das Produkt prüft die `amr`- und `acr`-Claims des Tokens gegen die für die Aktion nötige
+Stufe. Reicht sie nicht, folgt eine Re-Authentifizierung (`IDP-040`) statt einer Ablehnung.
+
+**Akzeptanzkriterien**
+- [ ] Eine mit TOTP begonnene Sitzung kann keine Geräteoperation auslösen.
+- [ ] Der Nutzer bekommt eine Aufforderung zur Re-Authentifizierung, keine Fehlermeldung.
+
+> **Zu verifizieren:** Wie Zitadel `amr`/`acr` befüllt und ob sich eigene ACR-Werte definieren
+> lassen. Falls nicht, trägt eine Action einen eigenen Claim ein.
+
+---
+
+### IDP-014 — Sitzungsdauer, Token-TTL, Refresh-Rotation
+
+**Prio:** P1 · **Typ:** config
+
+**Lösung**
+
+| Wert | Einstellung | Begründung |
+|---|---|---|
+| Access-Token | 15 min | Offline-Verifikation, Diebstahlfenster klein |
+| Refresh-Token | 8 h, rotierend | Wiederverwendung eines rotierten Tokens = Diebstahl ⇒ Familie invalidieren |
+| Sitzung (Browser) | 12 h absolut, 30 min inaktiv | Ein vergessener Laptop ist kein Dauerzugang |
+| Step-up-Gültigkeit | 5 min | `IDP-040` |
+
+Refresh-Token-Rotation mit Reuse-Detection ist der wichtigste Punkt: Wird ein bereits
+eingelöster Refresh-Token erneut vorgelegt, wurde er gestohlen — die gesamte Token-Familie
+wird invalidiert und der Nutzer alarmiert.
+
+**Akzeptanzkriterien**
+- [ ] Wiederverwendung eines rotierten Refresh-Tokens invalidiert die Familie und erzeugt einen
+      Alarm.
+- [ ] Cookies: `Secure`, `HttpOnly`, `SameSite=Lax`, `__Host-`-Präfix.
+
+---
+
+### IDP-015 — Token-Bindung prüfen und aktivieren
+
+**Prio:** P2 · **Typ:** security
+
+**Problem**
+Ein Bearer-Token ist so gut wie sein Besitz. Wer ihn stiehlt — Malware, XSS, Log-Leck — kann
+ihn überall verwenden.
+
+**Lösung**
+DPoP (RFC 9449) bindet das Token an einen clientseitigen Schlüssel; ein gestohlenes Token ist
+ohne den privaten Schlüssel wertlos. Alternativ mTLS-gebundene Tokens für Maschinenpfade.
+
+> **Zu verifizieren:** DPoP-Unterstützung in Zitadel und in den Produkt-APIs. Falls nicht
+> verfügbar, bleibt `IDP-040` (Step-up) die wirksame Kompensation — ein gestohlenes Token
+> erlaubt dann Lesen, aber keine Auslieferung.
+
+---
+
+# EPIC C — Wiederherstellung und Notfallzugang
+
+---
+
+### IDP-020 — Selbstbedienungs-Reset abschalten
+
+**Prio:** P0 · **Typ:** config
+
+**Problem**
+Der meistgenutzte Übernahmepfad in der Praxis. Wer MFA erzwingt und dann Reset per E-Mail
+erlaubt, hat die MFA an das E-Mail-Konto delegiert.
+
+**Lösung**
+Für Konten mit privilegierten Rollen: kein Selbstbedienungs-Reset, kein Magic Link, keine
+SMS. Für `viewer` und `contributor` zulässig, aber ohne Rollenerhöhung nach der
+Wiederherstellung.
+
+**Akzeptanzkriterien**
+- [ ] „Zugang verloren" für ein `operator`-Konto führt zu einem Hinweis auf den Prozess aus
+      `IDP-021`, nicht zu einem automatischen Fluss.
+
+---
+
+### IDP-021 — Wiederherstellungsprozess
+
+**Prio:** P1 · **Typ:** process
+
+**Lösung**
+Vier Schritte, alle zwingend:
+
+1. **Anfrage außerhalb des Kanals** — nicht über das kompromittierbare E-Mail-Konto allein.
+2. **Verifikation durch einen Menschen** gegen eine bei Vertragsschluss hinterlegte
+   Kontaktperson des Kunden.
+3. **Wartezeit 24 Stunden**, in der alle Org-Owner benachrichtigt werden und widersprechen
+   können. Das ist der eigentliche Schutz: Ein Angreifer, der die Verifikation besteht, hat
+   trotzdem einen Tag, in dem der echte Inhaber es merkt.
+4. **Registrierung neuer Authentikatoren**, mindestens zwei, ohne Absenkung des Niveaus.
+
+Bei Widerspruch: sofortiger Abbruch, Sicherheitsvorfall, Sitzungen des betroffenen Kontos
+invalidiert.
+
+**Akzeptanzkriterien**
+- [ ] Der Prozess ist im Runbook, mit Namen der verantwortlichen Rolle.
+- [ ] Ein Testdurchlauf ist protokolliert.
+- [ ] Die Wartezeit ist technisch erzwungen, nicht organisatorisch zugesagt.
+
+---
+
+### IDP-022 — `IAM_OWNER` als Break-Glass-Konto
+
+**Prio:** P0 · **Typ:** security
+
+**Problem**
+Der Instanz-Administrator kann in Zitadel alles: jede Org verwalten, Nutzer anlegen, Policies
+ändern, Rollen vergeben. Ein übernommenes `IAM_OWNER`-Konto ist die Kompromittierung
+sämtlicher Kunden gleichzeitig.
+
+**Lösung**
+- Genau ein `IAM_OWNER`-Konto, **nicht im Alltag verwendet**.
+- Zwei Hardware-Schlüssel, physisch getrennt verwahrt.
+- Keine E-Mail-Adresse, die auch für anderes benutzt wird.
+- **Jede Anmeldung erzeugt sofort einen Alarm** — nicht „bei Auffälligkeit", sondern immer.
+- Alltägliche Toob-Arbeit läuft über org-gebundene Rollen (`IDP-061`).
+
+**Akzeptanzkriterien**
+- [ ] Es existiert genau ein Konto mit Instanz-Rechten.
+- [ ] Eine Anmeldung damit erzeugt binnen 60 Sekunden einen Alarm im Betriebskanal.
+- [ ] Kein Automatisierungspfad verwendet dieses Konto.
+
+---
+
+### IDP-023 — Break-Glass-Übung
+
+**Prio:** P2 · **Typ:** process
+
+**Lösung**
+Halbjährlich: Zugriff mit dem `IAM_OWNER`-Konto herstellen, gemessene Zeit protokollieren,
+Alarm verifizieren, Schlüssel zurück in die Verwahrung. Zusammen mit der Übung aus `OPS-023`.
+
+Ein ungeübter Notfallpfad ist keiner — das gilt hier wie beim WireGuard-Hub.
+
+---
+
+# EPIC D — Organisationen, Einladungen, Rollen
+
+---
+
+### IDP-030 — Projekt- und Rollenmodell
+
+**Prio:** P1 · **Typ:** config
+
+**Lösung**
+Zwei Zitadel-Projekte mit ihren Rollen:
+
+| Projekt | Rollen |
+|---|---|
+| `registry` | `contributor`, `core` |
+| `fleet` | `viewer`, `operator`, `release-manager`, `admin`, `owner` |
+
+Die Trennung zwischen `release-manager` (darf signieren lassen) und `operator` (darf ausrollen)
+ist Lieferkettenschutz: Ein übernommener Operator kann kein bösartiges Artefakt einschleusen,
+nur ein vorhandenes falsch ausrollen — und das ist über den Assignment-Verlauf rekonstruierbar.
+
+Als Code, nicht per Konsole.
+
+> **Zu verifizieren:** Welches Zitadel-Primitiv die org-gebundene Rolle trägt — Projektrolle
+> mit Org-Grant, Org-Member-Rolle oder User-Grant. Bestimmt die Claim-Struktur.
+
+---
+
+### IDP-031 — Einladungsfluss
+
+**Prio:** P1 · **Typ:** feature
+
+**Lösung**
+- Einladung ist **einmalig einlösbar**, läuft nach 72 Stunden ab, ist an die eingeladene
+  E-Mail gebunden.
+- Der Einladende sieht, ob sie eingelöst wurde.
+- Eine Einladung vergibt **niemals direkt** eine Rolle mit Geräteauswirkung — der Beitritt
+  erfolgt als `viewer`, die Erhöhung braucht `IDP-033`.
+- Widerruf jederzeit möglich.
+
+**Akzeptanzkriterien**
+- [ ] Ein zweiter Einlöseversuch derselben Einladung schlägt fehl.
+- [ ] Eine Einladung, die auf eine andere E-Mail eingelöst wird, schlägt fehl.
+
+---
+
+### IDP-032 — Org-Namensregeln über Action
+
+**Prio:** P1 · **Typ:** feature
+
+**Problem**
+Der Org-Name ist zugleich Paket-Scope (`@esp-alliance/foo`). Lässt Zitadel Namen zu, die
+`validate.ValidateOrgName` ablehnt, entstehen Organisationen, die keinen gültigen Scope ergeben
+— und der Fehler fällt erst beim ersten Publish auf.
+
+**Lösung**
+Action bei der Org-Erzeugung, die dieselbe Regel durchsetzt. Die Regel steht an einer Stelle
+und wird von der Action konsumiert, nicht nachgebaut.
+
+---
+
+### IDP-033 — Rollenerhöhung braucht Owner-Genehmigung
+
+**Prio:** P1 · **Typ:** feature
+
+**Lösung**
+Die Vergabe von `operator`, `release-manager` oder `admin` erfordert die Bestätigung eines
+`owner` **mit frischem Step-up**. Alle Org-Owner werden benachrichtigt.
+
+Damit reicht ein übernommener `admin` nicht, um sich still weitere Rechte zu verschaffen — der
+Vorgang ist sichtbar.
+
+**Akzeptanzkriterien**
+- [ ] Rollenerhöhung ohne Owner-Bestätigung ist nicht möglich.
+- [ ] Jede Erhöhung erzeugt eine Benachrichtigung an alle Owner.
+
+---
+
+### IDP-034 — Org-Spiegel in die Produkte
+
+**Prio:** P1 · **Typ:** feature
+
+**Lösung**
+Push aus Zitadel in `toob-registry.organizations`/`organization_members` und
+`toob-update.tenants`/`tenant_members`. Read-only im Produkt, geschrieben nur vom Sync.
+
+Damit liest `PolicyEngine.AuthorizeOrgAction` weiter lokal — kein Netzaufruf, kein
+Laufzeitpfad zum IdP.
+
+**Akzeptanzkriterien**
+- [ ] Eine Mitgliedschaftsänderung ist binnen 60 Sekunden im Produkt sichtbar.
+- [ ] Sync-Rückstand über 5 Minuten erzeugt einen Alarm.
+- [ ] Der Produktcode schreibt nachweislich nicht in die Spiegeltabellen (Grant-Test).
+
+---
+
+# EPIC E — Step-up und Freigabe
+
+---
+
+### IDP-040 — Step-up vor Geräteoperationen
+
+**Prio:** P1 · **Typ:** feature
+
+**Lösung**
+Vor Artefakt-Publish, Channel-Wechsel, Rollout-Start und Killswitch: frische
+Re-Authentifizierung mit phishing-resistentem Faktor, maximal fünf Minuten alt. Umgesetzt über
+`prompt=login` mit `max_age` und Prüfung von `auth_time`.
+
+**Wirkung:** Ein gestohlenes Session-Token erlaubt Lesen, aber keine Auslieferung. Das ist die
+Kompensation, falls `IDP-015` nicht verfügbar ist.
+
+**Akzeptanzkriterien**
+- [ ] Publish mit einem sechs Minuten alten `auth_time` wird abgelehnt.
+- [ ] Die Ablehnung führt zur Re-Authentifizierung, nicht zu einem Fehler.
+
+---
+
+### IDP-041 — Vier-Augen-Freigabe für Produktions-Channels
+
+**Prio:** P2 · **Typ:** feature
+
+**Problem**
+Ohne diese Maßnahme genügt **ein** kompromittiertes Konto für die gesamte Flotte. Alles davor
+macht das schwer — das hier macht es unzureichend.
+
+**Lösung**
+Ein Channel-Wechsel in Produktion erfordert die Freigabe von **zwei verschiedenen**
+`release-manager`, beide mit frischem Step-up. Die zweite Freigabe kann nicht vom Ersteller
+kommen.
+
+Pro Mandant abschaltbar, aber **Default an**, sobald Geräte in Produktion registriert sind.
+
+**Akzeptanzkriterien**
+- [ ] Ein Nutzer kann nicht beide Freigaben erteilen.
+- [ ] Die Abschaltung erfordert eine `owner`-Entscheidung und erzeugt einen Audit-Eintrag.
+
+---
+
+### IDP-042 — Soak-Zeit
+
+**Prio:** P2 · **Typ:** feature
+
+**Lösung**
+Zwischen der zweiten Freigabe und dem ersten ausgelieferten Byte liegen mindestens 30 Minuten,
+in denen jeder Org-Owner abbrechen kann. Alle Owner werden bei Freigabe benachrichtigt.
+
+**Warum das wichtig ist:** Es verwandelt einen erfolgreichen Angriff von „sofort auf allen
+Geräten" in „ein halbstündiges Erkennungsfenster". Für einen Angreifer, der auf Unauffälligkeit
+angewiesen ist, ist das ein erheblicher Unterschied.
+
+**Akzeptanzkriterien**
+- [ ] Kein Gerät bekommt eine Zuweisung vor Ablauf der Soak-Zeit.
+- [ ] Ein Abbruch innerhalb des Fensters verhindert jede Auslieferung.
+
+---
+
+### IDP-043 — Signing Service verlangt Freigabenachweis
+
+**Prio:** P2 · **Typ:** security
+
+**Problem**
+Solange der Signing Service auf reine Rollenzugehörigkeit hin signiert, umgeht ein direkter
+API-Aufruf die Freigabe aus `IDP-041`.
+
+**Lösung**
+Der Signing Service akzeptiert nur Anfragen mit einem Nachweis über zwei Freigaben und
+frischen Step-up. Ohne diesen Nachweis wird nicht signiert — unabhängig davon, welche Rolle
+der Aufrufer hat.
+
+Damit ist die Vier-Augen-Regel technisch durchgesetzt und nicht nur in der UI abgebildet.
+
+**Akzeptanzkriterien**
+- [ ] Ein direkter Aufruf des Signing Service ohne Freigabenachweis wird abgelehnt.
+- [ ] Der Nachweis ist an Artefakt-Digest und Channel gebunden, nicht wiederverwendbar.
+
+---
+
+# EPIC F — Föderation
+
+---
+
+### IDP-050 — GitHub als Upstream, mit Rollenschranke
+
+**Prio:** P1 · **Typ:** config
+
+**Problem**
+GitHub-Login ist gute UX und ein Risiko: Eine GitHub-Übernahme wäre eine Toob-Übernahme, und
+GitHubs eigene MFA kann SMS sein.
+
+Zusätzlich das klassische **Account-Linking-Problem**: Ein Upstream, der E-Mail-Adressen nicht
+verifiziert, erlaubt Verknüpfung mit einer fremden Identität.
+
+**Lösung**
+- GitHub bleibt Anmeldemethode für `contributor` und `viewer`.
+- **Für Geräterollen genügt GitHub nicht** — dort ist zusätzlich ein lokaler Passkey
+  erforderlich, unabhängig vom Anmeldeweg.
+- Automatische Verknüpfung nur bei verifizierter E-Mail; sonst manuelle Bestätigung.
+
+**Akzeptanzkriterien**
+- [ ] Ein per GitHub angemeldeter Nutzer mit `operator` muss vor einer Geräteoperation den
+      lokalen Faktor vorlegen.
+- [ ] Verknüpfung mit unverifizierter Upstream-E-Mail ist nicht automatisch möglich.
+
+---
+
+### IDP-051 — Bestandsnutzer vorverknüpfen
+
+**Prio:** P1 · **Typ:** feature
+
+**Lösung**
+Bestehende Registry-Nutzer über die Management-API anlegen und per `github_id` mit ihrer
+GitHub-Identität verknüpfen, damit der erste Login sie wiedererkennt statt ein Duplikat
+anzulegen.
+
+Wichtig: Verknüpfung über die **numerische** `github_id`, nicht über den Login-Namen — Namen
+sind änderbar und wiederverwendbar.
+
+> **Zu verifizieren:** Ob die Management-API das Vorverknüpfen externer Identitäten erlaubt.
+> Falls nicht, braucht der erste Login eine Action, die anhand der `github_id` zuordnet.
+
+---
+
+### IDP-052 — Kunden-IdP über OIDC/SAML
+
+**Prio:** P3 · **Typ:** feature
+
+Industriekunden wollen ihren eigenen IdP. Wichtig dabei: Auch dann bleibt die Anforderung aus
+`IDP-011` bestehen — entweder der Kunden-IdP liefert nachweislich einen phishing-resistenten
+Faktor (`amr`-Claim), oder es ist zusätzlich ein lokaler Passkey nötig.
+
+Ein Kunde darf sein eigenes Sicherheitsniveau senken — aber nicht unbemerkt, und nicht für
+Geräteoperationen.
+
+---
+
+### IDP-053 — Workload-Identity-Federation
+
+**Prio:** P3 · **Typ:** feature
+
+GitHub-/GitLab-OIDC-Token gegen kurzlebiges Toob-Token. Kein langlebiges Kundensecret mehr bei
+uns.
+
+Wichtig: Der Token-Tausch muss `repository`, `ref` und `workflow` prüfen — sonst kann jedes
+Repository derselben Organisation Firmware publizieren. Und Maschinenidentitäten erhalten
+**nie** `release-manager` für Produktions-Channels; sie können nach `dev` publizieren, die
+Promotion bleibt menschlich.
+
+---
+
+# EPIC G — Insider und Support
+
+---
+
+### IDP-060 — Impersonation zeitbegrenzt und sichtbar
+
+**Prio:** P2 · **Typ:** security
+
+**Problem**
+Die erste Frage eines Auditors: *Wer bei euch sieht unsere Flottendaten, und wie erfahren wir
+davon?* Ohne dieses Ticket lautet die Antwort „jeder mit DB-Zugriff, und ihr erfahrt es nicht".
+
+**Lösung**
+Support-Zugriff läuft ausschließlich über eine explizite Impersonation:
+- Begründung verpflichtend, freier Text
+- Zeitlich begrenzt, maximal 4 Stunden
+- Erscheint im **Audit-Log des Kunden**, nicht nur im unseren
+- Benachrichtigung an alle Org-Owner beim Start
+- Niemals mit `release-manager` — Support liest, Support liefert nicht aus
+
+**Akzeptanzkriterien**
+- [ ] Impersonation ohne Begründung ist nicht möglich.
+- [ ] Der Kunde sieht den Vorgang in seinem eigenen Audit-Log.
+- [ ] Impersonierte Sitzungen können keine Geräteoperationen auslösen.
+
+---
+
+### IDP-061 — Toob-Mitarbeiter ohne stehende Kundenrechte
+
+**Prio:** P2 · **Typ:** process
+
+**Lösung**
+Kein Toob-Konto hat dauerhaft Rollen in Kundenorganisationen. Zugriff entsteht nur über
+`IDP-060` und endet automatisch. Das Alltagskonto ist ein normales Konto mit Passkey.
+
+---
+
+# EPIC H — Erkennung
+
+---
+
+### IDP-070 — Audit-Log nach Loki
+
+**Prio:** P1 · **Typ:** detect
+
+**Lösung**
+Zitadels Ereignisstrom nach Loki, mit `project=identity` und Mandanten-Label
+(`X-Scope-OrgID` aus `BEF-009`). Aufbewahrung mindestens so lang wie die CRA-Retention der
+Flottendaten.
+
+Das Log ist selbst schützenswert: Es enthält, wer wann welche Flotte verwaltet hat.
+
+**Akzeptanzkriterien**
+- [ ] Alle Anmelde-, Rollen- und Policy-Ereignisse landen in Loki.
+- [ ] Ein Mandant sieht ausschließlich seine eigenen Ereignisse.
+
+---
+
+### IDP-071 — Alarme auf sicherheitsrelevante Ereignisse
+
+**Prio:** P1 · **Typ:** detect
+
+| Ereignis | Schwere |
+|---|---|
+| `IAM_OWNER`-Anmeldung | **kritisch, immer** |
+| Neuer Authentikator registriert | hoch — an Nutzer und Org-Owner |
+| Privilegierte Rolle vergeben | hoch |
+| MFA-Policy geändert | **kritisch** |
+| Refresh-Token-Reuse erkannt | **kritisch** |
+| Wiederherstellungsprozess gestartet | hoch |
+| Impersonation gestartet | hoch, auch an den Kunden |
+| Upstream-IdP-Konfiguration geändert | kritisch |
+
+Der Alarm auf „neuer Authentikator" ist besonders wichtig: Das ist der Schritt, den ein
+Angreifer nach der Übernahme unternimmt, um sich Persistenz zu verschaffen.
+
+---
+
+### IDP-072 — Anomalie-Alarme
+
+**Prio:** P2 · **Typ:** detect
+
+Neue Geografie oder neues ASN bei privilegierten Konten, ungewöhnliche Uhrzeit,
+fehlgeschlagene WebAuthn-Versuche in Serie (deutet auf AiTM-Versuch hin — der Proxy bekommt
+keine gültige Assertion und probiert weiter).
+
+Kein automatisches Blockieren, sondern Benachrichtigung plus erzwungenes Step-up bei der
+nächsten Aktion.
+
+---
+
+### IDP-073 — Rate-Limits ohne DoS-Nebenwirkung
+
+**Prio:** P1 · **Typ:** security
+
+**Problem**
+Harte Kontosperren nach N Fehlversuchen sind selbst ein Angriff: Ein Angreifer sperrt gezielt
+die Operatoren eines Kunden aus, kurz bevor ein Sicherheitsupdate ausgeliefert werden müsste.
+
+**Lösung**
+Progressive Verzögerung statt Sperre, kombiniert mit Alarmierung. Rate-Limits pro IP **und**
+pro Konto, Cloudflare-Regel davor. Eine echte Sperre nur nach menschlicher Entscheidung.
+
+**Akzeptanzkriterien**
+- [ ] 1000 Fehlversuche gegen ein Konto sperren es nicht aus, erzeugen aber einen Alarm.
+- [ ] Der legitime Inhaber kann sich während des Angriffs weiterhin anmelden.
+
+---
+
+# EPIC I — Nachweis
+
+---
+
+### IDP-080 — Angriffssimulation: AiTM-Phishing
+
+**Prio:** P2 · **Typ:** process
+
+**Lösung**
+Ein kontrollierter Versuch mit einem AiTM-Proxy gegen ein Testkonto mit Geräterolle. Erwartetes
+Ergebnis: **Der Angriff scheitert**, weil WebAuthn die Origin-Bindung durchsetzt.
+
+Derselbe Versuch gegen ein `viewer`-Konto mit TOTP: Erwartetes Ergebnis: er gelingt — und
+belegt damit, warum `IDP-011` keine Rückfallebene erlaubt.
+
+**Akzeptanzkriterien**
+- [ ] Beide Ergebnisse sind protokolliert.
+- [ ] Der Versuch gegen das Geräterollen-Konto erzeugt die Alarme aus `IDP-072`.
+
+---
+
+### IDP-081 — Externe Sicherheitsprüfung
+
+**Prio:** P2 · **Typ:** process
+
+Vor dem ersten Kunden mit Geräten im Feld. Schwerpunkt: Wiederherstellungsfluss,
+Einladungsfluss, Rollenerhöhung, Impersonation, Step-up-Umgehung.
+
+Der Wiederherstellungsfluss zuerst — dort liegen erfahrungsgemäß die Findings.
+
+---
+
+### IDP-090 — Patch-Prozess mit Frist
+
+**Prio:** P1 · **Typ:** process
+
+**Problem**
+Gegen eine Schwachstelle in Zitadel selbst hilft keine Konfiguration. Nur Geschwindigkeit.
+
+**Lösung**
+Abonnement der Zitadel-Sicherheitsmeldungen, feste Frist: kritische Lücken binnen 24 Stunden,
+hohe binnen 72 Stunden. Der Rolling-Deploy über zwei Knoten macht das unterbrechungsfrei.
+
+Ein Zitadel, das drei Versionen zurückliegt, macht jedes andere Ticket dieses Backlogs
+wirkungslos.
+
+---
+
+## Reihenfolge
+
+**Vor dem ersten echten Nutzer** — nicht nachrüstbar ohne Zeitfenster:
+`IDP-001` → `IDP-002` → `IDP-003` → `IDP-004` → `IDP-005` → `IDP-010` → `IDP-011` →
+`IDP-011b` → `IDP-011c` → `IDP-012` → `IDP-020` → `IDP-022`
+
+**Vor Produktivgang:**
+`IDP-030` → `IDP-031` → `IDP-032` → `IDP-033` → `IDP-050` → `IDP-051` → `IDP-034` →
+`IDP-013` → `IDP-014` → `IDP-040` → `IDP-021` → `IDP-070` → `IDP-071` → `IDP-073` → `IDP-090`
+
+**Vor dem ersten Kunden mit Flotte:**
+`IDP-041` → `IDP-042` → `IDP-043` → `IDP-060` → `IDP-061` → `IDP-015` → `IDP-072` →
+`IDP-023` → `IDP-080` → `IDP-081`
+
+**Danach:** `IDP-052`, `IDP-053`
+
+---
+
+## Merksatz
+
+> Alles vor `IDP-041` macht Kontoübernahme schwer. `IDP-041` bis `IDP-043` machen sie
+> unzureichend. Nur zusammen ergeben sie eine Antwort auf die Frage, warum ein Hersteller
+> uns die Kontrolle über hunderttausend Geräte anvertrauen sollte.

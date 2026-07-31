@@ -1,191 +1,312 @@
-# Recovery-OS — Backlog (v2)
+# Struktur — `toob-infra`
 
-Ziel: Den Core-seitigen Recovery-*Vertrag* dichtmachen und danach den `recovery/`-Source-Tree als
-dumme OTA-only-App bauen. Grundprinzip aus der Analyse: **Recovery bleibt dumm** — kein eigenes
-Krypto, keine zweite Root-of-Trust. Es streamt Bytes ins Staging, schreibt einen Mailbox-Request,
-rebootet; **Stage 1 verifiziert.** Auflösung läuft über `RECOVERY_RESOLVED`, das der Core idempotent
-faltet.
+**Zweck:** Zielstruktur für den heutigen `toob-registry/deploy/`-Baum, ausgerichtet auf
+`ARCHITEKTUR-devops.md` (fünf Projekte, Kontrollebene `toob-ops`, Spokes für Registry,
+Identity, Update, Staging).
 
-**Voraussetzung:** Der Patch `PATCH_boot_state_heal_then_crash.md` (Lücke 1, Heal-then-Crash) ist
-eingearbeitet. Dieser Backlog deckt die verbleibenden drei Vertragslücken (E1–E3) und den
-Source-Tree (E4) ab.
-
-**Ticket-Schema** — ID · Ziel · Berührt · Skizze · Fertig-wenn · Aufwand · Risiko · Hängt-an.
-**Aufwand** S ≤0,5 T · M 1–2 T · L 3–5 T. **Risiko** 🟢 mechanisch · 🟡 kritischer Pfad/RoT · 🔴 Design-Entscheidung.
+**Ausgangslage:** Der Umbau ist weiter fortgeschritten, als die Backlogs annehmen. Erledigt
+oder größtenteils erledigt sind `OPS-004` (Image-Split), `OPS-005` (Rollen), `OPS-020`
+(Restore-Test), `OPS-060` (Baseline-Modul, angefangen), `BEF-007` (notify-recovery),
+`BEF-008` (`versions.json`), `BEF-012` (Nomad-Templates).
 
 ---
 
-## D0 — Scope-Entscheidungen (zuerst treffen, sie steuern den Aufwand aller Tickets)
+## 1. Die drei Strukturprobleme
 
-Diese drei Fragen sind keine Tickets, sondern Weichen. Jede ist im zugehörigen Epic als Entscheidung
-verankert; hier gebündelt, weil sie sich gegenseitig beeinflussen.
+### P1 — Zwei parallele Terraform-Welten
 
-- **D0-A — Recovery-Kanal.** Lokal (USB-DFU/seriell/BLE) vs. netzfähig (WiFi+TLS). *Empfehlung:
-  lokal zuerst.* Netzfähiges Recovery ist fast app-groß, erbt jeden Netz-Fehlermodus und verbrennt
-  bei Netzfehlern still das Recovery-Fenster (siehe E1). Netz nur, wenn „unbeaufsichtigte Heilung
-  ohne physischen Zugriff" hartes Requirement ist. → steuert E4-T2.
-- **D0-B — Recovery updatebar?** Immutable (factory-locked) vs. zweistufig (winziges immutables
-  Minimal-Recovery reflasht größeres) vs. eigenes A/B. *Empfehlung: immutable + klein für den
-  Start.* → steuert E3.
-- **D0-C — Was heißt „resolved"?** „Neues App-Image gestaged" (Standard, vom Code so gelebt) vs.
-  „gibt auf, App nochmal versuchen". *Empfehlung: „gestaged", und der Folge-App-Boot ist tentative*
-  (E2). → steuert E2 + E4-T4.
+```
+terraform/cloudflare/     ┐
+terraform/database/       │  nach Ressourcentyp — der alte Schnitt
+terraform/s3/             │
+terraform/worker/         ┘
+terraform/modules/        ┐  nach Wiederverwendbarkeit — der neue Schnitt
+terraform/projects/       ┘
+```
 
----
+Beide Strukturen existieren nebeneinander, und aus dem Baum ist nicht ablesbar, welche
+autoritativ ist. `stages/terraform.go` iteriert über `{s3, database, control-plane,
+cloudflare}` — also die alte Welt; `projects/` wird von der CLI noch gar nicht angefasst.
 
-# E1 — Recovery-Erschöpfung entkoppeln (Vertragslücke 2)
+Solange das so bleibt, kann ein `terraform apply` in `projects/registry` und eines in
+`terraform/database` dieselbe Ubicloud-Instanz beanspruchen.
 
-Problem: `boot_rollback_evaluate_os` nutzt einen einzigen `boot_failure_counter` für App *und*
-Recovery. Ein Recovery-OS, das selbst wiederholt crasht (kaputtes Image, Netzfehler in Schleife),
-zählt denselben Counter hoch, überschreitet `limit_rec` und fällt in den **Unattended-Backoff oder
-Panic** — ohne dass je eine lokale Rescue-Schnittstelle drankam. Das grobe Sicherheitsnetz kann die
-Rettung selbst aussperren.
+**Auflösung:** Die vier alten Verzeichnisse werden zu Modulen, `projects/` komponiert sie.
+Ein Projekt ist dann eine Datei, die sagt „ich brauche ein Netz, zwei Knoten, eine Datenbank
+und zwei Hostnames" — und nicht fünf Verzeichnisse, die man in der richtigen Reihenfolge
+anfassen muss.
 
-### E1-T1 — App- und Recovery-Fehlversuche trennen                             [M · 🔴]
-Ziel        Ein separater `recovery_failure_counter` in der TMR, damit Recovery-Crashes nicht das
-            App-Fenster verbrennen und umgekehrt.
-Berührt     `boot_journal.h` (`wal_tmr_payload_t`, neues Feld aus `reserved`-Tail; `struct_version`
-            bump; `WAL_TMR_POPULATED_SIZE`), `boot_rollback.c`, `boot_state.c`.
-Skizze      Beim Recovery-Boot (`booted_partition == RECOVERY`) inkrementiert ein Crash den
-            `recovery_failure_counter`, nicht den App-Counter. `boot_rollback_evaluate_os` liest
-            beide.
-Fertig wenn Recovery-Crashes lassen den App-Counter unberührt (Test); ein reparierter App-Boot
-            heilt den App-Counter, nicht den Recovery-Counter.
-Hängt an    D0-B (Zählerlogik hängt an updatebar/immutable)
+### P2 — Hohle Rollen, die nach außen greifen
 
-### E1-T2 — Recovery eskaliert nie terminal, sondern in lokale Rescue          [M · 🟡]
-Ziel        Aus dem Recovery-Kontext heraus wird **nie** in den Unattended-Backoff-Sleep oder Panic
-            eskaliert. Erschöpftes Recovery → definierte lokale Rescue (UART/DFU-Warteschleife),
-            damit ein Mensch/Tool immer eine Chance hat.
-Berührt     `boot_rollback.c` (`boot_rollback_evaluate_os`, Terminal-Zweig).
-Skizze      Wenn `recovery_failure_counter` erschöpft: statt `enter_low_power`/`boot_panic` gezielt
-            `boot_panic(BOOT_RECOVERY_REQUESTED)` (Serial-Rescue) — nie der stille Akku-Backoff.
-Fertig wenn Ein dauerhaft crashendes Recovery landet in der Rescue-Schleife, nicht im
-            136-Jahre-Backoff; App-seitiger Backoff bleibt unverändert.
-Hängt an    E1-T1
+Alle zwölf Rollen enthalten ausschließlich `tasks/main.yml` (Ausnahmen: `wg-hub`, `wg-peer`,
+`zitadel` haben Templates bzw. Handler). Die Dateien, die sie ausrollen, liegen daneben:
+`caddy/Caddyfile.j2`, `monitoring/prometheus/*`, `vault/*.hcl.j2`, `nomad/*.j2`.
 
----
+Die Rollen müssen also mit `src: "../../../caddy/Caddyfile.j2"` hinausgreifen — dasselbe
+Muster wie im alten Monolith-Playbook. Eine Rolle, die das tut, ist nicht für sich testbar
+und nicht in ein anderes Playbook übertragbar.
 
-# E2 — Reparierter Boot wird tentative (Vertragslücke 3)
+**Auflösung:** Was Ansible ausrollt, gehört in die Rolle. Was andere Werkzeuge konsumieren
+(Terraform, Packer, Release-Skripte), bleibt außerhalb.
 
-Problem: In Step 5 wird `requires_confirmation`/`is_tentative_boot` nur bei
-`open_txn.intent == WAL_INTENT_TXN_COMMIT` gesetzt. Nach einer Recovery-Reparatur heilt der Core den
-Counter und bootet die App — aber **ohne Tentative-Nonce**, also ohne Confirm-Zwang. Eine schlechte
-Reparatur wird erst über die normale Crash-Kaskade wieder gefangen; der schnelle Sicherheitsgurt
-fehlt genau nach der Reparatur.
+### P3 — Generiertes und Geheimes im Baum
 
-### E2-T1 — Recovery-reparierten App-Boot als tentative markieren              [M · 🟡]
-Ziel        Ein App-Boot, der aus `RECOVERY_RESOLVED`-Heilung hervorgeht, bekommt eine
-            Tentative-Nonce und muss confirmen — sonst schneller Rückfall statt stiller
-            Crash-Kaskade.
-Berührt     `boot_state.c` (Step 2 Heilungszweig setzt Marker; Step 5
-            `requires_confirmation`-Bedingung erweitern).
-Skizze      Neben `TXN_COMMIT` auch „geheilt aus Recovery in diesem Boot" als
-            `requires_confirmation`-Auslöser; nutzt denselben `healed_this_boot`-Kontext wie der
-            Heal-then-Crash-Patch.
-Fertig wenn Nach Recovery-Reparatur ist `is_tentative_boot == true`, Nonce registriert; bleibt der
-            Confirm der reparierten App aus, folgt zügiger Rückfall (Test).
-Hängt an    D0-C, Patch (Heal-then-Crash, für `healed_this_boot`)
+| Pfad | Art |
+|---|---|
+| `.toob-ops-secrets.dev.json` | **Secrets** — siehe `BEF-001`, `BEF-002` |
+| `.toob-ops-state.dev.json`, `.dryrun` | Laufzeitzustand |
+| `terraform/*/tfplan` | **Plan-Dateien mit aufgelösten Variablenwerten**, u. a. das Cloudflare-Token |
+| `terraform/*/.terraform/providers/**` | Provider-Binaries, hier für **zwei** Plattformen (`linux_amd64` und `windows_amd64`) |
+| `terraform/*/.terraform/terraform.tfstate` | Backend-Cache |
+| `packer/packer-manifest.json` | Build-Ausgabe |
+| `api/.last_tag.dev` | Laufzeitzustand |
+| `logs/dev/` | Laufzeitausgabe |
+
+Die Provider-Binaries sind der größte Posten: `terraform-provider-cloudflare_v5.19.1.exe`
+und `terraform-provider-aws_v5.100.0_x5` liegen jeweils in beiden Plattformvarianten. Das
+sind mehrere hundert Megabyte, die bei jedem Clone mitkommen.
+
+> **Zu prüfen:** Ob diese Pfade tatsächlich in Git stehen oder nur lokal existieren, kann ich
+> aus dem Verzeichnisbaum nicht sehen. `git ls-files terraform/ | grep -c '\.terraform/'`
+> beantwortet es. Falls sie getrackt sind, ist eine History-Bereinigung nötig — und für das
+> Cloudflare-Token in `tfplan` gilt `BEF-001` sinngemäß.
 
 ---
 
-# E3 — Recovery-Update brownout-sicher (Vertragslücke 4, gefährlichste)
+## 2. Zielstruktur
 
-Problem: Der Recovery-Slot wird via Multi-Image **in-place** aktualisiert
-(`TBM1_SLOT_RECOVERY` → `CHIP_RECOVERY_OS_ABS_ADDR`). Ein Stromausfall mitten im Recovery-Update
-hinterlässt ein halb-geschriebenes Recovery — **die Rückfallebene selbst ist beim eigenen Update
-angreifbar.** Wenn Recovery kaputt ist, ist das letzte Sicherheitsnetz weg.
+```
+toob-infra/
+├── .gitignore                        ← neu, siehe §4
+├── README.md                         Einstieg: welches Kommando für welchen Zweck
+├── versions.json                     einzige Versionsquelle (Nomad, Vault, Terraform, …)
+├── Dockerfile.ops                    Tooling-Container
+│
+├── terraform/
+│   ├── modules/                      wiederverwendbar, kennen kein Projekt
+│   │   ├── project-baseline/         Netz, Subnetz, Firewall-Baseline, WG-Peer-Eintrag
+│   │   ├── spoke-nodes/              Knoten aus toob-base, Rollen-Meta, Platzierung
+│   │   ├── ubicloud-postgres/        ← aus terraform/database/
+│   │   ├── object-storage/           ← aus terraform/s3/
+│   │   ├── edge-hostname/            ← aus terraform/cloudflare/, ein Hostname je Aufruf
+│   │   └── nomad-workers/            ← aus terraform/worker/, nur Registry
+│   │
+│   └── projects/                     komponiert Module, kennt keine Ressourcendetails
+│       ├── ops/                      main.tf, vault_cluster.tf, hub.tf
+│       ├── registry/                 je Umgebung über Workspaces oder tfvars
+│       ├── identity/
+│       ├── update/
+│       └── staging/
+│
+├── packer/
+│   ├── base.pkr.hcl                  toob-base
+│   ├── worker.pkr.hcl                toob-worker = base + Firecracker
+│   └── scripts/
+│       ├── install-base.sh
+│       ├── install-binaries.sh       liest versions.json
+│       └── install-worker.sh
+│
+├── ansible/
+│   ├── ansible.cfg
+│   ├── site.yml                      Verteiler auf die Projekt-Playbooks
+│   ├── playbooks/
+│   │   ├── ops.yml                   wg-hub, vault-kms, vault-primary, monitoring, ci-runner
+│   │   ├── registry.yml              common, wg-peer, caddy, nomad
+│   │   ├── identity.yml              common, wg-peer, caddy, zitadel
+│   │   ├── update.yml                common, wg-peer, caddy, update-service
+│   │   └── staging.yml
+│   ├── group_vars/
+│   │   ├── all.yml
+│   │   └── <projekt>.yml
+│   ├── inventory/                    generiert von toob-ops → .gitignore
+│   └── roles/
+│       └── <rolle>/
+│           ├── defaults/main.yml     überschreibbare Werte
+│           ├── tasks/main.yml
+│           ├── handlers/main.yml
+│           ├── templates/            .j2 dieser Rolle
+│           └── files/                statische Dateien dieser Rolle
+│
+├── vault/                            was NICHT Ansible ausrollt
+│   ├── policies/
+│   │   ├── platform/                 autounseal, backup, monitoring, deployer, cosign
+│   │   └── projects/
+│   │       ├── registry/             registry-api, -worker, -autoscaler, nomad-*
+│   │       ├── identity/             identity-service, workload-identity
+│   │       └── update/               update-service
+│   └── operator_gpg_keys/            → .gitignore, aber Verzeichnis mit .gitkeep
+│
+├── nomad/                            nur Registry — bewusst nicht projektabstrahiert
+│   └── jobs/
+│       ├── registry-api.nomad.hcl
+│       ├── registry-migrate.nomad.hcl
+│       ├── registry-worker.nomad.hcl
+│       └── registry-autoscaler.nomad.hcl
+│
+├── monitoring/                       Konfiguration, die Ansible als Datei ausrollt
+│   ├── prometheus/
+│   │   ├── rules/
+│   │   │   ├── common.yml            InstanceDown, DiskSpace, Backup, Watchdog
+│   │   │   ├── registry.yml          Autoscaler, Worker-Queue, Nomad
+│   │   │   ├── identity.yml
+│   │   │   ├── update.yml
+│   │   │   └── platform.yml          Vault, TLS-Rotation, Token-TTL, Restore-Test
+│   │   └── blackbox.yml
+│   └── grafana/
+│       └── dashboards/
+│           ├── platform/             ops-home, vault-security, infrastructure
+│           └── projects/
+│               ├── registry/         api-performance, worker-pipeline
+│               ├── identity/
+│               └── update/
+│
+├── release/                          ehemals api/deploy.sh, zerlegt
+│   ├── sign.sh                       Cosign gegen Vault Transit — gemeinsam
+│   ├── verify.sh                     gemeinsam
+│   ├── deploy-nomad.sh               Registry
+│   └── deploy-systemd.sh             Identity, Update (rolling)
+│
+├── scripts/
+│   ├── break-glass.sh
+│   ├── gen-admin-wg.sh
+│   ├── restore-test.sh               ← aus vault/scripts/
+│   └── shutdown-test.sh              OPS-080 ff.
+│
+└── runbooks/
+    ├── vault-migration.md
+    ├── break-glass.md
+    ├── restore.md
+    └── project-onboarding.md
+```
 
-Die Umsetzung hängt an **D0-B**:
-
-### E3-T1a — Variante immutable: Recovery-Update abweisen                      [S · 🔴]
-Ziel        Wenn D0-B = immutable: `TBM1_SLOT_RECOVERY` wird aus der Multi-Image-Whitelist entfernt;
-            ein Manifest mit Recovery-Sub-Image wird sauber abgelehnt (kein in-place-Risiko).
-Berührt     `boot_state.c` (`stage_swap` Whitelist + Slot-Mapping), Manifest-Compiler (Slot
-            verbieten).
-Fertig wenn Ein Recovery-Sub-Image führt zu definiertem Reject, nie zu einem in-place-Write;
-            Recovery bleibt factory-locked.
-Hängt an    D0-B
-
-### E3-T1b — Variante zweistufig/A-B: brownout-sicheres Recovery-Update        [L · 🔴]
-Ziel        Wenn D0-B = updatebar: Recovery-Update erhält dieselbe WAL-journaled, resume-fähige
-            Semantik wie der App-Swap — entweder eigenes A/B oder ein winziges immutables
-            Minimal-Recovery, das das größere reflasht und dabei einen halben Schreibvorgang beim
-            nächsten Boot fortsetzt.
-Berührt     `boot_state.c`, `boot_swap.c`/`boot_multiimage.c`, Flash-Map (zweiter Recovery-Slot bzw.
-            Minimal-Recovery-Region), `boot_rollback.c` (`ROLLBACK_TARGET_RECOVERY`-SVN-Persistenz).
-Fertig wenn Power-Cut mitten im Recovery-Update → beim nächsten Boot existiert immer ein bootbares
-            Recovery (das alte oder das fertige neue), nie ein halbes.
-Hängt an    D0-B
+**Bleibt in `toob-registry`** (baut das Produkt, deployt es nicht):
+`api/Dockerfile.api`, `compiler/` vollständig, `worker/Makefile`, `worker/build-rootfs.sh`,
+`worker/setup-host.sh`.
 
 ---
 
-# E4 — `recovery/` Source-Tree (die dumme OTA-only-App)
+## 3. Verschiebetabelle
 
-Erst bauen, wenn E1–E3 den Vertrag dichtgemacht haben — sonst baut Recovery auf einer Heilung/einem
-Update-Pfad, der nicht hält.
-
-### E4-T1 — Recovery-Grundgerüst: Handoff lesen, Modus erkennen                [M · 🟢]
-Ziel        Minimal-App, die via `toob_get_handoff()` prüft `booted_partition == RECOVERY`,
-            `TOOB_OS_INIT_OR_PANIC()` läuft, sonst nichts tut. Kein Krypto, kein Netz.
-Berührt     neu `recovery/main.c`, bindet libtoob + `toob_port.h`.
-Fertig wenn Recovery bootet, erkennt seinen Modus, ist ein eigenständiges, verifizierbares Image
-            (eigenes TBM1-Header, `TBM1_SLOT_RECOVERY`).
-Hängt an    —
-
-### E4-T2 — Reparatur-Kanal (gemäß D0-A)                                       [L · 🔴]
-Ziel        Recovery bezieht ein funktionierendes App-Image und streamt es via
-            `toob_ota_begin/process_chunk/finalize` ins Staging — Kanal je nach D0-A.
-Berührt     `recovery/`; bei lokal: DFU/seriell-Empfang; bei Netz: `os_client`-Wiederverwendung.
-Skizze      Kein Verify im Recovery — `finalize` schreibt `MBX_CMD_UPDATE_PENDING`; Stage 1
-            verifiziert beim nächsten Boot. Recovery bleibt damit ohne Root-of-Trust.
-Fertig wenn Recovery lädt ein App-Image in Staging und registriert es; ein absichtlich korruptes
-            Image wird von Stage 1 (nicht von Recovery) abgelehnt.
-Hängt an    D0-A, E4-T1
-
-### E4-T3 — Auflösung: `toob_recovery_resolved()` sauber aufrufen              [S · 🟡]
-Ziel        Nach erfolgreichem Staging ruft Recovery `toob_recovery_resolved()` (Mailbox
-            `RECOVERY_RESOLVED`) und rebootet. Der Core heilt (mit dem Patch: korrekt auf 0) und
-            bootet die reparierte App.
-Berührt     `recovery/main.c`.
-Fertig wenn End-to-End: Crash-Kaskade → Recovery-Boot → Reparatur → resolved → App bootet,
-            App-Counter = 0 (Patch), reparierte App ist tentative (E2-T1).
-Hängt an    E4-T2, E2-T1, Patch
-
-### E4-T4 — Status-/Anzeige-Integration (SWEV-T9)                              [S · 🟢]
-Ziel        Recovery bindet denselben `toob_swap_notify_fn`-Herstellertreiber wie die App ein und
-            zeichnet `phase = TOOB_SWAP_PHASE_RECOVERY` — reiche Anzeige trivial, weil volles OS.
-Berührt     `recovery/main.c`; Wiederverwendung der Swap-Event-Naht.
-Fertig wenn Recovery zeigt „Firmware wird neu geladen" über denselben Treibercode wie die App
-            (Ebene C aus dem Swap-Display-Backlog).
-Hängt an    E4-T1
-
-### E4-T5 — Roach-Motel-Test: Recovery kann sich nicht selbst einsperren       [M · 🟡]
-Ziel        Der Integrationstest, der beweist, dass Recovery immer einen Ausweg hat — die zentrale
-            Garantie des ganzen Epics.
-Berührt     Test-Harness.
-Skizze      Szenarien: (a) Recovery repariert erfolgreich → App bootet, Counter 0; (b) Recovery
-            crasht wiederholt → landet in lokaler Rescue (E1-T2), nie im stillen Backoff;
-            (c) Power-Cut während Recovery-Update → bootbares Recovery bleibt (E3).
-Fertig wenn Alle drei Szenarien grün; kein Pfad führt in einen Zustand ohne
-            Mensch-/Tool-Eingriffsmöglichkeit.
-Hängt an    E1-T2, E3, E4-T3
+| Von | Nach | Begründung |
+|---|---|---|
+| `caddy/Caddyfile.j2` | `ansible/roles/caddy/templates/` | Rolle besitzt ihre Dateien |
+| `caddy/caddy.service` | `ansible/roles/caddy/files/` | |
+| `vault/vault.hcl.j2`, `vault.service`, `vault.logrotate` | `ansible/roles/vault-primary/{templates,files}/` | |
+| `vault/unseal-vault.hcl.j2`, `unseal-vault.service` | `ansible/roles/vault-kms/{templates,files}/` | |
+| `vault/scripts/init.sh`, `seed.sh` | `ansible/roles/vault-primary/files/` | von Ansible ausgeführt |
+| `vault/scripts/init-unseal.sh` | `ansible/roles/vault-kms/files/` | |
+| `vault/scripts/backup.sh` | `ansible/roles/vault-primary/files/` | als Timer ausgerollt |
+| `vault/scripts/backup-unseal.sh` | `ansible/roles/vault-kms/files/` | |
+| `vault/scripts/restore-test.sh` | `scripts/` | läuft auf `ops-hub`, nicht Teil einer Rolle |
+| `vault/policies/*.hcl` | `vault/policies/{platform,projects/*}/` | Projektzuordnung sichtbar machen |
+| `monitoring/**` (außer `grafana/`, `prometheus/rules`) | `ansible/roles/monitoring/{templates,files}/` | |
+| `monitoring/systemd/notify-*` | `ansible/roles/common/files/` | jede Rolle nutzt `OnFailure` |
+| `monitoring/alloy/config.alloy.j2` | `ansible/roles/common/templates/` | Alloy läuft überall |
+| `nomad/{client,server}.hcl.j2`, `nomad.service` | `ansible/roles/nomad/{templates,files}/` | |
+| `nomad/vault-agent*.hcl`, `templates/nomad-tls.json.tpl` | `ansible/roles/nomad/{files,templates}/` | |
+| `nomad/scripts/*` | `ansible/roles/nomad/files/` | |
+| `nomad/registry-*.nomad.hcl` | `nomad/jobs/` | von `release/deploy-nomad.sh` konsumiert, nicht von Ansible |
+| `nomad/{client,server}.hcl` | **löschen** | Templates ersetzen sie (BEF-012) |
+| `ansible/files/cleanup-db-firewall.py` | `ansible/roles/ubicloud-db/files/` | |
+| `terraform/database/` | `terraform/modules/ubicloud-postgres/` | |
+| `terraform/s3/` | `terraform/modules/object-storage/` | |
+| `terraform/cloudflare/` | `terraform/modules/edge-hostname/` | ein Hostname je Aufruf (OPS-00B) |
+| `terraform/worker/` | `terraform/modules/nomad-workers/` | |
+| `api/deploy.sh` | `release/` (zerlegt, siehe §5) | |
+| `api/seccomp-api.json`, `toob-api-hardening.service` | `ansible/roles/nomad/files/` | auf Nomad-Clients ausgerollt |
+| `logs/` | **entfernen**, `.gitignore` | Laufzeitausgabe |
 
 ---
 
-## Reihenfolge
+## 4. `.gitignore`
 
-1. **D0-A/B/C** entscheiden — sie bestimmen E2/E3/E4-Aufwand.
-2. **E1** (Erschöpfung entkoppeln) + **E2** (tentative Reparatur) — die zwei restlichen
-   Vertragslücken im Boot-Pfad; unabhängig voneinander, beide bauen auf dem Heal-then-Crash-Patch.
-3. **E3** (brownout-sicheres Recovery-Update) — Variante nach D0-B; die gefährlichste Lücke, aber
-   erst relevant, wenn Recovery überhaupt updatebar sein soll.
-4. **E4** (Source-Tree) — zuletzt, gegen den dann dichten Vertrag.
-5. **E4-T5** als Abschluss-Gate.
+Vor allen Verschiebungen. Die Datei liegt separat als `gitignore-toob-infra.txt` bei.
 
-## Kern-Garantie, die am Ende grün sein muss
+Zwei Einträge sind sicherheitsrelevant und nicht optional:
 
-**Kein Pfad sperrt die Rettung aus.** Nach erfolgreichem Recovery ist der App-Counter sauber 0
-(Patch), die reparierte App ist tentative (E2), ein crashendes Recovery landet in lokaler Rescue
-statt im stillen Backoff (E1), und ein Power-Cut im Recovery-Update lässt immer ein bootbares
-Recovery zurück (E3). Recovery ist dumm (kein eigenes Krypto), Stage 1 verifiziert (E4).
+```gitignore
+.toob-ops-secrets.*.json      # Vault-Token, Nomad-Token, WireGuard-Keys
+**/tfplan                     # aufgelöste Variablenwerte, u. a. Cloudflare-Token
+```
+
+Vier weitere sparen Volumen und Verwirrung:
+
+```gitignore
+**/.terraform/                # Provider-Binaries, zwei Plattformen
+*.tfstate*
+wg0.*.conf
+packer/packer-manifest.json
+```
+
+---
+
+## 5. Warum `deploy.sh` zerlegt wird
+
+Heute macht `api/deploy.sh` vier Dinge: bauen, signieren, verifizieren, per Nomad ausrollen.
+Für Identity und Update wird der mittlere Teil gebraucht — dieselbe Cosign-Logik gegen
+denselben Vault-Transit-Pfad — aber weder Docker-Build noch Nomad.
+
+Ohne Zerlegung dupliziert `OPS-071` (`rolling-deploy.sh`) die Signaturkette. Dann existiert
+sie zweimal, und beim nächsten Cosign-Update wird eine davon vergessen.
+
+```
+release/sign.sh      ← cmd_sign      gemeinsam
+release/verify.sh    ← cmd_verify    gemeinsam, inkl. der Retry-Schleife für
+                                     Registry-Propagation
+release/deploy-nomad.sh    ← cmd_deploy   Registry
+release/deploy-systemd.sh                 Identity, Update
+```
+
+`cmd_build` wandert in die Registry-CI — es braucht `Dockerfile.api` und den Repo-Kontext,
+beides Produkt und nicht Infrastruktur.
+
+Bei der Gelegenheit gehört ein Kommentar an `verify.sh`: `--insecure-ignore-tlog` ist bei
+einem selbstverwalteten Transit-Key richtig, weil die Signatur nie in Rekor landet — aber
+der Flag-Name suggeriert das Gegenteil (`BEF-016`).
+
+---
+
+## 6. Was die Struktur bewusst *nicht* abstrahiert
+
+**`nomad/` bleibt registry-spezifisch.** Nur die Registry hat dynamische Workloads. Ein
+`nomad/jobs/<projekt>/`-Schema würde eine Projektdimension suggerieren, die es nicht gibt,
+und die vier Jobspecs sind alle registry-eigen.
+
+**Kein `projects/<name>/` als oberste Ebene.** Naheliegend, aber es würde Terraform, Ansible,
+Monitoring und Release-Skripte pro Projekt vervielfachen — obwohl sich alle vier zu über
+achtzig Prozent gleichen. Die Projektdimension gehört dahin, wo sie echte Unterschiede
+trägt: `terraform/projects/`, `ansible/playbooks/`, `monitoring/*/projects/`,
+`vault/policies/projects/`. Sonst nirgends.
+
+**Umgebungen bekommen keine Verzeichnisebene.** Registry existiert dreifach
+(prod/dev/staging), Identity und Update je zweifach. Das über Verzeichnisse abzubilden
+erzeugt neun fast identische Bäume. Terraform-Workspaces oder `<projekt>.<env>.tfvars` sind
+der richtige Ort — die CLI kennt die Dimension über `--env` bereits.
+
+---
+
+## 7. Reihenfolge
+
+Jeder Schritt ist einzeln gegen `--env dev` verifizierbar.
+
+| # | Schritt | Verifikation |
+|---|---|---|
+| 1 | `.gitignore`, generierte Dateien entfernen, History prüfen | `git ls-files` ist sauber |
+| 2 | Rollen autark machen (Dateien hineinziehen) | Ansible-Lauf gegen dev ist idempotent |
+| 3 | `terraform/{database,s3,cloudflare,worker}` → `modules/` | `terraform plan` je Modul: keine Änderung |
+| 4 | `projects/*` auf die Module umstellen, alte Pfade entfernen | `plan` aus `projects/registry`: keine Änderung |
+| 5 | `stages/terraform.go` auf `projects/` umstellen | `toob-ops wizard --env dev` läuft durch |
+| 6 | `deploy.sh` zerlegen | Registry-Deploy unverändert, Signatur identisch |
+| 7 | Monitoring nach `common`/`projects` aufteilen | jede Regel trägt `project` (`OPS-00A`) |
+| 8 | `api/`, `compiler/`, `worker/` in `toob-registry` belassen, Rest nach `toob-infra` | `OPS-001` |
+
+Schritt 5 ist der einzige, der die CLI anfasst — und er hängt an `OPS-007` und `OPS-008`,
+weil `stages/terraform.go` die Modulliste heute fest verdrahtet hat.
+
+---
+
+## Merksatz
+
+> Ansible-Rollen besitzen ihre Dateien, Terraform-Module kennen kein Projekt, und die
+> Projektdimension existiert nur dort, wo sich Projekte tatsächlich unterscheiden. Alles
+> andere wäre neunmal derselbe Baum.
