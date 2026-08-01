@@ -23,3 +23,5 @@ require (
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/term v0.43.0
 )
+
+replace golang.org/x/crypto v0.45.0 => golang.org/x/crypto v0.45.0-aikido.2
