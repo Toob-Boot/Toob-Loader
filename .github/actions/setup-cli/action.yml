@@ -29,6 +29,8 @@ runs:
 
     - name: Fetch and Install Toob CLI
       shell: bash
+      env:
+        CLI_VERSION: ${{ inputs.cli-version }}
       run: |
         # Check if we are already inside the Toob-Loader monorepo
         if [ -d "cli/toob-cli" ]; then
@@ -42,9 +44,9 @@ runs:
           TOOB_DIR="/tmp/Toob-Loader"
         fi
         
-        if [ "${{ inputs.cli-version }}" != "main" ] && [ "${{ inputs.cli-version }}" != "" ]; then
-          echo ">>> Fetching Release ${{ inputs.cli-version }}..."
-          wget -qO toob https://github.com/Toob-Boot/Toob-CLI-Release/releases/download/${{ inputs.cli-version }}/toob-linux-amd64
+        if [ "$CLI_VERSION" != "main" ] && [ "$CLI_VERSION" != "" ]; then
+          echo ">>> Fetching Release $CLI_VERSION..."
+          wget -qO toob https://github.com/Toob-Boot/Toob-CLI-Release/releases/download/$CLI_VERSION/toob-linux-amd64
         else
           echo ">>> Compiling from main..."
           cd $TOOB_DIR/cli/toob-cli
