@@ -546,8 +546,13 @@ func checkManifestDependencies(ctx context.Context, dir string, client *apiclien
 
 	var data []byte
 	for _, mf := range manifests {
-		p := filepath.Join(dir, mf)
-		if d, err := os.ReadFile(p); err == nil {
+		baseClean := filepath.Clean(dir)
+		targetClean := filepath.Clean(filepath.Join(baseClean, mf))
+		rel, err := filepath.Rel(baseClean, targetClean)
+		if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			continue
+		}
+		if d, err := os.ReadFile(targetClean); err == nil {
 			data = d
 			break
 		}
