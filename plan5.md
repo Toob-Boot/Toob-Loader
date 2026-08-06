@@ -1,961 +1,656 @@
-# Backlog — Zitadel: Sicherheitsentwurf und Aufbau
+# Toob Platform — Architekturdokumentation (Verwaltungsebene)
 
-**Grundlage:** `ARCHITEKTUR-identity-zitadel.md` (der Schnitt gegen die Produkte),
-`ARCHITEKTUR-devops.md` (der Identity-Spoke).
-
-**Was dieses Dokument zusätzlich leistet:** Es entwirft das Sicherheitsmodell aus dem
-Bedrohungsmodell heraus und leitet daraus die Tickets ab — nicht umgekehrt.
+> **Scope:** Diese Dokumentation beschreibt die **Platform-Ebene** von `toob-infra` — also die Schicht, die Infrastruktur *bereitstellt, konfiguriert, absichert und betreibt*. Die Fachlogik der Workloads (Registry-Control-Plane, Worker-Daemon, Compiler-Pipeline) ist bereits in `docs/compiler_arch_1.md`, `docs/worker_architecture.md` und `docs/worker_lifecycle_management.md` dokumentiert und wird hier nur so weit berührt, wie sie von der Platform-Ebene verwaltet wird.
+>
+> **Grundlage:** Statische Analyse des Repository-Standes (Go 1.26.3, Modul `github.com/Toob-Boot/Toob-Registry`). Stellen, an denen der Code nur teilweise vorlag, sind als *[unvollständig belegt]* markiert.
 
 ---
 
-# TEIL 1 — Bedrohungsmodell und Entwurf
+## Inhaltsverzeichnis
 
-## 1.1 Was auf dem Spiel steht
-
-Die Angriffskette ist kurz:
-
-```
-Konto kompromittiert (release-manager)
-  → Artefakt hochladen
-  → Signing Service signiert (er signiert, was autorisierte Aufrufer verlangen)
-  → Channel publizieren
-  → jedes Gerät der Flotte lädt und installiert
-  → Signatur ist gültig, weil WIR sie erzeugt haben
-```
-
-Der Bootloader schützt hier nicht. Er prüft Ed25519 gegen den eFuse-Anker, und die Signatur
-ist echt. Anti-Rollback greift nicht, weil die SVN höher ist. Das Gerät tut genau das, wofür
-es gebaut wurde.
-
-**Konsequenz für den Entwurf:** Es genügt nicht, Kontoübernahme schwer zu machen. Ein
-einzelnes übernommenes Konto darf **nicht ausreichen**, um Firmware auszuliefern. Das ist
-der Unterschied zwischen einem gut konfigurierten IdP und einem, der dieser Verantwortung
-gerecht wird.
-
-## 1.2 Angriffsflächen, systematisch
-
-| # | Klasse | Konkret | Gegenmaßnahme |
-|---|---|---|---|
-| A1 | Credential | Spraying, Stuffing, Wiederverwendung | **Kein Passwort** für privilegierte Rollen |
-| A2 | Phishing | AiTM-Proxy (Evilginx), relayed TOTP/Push | **WebAuthn** — Origin-gebunden, nicht relaybar |
-| A3 | Wiederherstellung | „Passwort vergessen" → E-Mail → Übernahme | Keine Selbstbedienung für privilegierte Rollen |
-| A4 | Sitzung | Token-Diebstahl, Replay, XSS | Kurze TTL, Step-up, Token-Bindung |
-| A5 | Registrierung | Selbstregistrierung, Enumeration | Einladung mit Ablauf, Genehmigung durch Owner |
-| A6 | Föderation | GitHub-Übernahme, Account-Linking-Angriff | Upstream reicht nicht für privilegierte Rollen |
-| A7 | Admin-Ebene | `IAM_OWNER` kann alles in allen Orgs | Break-Glass-Konto, nie im Alltag |
-| A8 | Insider | Toob-Mitarbeiter sehen Kundendaten | Zeitbegrenzte Impersonation, Kunde wird benachrichtigt |
-| A9 | Infrastruktur | Masterkey, DB, Backups | Vault, Verschlüsselung, getrennte Sicherung |
-| A10 | Lieferkette | Ein Konto → ganze Flotte | **Vier Augen + Verzögerung** |
-
-Die letzte Zeile ist die wichtigste. A1 bis A9 machen Übernahme schwer; A10 macht sie
-unzureichend.
-
-## 1.3 Die fünf Entwurfsentscheidungen
-
-### E1 — Passwortlos für alles, was Geräte berührt
-
-Kein Passwort bedeutet: nichts zu erraten, nichts zu stuffen, nichts wiederzuverwenden, und
-vor allem **kein Passwort-Reset-Fluss, den man angreifen kann**. Das eliminiert A1 vollständig
-und schrumpft A3 erheblich.
-
-Passkeys als primärer und einziger Faktor für `operator`, `release-manager`, `admin`, `owner`.
-
-### E2 — Nur phishing-resistente Faktoren
-
-TOTP und Push sind gegen einen AiTM-Proxy wirkungslos: Der Proxy leitet den Code in Echtzeit
-weiter, der Nutzer merkt nichts. WebAuthn bindet die Assertion an den Origin — ein Proxy auf
-`id.the-toob.corn` bekommt keine gültige Signatur.
-
-**Für Rollen mit Geräteauswirkung: WebAuthn ohne Rückfallebene.** Eine Rückfallebene auf TOTP
-macht WebAuthn wertlos, weil der Angreifer sie wählt.
-
-`viewer` und Registry-`contributor` dürfen TOTP verwenden — dort ist der Schaden auf Lesen
-bzw. Paketveröffentlichung begrenzt.
-
-### E3 — Wiederherstellung ist nie Selbstbedienung
-
-Der am häufigsten ausgenutzte Pfad in freier Wildbahn. Wer MFA erzwingt und dann einen
-Reset per E-Mail erlaubt, hat MFA nicht erzwungen — er hat sie zu einer Unbequemlichkeit
-gemacht.
-
-Der Entwurf:
-1. **Mindestens zwei Authentikatoren** registriert, bevor eine privilegierte Rolle aktiv wird.
-   Verlust eines Schlüssels ist dann kein Notfall.
-2. Verlust beider: Verifikation außerhalb des Kanals, **Wartezeit von 24 Stunden**,
-   Benachrichtigung an alle Org-Owner. Die Wartezeit ist der Punkt — sie gibt dem echten
-   Inhaber Zeit zu widersprechen.
-3. **Wiederherstellung darf das Authentifizierungsniveau nicht senken.** Ein Fluss, der in
-   „setze ein neues Passwort" endet, führt das Passwort wieder ein.
-
-### E4 — Step-up vor gefährlichen Operationen
-
-Eine Sitzung ist nicht dasselbe wie eine Freigabe. Selbst ein gestohlenes Session-Token soll
-nicht ausreichen, um Firmware zu publizieren.
-
-Vor Publish, Channel-Wechsel und Rollout-Start: **frische Re-Authentifizierung mit dem
-phishing-resistenten Faktor**, maximal fünf Minuten alt. Der Angreifer mit gestohlenem Token
-kann lesen — ausliefern kann er nicht.
-
-### E5 — Ein Konto genügt nicht
-
-Für Produktions-Channels mit Geräten im Feld:
-- **Vier-Augen-Prinzip**: zwei verschiedene `release-manager` müssen freigeben, beide mit
-  frischem Step-up.
-- **Soak-Zeit**: zwischen Freigabe und Beginn der Auslieferung liegen mindestens 30 Minuten,
-  in denen jeder Org-Owner abbrechen kann. Ein erfolgreicher Angriff hat damit ein
-  Erkennungsfenster, bevor das erste Gerät installiert.
-
-Beides ist pro Mandant konfigurierbar, aber **Default an** für jeden Mandanten mit Geräten in
-Produktion.
-
-## 1.4 Was das nicht leistet
-
-Ehrlichkeit gehört zum Entwurf: Kein IdP ist unangreifbar. Was dieser Aufbau erreicht:
-
-- Kontoübernahme erfordert **physischen Besitz** eines registrierten Authentikators.
-- Ein übernommenes Konto reicht **nicht** für Firmware-Auslieferung (E5).
-- Jeder erfolgreiche Angriff hat ein **Erkennungsfenster** vor der Wirkung.
-- Der Radius eines kompromittierten Toob-Mitarbeiters ist begrenzt und sichtbar.
-
-Was bleibt: ein Angreifer mit physischem Zugriff auf zwei Authentikatoren einer Person, oder
-zwei kollaborierende Insider, oder eine Schwachstelle in Zitadel selbst. Gegen die ersten
-beiden hilft nur Organisation, gegen die dritte nur zeitnahes Patchen (`IDP-090`).
+1. [Das mentale Modell in fünf Sätzen](#1-das-mentale-modell-in-fünf-sätzen)
+2. [Leitprinzipien](#2-leitprinzipien)
+3. [Ebenenmodell: Platform, Hub und Spokes](#3-ebenenmodell-platform-hub-und-spokes)
+4. [Repository-Topografie](#4-repository-topografie)
+5. [Umgebungs- und Netzwerktopologie](#5-umgebungs--und-netzwerktopologie)
+6. [Der Orchestrator: `toob-ops`](#6-der-orchestrator-toob-ops)
+7. [Infrastructure as Code (Terraform)](#7-infrastructure-as-code-terraform)
+8. [Konfigurationsmanagement (Ansible)](#8-konfigurationsmanagement-ansible)
+9. [Secrets- und Trust-Architektur (Vault)](#9-secrets--und-trust-architektur-vault)
+10. [Workload-Orchestrierung (Nomad)](#10-workload-orchestrierung-nomad)
+11. [Edge & Ingress (Cloudflare + Caddy)](#11-edge--ingress-cloudflare--caddy)
+12. [Observability & Alerting](#12-observability--alerting)
+13. [Identity Plane (Zitadel)](#13-identity-plane-zitadel)
+14. [Release- und Deployment-Pfad](#14-release--und-deployment-pfad)
+15. [Backup, Restore und Drills](#15-backup-restore-und-drills)
+16. [Ende-zu-Ende-Bootstrap: der vollständige Ablauf](#16-ende-zu-ende-bootstrap-der-vollständige-ablauf)
+17. [Befunde, Inkonsistenzen und Risiken](#17-befunde-inkonsistenzen-und-risiken)
+18. [Glossar](#18-glossar)
 
 ---
 
-# TEIL 2 — Backlog
+## 1. Das mentale Modell in fünf Sätzen
 
-**Legende**
-**Prio:** P0 muss vor dem ersten echten Nutzer · P1 vor Produktivgang · P2 vor dem ersten
-Kunden mit Flotte · P3 danach
-**Typ:** `security` `config` `feature` `infra` `process` `detect`
+Ein einziges Go-Binary (`toob-ops`) ist der Einstiegspunkt für den gesamten Lebenszyklus: Es startet sich auf Windows selbst in einem hermetischen Docker-Container mit versionsgepinnter Toolchain neu, lädt umgebungsspezifische Credentials, und arbeitet dann eine **resumable Zustandsmaschine aus neun Phasen** ab.
 
-**Reihenfolgeprinzip:** Alles, was sich nicht ohne Zeitfenster nachrüsten lässt, kommt zuerst.
-Eine MFA-Policy nachträglich auf bestehende Konten anzuwenden, hinterlässt genau die Lücke,
-die ein Angreifer sucht.
+Diese Phasen provisionieren über **Terraform** die Cloud-Ressourcen, backen über **Packer** Golden Images, bauen über **WireGuard** einen VPN-Tunnel in das private Netz, konfigurieren über **Ansible** jeden Knoten, und übergeben schließlich an **Nomad**, das die eigentlichen Anwendungs-Workloads ausführt.
 
----
+Das Vertrauensfundament ist **zweistufiges Vault**: Eine kleine, isolierte KMS-Instanz entsiegelt per Transit-Engine automatisch den primären Vault-Raft-Cluster, der wiederum sämtliche Secrets, mTLS-Zertifikate (PKI) und Signaturen (Transit) für alle anderen Komponenten ausstellt — kein Knoten hält dauerhafte statische Geheimnisse.
 
-## Übersicht
+Nach außen terminiert **Caddy** mit Cloudflare-Origin-Zertifikaten hinter einem Cloudflare-Proxy, der als einziger legitimer Ursprung akzeptiert wird; nach innen ist alles nur über den VPN-Hub erreichbar.
 
-| ID | Titel | Prio | Typ |
-|---|---|---|---|
-| **EPIC A — Fundament, vor dem ersten Nutzer** |||
-| IDP-001 | Masterkey aus Vault, nie aus Datei | P0 | security |
-| IDP-002 | Datenbank: eigene Instanz, verschlüsselte Backups, getrennter Bucket | P0 | infra |
-| IDP-003 | Netz- und Edge-Härtung des Identity-Spokes | P0 | infra |
-| IDP-004 | Selbstregistrierung aus, Enumeration verhindern | P0 | config |
-| IDP-005 | Instanz-Policies vor der ersten Org festschreiben | P0 | config |
-| **EPIC B — Authentifizierung** |||
-| IDP-010 | Passkeys als primärer Faktor, passwortlos | P0 | config |
-| IDP-011 | WebAuthn ohne Rückfallebene für Geräterollen | P0 | config |
-| IDP-012 | Zwei Authentikatoren als Vorbedingung privilegierter Rollen | P0 | feature |
-| IDP-013 | Rollenabhängige Authentifizierungsanforderung durchsetzen | P1 | feature |
-| IDP-014 | Sitzungsdauer, Token-TTL, Refresh-Rotation | P1 | config |
-| IDP-015 | Token-Bindung (DPoP oder mTLS) prüfen und aktivieren | P2 | security |
-| **EPIC C — Wiederherstellung und Notfallzugang** |||
-| IDP-020 | Selbstbedienungs-Reset für privilegierte Rollen abschalten | P0 | config |
-| IDP-021 | Wiederherstellungsprozess mit Wartezeit und Benachrichtigung | P1 | process |
-| IDP-022 | `IAM_OWNER` als Break-Glass-Konto | P0 | security |
-| IDP-023 | Break-Glass-Übung und Protokoll | P2 | process |
-| **EPIC D — Organisationen, Einladungen, Rollen** |||
-| IDP-030 | Projekt- und Rollenmodell anlegen | P1 | config |
-| IDP-031 | Einladungsfluss: einmalig, ablaufend, E-Mail-gebunden | P1 | feature |
-| IDP-032 | Org-Namensregeln über Action durchsetzen | P1 | feature |
-| IDP-033 | Rollenvergabe erfordert Owner-Genehmigung | P1 | feature |
-| IDP-034 | Org-Spiegel in die Produkte pushen | P1 | feature |
-| **EPIC E — Step-up und Freigabe** |||
-| IDP-040 | Step-up-Authentifizierung vor Geräteoperationen | P1 | feature |
-| IDP-041 | Vier-Augen-Freigabe für Produktions-Channels | P2 | feature |
-| IDP-042 | Soak-Zeit zwischen Freigabe und Auslieferung | P2 | feature |
-| IDP-043 | Signing Service verlangt Freigabenachweis | P2 | security |
-| **EPIC F — Föderation** |||
-| IDP-050 | GitHub als Upstream-IdP, mit Rollenschranke | P1 | config |
-| IDP-051 | Bestandsnutzer vorverknüpfen | P1 | feature |
-| IDP-052 | Kunden-IdP über OIDC/SAML | P3 | feature |
-| IDP-053 | Workload-Identity-Federation für CI | P3 | feature |
-| **EPIC G — Insider und Support** |||
-| IDP-060 | Impersonation zeitbegrenzt, begründet, sichtbar | P2 | security |
-| IDP-061 | Toob-Mitarbeiter ohne stehende Kundenrechte | P2 | process |
-| **EPIC H — Erkennung** |||
-| IDP-070 | Audit-Log nach Loki, unveränderlich, projektgetrennt | P1 | detect |
-| IDP-071 | Alarme auf sicherheitsrelevante Ereignisse | P1 | detect |
-| IDP-072 | Anomalie-Alarme: neue Geografie, neuer Authentikator | P2 | detect |
-| IDP-073 | Rate-Limits ohne DoS-Nebenwirkung | P1 | security |
-| **EPIC I — Nachweis** |||
-| IDP-080 | Angriffssimulation: AiTM-Phishing | P2 | process |
-| IDP-081 | Externe Sicherheitsprüfung vor dem ersten Kunden | P2 | process |
-| IDP-090 | Patch-Prozess mit Frist | P1 | process |
+Ein zentraler **Monitoring-Stack** auf dem Ops-Hub (Prometheus, Alertmanager, Grafana, Loki) sammelt Metriken und Logs aller Knoten, und jeder Alert besitzt ein hinterlegtes Runbook.
 
 ---
 
-# EPIC A — Fundament, vor dem ersten Nutzer
+## 2. Leitprinzipien
 
----
-
-### IDP-001 — Masterkey aus Vault, nie aus Datei
-
-**Prio:** P0 · **Typ:** security
-
-**Problem**
-Zitadel verschlüsselt Secrets in der Datenbank mit einem Masterkey. Wer Masterkey **und**
-Datenbank hat, hat die Identitätsinfrastruktur — inklusive aller Client-Secrets und
-IdP-Konfigurationen.
-
-Der Standardweg legt ihn in eine Datei oder eine Umgebungsvariable. Beides landet in Backups,
-Prozesslisten und Log-Ausgaben.
-
-**Lösung**
-Masterkey aus `secret/projects/identity/masterkey`, per Vault-Agent in ein Template gerendert,
-Dateimodus `0400`, Eigentümer `zitadel`. Die Lease-Regel der Plattform gilt: **mindestens 30
-Tage**, damit ein Vault-Ausfall den IdP nicht stoppt (`OPS-060`).
-
-Der Schlüssel wird bei der Einrichtung genau einmal erzeugt und offline gesichert — er ist
-nicht rotierbar, ohne die Datenbank neu zu verschlüsseln.
-
-**Akzeptanzkriterien**
-- [ ] Der Masterkey steht in keiner Umgebungsvariablen und in keinem Ansible-Vault-freien Pfad.
-- [ ] `systemctl show zitadel` und `/proc/<pid>/environ` enthalten ihn nicht.
-- [ ] Offline-Sicherung existiert und ihr Ort ist im Runbook vermerkt.
-
----
-
-### IDP-002 — Datenbank, Backups, Bucket
-
-**Prio:** P0 · **Typ:** infra
-
-**Lösung**
-Eigene Ubicloud-Instanz `toob-idp-db`, kein geteiltes Schema. `sslmode=verify-full` wie im
-Bestand. Firewall-Pinning über den zentralen Pruner.
-
-**Backups sind so sensibel wie der IdP selbst.** Eigener Bucket
-`toob-idp-backups-<env>` — nicht der geteilte Vault-Bucket, dessen Löschpfad in `BEF-003`
-auffiel. Verschlüsselung at rest, WORM, eigene Zugriffsschlüssel.
-
-**Akzeptanzkriterien**
-- [ ] Kein anderer Dienst hat Zugriff auf `toob-idp-db`.
-- [ ] Backup-Bucket ist umgebungspräfigiert und von keinem Teardown-Pfad erfasst.
-- [ ] Ein Restore ist getestet (analog `OPS-020`).
-
----
-
-### IDP-003 — Netz- und Edge-Härtung
-
-**Prio:** P0 · **Typ:** infra
-
-**Lösung**
-- Cloudflare vor `id.the-toob.com`, Origin-Cert, Full Strict. Ursprungs-IPs nur von
-  CF-Ranges erreichbar (Hetzner-Firewall).
-- **Admin-Konsole nicht öffentlich**: Zitadels Console-Pfad nur aus dem WireGuard-Netz
-  erreichbar, per Caddy-Matcher auf Quell-IP. Der Login-Endpunkt bleibt öffentlich, die
-  Verwaltungsoberfläche nicht.
-- Security-Header wie im Registry-Caddyfile, CSP eng.
-- Keine Introspection-Endpunkte öffentlich, wenn sie nicht gebraucht werden.
-- WAF-Regel gegen bekannte Phishing-Kit-Signaturen und ungewöhnliche `redirect_uri`-Muster.
-
-**Akzeptanzkriterien**
-- [ ] Portscan von außen: nur 443.
-- [ ] Console-Pfad aus dem Internet: `403`.
-- [ ] Ein Aufruf mit fremdem `Host`-Header wird abgewiesen.
-
----
-
-### IDP-004 — Selbstregistrierung aus, Enumeration verhindern
-
-**Prio:** P0 · **Typ:** config
-
-**Problem**
-Offene Selbstregistrierung erzeugt Konten, die später über Einladungsfehler oder Social
-Engineering in Organisationen wandern. Und unterschiedliche Fehlermeldungen für „Nutzer
-existiert nicht" gegenüber „falsches Passwort" verraten, wer Kunde ist — für einen
-gezielten Angriff auf einen bestimmten Hersteller ist das der erste Schritt.
-
-**Lösung**
-- Registrierung ausschließlich per Einladung (`IDP-031`).
-- Login-Antworten und -Zeiten für existierende und nicht existierende Konten ununterscheidbar.
-- Kein Hinweis darauf, welche Faktoren registriert sind, bevor die Identität feststeht.
-
-**Akzeptanzkriterien**
-- [ ] `POST` auf den Registrierungspfad ⇒ abgelehnt.
-- [ ] Antwortzeit für existierendes und nicht existierendes Konto unterscheidet sich nicht
-      messbar (Messung über 1000 Versuche).
-
----
-
-### IDP-005 — Instanz-Policies vor der ersten Org
-
-**Prio:** P0 · **Typ:** config
-
-**Problem**
-Zitadel-Organisationen erben Policies von der Instanz, können sie aber überschreiben. Werden
-die Instanz-Defaults erst nach der ersten Org gesetzt, gilt für diese weiter der alte Stand —
-und niemand merkt es.
-
-**Lösung**
-Alle Instanz-Policies festschreiben, **bevor** die erste Organisation existiert: Login-Policy,
-Passwort-Policy (ungenutzt, aber restriktiv als Sicherheitsnetz), MFA-Policy, Lockout-Policy,
-Domain-Policy. Als Terraform oder als versionierte API-Aufrufe, nicht per Klick.
-
-Zusätzlich: **Org-eigene Policy-Überschreibung deaktivieren**, wo möglich. Ein Kunde soll die
-MFA-Anforderung nicht senken können.
-
-**Akzeptanzkriterien**
-- [ ] Die Policy-Konfiguration liegt als Code vor und ist reproduzierbar anwendbar.
-- [ ] Eine neu angelegte Org erbt alle Einschränkungen (Negativtest: Versuch, MFA in einer Org
-      abzuschalten, schlägt fehl).
-
-> **Zu verifizieren:** Welche Policies Zitadel org-seitig überschreibbar lässt und ob sich das
-> instanzweit sperren lässt. Falls nicht, muss eine Action die Änderung zurücksetzen und
-> alarmieren.
-
----
-
-# EPIC B — Authentifizierung
-
----
-
-### IDP-010 — Passkeys als primärer Faktor, passwortlos
-
-**Prio:** P0 · **Typ:** config
-
-**Lösung**
-Passwortloser Login als Standard für alle neuen Nutzer. Kein Passwort gesetzt, keins
-setzbar. Damit entfallen Credential-Stuffing, Spraying, Wiederverwendung und der gesamte
-Passwort-Reset-Angriffspfad.
-
-Registry-`contributor` dürfen übergangsweise über GitHub kommen (`IDP-050`) — auch dort ohne
-lokales Passwort.
-
-**Akzeptanzkriterien**
-- [ ] Ein neuer Nutzer kann kein Passwort setzen.
-- [ ] Der Login-Bildschirm bietet keine Passworteingabe an.
-
----
-
-### IDP-011 — WebAuthn ohne Rückfallebene für Geräterollen
-
-**Prio:** P0 · **Typ:** config
-
-**Problem**
-TOTP und Push sind gegen AiTM-Proxys wirkungslos — der Proxy leitet den Code in Echtzeit
-weiter. WebAuthn bindet die Assertion an den Origin und ist deshalb nicht relaybar.
-
-**Eine Rückfallebene macht die Maßnahme wertlos**, weil der Angreifer sie wählt. Wer TOTP als
-Alternative anbietet, hat TOTP.
-
-**Lösung**
-
-| Rolle | Erlaubte Faktoren |
+| Prinzip | Umsetzung im Code |
 |---|---|
-| `owner`, `admin`, `release-manager`, `operator` | **nur WebAuthn/Passkey** |
-| `viewer`, Registry-`contributor` | WebAuthn oder TOTP |
-
-Bevorzugt Authentikatoren mit User-Verification (PIN oder Biometrie), damit ein gestohlener
-Schlüssel allein nicht genügt.
-
-**Akzeptanzkriterien**
-- [ ] Ein Konto mit `operator` kann TOTP nicht als einzigen Faktor verwenden.
-- [ ] Der Versuch, für eine Geräterolle TOTP zu registrieren, wird abgelehnt.
+| **Zero-Trust** | Worker- und Client-Knoten halten weder DB-, S3- noch Vault-Credentials. Authentifizierung ausschließlich per mTLS + kurzlebige Tokens. Privilegierte Operationen werden über die Control-Plane vermittelt. |
+| **Fail-Closed** | Fehlende Konfiguration führt zum harten Abbruch, nicht zum stillen Fallback: `Validate()` prüft Pfade und Dateirechte (world-readable TLS-Key ⇒ Startabbruch), Vault-Renewal-Fehler erzwingen einen Neustart mit frischer SecretID. |
+| **Single Source of Truth** | `deploy/versions.json` definiert *alle* Binary-Versionen (Nomad, Vault, Terraform, Go, …) und wird sowohl vom `Dockerfile.ops` als auch von `install-binaries.sh` gelesen. Analog: `compiler_manifest.json` für die Compiler-Umgebung. |
+| **Path Autonomy (OPS-001)** | Keine absoluten Pfade in Terraform/Ansible/Nomad/Go. Der Repo-Root wird zur Laufzeit über `go.mod`-Suche ermittelt (`findRepoRoot()`). Das Verzeichnis kann frei umbenannt oder verschoben werden. |
+| **Idempotenz & Resumability** | Jede Phase schreibt ihr Ergebnis in eine JSON-State-Datei; Wiederaufnahme ist der Normalfall. Ansible-Tasks prüfen vor jeder Aktion den Ist-Zustand (`stat` → `when`). |
+| **Digitale Souveränität (EU)** | Hetzner (Falkenstein/Helsinki), Ubicloud, Cloudflare; bewusster Verzicht auf AWS/GCP/Azure KMS zugunsten einer regionalen Vault-Transit-Unseal-Instanz. |
+| **Actions-frei** | GitHub dient nur als Code-Hosting und Webhook-Quelle. Builds und Releases laufen auf eigenen, isolierten Runnern — Schutz vor `pull_request_target`-Exploits und Repository-Würmern. |
 
 ---
 
-### IDP-012 — Zwei Authentikatoren als Vorbedingung
+## 3. Ebenenmodell: Platform, Hub und Spokes
 
-**Prio:** P0 · **Typ:** feature
+Die Architektur ist als **Hub-and-Spoke** aufgebaut. Die Platform-Ebene ist der Hub; die fachlichen Systeme sind Spokes, die identische Bausteine wiederverwenden.
 
-**Problem**
-Passwortlos mit einem Schlüssel bedeutet: Laptop verloren, Konto verloren. Und eine
-Notfall-Wiederherstellung ist der schwächste Punkt jedes Systems (`E3`).
+```mermaid
+flowchart TB
+    subgraph OPS["Control Plane / Hub (Projekt: ops)"]
+        HUB["ops-hub<br/>WireGuard-Hub · Prometheus<br/>Alertmanager · Grafana · Loki"]
+        CI["ops-ci<br/>Isolierter Build- &<br/>Deploy-Runner"]
+        KMS["unseal-vault<br/>KMS Auto-Unseal (Transit)"]
+    end
 
-Wer zwei Authentikatoren registriert hat, braucht die Notfallwiederherstellung nicht.
+    subgraph SPOKES["Workload-Projekte (Spokes)"]
+        REG["registry<br/>Paket-Registry &<br/>Compile-Validierung"]
+        IDP["identity<br/>Zitadel IdP"]
+        UPD["update<br/>Update-Verteilung"]
+        STG["staging<br/>Vorproduktion"]
+    end
 
-**Lösung**
-Eine privilegierte Rolle wird **erst aktiv**, wenn mindestens zwei Authentikatoren registriert
-sind. Empfohlen: ein Plattform-Passkey (Laptop, Telefon) und ein Hardware-Schlüssel im Safe.
+    subgraph SHARED["Geteilte Bausteine"]
+        TF["Terraform-Module<br/>project-baseline<br/>ubicloud-postgres"]
+        ANS["Ansible-Rollen<br/>common · caddy · nomad<br/>vault-primary · monitoring"]
+        VAULTPOL["Vault-Policies<br/>platform + projektbezogen"]
+    end
 
-Die Prüfung läuft über eine Action bei der Rollenvergabe. Fällt die Zahl unter zwei, wird die
-Rolle suspendiert und der Nutzer benachrichtigt.
+    HUB -.->|"Telemetrie & Logs"| SPOKES
+    CI -.->|"signierte Deployments"| SPOKES
+    KMS -.->|"Auto-Unseal"| SPOKES
+    SHARED --> SPOKES
+    SHARED --> OPS
+```
 
-**Akzeptanzkriterien**
-- [ ] Rollenvergabe an einen Nutzer mit einem Authentikator ⇒ Rolle bleibt inaktiv, Hinweis.
-- [ ] Entfernen des zweiten Authentikators ⇒ Rolle wird suspendiert, Nutzer und Org-Owner
-      werden benachrichtigt.
-
----
-
-### IDP-013 — Rollenabhängige Anforderung durchsetzen
-
-**Prio:** P1 · **Typ:** feature
-
-**Problem**
-Die Anforderung aus `IDP-011` muss **zum Zeitpunkt der Aktion** gelten, nicht nur beim Login.
-Ein Nutzer, der als `viewer` mit TOTP eingeloggt ist und dann `operator` erhält, hat eine
-Sitzung mit zu schwachem Niveau.
-
-**Lösung**
-Das Produkt prüft die `amr`- und `acr`-Claims des Tokens gegen die für die Aktion nötige
-Stufe. Reicht sie nicht, folgt eine Re-Authentifizierung (`IDP-040`) statt einer Ablehnung.
-
-**Akzeptanzkriterien**
-- [ ] Eine mit TOTP begonnene Sitzung kann keine Geräteoperation auslösen.
-- [ ] Der Nutzer bekommt eine Aufforderung zur Re-Authentifizierung, keine Fehlermeldung.
-
-> **Zu verifizieren:** Wie Zitadel `amr`/`acr` befüllt und ob sich eigene ACR-Werte definieren
-> lassen. Falls nicht, trägt eine Action einen eigenen Claim ein.
+**Wichtige Konsequenz:** Ein Spoke bringt keine eigene Betriebsmechanik mit. Er komponiert die geteilten Terraform-Module und Ansible-Rollen und unterscheidet sich nur durch Variablen (Domain, Netz-CIDR, Nomad-Pool, Vault-Pfade). Das erklärt, warum `site.yml` Rollen konditional über Inventory-Gruppen aktiviert statt über separate Playbooks pro Projekt.
 
 ---
 
-### IDP-014 — Sitzungsdauer, Token-TTL, Refresh-Rotation
+## 4. Repository-Topografie
 
-**Prio:** P1 · **Typ:** config
+```
+toob-infra/
+├── go.mod                      Modul github.com/Toob-Boot/Toob-Registry (Go 1.26.3)
+├── justfile                    Operative Handgriffe: Plan-Gates, Logs, DB-Shell, Restore-Tests
+├── .golangci.yml               depguard-Regeln: erzwingt Modulgrenzen (shared ↛ registry/platform/update)
+├── .dockerignore               Verhindert Secret-Leaks in Image-Layer (deploy/vault/, registry/, .git)
+│
+├── docs/                       Architektur- und Betriebsdokumentation
+│   ├── compiler_arch_1.md          Gesamtarchitektur & Domänenmodell (DE)
+│   ├── worker_architecture.md      Worker-Laufzeit & Firecracker-Mechanik (DE)
+│   ├── worker_lifecycle_management.md  Node-Lebenszyklus & 6 Job-Typen (DE)
+│   ├── devops_worker_architecture.md   Sicherheitsarchitektur der Data-Plane (EN)
+│   ├── release.md                  CLI-Release- & Self-Update-Pipeline (EN)
+│   ├── authz.md                    3-Ebenen-Autorisierungsmodell (EN)
+│   ├── runbooks/                   ~20 alertspezifische Runbooks + Prozess-Runbooks
+│   └── security_audit_reports/     AiTM-Phishing-Simulation, externer Pentest-Scope
+│
+└── platform/
+    ├── cmd/toob-ops/           Der Orchestrator (main.go, account_recovery.go, console_*.go)
+    ├── internal/               engine · stages · dashboard · testrunner · topology
+    └── deploy/
+        ├── versions.json           SSOT für alle Binary-Versionen
+        ├── Dockerfile.ops          Hermetischer Toolchain-Container
+        ├── terraform/              modules/ + projects/{ops,registry,identity,update,staging}
+        ├── ansible/                site.yml + roles/ (self-contained)
+        ├── nomad/jobs/             Job-Spezifikationen
+        ├── vault/policies/         Deklarative ACL-Policies
+        ├── monitoring/             prometheus/rules/ + grafana/dashboards/
+        ├── release/                sign.sh · verify.sh · deploy-nomad.sh · deploy-systemd.sh
+        ├── packer/                 toob-base · toob-worker Golden Images
+        ├── compiler/ · worker/     Build-Skripte der Data-Plane
+        └── scripts/                break-glass.sh, WireGuard-Adminkeys, Patch-SLA
+```
 
-**Lösung**
+**Modulgrenzen werden statisch erzwungen.** `.golangci.yml` konfiguriert `depguard` mit drei Regeln: `shared/` darf weder `registry`, `platform` noch `update` importieren; `platform/` darf nicht auf `registry`/`update` zugreifen; `update/` nicht auf `registry`. Architekturverletzungen scheitern damit im Lint, nicht erst im Review.
 
-| Wert | Einstellung | Begründung |
+---
+
+## 5. Umgebungs- und Netzwerktopologie
+
+Drei vollständig getrennte Umgebungen mit eigenen State-Dateien, eigenen Netz-Präfixen und eigenen Vault-Key-Pfaden:
+
+| Umgebung | Netz-Präfix | Trigger-Branch | Ziel-Release-Repo | Vault-Signing-Key |
+|---|---|---|---|---|
+| `dev` | `10.1.0.0/16` | manuell | `Toob-CLI-Release-Test` | lokale/Mock-Transit-Keys |
+| `staging` | `10.2.0.0/16` | `staging` | `Toob-CLI-Release-Test` | `…/staging-cli-signing-key` |
+| `production` | `10.0.0.0/16` | `main` | `Toob-CLI-Release` | `…/cli-signing-key` |
+
+Die Zuordnung IP ↔ Rolle liefert `internal/topology`. Ansible-Inventory-Gruppen:
+
+```
+ops_hub       WireGuard-Hub, zentrale Telemetrie
+ci_runner     isolierter Build-/Deploy-Runner
+bastion       VPN-Gateway (dev: 10.1.1.2)
+unseal_vault  KMS-Vault (dev: 10.1.1.12)
+api           Control-Plane-Knoten (dev: api-fsn1 = 10.1.1.10)
+workers       Bare-Metal-/Ephemere Validierungs-Knoten
+idp           Zitadel-Identity-Provider
+```
+
+Erreichbarkeit ist strikt zweigeteilt: Öffentlich ist ausschließlich der Cloudflare-Edge. Alles andere — Vault (`:8200`), Nomad (`:4646`), Grafana (`127.0.0.1:3000`), Prometheus (`127.0.0.1:9090`) — ist nur über den WireGuard-Tunnel erreichbar. Der Monitoring-Stack bindet bewusst auf Loopback; nur Loki lauscht auf der privaten IP, weil die Alloy-Agenten der anderen Knoten dorthin pushen.
+
+---
+
+## 6. Der Orchestrator: `toob-ops`
+
+`platform/cmd/toob-ops` ist ein Cobra-CLI und der einzige unterstützte Weg, Infrastruktur zu verändern.
+
+### 6.1 Kommandos
+
+| Kommando | Zweck |
+|---|---|
+| `wizard` | Geführtes, resumables Deployment über alle neun Phasen. Flags: `--env`, `--resume`, `--dry-run`, `--yes` (nur `dev`), `--state-file`, `--build-dir`, `--deploy-dir`, `--ca-cert-path` |
+| `status` | Live-Cluster-Dashboard. Baut bei Bedarf selbstständig VPN auf, synchronisiert CA-Zertifikate, lädt Tokens aus der Secrets-Datei |
+| `destroy` | Teardown in **umgekehrter** Stage-Reihenfolge (Verify → Prereqs) mit doppelter Bestätigung, `--force` überspringt Prompts |
+| `test` | E2E-/Integrationstests gegen eine laufende Umgebung, inkl. temporärer DB-Firewall-Freischaltung |
+| `account-recover` | Vier-Schritt-Prozess zur Wiederherstellung privilegierter Identitäten (siehe §13) |
+
+### 6.2 Hermetische Toolchain
+
+Auf Windows startet sich `toob-ops` **selbst neu**: `runInDockerIfNeeded()` prüft die Docker-Verfügbarkeit, schreibt `deploy/Dockerfile.ops`, baut das Image `toob-ops-tooling`, und führt das Kommando dort erneut aus. Das Image installiert jede Version aus `versions.json` (Go, Terraform, Packer, Vault, Nomad, Ansible, Cosign, jq, AWS CLI, Docker CLI, Buildx, WireGuard-Tools, Firecracker/Jailer).
+
+Beim Start werden gemountet: das Repo nach `/workspace`, der Docker-Socket, persistente Go-Caches, und — falls vorhanden — das Host-`~/.ssh` nach `/tmp/host-ssh` (read-only). Der Inner-Command kopiert die Keys nach `/root/.ssh` und setzt `0700`/`0600`, weil Ansible sonst die Schlüssel ablehnt.
+
+Weitergereicht werden nur Umgebungsvariablen mit Präfix-Whitelist (`TOOB_`, `VAULT_`, `NOMAD_`, `AWS_`, `SEED_`, `CLOUDFLARE_`, `HCLOUD_`, `UBICLOUD_`, …).
+
+> **Anmerkung:** Der Dockerfile-Inhalt existiert doppelt — einmal als String-Konstante in `main.go`, einmal als Datei unter `platform/deploy/Dockerfile.ops`. Die Datei-Variante liest bereits `versions.json`, die eingebettete Variante enthält hartcodierte Versionen (z. B. Ansible 14.1.0 vs. 13.7.0 in `versions.json`). Das ist eine Drift-Quelle, siehe §17.
+
+### 6.3 Credential-Auflösung
+
+Die Auflösungskette ist mehrstufig und bewusst umgebungsisolierend:
+
+```
+.env                              (allgemeine Defaults)
+   ↓
+.env.<env>                        (umgebungsspezifisch)
+   ↓
+resolveValue()                    Pfadwerte werden zu Dateiinhalten aufgelöst:
+                                  SEED_GH_PRIVATE_KEY=/pfad/key.pem → PEM-Inhalt
+                                  (Windows-Pfade werden im Container erkannt und
+                                   unverändert durchgereicht)
+   ↓
+propagate*Credentials()           Spiegelt identische Werte:
+                                  SEED_S3_* ↔ AWS_*, SEED_CF_ACCOUNT_ID ↔ CLOUDFLARE_ACCOUNT_ID
+   ↓
+mapCredentials(env)               TOOB_DEV_* / TOOB_STAGING_* / TOOB_PROD_*
+                                  → generische Namen (HCLOUD_TOKEN, VAULT_ADDR, …)
+```
+
+Der Präfix-Mechanismus ist die zentrale Sicherung gegen Cross-Environment-Unfälle: Ein Skript, das `HCLOUD_TOKEN` liest, bekommt garantiert den Token der Umgebung, für die der Prozess gestartet wurde.
+
+### 6.4 State-Maschine und Phasenmodell
+
+**Zustandsdatei:** `deploy/.toob-ops-state.<env>.json` (Dry-Runs schreiben nach `.dryrun`). Sie hält `started_at`, `environment`, `completed_phases`, `current_phase`, `collected_values` (z. B. ermittelte IPs, Packer-Snapshot-ID) und `stage_results` (Status, Meldung, Logdatei-Pfad je Stage).
+
+**Sicherung gegen Vermischung:** Stimmt `state.Environment` nicht mit `--env` überein, bricht der Wizard ab, bevor irgendetwas ausgeführt wird.
+
+| # | Phase | Inhalt |
 |---|---|---|
-| Access-Token | 15 min | Offline-Verifikation, Diebstahlfenster klein |
-| Refresh-Token | 8 h, rotierend | Wiederverwendung eines rotierten Tokens = Diebstahl ⇒ Familie invalidieren |
-| Sitzung (Browser) | 12 h absolut, 30 min inaktiv | Ein vergessener Laptop ist kein Dauerzugang |
-| Step-up-Gültigkeit | 5 min | `IDP-040` |
+| 0 | `prereqs` | Tool-Verfügbarkeit, Credentials, Erreichbarkeit |
+| 1 | `artifacts` | Build von `worker`, `autoscaler`, `vm-runner`, `rootfs` |
+| 2 | `packer` | Golden Images (`toob-base`, `toob-worker`); Wiederverwendung vorhandener Snapshots |
+| 3 | `terraform` | S3 → Database → Control-Plane → Cloudflare → Worker |
+| 4 | `vpn` | WireGuard-Tunnel, `/etc/hosts`-Injektion, CA-Sync |
+| 5 | `ansible` | Vollständige Knoten-Konfiguration (siehe §8) |
+| 6 | `deploy` | API-Build und Nomad-Deployment |
+| 7 | `workers` | Worker-Provisionierung |
+| 8 | `verify` | Health-Checks und Abnahme |
 
-Refresh-Token-Rotation mit Reuse-Detection ist der wichtigste Punkt: Wird ein bereits
-eingelöster Refresh-Token erneut vorgelegt, wurde er gestohlen — die gesamte Token-Familie
-wird invalidiert und der Nutzer alarmiert.
+Nach erfolgreichem Wizard-Lauf geht der Prozess **nahtlos in das Status-Dashboard über** — VPN steht, CA-Zertifikate sind synchron, Tokens sind geladen.
 
-**Akzeptanzkriterien**
-- [ ] Wiederverwendung eines rotierten Refresh-Tokens invalidiert die Familie und erzeugt einen
-      Alarm.
-- [ ] Cookies: `Secure`, `HttpOnly`, `SameSite=Lax`, `__Host-`-Präfix.
+### 6.5 Dynamische Datenbank-Freischaltung
 
----
+Ein wiederkehrendes Muster: Der Runner besitzt keine statisch freigeschaltete IP. `ensureDBFirewallRule()` ermittelt die eigene öffentliche IP (drei redundante Dienste), trägt sie als `/32` in die Ubicloud-Postgres-Firewall ein und liefert eine `cleanup`-Closure zurück, die die Regel danach wieder entfernt. Behandelt werden dabei explizit die Fälle „Regel existiert bereits" (`409` bzw. `400` mit „already taken").
 
-### IDP-015 — Token-Bindung prüfen und aktivieren
-
-**Prio:** P2 · **Typ:** security
-
-**Problem**
-Ein Bearer-Token ist so gut wie sein Besitz. Wer ihn stiehlt — Malware, XSS, Log-Leck — kann
-ihn überall verwenden.
-
-**Lösung**
-DPoP (RFC 9449) bindet das Token an einen clientseitigen Schlüssel; ein gestohlenes Token ist
-ohne den privaten Schlüssel wertlos. Alternativ mTLS-gebundene Tokens für Maschinenpfade.
-
-> **Zu verifizieren:** DPoP-Unterstützung in Zitadel und in den Produkt-APIs. Falls nicht
-> verfügbar, bleibt `IDP-040` (Step-up) die wirksame Kompensation — ein gestohlenes Token
-> erlaubt dann Lesen, aber keine Auslieferung.
+Als Sicherheitsnetz für vergessene oder abgebrochene Cleanups läuft zusätzlich der zentrale Pruner `cleanup-db-firewall.py` (§8.4).
 
 ---
 
-# EPIC C — Wiederherstellung und Notfallzugang
+## 7. Infrastructure as Code (Terraform)
+
+```
+deploy/terraform/
+├── modules/
+│   ├── project-baseline/     Netz, Firewall, Basis-Ressourcen je Projekt
+│   └── ubicloud-postgres/    Managed PostgreSQL inkl. Firewall-Regeln
+└── projects/
+    ├── ops/ · registry/ · identity/ · update/ · staging/
+```
+
+**Provider:** Hetzner Cloud (`hcloud`) für Server, vSwitches, Firewalls; S3-kompatibler Provider gegen Hetzner Object Storage (`https://fsn1.your-objectstorage.com`); Cloudflare für DNS und Proxy; Ubicloud für PostgreSQL.
+
+**State:** Remote in PostgreSQL (pg-Backend) oder in einem versionierten, privaten S3-Bucket. Datenbankgestützte State-Locks verhindern konkurrierende Applies.
+
+**Plan-Gate:** Der `justfile` erzwingt das Zwei-Schritt-Muster. `plan-infra` erzeugt Pläne für alle fünf Module (`s3`, `cloudflare`, `database`, `control-plane`, `worker`), `apply-infra` wendet ausschließlich zuvor erzeugte `tfplan`-Dateien an. Ein `terraform apply` ohne vorherigen Plan ist über die Toolbox nicht möglich.
+
+**Object Storage:** Versionierung ist aktiviert (Schutz vor versehentlichem Löschen, Audit-Trail); CORS erlaubt GET/PUT nur von autorisierten Origins.
 
 ---
 
-### IDP-020 — Selbstbedienungs-Reset abschalten
+## 8. Konfigurationsmanagement (Ansible)
 
-**Prio:** P0 · **Typ:** config
+`site.yml` ist streng nach Abhängigkeiten geordnet — jede Phase setzt voraus, dass die vorherige abgeschlossen ist.
 
-**Problem**
-Der meistgenutzte Übernahmepfad in der Praxis. Wer MFA erzwingt und dann Reset per E-Mail
-erlaubt, hat die MFA an das E-Mail-Konto delegiert.
+```mermaid
+flowchart TD
+    P0["Phase 0 · localhost<br/>Vault-CA + Node-Zertifikate erzeugen"]
+    P1A["Phase 1 · all<br/>Rolle: common"]
+    P1B["Phase 1 · ops_hub<br/>wg-hub + monitoring"]
+    P1C["Phase 1 · ci_runner<br/>ci-runner + wg-peer"]
+    P2["Phase 2 · unseal_vault<br/>vault-kms + wg-peer"]
+    P3A["Phase 3 · localhost<br/>ubicloud-db (Firewall/Anbindung)"]
+    P3B["Phase 3 · api<br/>vault-primary + wg-peer"]
+    P4["Phase 4 · api<br/>caddy"]
+    P5["Phase 5 · api + workers<br/>nomad"]
+    P6["Phase 6 · idp<br/>zitadel"]
 
-**Lösung**
-Für Konten mit privilegierten Rollen: kein Selbstbedienungs-Reset, kein Magic Link, keine
-SMS. Für `viewer` und `contributor` zulässig, aber ohne Rollenerhöhung nach der
-Wiederherstellung.
+    P0 --> P1A --> P1B --> P1C --> P2 --> P3A --> P3B --> P4 --> P5 --> P6
+```
 
-**Akzeptanzkriterien**
-- [ ] „Zugang verloren" für ein `operator`-Konto führt zu einem Hinweis auf den Prozess aus
-      `IDP-021`, nicht zu einem automatischen Fluss.
+### 8.1 `ansible.cfg` — bewusste Härtungen gegen Container-Eigenheiten
 
----
+`pipelining = True` vermeidet TTY-/PTY-Allokation und damit Hänger; SSH-Multiplexing (`ControlMaster`/`ControlPersist`) ist **explizit deaktiviert**, weil UNIX-Sockets im Overlay-Dateisystem des Containers blockieren; `scp_extra_args = -O` erzwingt das Legacy-SCP-Protokoll statt SFTP-under-the-hood (OpenSSH ≥ 9.0); Keepalives und `retries = 3` überstehen VPN-Aussetzer.
 
-### IDP-021 — Wiederherstellungsprozess
+### 8.2 Rolle `common` (jeder Knoten)
 
-**Prio:** P1 · **Typ:** process
+- **Node Exporter** inklusive Textfile-Collector unter `/var/lib/prometheus/node-exporter`.
+- **Failure-/Recovery-Handler:** Jede kritische systemd-Unit deklariert `OnFailure=notify-failure@%n`. Das Skript schreibt eine `.prom`-Datei mit `systemd_service_failed{unit="…"} 1`; `ExecStartPost` ruft nach erfolgreichem Start `notify-recovery.sh` auf, das die Datei löscht. Ein Ausfall wird so ohne zusätzlichen Agenten zu einer Prometheus-Metrik.
+- **Grafana Alloy** → Loki: journald mit Relabeling auf `unit`, plus Nomad-Task-Logs aus `/opt/nomad/data/alloc/*/alloc/logs/*` mit Regex-Extraktion von `alloc_id`, `task_name` und `stream`.
+- **CA-Verteilung** (Vault-CA, Ubicloud-CA) nach `/etc/ssl/certs` und `/usr/local/share/ca-certificates` mit anschließendem `update-ca-certificates`.
+- Swap deaktivieren, `/etc/hosts`-Mapping für `vault.the-toob.com` und `api.global.nomad`.
 
-**Lösung**
-Vier Schritte, alle zwingend:
+### 8.3 Weitere Rollen im Überblick
 
-1. **Anfrage außerhalb des Kanals** — nicht über das kompromittierbare E-Mail-Konto allein.
-2. **Verifikation durch einen Menschen** gegen eine bei Vertragsschluss hinterlegte
-   Kontaktperson des Kunden.
-3. **Wartezeit 24 Stunden**, in der alle Org-Owner benachrichtigt werden und widersprechen
-   können. Das ist der eigentliche Schutz: Ein Angreifer, der die Verifikation besteht, hat
-   trotzdem einen Tag, in dem der echte Inhaber es merkt.
-4. **Registrierung neuer Authentikatoren**, mindestens zwei, ohne Absenkung des Niveaus.
-
-Bei Widerspruch: sofortiger Abbruch, Sicherheitsvorfall, Sitzungen des betroffenen Kontos
-invalidiert.
-
-**Akzeptanzkriterien**
-- [ ] Der Prozess ist im Runbook, mit Namen der verantwortlichen Rolle.
-- [ ] Ein Testdurchlauf ist protokolliert.
-- [ ] Die Wartezeit ist technisch erzwungen, nicht organisatorisch zugesagt.
-
----
-
-### IDP-022 — `IAM_OWNER` als Break-Glass-Konto
-
-**Prio:** P0 · **Typ:** security
-
-**Problem**
-Der Instanz-Administrator kann in Zitadel alles: jede Org verwalten, Nutzer anlegen, Policies
-ändern, Rollen vergeben. Ein übernommenes `IAM_OWNER`-Konto ist die Kompromittierung
-sämtlicher Kunden gleichzeitig.
-
-**Lösung**
-- Genau ein `IAM_OWNER`-Konto, **nicht im Alltag verwendet**.
-- Zwei Hardware-Schlüssel, physisch getrennt verwahrt.
-- Keine E-Mail-Adresse, die auch für anderes benutzt wird.
-- **Jede Anmeldung erzeugt sofort einen Alarm** — nicht „bei Auffälligkeit", sondern immer.
-- Alltägliche Toob-Arbeit läuft über org-gebundene Rollen (`IDP-061`).
-
-**Akzeptanzkriterien**
-- [ ] Es existiert genau ein Konto mit Instanz-Rechten.
-- [ ] Eine Anmeldung damit erzeugt binnen 60 Sekunden einen Alarm im Betriebskanal.
-- [ ] Kein Automatisierungspfad verwendet dieses Konto.
-
----
-
-### IDP-023 — Break-Glass-Übung
-
-**Prio:** P2 · **Typ:** process
-
-**Lösung**
-Halbjährlich: Zugriff mit dem `IAM_OWNER`-Konto herstellen, gemessene Zeit protokollieren,
-Alarm verifizieren, Schlüssel zurück in die Verwahrung. Zusammen mit der Übung aus `OPS-023`.
-
-Ein ungeübter Notfallpfad ist keiner — das gilt hier wie beim WireGuard-Hub.
-
----
-
-# EPIC D — Organisationen, Einladungen, Rollen
-
----
-
-### IDP-030 — Projekt- und Rollenmodell
-
-**Prio:** P1 · **Typ:** config
-
-**Lösung**
-Zwei Zitadel-Projekte mit ihren Rollen:
-
-| Projekt | Rollen |
+| Rolle | Aufgabe |
 |---|---|
-| `registry` | `contributor`, `core` |
-| `fleet` | `viewer`, `operator`, `release-manager`, `admin`, `owner` |
+| `wg-hub` / `wg-peer` | WireGuard-Overlay: Hub auf `ops_hub`, Peers auf allen anderen Knoten |
+| `vault-kms` | KMS-Vault mit Transit-Engine für Auto-Unseal |
+| `vault-primary` | Vault-Raft-Cluster auf den API-Knoten, Secret-Seeding, AppRole-/PKI-Setup |
+| `ubicloud-db` | Firewall- und Verbindungsintegration der Managed-PostgreSQL |
+| `caddy` | Ingress, TLS, Security-Header, SSRF-Härtung |
+| `nomad` | Server-/Client-Konfiguration, TLS-Rotation, ACL-Bootstrap |
+| `monitoring` | Compose-Stack, Alertmanager-Routing, Backup- und TTL-Exporter-Timer |
+| `ci-runner` | Unprivilegierter Deploy-Wrapper, ephemere Vault-Tokens |
+| `zitadel` | Identity-Provider |
 
-Die Trennung zwischen `release-manager` (darf signieren lassen) und `operator` (darf ausrollen)
-ist Lieferkettenschutz: Ein übernommener Operator kann kein bösartiges Artefakt einschleusen,
-nur ein vorhandenes falsch ausrollen — und das ist über den Assignment-Verlauf rekonstruierbar.
+### 8.4 SSRF- und Firewall-Härtung
 
-Als Code, nicht per Konsole.
+Die Caddy-Rolle installiert `toob-api-hardening.service`: eine idempotente `iptables`-Regel, die Zugriffe auf `169.254.169.254` (Cloud-Metadata-Endpoint) für alle Nicht-Root-UIDs verwirft. Damit kann eine SSRF-Lücke in der API keine Instanz-Credentials abgreifen.
 
-> **Zu verifizieren:** Welches Zitadel-Primitiv die org-gebundene Rolle trägt — Projektrolle
-> mit Org-Grant, Org-Member-Rolle oder User-Grant. Bestimmt die Claim-Struktur.
+Der zentrale DB-Firewall-Pruner (`cleanup-db-firewall.py`, OPS-094) läuft periodisch auf dem Unseal-Vault-Knoten, listet alle aktiven Hetzner-Server (paginiert), vergleicht sie mit den `/32`-Regeln der Ubicloud-Firewall und entfernt verwaiste Einträge. Drei Sicherungen verhindern dabei Selbstaussperrung:
 
----
+1. Liefert die Hetzner-API **0 aktive Server**, bricht das Skript ab (Netzwerkfehler ≠ „alles löschen").
+2. Mehr als **20 Löschkandidaten** ⇒ Abbruch.
+3. Mehr als **50 %** aller Regeln als Kandidaten ⇒ Abbruch.
 
-### IDP-031 — Einladungsfluss
-
-**Prio:** P1 · **Typ:** feature
-
-**Lösung**
-- Einladung ist **einmalig einlösbar**, läuft nach 72 Stunden ab, ist an die eingeladene
-  E-Mail gebunden.
-- Der Einladende sieht, ob sie eingelöst wurde.
-- Eine Einladung vergibt **niemals direkt** eine Rolle mit Geräteauswirkung — der Beitritt
-  erfolgt als `viewer`, die Erhöhung braucht `IDP-033`.
-- Widerruf jederzeit möglich.
-
-**Akzeptanzkriterien**
-- [ ] Ein zweiter Einlöseversuch derselben Einladung schlägt fehl.
-- [ ] Eine Einladung, die auf eine andere E-Mail eingelöst wird, schlägt fehl.
+Zusätzlich existiert eine statische Whitelist (`STATIC_WHITELIST_IPS`). Ergebnis und Zeitstempel werden als Prometheus-Metriken geschrieben; der Alert `DBFirewallCleanupStale` feuert nach 30 Minuten ohne Erfolg.
 
 ---
 
-### IDP-032 — Org-Namensregeln über Action
+## 9. Secrets- und Trust-Architektur (Vault)
 
-**Prio:** P1 · **Typ:** feature
+### 9.1 Zweistufiges Vault
 
-**Problem**
-Der Org-Name ist zugleich Paket-Scope (`@esp-alliance/foo`). Lässt Zitadel Namen zu, die
-`validate.ValidateOrgName` ablehnt, entstehen Organisationen, die keinen gültigen Scope ergeben
-— und der Fehler fällt erst beim ersten Publish auf.
+```mermaid
+flowchart LR
+    KMS["unseal-vault<br/>eigene Region/Zone<br/>transit-Engine"]
+    V1["Primary Vault 1<br/>(api-fsn1)"]
+    V2["Primary Vault 2<br/>(api-hel1)"]
 
-**Lösung**
-Action bei der Org-Erzeugung, die dieselbe Regel durchsetzt. Die Regel steht an einer Stelle
-und wird von der Action konsumiert, nicht nachgebaut.
+    KMS -->|"Auto-Unseal (transit seal)"| V1
+    KMS -->|"Auto-Unseal (transit seal)"| V2
+    V1 <-->|"Raft-Peering"| V2
 
----
+    V1 --> PKI["pki/<br/>mTLS-Zertifikate"]
+    V1 --> TRANSIT["transit/<br/>Ed25519-Signaturen"]
+    V1 --> KV["secret/<br/>DB · S3 · GitHub · CF · Docker"]
+```
 
-### IDP-033 — Rollenerhöhung braucht Owner-Genehmigung
+Der bewusste Verzicht auf AWS/GCP/Azure KMS zugunsten einer **zweiten, regional getrennten Vault-Instanz** ist die Kernentscheidung für Souveränität: kein Lizenzkostenanteil, vollständig selbst gehostet, ausschließlich europäische Infrastruktur. Dokumentierte Alternativen: Scaleway KMS (Frankreich, SecNumCloud) und Securosys CloudHSM (Schweiz, via PKCS#11).
 
-**Prio:** P1 · **Typ:** feature
+### 9.2 Nur vier sicherheitsrelevante Umgebungsvariablen
 
-**Lösung**
-Die Vergabe von `operator`, `release-manager` oder `admin` erfordert die Bestätigung eines
-`owner` **mit frischem Step-up**. Alle Org-Owner werden benachrichtigt.
+Die Anwendung selbst kennt nur `VAULT_ADDR`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID`, `VAULT_CA_CERT`. **Alle** weiteren Geheimnisse — Datenbank-URL, GitHub-App, GitHub-OAuth, Webhook-HMAC, Cloudflare, S3-Keys, OAuth-AES-Key, Docker Hub — werden zur Laufzeit aus Vault gelesen.
 
-Damit reicht ein übernommener `admin` nicht, um sich still weitere Rechte zu verschaffen — der
-Vorgang ist sichtbar.
+### 9.3 Zertifikatsverteilung über Vault Agent
 
-**Akzeptanzkriterien**
-- [ ] Rollenerhöhung ohne Owner-Bestätigung ist nicht möglich.
-- [ ] Jede Erhöhung erzeugt eine Benachrichtigung an alle Owner.
+Auf jedem Nomad-Knoten läuft ein Vault Agent mit AppRole-Auth (`api-node-agent` bzw. `nomad-node-pki`). Das Template rendert ein **JSON-Bundle** aus `pki/issue/nomad-cluster` mit CA, Zertifikat und Key. Der `command`-Hook ruft `unpack-nomad-tls.sh`, das die drei Bestandteile per Python atomar (`.tmp` → `os.replace`) mit korrekten Rechten (`0644`/`0600`) schreibt, Ownership setzt, Nomad reloaded und einen Rotations-Zeitstempel als Prometheus-Metrik ablegt. Der Alert `NomadTLSRotationFailed` feuert, wenn dieser Zeitstempel älter als 20 Stunden ist — also vier Stunden vor Ablauf des Zertifikats.
 
----
+Derselbe Agent rendert auf API-Knoten zusätzlich `/etc/docker-auth.json` aus `secret/dockerhub`, sodass Nomad private Images ziehen kann, ohne dass Credentials in einer Job-Spezifikation stehen.
 
-### IDP-034 — Org-Spiegel in die Produkte
+### 9.4 Bootstrapping neuer Knoten (Wrapped SecretIDs)
 
-**Prio:** P1 · **Typ:** feature
+Golden Images enthalten **keine** Geheimnisse. Beim Scale-Up erzeugt der Autoscaler eine *wrapped* SecretID (TTL 5 Minuten, einmalig konsumierbar), übergibt sie per cloud-init-Metadaten, und der bootende Knoten tauscht sie gegen die echte SecretID, loggt sich per AppRole ein und zieht sein mTLS-Zertifikat aus der PKI-Engine. Abgefangene Metadaten sind wertlos, weil das Wrapper-Token bereits verbraucht ist.
 
-**Lösung**
-Push aus Zitadel in `toob-registry.organizations`/`organization_members` und
-`toob-update.tenants`/`tenant_members`. Read-only im Produkt, geschrieben nur vom Sync.
+### 9.5 Token-Hygiene
 
-Damit liest `PolicyEngine.AuthorizeOrgAction` weiter lokal — kein Netzaufruf, kein
-Laufzeitpfad zum IdP.
-
-**Akzeptanzkriterien**
-- [ ] Eine Mitgliedschaftsänderung ist binnen 60 Sekunden im Produkt sichtbar.
-- [ ] Sync-Rückstand über 5 Minuten erzeugt einen Alarm.
-- [ ] Der Produktcode schreibt nachweislich nicht in die Spiegeltabellen (Grant-Test).
+- **Deployer-Tokens** (Nomad + Vault) werden erzeugt, per `fetch` abgeholt und anschließend auf dem Zielknoten gelöscht (`state: absent`).
+- Der **Nomad-Bootstrap-Token** wandert nach `secret/platform/nomad-bootstrap` und wird lokal geschreddert.
+- In **Produktion** wird der Vault-Root-Token am Ende der Nomad-Rolle revoked und `vault-keys.json` mit `shred -vfz -n 5` vernichtet.
+- Ein **Token-TTL-Exporter** läuft alle fünf Minuten und exportiert die Restlaufzeit für `autounseal`, `nomad_server` und `vault_agent` als Metrik; der Alert `TokenTTLLow` (CRITICAL) feuert unter 24 Stunden.
 
 ---
 
-# EPIC E — Step-up und Freigabe
+## 10. Workload-Orchestrierung (Nomad)
+
+**Server/Client-Topologie:** Der erste API-Knoten ist Server *und* Client (`bootstrap_expect = 1`), alle übrigen sind reine Clients. Gossip ist verschlüsselt (`NOMAD_GOSSIP_KEY`), HTTP und RPC laufen über mTLS aus der Vault-PKI. Die Konfiguration entsteht aus Jinja2-Templates (`server.hcl.j2`, `client.hcl.j2`) statt aus fehleranfälligen Regex-Ersetzungen — eine explizit dokumentierte Refaktorierung (BEF-012).
+
+**ACL-Modell:** Nach der Leader-Wahl wird `nomad acl bootstrap` ausgeführt und der Token per Regex geparst. Anschließend werden drei Policies mit minimalen Rechten registriert:
+
+| Policy | Rechte | Verwendung |
+|---|---|---|
+| `prometheus` | agent/node/service: `read` | Service-Discovery-Scraping |
+| `autoscaler` | agent/node/namespace: `write` | Knoten drainen und purgen |
+| `deployer` | namespace `*`, node, agent: `write` | Deployments durch den CI-Runner |
+
+Der Prometheus-Token wird direkt in das Monitoring-Verzeichnis geschrieben, der Autoscaler-Token nach Vault gepatcht.
+
+**Docker-Härtung:** `allow_privileged = false`; das Seccomp-Profil `seccomp-api.json` liegt unter `/opt/toob-registry/`. `raw_exec` ist auf Servern aktiviert, auf Clients über die Variable `nomad_raw_exec_enabled` steuerbar.
 
 ---
 
-### IDP-040 — Step-up vor Geräteoperationen
+## 11. Edge & Ingress (Cloudflare + Caddy)
 
-**Prio:** P1 · **Typ:** feature
+**Origin Cloaking:** Cloudflare läuft in *Full (Strict)*. Caddy terminiert TLS mit **Cloudflare-Origin-CA-Zertifikaten**, die ausschließlich vom Cloudflare-Proxy-Netz akzeptiert werden. Wer die Bare-Metal-IP kennt und direkt HTTPS spricht, scheitert bereits am TLS-Handshake. Nebeneffekt: Diese Zertifikate sind bis zu 15 Jahre gültig — kein ACME-Renewal, keine DNS-API-Key-Exposition, keine WAF-Interferenz mit HTTP-01-Challenges.
 
-**Lösung**
-Vor Artefakt-Publish, Channel-Wechsel, Rollout-Start und Killswitch: frische
-Re-Authentifizierung mit phishing-resistentem Faktor, maximal fünf Minuten alt. Umgesetzt über
-`prompt=login` mit `max_age` und Prüfung von `auth_time`.
+**Slowloris-Schutz:** Globale Timeouts (`read_body 10s`, `read_header 5s`, `idle 5m`) plus `request_body max_size` (6 MB API, 2 MB Identity).
 
-**Wirkung:** Ein gestohlenes Session-Token erlaubt Lesen, aber keine Auslieferung. Das ist die
-Kompensation, falls `IDP-015` nicht verfügbar ist.
+**Trusted Proxies:** Vollständige Liste der Cloudflare-IPv4-/IPv6-Ranges. Nur dahinter wird `CF-Connecting-IP` als echte Client-IP übernommen — Voraussetzung dafür, dass das Rate-Limiting nicht durch gefälschte Header umgangen werden kann.
 
-**Akzeptanzkriterien**
-- [ ] Publish mit einem sechs Minuten alten `auth_time` wird abgelehnt.
-- [ ] Die Ablehnung führt zur Re-Authentifizierung, nicht zu einem Fehler.
+**Zwei Caddyfile-Varianten:**
+
+- **Standard-API** (`Caddyfile.j2`): HSTS mit Preload, `X-Frame-Options: DENY`, `nosniff`, restriktive CSP (`default-src 'none'`), `-Server`. `/metrics*` wird mit 403 blockiert. Das Admin-Dashboard erhält eine gelockerte CSP für HTML-Rendering. Reverse-Proxy mit `/ready`-Healthcheck und `lb_policy first` (Failover, kein Round-Robin).
+- **Identity** (`Caddyfile-identity.j2`): Zusätzlich ein Matcher, der `/ui/console*`, `/ui/admin*` und `/console*` für alle IPs **außerhalb** von `10.9.0.0/16` und `10.20.0.0/16` mit 403 beantwortet — die Admin-Konsole ist ausschließlich über VPN erreichbar (IDP-003). Ebenso blockiert: Selbstregistrierung (IDP-004), Passwort-Endpunkte (IDP-010), Self-Service-Recovery (IDP-020).
 
 ---
 
-### IDP-041 — Vier-Augen-Freigabe für Produktions-Channels
+## 12. Observability & Alerting
 
-**Prio:** P2 · **Typ:** feature
+### 12.1 Stack
 
-**Problem**
-Ohne diese Maßnahme genügt **ein** kompromittiertes Konto für die gesamte Flotte. Alles davor
-macht das schwer — das hier macht es unzureichend.
+Ein Docker-Compose-Stack auf dem Ops-Hub: Prometheus (30 Tage Retention), Grafana (GitHub-OAuth mit Org-Beschränkung und rollenbasiertem `role_attribute_path`), Alertmanager, Loki, sowie Blackbox-, Postgres- und Cloudflare-Exporter. Alle Ports außer Loki binden auf `127.0.0.1`.
 
-**Lösung**
-Ein Channel-Wechsel in Produktion erfordert die Freigabe von **zwei verschiedenen**
-`release-manager`, beide mit frischem Step-up. Die zweite Freigabe kann nicht vom Ersteller
-kommen.
+### 12.2 Scrape-Strategie
 
-Pro Mandant abschaltbar, aber **Default an**, sobald Geräte in Produktion registriert sind.
+| Job | Ziel | Auth |
+|---|---|---|
+| `toob-api` | `:8443` (interne mTLS-API) | Client-Zertifikat aus Vault-PKI |
+| `vault` | `/v1/sys/metrics` | Bearer-Token aus Vault-Agent-Sink |
+| `nomad` | `:4646/v1/metrics` | Nomad-ACL-Token + mTLS |
+| `nomad-node-exporter` | Nomad Service Discovery | Relabeling auf `toob-worker-*`, Port-Rewrite auf `:9100` |
+| `blackbox-public` | `https://<domain>/health` über CF | — |
+| `blackbox-origins` | `http://<private-ip>:8080/ready` | — |
+| `blackbox-vaults` | `/v1/sys/seal-status`, Regex auf `"sealed": false` | — |
 
-**Akzeptanzkriterien**
-- [ ] Ein Nutzer kann nicht beide Freigaben erteilen.
-- [ ] Die Abschaltung erfordert eine `owner`-Entscheidung und erzeugt einen Audit-Eintrag.
+Die drei Blackbox-Jobs bilden eine Kaskade: Öffentlicher Probe fehlgeschlagen, aber Origin-Probe grün ⇒ das Problem liegt bei Cloudflare oder DNS, nicht in der Anwendung.
 
----
+### 12.3 Alert-Routing
 
-### IDP-042 — Soak-Zeit
+```
+Watchdog / WatchdogHeartbeatStale  →  BetterStack-Heartbeat (group_wait 0s, repeat 1m)
+severity: critical                 →  Discord (Titel 🚨, @here-Mention)
+severity: warning                  →  Discord (Titel ⚠️)
+```
 
-**Prio:** P2 · **Typ:** feature
+**Inhibit-Regel:** Ist `InstanceDown` aktiv, werden alle Folge-Alerts derselben Instanz (`SystemdServiceFailed`, `APIHighErrorRate`, `NomadJobFailed`, `VaultSealedExternal`, …) unterdrückt. Ein ausgefallener Knoten erzeugt einen Alert, nicht zwölf.
 
-**Lösung**
-Zwischen der zweiten Freigabe und dem ersten ausgelieferten Byte liegen mindestens 30 Minuten,
-in denen jeder Org-Owner abbrechen kann. Alle Owner werden bei Freigabe benachrichtigt.
+**Dead-Man's-Switch:** Der `Watchdog`-Alert feuert dauerhaft und wird an einen BetterStack-Heartbeat weitergereicht. Bleibt der Ping aus, ist der Monitoring-Stack selbst ausgefallen — das Runbook formuliert es unmissverständlich: *„You are currently blind to all system failures."*
 
-**Warum das wichtig ist:** Es verwandelt einen erfolgreichen Angriff von „sofort auf allen
-Geräten" in „ein halbstündiges Erkennungsfenster". Für einen Angreifer, der auf Unauffälligkeit
-angewiesen ist, ist das ein erheblicher Unterschied.
+### 12.4 Runbooks
 
-**Akzeptanzkriterien**
-- [ ] Kein Gerät bekommt eine Zuweisung vor Ablauf der Soak-Zeit.
-- [ ] Ein Abbruch innerhalb des Fensters verhindert jede Auslieferung.
+Jeder Alert besitzt ein Runbook unter `docs/runbooks/` mit identischer Struktur: **Symptoms → Impact → Troubleshooting & Resolution** mit konkreten Kommandos. Abgedeckt sind unter anderem `VaultSealed` (inkl. manuellem PGP-Recovery-Pfad), `PostgresDown`, `TokenTTLLow`, `AutoscalerIneffective`, `NomadTLSRotationFailed`, `BackupStale`, `VersionDivergence`, `DiskSpaceFillingUp`, `SSLCertExpiringSoon`.
 
----
-
-### IDP-043 — Signing Service verlangt Freigabenachweis
-
-**Prio:** P2 · **Typ:** security
-
-**Problem**
-Solange der Signing Service auf reine Rollenzugehörigkeit hin signiert, umgeht ein direkter
-API-Aufruf die Freigabe aus `IDP-041`.
-
-**Lösung**
-Der Signing Service akzeptiert nur Anfragen mit einem Nachweis über zwei Freigaben und
-frischen Step-up. Ohne diesen Nachweis wird nicht signiert — unabhängig davon, welche Rolle
-der Aufrufer hat.
-
-Damit ist die Vier-Augen-Regel technisch durchgesetzt und nicht nur in der UI abgebildet.
-
-**Akzeptanzkriterien**
-- [ ] Ein direkter Aufruf des Signing Service ohne Freigabenachweis wird abgelehnt.
-- [ ] Der Nachweis ist an Artefakt-Digest und Channel gebunden, nicht wiederverwendbar.
+Ergänzend existieren **Prozess-Runbooks**: `account_recovery.md`, `break_glass_drill.md`, `security_patching_sla.md`.
 
 ---
 
-# EPIC F — Föderation
+## 13. Identity Plane (Zitadel)
 
----
+Die Identity-Ebene folgt einem eigenen Kontroll-Katalog (`IDP-*`), der konsequent auf **phishing-resistente** Authentifizierung setzt.
 
-### IDP-050 — GitHub als Upstream, mit Rollenschranke
-
-**Prio:** P1 · **Typ:** config
-
-**Problem**
-GitHub-Login ist gute UX und ein Risiko: Eine GitHub-Übernahme wäre eine Toob-Übernahme, und
-GitHubs eigene MFA kann SMS sein.
-
-Zusätzlich das klassische **Account-Linking-Problem**: Ein Upstream, der E-Mail-Adressen nicht
-verifiziert, erlaubt Verknüpfung mit einer fremden Identität.
-
-**Lösung**
-- GitHub bleibt Anmeldemethode für `contributor` und `viewer`.
-- **Für Geräterollen genügt GitHub nicht** — dort ist zusätzlich ein lokaler Passkey
-  erforderlich, unabhängig vom Anmeldeweg.
-- Automatische Verknüpfung nur bei verifizierter E-Mail; sonst manuelle Bestätigung.
-
-**Akzeptanzkriterien**
-- [ ] Ein per GitHub angemeldeter Nutzer mit `operator` muss vor einer Geräteoperation den
-      lokalen Faktor vorlegen.
-- [ ] Verknüpfung mit unverifizierter Upstream-E-Mail ist nicht automatisch möglich.
-
----
-
-### IDP-051 — Bestandsnutzer vorverknüpfen
-
-**Prio:** P1 · **Typ:** feature
-
-**Lösung**
-Bestehende Registry-Nutzer über die Management-API anlegen und per `github_id` mit ihrer
-GitHub-Identität verknüpfen, damit der erste Login sie wiedererkennt statt ein Duplikat
-anzulegen.
-
-Wichtig: Verknüpfung über die **numerische** `github_id`, nicht über den Login-Namen — Namen
-sind änderbar und wiederverwendbar.
-
-> **Zu verifizieren:** Ob die Management-API das Vorverknüpfen externer Identitäten erlaubt.
-> Falls nicht, braucht der erste Login eine Action, die anhand der `github_id` zuordnet.
-
----
-
-### IDP-052 — Kunden-IdP über OIDC/SAML
-
-**Prio:** P3 · **Typ:** feature
-
-Industriekunden wollen ihren eigenen IdP. Wichtig dabei: Auch dann bleibt die Anforderung aus
-`IDP-011` bestehen — entweder der Kunden-IdP liefert nachweislich einen phishing-resistenten
-Faktor (`amr`-Claim), oder es ist zusätzlich ein lokaler Passkey nötig.
-
-Ein Kunde darf sein eigenes Sicherheitsniveau senken — aber nicht unbemerkt, und nicht für
-Geräteoperationen.
-
----
-
-### IDP-053 — Workload-Identity-Federation
-
-**Prio:** P3 · **Typ:** feature
-
-GitHub-/GitLab-OIDC-Token gegen kurzlebiges Toob-Token. Kein langlebiges Kundensecret mehr bei
-uns.
-
-Wichtig: Der Token-Tausch muss `repository`, `ref` und `workflow` prüfen — sonst kann jedes
-Repository derselben Organisation Firmware publizieren. Und Maschinenidentitäten erhalten
-**nie** `release-manager` für Produktions-Channels; sie können nach `dev` publizieren, die
-Promotion bleibt menschlich.
-
----
-
-# EPIC G — Insider und Support
-
----
-
-### IDP-060 — Impersonation zeitbegrenzt und sichtbar
-
-**Prio:** P2 · **Typ:** security
-
-**Problem**
-Die erste Frage eines Auditors: *Wer bei euch sieht unsere Flottendaten, und wie erfahren wir
-davon?* Ohne dieses Ticket lautet die Antwort „jeder mit DB-Zugriff, und ihr erfahrt es nicht".
-
-**Lösung**
-Support-Zugriff läuft ausschließlich über eine explizite Impersonation:
-- Begründung verpflichtend, freier Text
-- Zeitlich begrenzt, maximal 4 Stunden
-- Erscheint im **Audit-Log des Kunden**, nicht nur im unseren
-- Benachrichtigung an alle Org-Owner beim Start
-- Niemals mit `release-manager` — Support liest, Support liefert nicht aus
-
-**Akzeptanzkriterien**
-- [ ] Impersonation ohne Begründung ist nicht möglich.
-- [ ] Der Kunde sieht den Vorgang in seinem eigenen Audit-Log.
-- [ ] Impersonierte Sitzungen können keine Geräteoperationen auslösen.
-
----
-
-### IDP-061 — Toob-Mitarbeiter ohne stehende Kundenrechte
-
-**Prio:** P2 · **Typ:** process
-
-**Lösung**
-Kein Toob-Konto hat dauerhaft Rollen in Kundenorganisationen. Zugriff entsteht nur über
-`IDP-060` und endet automatisch. Das Alltagskonto ist ein normales Konto mit Passkey.
-
----
-
-# EPIC H — Erkennung
-
----
-
-### IDP-070 — Audit-Log nach Loki
-
-**Prio:** P1 · **Typ:** detect
-
-**Lösung**
-Zitadels Ereignisstrom nach Loki, mit `project=identity` und Mandanten-Label
-(`X-Scope-OrgID` aus `BEF-009`). Aufbewahrung mindestens so lang wie die CRA-Retention der
-Flottendaten.
-
-Das Log ist selbst schützenswert: Es enthält, wer wann welche Flotte verwaltet hat.
-
-**Akzeptanzkriterien**
-- [ ] Alle Anmelde-, Rollen- und Policy-Ereignisse landen in Loki.
-- [ ] Ein Mandant sieht ausschließlich seine eigenen Ereignisse.
-
----
-
-### IDP-071 — Alarme auf sicherheitsrelevante Ereignisse
-
-**Prio:** P1 · **Typ:** detect
-
-| Ereignis | Schwere |
+| Kontrolle | Inhalt |
 |---|---|
-| `IAM_OWNER`-Anmeldung | **kritisch, immer** |
-| Neuer Authentikator registriert | hoch — an Nutzer und Org-Owner |
-| Privilegierte Rolle vergeben | hoch |
-| MFA-Policy geändert | **kritisch** |
-| Refresh-Token-Reuse erkannt | **kritisch** |
-| Wiederherstellungsprozess gestartet | hoch |
-| Impersonation gestartet | hoch, auch an den Kunden |
-| Upstream-IdP-Konfiguration geändert | kritisch |
+| IDP-003 | Admin-Konsole nur über VPN (Caddy-Matcher, 403 für externe IPs) |
+| IDP-004 | Ausschließlich einladungsbasierter Zugang; Registrierungs-Endpunkte blockiert |
+| IDP-010/011 | Passwortlos per Passkey/WebAuthn; TOTP- und SMS-Fallbacks für privilegierte Rollen **verboten** |
+| IDP-013/015 | DPoP-Token-Binding nach RFC 9449, Step-Up-Prompts über `WWW-Authenticate` |
+| IDP-020/021 | Kein Self-Service-Recovery für privilegierte Konten; stattdessen der Vier-Schritt-Prozess |
+| IDP-031/033/040 | 72-h-Einladungen, initiale Rolle immer `viewer`, Rollenerhöhung nur mit Owner-Freigabe und frischem Step-Up (< 300 s) |
+| IDP-060/061 | Support-Impersonation: Pflichtbegründung, max. 4 h, nur lesend, Eintrag im Kunden-Audit-Log; keine Standing Grants |
+| IDP-072 | Anomalie-Alarm `ANOMALY_AITM_PROXY_SUSPECTED` nach wiederholten Assertion-Fehlern |
+| IDP-090 | Patch-SLA: CRITICAL binnen 24 h, HIGH binnen 72 h, Zero-Downtime-Rolling-Upgrade mit automatischem Rollback |
 
-Der Alarm auf „neuer Authentikator" ist besonders wichtig: Das ist der Schritt, den ein
-Angreifer nach der Übernahme unternimmt, um sich Persistenz zu verschaffen.
+### 13.1 Privileged Account Recovery (IDP-021)
 
----
+Implementiert in `platform/cmd/toob-ops/account_recovery.go` als vier explizite, protokollierte Schritte:
 
-### IDP-072 — Anomalie-Alarme
+```
+1. Out-of-Band-Anfrage      verschlüsselter Anruf / signierte PGP-Mail / persönliches Ticket
+                            (Standard-Mail und Web-Reset sind ausgeschlossen)
+2. Human Verification       Abgleich mit dem Vertrags-Kontakt: Name, Vertrags-ID, Telefonnummer
+                            → --verified-by <operator> --contract-id <id>
+3. 24-h-Veto-Fenster        Alle Org-Owner werden per E-Mail, Webhook und SMS benachrichtigt.
+                            Jeder Owner kann abbrechen → INCIDENT_ACCOUNT_RECOVERY_VETOED
+4. Dual-Factor Re-Keying    Alle Sessions und Tokens werden revoked; der Nutzer registriert
+                            ZWEI neue phishing-resistente Authentikatoren. Keine Rollen-Degradierung.
+```
 
-**Prio:** P2 · **Typ:** detect
+### 13.2 Empirischer Nachweis der Passkey-Wirksamkeit
 
-Neue Geografie oder neues ASN bei privilegierten Konten, ungewöhnliche Uhrzeit,
-fehlgeschlagene WebAuthn-Versuche in Serie (deutet auf AiTM-Versuch hin — der Proxy bekommt
-keine gültige Assertion und probiert weiter).
+Der Audit-Bericht `aitm_phishing_simulation.md` dokumentiert eine kontrollierte Adversary-in-the-Middle-Simulation über eine getippte Domain. Ergebnis: Das privilegierte Konto mit WebAuthn-Passkey war **nicht angreifbar** — die Signatur band sich an den Proxy-Origin und wurde vom echten Server wegen Relying-Party-Mismatch verworfen. Das Read-Only-Konto mit Passwort + TOTP wurde in Echtzeit **erfolgreich gephisht**. Das ist der belastbare Grund, warum IDP-011 TOTP-Fallbacks für privilegierte Rollen kategorisch ausschließt.
 
-Kein automatisches Blockieren, sondern Benachrichtigung plus erzwungenes Step-up bei der
-nächsten Aktion.
+### 13.3 Break-Glass-Drill (IDP-023)
 
----
-
-### IDP-073 — Rate-Limits ohne DoS-Nebenwirkung
-
-**Prio:** P1 · **Typ:** security
-
-**Problem**
-Harte Kontosperren nach N Fehlversuchen sind selbst ein Angriff: Ein Angreifer sperrt gezielt
-die Operatoren eines Kunden aus, kurz bevor ein Sicherheitsupdate ausgeliefert werden müsste.
-
-**Lösung**
-Progressive Verzögerung statt Sperre, kombiniert mit Alarmierung. Rate-Limits pro IP **und**
-pro Konto, Cloudflare-Regel davor. Eine echte Sperre nur nach menschlicher Entscheidung.
-
-**Akzeptanzkriterien**
-- [ ] 1000 Fehlversuche gegen ein Konto sperren es nicht aus, erzeugen aber einen Alarm.
-- [ ] Der legitime Inhaber kann sich während des Angriffs weiterhin anmelden.
+Halbjährlich, gemeinsam mit dem WireGuard-Hub-Recovery-Drill: Hardware-Key aus dem feuerfesten Safe holen, `IAM_OWNER`-Login durchführen, verifizieren dass der CRITICAL-Alert **binnen 60 Sekunden** in `#security-alerts` ankommt, sofort ausloggen, Key zurücklegen, Zeiten protokollieren. Die Begründung im Runbook ist knapp und richtig: *„An unpracticed emergency path is no emergency path."*
 
 ---
 
-# EPIC I — Nachweis
+## 14. Release- und Deployment-Pfad
+
+### 14.1 Warum kein GitHub Actions
+
+GitHub bleibt Code-Hosting, PR-Plattform und Webhook-Quelle. Ausgeführt wird nichts dort. Der Angriffsvektor „kompromittierter Workflow ändert den Release-Prozess" existiert damit nicht. Stattdessen: HMAC-SHA256-verifizierte Webhooks (`X-Hub-Signature-256`) an den eigenen `toob-ci`-Daemon.
+
+### 14.2 Der isolierte CI-Runner (`ops-ci`)
+
+- Systembenutzer `toob-ci` in der `docker`-Gruppe, Workspace `/var/lib/toob-ci` (`0750`).
+- `toob-ci-deploy` ist ein **unprivilegierter Wrapper** (BEF-015/OPS-034): Er holt sich über AppRole (`role-id`/`secret-id` aus dem Workspace) ein **ephemeres** Vault-Token, statt ein statisches zu halten, und führt das Deploy-Skript per `sudo -u toob-ci` aus. Root und Docker-Socket bleiben Image-/Rootfs-Builds vorbehalten.
+- **Immutable-Digest-Gate (OPS-062):** Bei `TOOB_ENV=production` wird jede Image-Referenz ohne `@sha256:` abgelehnt. Tag-basierte Deployments in Produktion sind unmöglich.
+
+### 14.3 Modulare Release-Skripte
+
+| Skript | Aufgabe |
+|---|---|
+| `sign.sh` | Cosign-Signatur von Container-Images über Vault Transit |
+| `verify.sh` | Signaturprüfung mit Retry für Propagationsverzögerung |
+| `deploy-nomad.sh` | DB-Migration und API-Deployment in Nomad |
+| `deploy-systemd.sh` | Zero-Downtime-Rolling-Deployment der systemd-Spoke-Dienste |
+
+**Zero-Exposition-Signing:** Private Schlüssel existieren nie im Build-Environment. Die Build-VM liefert nur SHA-256-Hashes; `toob-ci` reicht sie über mTLS an `transit/sign/toob-registry-ed25519`; Vault signiert intern und gibt die Signatur zurück.
+
+**Clean-Git-Gate:** `just deploy <version>` verweigert den Dienst, wenn `git diff-index --quiet HEAD` fehlschlägt — kein Deployment aus einem verschmutzten Arbeitsverzeichnis.
 
 ---
 
-### IDP-080 — Angriffssimulation: AiTM-Phishing
+## 15. Backup, Restore und Drills
 
-**Prio:** P2 · **Typ:** process
+| Objekt | Mechanismus | Frequenz |
+|---|---|---|
+| Nomad Raft | `nomad operator snapshot save` → S3 (`toob-vault-backups-<env>`) | täglich, 30 Tage lokale Retention |
+| Vault Raft | Snapshot-Skript mit AppRole-Auth | täglich |
+| PostgreSQL | Ubicloud-Managed-Backups | providerseitig |
+| **Restore-Test** | `toob-vault-restore-test.service` (OPS-020) | **monatlich** |
 
-**Lösung**
-Ein kontrollierter Versuch mit einem AiTM-Proxy gegen ein Testkonto mit Geräterolle. Erwartetes
-Ergebnis: **Der Angriff scheitert**, weil WebAuthn die Origin-Bindung durchsetzt.
+Jeder Backup-Lauf schreibt eine Prometheus-Textfile-Metrik (`toob_backup_last_success_timestamp`, `toob_backup_status`). Der Alert `BackupStale` feuert nach **26 Stunden** — ein bewusst gewähltes Fenster, das eine verspätete, aber erfolgreiche Ausführung toleriert.
 
-Derselbe Versuch gegen ein `viewer`-Konto mit TOTP: Erwartetes Ergebnis: er gelingt — und
-belegt damit, warum `IDP-011` keine Rückfallebene erlaubt.
-
-**Akzeptanzkriterien**
-- [ ] Beide Ergebnisse sind protokolliert.
-- [ ] Der Versuch gegen das Geräterollen-Konto erzeugt die Alarme aus `IDP-072`.
+Bemerkenswert: Der Restore wird **automatisiert getestet**, nicht nur das Backup. Ein Backup, dessen Wiederherstellung nie erprobt wurde, ist eine Vermutung. Ergänzend erzwingt `just test-restore-raft` / `just test-restore-db` manuelle Validierungsläufe.
 
 ---
 
-### IDP-081 — Externe Sicherheitsprüfung
+## 16. Ende-zu-Ende-Bootstrap: der vollständige Ablauf
 
-**Prio:** P2 · **Typ:** process
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Op as Operator
+    participant CLI as toob-ops
+    participant Docker as Toolchain-Container
+    participant TF as Terraform
+    participant HZ as Hetzner / Ubicloud / Cloudflare
+    participant WG as WireGuard
+    participant ANS as Ansible
+    participant V as Vault (KMS + Primary)
+    participant N as Nomad
 
-Vor dem ersten Kunden mit Geräten im Feld. Schwerpunkt: Wiederherstellungsfluss,
-Einladungsfluss, Rollenerhöhung, Impersonation, Step-up-Umgehung.
+    Op->>CLI: toob-ops wizard --env dev
+    CLI->>CLI: .env / .env.dev laden, Pfade → Inhalte auflösen
+    CLI->>CLI: mapCredentials(dev) — TOOB_DEV_* → generisch
+    CLI->>Docker: Image bauen (versions.json), sich selbst neu starten
+    CLI->>CLI: State laden, Environment-Abgleich
 
-Der Wiederherstellungsfluss zuerst — dort liegen erfahrungsgemäß die Findings.
+    Note over CLI,HZ: Phase 0–3
+    CLI->>CLI: Prereqs · Artefakte (worker, autoscaler, vm-runner, rootfs)
+    CLI->>HZ: Packer — Golden Images (Snapshot-Reuse)
+    CLI->>TF: plan → apply (s3 → db → control-plane → cloudflare → worker)
+    TF->>HZ: Server, vSwitch, Firewalls, Bucket, DNS
+
+    Note over CLI,WG: Phase 4
+    CLI->>WG: wg-quick up, Tunnel prüfen
+    CLI->>CLI: /etc/hosts setzen, CA-Zertifikate per scp holen
+
+    Note over ANS,V: Phase 5
+    CLI->>ANS: site.yml
+    ANS->>ANS: CA + Node-Zertifikate erzeugen
+    ANS->>ANS: common (Exporter, Alloy, Handler) auf allen Knoten
+    ANS->>V: KMS-Vault → Transit-Unseal → Primary-Raft-Cluster
+    ANS->>V: Secrets seeden, AppRoles + PKI einrichten
+    ANS->>ANS: Caddy (Origin-CA, Header, SSRF-Regel)
+    ANS->>N: Nomad-Konfiguration, TLS via Vault Agent
+    N->>N: ACL-Bootstrap, Policies, scoped Tokens
+    ANS->>ANS: Deployer-Tokens fetchen, remote löschen, Root-Token revoken (prod)
+
+    Note over CLI,N: Phase 6–8
+    CLI->>N: API-Build und Deployment
+    CLI->>HZ: Worker provisionieren
+    CLI->>CLI: Verifikation
+    CLI->>Op: Übergang in das Live-Dashboard
+```
 
 ---
 
-### IDP-090 — Patch-Prozess mit Frist
+## 17. Befunde, Inkonsistenzen und Risiken
 
-**Prio:** P1 · **Typ:** process
+Die Architektur ist durchdacht und an vielen Stellen überdurchschnittlich sauber — Zero-Trust ist hier keine Folienaussage, sondern im Code durchgesetzt. Die folgenden Punkte sind Beobachtungen aus der statischen Analyse, nach Dringlichkeit geordnet.
 
-**Problem**
-Gegen eine Schwachstelle in Zitadel selbst hilft keine Konfiguration. Nur Geschwindigkeit.
+### 🔴 Kritisch
 
-**Lösung**
-Abonnement der Zitadel-Sicherheitsmeldungen, feste Frist: kritische Lücken binnen 24 Stunden,
-hohe binnen 72 Stunden. Der Rolling-Deploy über zwei Knoten macht das unterbrechungsfrei.
+**1. Produktiv aussehende Credentials im Klartext in `.env.dev` und `.env.staging`.**
+Beide Dateien enthalten vollständige, unmaskierte Zugangsdaten: Hetzner-Cloud-Token, Ubicloud-API-Token, S3-Access-/Secret-Key, Cloudflare-API-Token mit Zone- und Account-ID, Docker-Hub-PAT, Nomad-Gossip-Key, GitHub-App-Secrets, Grafana-Admin-Passwort und Webhook-Secret.
 
-Ein Zitadel, das drei Versionen zurückliegt, macht jedes andere Ticket dieses Backlogs
-wirkungslos.
+`.gitignore` enthält zwar `.env.*`, aber die Dateien lagen in der übergebenen Sammlung vor — sie wurden also mindestens außerhalb des Repos weitergegeben. **Empfehlung: sämtliche genannten Credentials rotieren**, unabhängig davon, ob sie je in Git gelandet sind. Danach `git log --all -- '.env*'` prüfen, ob sie historisch doch einmal committed wurden.
+
+**2. Dieselben Credentials für `dev` und `staging`.**
+Hetzner-Token, Ubicloud-Token und -Projekt-ID, AWS-/S3-Keys, Cloudflare-Token, Zone- und Account-ID, GitHub-App und Docker-Hub-Zugang sind in beiden Dateien identisch. Der Präfix-Mechanismus (`TOOB_DEV_*` / `TOOB_STAGING_*`) suggeriert eine Trennung, die auf Credential-Ebene nicht existiert. Ein kompromittierter Dev-Zugang öffnet damit auch Staging und potenziell Produktionsressourcen im selben Cloud-Projekt.
+
+**3. Wiederverwendetes, persönlich wirkendes Passwort.**
+Derselbe Wert dient als `GRAFANA_ADMIN_PASSWORD` **und** als `SEED_WEBHOOK_SECRET` — in beiden Umgebungen. Das Webhook-Secret ist der einzige Schutz davor, dass beliebige Dritte Release- und Validierungs-Jobs auslösen können. Beide Werte sollten unabhängig, zufällig und hinreichend lang sein.
+
+**4. `SEED_GH_CLIENT_ID` und `SEED_GH_CLIENT_SECRET` sind identisch.**
+In beiden `.env`-Dateien tragen die zwei Felder denselben 40-Zeichen-Wert. Das ist mit hoher Wahrscheinlichkeit ein Copy-Paste-Fehler; entweder ist der OAuth-Flow aktuell defekt oder die Client-ID wurde versehentlich als Secret hinterlegt.
+
+**5. Private Schlüssel auf dem Desktop.**
+`SEED_GH_PRIVATE_KEY`, `SEED_CF_ORIGIN_CERT` und `SEED_CF_ORIGIN_KEY` verweisen auf `C:\Users\<user>\Desktop\…`, einer davon auf eine Datei mit dem Suffix „ - Kopie". Diese Schlüssel gehören in einen Passwort-Manager oder direkt nach Vault; der Wizard kann sie von dort seeden.
+
+### 🟠 Hoch
+
+**6. Die Vault-Root-CA entsteht in `/tmp` ohne Passphrase.**
+`site.yml` Phase 0 erzeugt `vault-ca.key` in `/tmp/toob-ca/` — unverschlüsselt, mit 3650 Tagen Gültigkeit, auf der Operator-Maschine (bzw. im Container). Wer diese Datei erlangt, kann beliebige Vault-Server-Zertifikate ausstellen. Optionen: Übergang zu einer Offline-Root-CA mit kurzlebiger Intermediate, oder mindestens Ablage in einem persistenten, verschlüsselten Pfad mit passphrasengeschütztem Key.
+
+**7. Nomad-Server als Single Point of Failure.**
+`bootstrap_expect = 1` bedeutet: Fällt `api-fsn1` aus, gibt es keine Scheduling-Entscheidungen mehr. Für `dev` ist das vertretbar; `docs/devops_worker_architecture.md` §9.A benennt den 3-Knoten-Vault-HA-Cluster bereits als Empfehlung (P1-11) — dasselbe gilt für Nomad. Für Produktion sollten drei Server über verschiedene Availability Zones laufen.
+
+**8. Docker-Socket-Mount in den Toolchain-Container.**
+`runInDockerIfNeeded()` startet mit `--privileged` und mountet `/var/run/docker.sock`. Für Firecracker/KVM und Image-Builds ist das nötig, verleiht dem Container aber effektiv Root-Rechte auf dem Host. Konsequenz: Der Container darf nur aus vertrauenswürdigen Quellen gebaut werden — was durch `versions.json` und den lokalen Build bereits weitgehend gegeben ist, aber dokumentiert werden sollte.
+
+### 🟡 Mittel
+
+**9. Doppelter Dockerfile mit Versions-Drift.**
+`platform/deploy/Dockerfile.ops` liest `versions.json`; die String-Konstante `dockerfileContent` in `main.go` enthält hartcodierte Versionen. Beispiel: Ansible `14.1.0` (eingebettet) gegen `13.7.0` (Manifest), Nomad `2.0.3` in beiden, aber ohne Kopplung. Empfehlung: die Konstante entfernen und die Datei per `go:embed` einbinden.
+
+**10. `justfile` enthält hartcodierte Produktions-IPs.**
+`vault-status`, `backup-status` und `db-shell` sprechen `10.0.1.10/11/12` an. In `dev` (Topologie `10.1.x`) laufen diese Rezepte damit ins Leere oder — schlimmer — gegen die Produktion. Die IPs sollten aus `internal/topology` bzw. der Umgebungsvariable abgeleitet werden.
+
+**11. `mock-digest`-Fallback im `plan-app`-Rezept.**
+Schlägt `docker inspect` fehl, wird der String `mock-digest` als Image-Digest weitergereicht. Für ein reines `nomad job plan` ist das folgenlos, kaschiert aber einen realen Fehlerzustand. Ein sauberer Abbruch wäre konsistenter mit dem sonst durchgehaltenen Fail-Closed-Prinzip.
+
+**12. `insecure_skip_verify: true` im Blackbox-Vault-Modul.**
+Das `http_vault_unsealed`-Modul überspringt die Zertifikatsprüfung. Da die Vault-CA ohnehin auf allen Knoten verteilt wird, ließe sich hier stattdessen `ca_file` setzen.
+
+**13. `host_key_checking = False` in `ansible.cfg`.**
+Für dynamisch erzeugte Cloud-VMs pragmatisch, öffnet über den VPN-Tunnel aber theoretisch MITM. Da die Kommunikation ohnehin durch WireGuard geschützt ist, ist das Restrisiko klein — eine Notiz in der `ansible.cfg` wäre trotzdem hilfreich.
+
+**14. `ignore_errors: yes` bei der CA-Verteilung.**
+In der `common`-Rolle scheitert das Kopieren von `vault-ca.pem` und `ubicloud-ca.pem` still. Ein Knoten kann so ohne CA weiterlaufen und erst später mit schwer diagnostizierbaren TLS-Fehlern auffallen. Besser: `failed_when` mit klarer Bedingung, oder ein expliziter Verifikations-Task am Ende der Rolle.
+
+### 🔵 Niedrig / Bekannte Lücken
+
+**15. Compatibility-Matrix-Generator noch nicht DB-gestützt.**
+`docs/worker_lifecycle_management.md` §7.8 markiert das selbst: Der alte Generator arbeitete mit lokalen JSON-Dateien und liegt unter `_archived_scripts/`. Neue Matrix-Kombinationen müssen derzeit manuell angelegt werden.
+
+**16. Caddy-Pfad-Matcher mit Wildcard in der Pfadmitte.**
+Ausdrücke wie `/v2/users/*/password` sollten gegen die eingesetzte Caddy-Version verifiziert werden — falls das Matching nicht wie erwartet greift, wären die Passwort-Endpunkte entgegen IDP-010 erreichbar. Ein kurzer Integrationstest (`curl` gegen die Route, erwartet 403) würde das dauerhaft absichern.
+
+**17. Inkonsistente Dokumentationssprache.**
+`CONTRIBUTING.md` legt Englisch für Registry-Code und Manifeste fest, erlaubt Deutsch nur in teaminternen Spezifikationen. Die `docs/`-Dateien mischen beides, teils innerhalb einer Datei (z. B. eine deutsche Zeile in der englischen Threat-Tabelle von `devops_worker_architecture.md`). Für externe Contributor lohnt eine klare Trennung: `docs/` englisch, `docs/internal/` deutsch.
+
+**18. Verwaiste `_archived_*`-Verzeichnisse.**
+`.dockerignore` referenziert `_archived_scripts/` und `_archived_workflows/`. Sofern diese nur historisch relevant sind, gehören sie in einen Git-Tag statt in den Arbeitsbaum.
 
 ---
 
-## Reihenfolge
+## 18. Glossar
 
-**Vor dem ersten echten Nutzer** — nicht nachrüstbar ohne Zeitfenster:
-`IDP-001` → `IDP-002` → `IDP-003` → `IDP-004` → `IDP-005` → `IDP-010` → `IDP-011` →
-`IDP-012` → `IDP-020` → `IDP-022`
-
-**Vor Produktivgang:**
-`IDP-030` → `IDP-031` → `IDP-032` → `IDP-033` → `IDP-050` → `IDP-051` → `IDP-034` →
-`IDP-013` → `IDP-014` → `IDP-040` → `IDP-021` → `IDP-070` → `IDP-071` → `IDP-073` → `IDP-090`
-
-**Vor dem ersten Kunden mit Flotte:**
-`IDP-041` → `IDP-042` → `IDP-043` → `IDP-060` → `IDP-061` → `IDP-015` → `IDP-072` →
-`IDP-023` → `IDP-080` → `IDP-081`
-
-**Danach:** `IDP-052`, `IDP-053`
-
----
-
-## Merksatz
-
-> Alles vor `IDP-041` macht Kontoübernahme schwer. `IDP-041` bis `IDP-043` machen sie
-> unzureichend. Nur zusammen ergeben sie eine Antwort auf die Frage, warum ein Hersteller
-> uns die Kontrolle über hunderttausend Geräte anvertrauen sollte.
+| Begriff | Bedeutung |
+|---|---|
+| **Control Plane** | Vertrauenswürdige Ebene mit Zugriff auf DB, S3, Vault, GitHub; führt alle privilegierten Operationen aus |
+| **Data Plane** | Zustandslose Worker-Knoten ohne dauerhafte Secrets; führen untrusted Code in Firecracker-VMs aus |
+| **Spoke** | Fachliches Workload-Projekt (registry, identity, update, staging), das geteilte Platform-Bausteine komponiert |
+| **Ops-Hub** | Zentraler Knoten mit WireGuard-Hub und Telemetrie-Stack |
+| **Golden Image** | Per Packer vorgebackenes VM-Image mit Toolchain, Kernel und Binaries — enthält keine Secrets |
+| **Wrapped SecretID** | Einmalig konsumierbares Vault-Token (TTL 5 min) zum sicheren Bootstrapping neuer Knoten |
+| **Transit Seal** | Vault-Mechanismus, bei dem eine zweite Instanz den Master-Key ver-/entschlüsselt (Auto-Unseal) |
+| **Origin Cloaking** | Caddy akzeptiert nur Cloudflare-Origin-Zertifikate; Direktzugriffe auf die IP scheitern am Handshake |
+| **Plan-Gate** | Erzwungene Trennung von `terraform plan` und `apply` über den `justfile` |
+| **Dead-Man's-Switch** | Dauerhaft feuernder Watchdog-Alert; ausbleibender Heartbeat signalisiert Ausfall des Monitorings |
+| **Step-Up** | Erneute, frische Authentifizierung (< 300 s) vor privilegierten Aktionen |
+| **DPoP** | Demonstrating Proof-of-Possession (RFC 9449) — bindet ein Token an einen privaten Schlüssel |
+| **AiTM** | Adversary-in-the-Middle — Echtzeit-Phishing über einen Reverse-Proxy |
+| **Path Autonomy** | Prinzip, dass das Repository frei umbenannt/verschoben werden kann (OPS-001) |
