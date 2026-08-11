@@ -132,6 +132,7 @@ func (m *mockGatewayDB) LogDeviceEvent(ctx context.Context, deviceID []byte, eve
 
 // Helpers
 func setupTestGateway(t *testing.T) (*mockGatewayDB, *gateway.CheckinHandler, string, []byte, []byte) {
+	t.Helper()
 	serverKey := []byte("SUPER_SECRET_SERVER_HMAC_KEY_12345")
 	rawToken := "device_secret_token_val_9999"
 
@@ -146,6 +147,7 @@ func setupTestGateway(t *testing.T) (*mockGatewayDB, *gateway.CheckinHandler, st
 	db.devices[devHex] = &gateway.DeviceRecord{
 		ID:              devIDBytes,
 		ProductID:       "toob-lamp-01",
+		ProductHWRev:    2,
 		TokenHMAC:       tokenHMAC,
 		StagingCapacity: 1024 * 1024,
 		ReaderMajor:     2,

@@ -3,6 +3,7 @@ package tbm1
 // #cgo CFLAGS: -I${SRCDIR}/../../../../common/include
 // #cgo CFLAGS: -I${SRCDIR}/../../../../toobloader/core/include
 // #cgo CFLAGS: -I${SRCDIR}/../../../../toobloader/core/utils/include
+// #cgo CFLAGS: -I${SRCDIR}/../../../../sdk/libtoob/include
 // #cgo CFLAGS: -std=c11 -Wall -Wextra -Wno-unused-parameter
 //
 // extern int toob_admit_validate(const unsigned char *buf,
@@ -82,7 +83,7 @@ func ValidateCReader(blob []byte, stagingCap uint32) RejectCode {
 
 	cap := stagingCap
 	if cap == 0 {
-		cap = uint32(len(blob))
+		cap = 0xFFFFFFFF
 	}
 
 	rc := C.toob_admit_validate(

@@ -5,7 +5,6 @@ package resolver
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"fmt"
 	"strings"
 )
 

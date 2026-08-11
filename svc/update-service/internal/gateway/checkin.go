@@ -21,6 +21,7 @@ import (
 type DeviceRecord struct {
 	ID              []byte `json:"id"`
 	ProductID       string `json:"product"`
+	ProductHWRev    uint16 `json:"product_hw_rev"`
 	TokenHMAC       []byte `json:"token_hmac"`
 	StagingCapacity uint32 `json:"staging_capacity"`
 	ReaderMajor     uint16 `json:"reader_major"`
@@ -94,8 +95,7 @@ func (h *CheckinHandler) HandleCheckinRoute(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	deviceIDBytes, hexErr := hex.DecodeString(deviceIDHex)
-	if hexErr != nil {
+	if _, hexErr := hex.DecodeString(deviceIDHex); hexErr != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid hex device_id")
 		return
 	}
@@ -170,6 +170,7 @@ func (h *CheckinHandler) HandleCheckinRoute(w http.ResponseWriter, r *http.Reque
 	dev := resolver.Device{
 		ID:              devRec.ID,
 		Product:         devRec.ProductID,
+		ProductHWRev:    devRec.ProductHWRev,
 		StagingCapacity: devRec.StagingCapacity,
 		ReaderMajor:     devRec.ReaderMajor,
 		ReaderMinor:     devRec.ReaderMinor,

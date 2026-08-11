@@ -3,9 +3,10 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/stdlib"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 	"github.com/toob-boot/update-service/migrations"
 )
@@ -16,7 +17,7 @@ import (
 // The migration runner is idempotent: re-running on an up-to-date database
 // is a no-op. Goose tracks applied migrations in a `goose_db_version` table.
 func Migrate(ctx context.Context, dsn string) error {
-	db, err := stdlib.Open(dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return fmt.Errorf("db.Migrate: open connection: %w", err)
 	}

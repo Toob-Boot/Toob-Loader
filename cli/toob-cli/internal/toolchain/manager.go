@@ -12,14 +12,15 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/toob-boot/toob/internal/archiveutil"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/ui"
 	"github.com/ulikunitz/xz"
@@ -165,7 +166,14 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 
 	ui.Info("Found toolchain v%s for %s", tcInfo.Version, osArch)
 
-	expectedSha256 := tcInfo.Sha256[osArch]
+	// A missing entry used to yield an empty string, and the download then skipped verification
+	// entirely. The registry is the only thing standing between a compromised mirror and a compiler
+	// that runs on the developer's machine, so a gap in it is a hard error and not a silent
+	// downgrade.
+	expectedSha256, ok := tcInfo.Sha256[osArch]
+	if !ok || strings.TrimSpace(expectedSha256) == "" {
+		return "", fmt.Errorf("registry has no sha256 for toolchain '%s' on %s: refusing to install it unverified", tcName, osArch)
+	}
 
 	if err := downloadAndExtract(downloadURL, tcRoot, expectedSha256, expectedVersion); err != nil {
 		return "", fmt.Errorf("failed to download and extract toolchain: %w", err)
@@ -205,7 +213,39 @@ func RetryWindowsLocks(op func() error) error {
 	return err
 }
 
+// downloadClient fetches toolchain archives.
+//
+// It deliberately has no overall timeout — a toolchain is hundreds of megabytes and a slow link is
+// not an error — but it bounds every phase that can hang without transferring anything, and it
+// refuses to be redirected off HTTPS. http.DefaultClient, which this used before, has none of that.
+var downloadClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		Proxy:                 http.ProxyFromEnvironment,
+	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		if req.URL.Scheme != "https" {
+			return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
+		}
+		return nil
+	},
+}
+
 func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) error {
+	// The archive is executed as a compiler on the developer's machine, so neither of these is
+	// optional. The checksum was skipped whenever the registry had no entry for this platform.
+	if !strings.HasPrefix(url, "https://") {
+		return fmt.Errorf("refusing to download a toolchain over a non-HTTPS URL: %s", url)
+	}
+	if expectedSha256 == "" {
+		return fmt.Errorf("refusing to install a toolchain without an expected SHA256 checksum")
+	}
+
 	// Setup download cache directory
 	homeDir, _ := paths.ToobHome()
 	cacheDir := filepath.Join(homeDir, "cache", "downloads")
@@ -231,7 +271,7 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 		ui.Step("Downloading %s", url)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -270,24 +310,18 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 		return fmt.Errorf("server returned %d", resp.StatusCode)
 	}
 
-	// Verify SHA256 of the FULL file
-	if expectedSha256 != "" {
-		hasher := sha256.New()
-		f, err := os.Open(archivePath)
-		if err != nil {
-			return err
-		}
-		io.Copy(hasher, f)
-		f.Close()
-
-		actualSha256 := hex.EncodeToString(hasher.Sum(nil))
-		if actualSha256 != expectedSha256 {
-			// Corrupt! Delete it and fail.
-			os.Remove(archivePath)
-			return fmt.Errorf("SHA256 mismatch!\nExpected: %s\nGot:      %s", expectedSha256, actualSha256)
-		}
-		ui.Success("Checksum verified.")
+	// Verify SHA256 of the FULL file before anything is unpacked.
+	actualSha256, err := hashFile(archivePath)
+	if err != nil {
+		os.Remove(archivePath)
+		return fmt.Errorf("failed hashing the downloaded archive: %w", err)
 	}
+	if actualSha256 != expectedSha256 {
+		// Corrupt! Delete it and fail.
+		os.Remove(archivePath)
+		return fmt.Errorf("SHA256 mismatch!\nExpected: %s\nGot:      %s", expectedSha256, actualSha256)
+	}
+	ui.Success("Checksum verified.")
 
 	tmpDestDir := fmt.Sprintf("%s.tmp.%d", destDir, os.Getpid())
 	_ = RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
@@ -295,28 +329,11 @@ func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) er
 		return err
 	}
 
-	var extractErr error
-	if strings.HasSuffix(url, ".zip") {
-		extractErr = extractZipFast(archivePath, tmpDestDir)
-		if extractErr != nil {
-			ui.Warn("Fast native zip failed. Falling back to Go extraction...")
-			extractErr = extractZip(archivePath, tmpDestDir)
-		}
-	} else if strings.HasSuffix(url, ".tar.gz") || strings.HasSuffix(url, ".tar.xz") {
-		extractErr = extractTarFast(archivePath, tmpDestDir)
-		if extractErr != nil {
-			ui.Warn("Fast native tar failed. Falling back to Go extraction...")
-			f, _ := os.Open(archivePath)
-			if strings.HasSuffix(url, ".tar.gz") {
-				extractErr = extractTarGz(f, tmpDestDir)
-			} else {
-				extractErr = extractTarXz(f, tmpDestDir)
-			}
-			f.Close()
-		}
-	} else {
-		extractErr = fmt.Errorf("unsupported archive format for url: %s", url)
-	}
+	// Extraction runs in-process. It used to shell out to tar and unzip first and fall back to
+	// these only when the external tool failed, which meant the path guards below applied to the
+	// exceptional case and the normal case relied on the defaults of two programs that are not
+	// installed everywhere, differ between platforms and are not covered by any test here.
+	extractErr := extractArchive(url, archivePath, tmpDestDir)
 
 	if extractErr != nil {
 		os.Remove(archivePath) // Gap 4: Wipe broken archive from cache to avoid endless loops
@@ -427,14 +444,44 @@ func postProcessCAS(extractedDir string) error {
 	})
 }
 
-func extractTarFast(archivePath, destDir string) error {
-	cmd := exec.Command("tar", "-xf", archivePath, "-C", destDir)
-	return cmd.Run()
+// hashFile returns the hex SHA-256 of a file. The read error is not discarded: a truncated read
+// would produce the hash of a prefix, and while that still fails the comparison, it would fail it
+// with a misleading "checksum mismatch" instead of the actual I/O problem.
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func extractZipFast(archivePath, destDir string) error {
-	cmd := exec.Command("unzip", "-q", archivePath, "-d", destDir)
-	return cmd.Run()
+// extractArchive unpacks an archive according to the extension of the URL it came from.
+func extractArchive(url, archivePath, destDir string) error {
+	switch {
+	case strings.HasSuffix(url, ".zip"):
+		return extractZip(archivePath, destDir)
+
+	case strings.HasSuffix(url, ".tar.gz"), strings.HasSuffix(url, ".tar.xz"):
+		f, err := os.Open(archivePath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if strings.HasSuffix(url, ".tar.gz") {
+			return extractTarGz(f, destDir)
+		}
+		return extractTarXz(f, destDir)
+
+	default:
+		return fmt.Errorf("unsupported archive format for url: %s", url)
+	}
 }
 
 func extractZip(zipPath, destDir string) error {
@@ -444,50 +491,56 @@ func extractZip(zipPath, destDir string) error {
 	}
 	defer r.Close()
 
-	totalFiles := len(r.File)
-
 	spinner := ui.NewSpinner("Unzipping Toolchain")
-	spinner.SetProgress(0, totalFiles)
+	spinner.SetProgress(0, len(r.File))
 	spinner.Start()
 	defer spinner.Stop()
+
+	budget := archiveutil.NewBudget(archiveutil.DefaultSizeLimit)
 
 	for _, f := range r.File {
 		spinner.AddProgress(1)
 
-		fpath := filepath.Join(destDir, f.Name)
-		if !strings.HasPrefix(fpath, filepath.Clean(destDir)+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path: %s", fpath)
+		fpath, err := archiveutil.SafeJoin(destDir, f.Name)
+		if err != nil {
+			return err
 		}
 
 		if f.FileInfo().IsDir() {
-			os.MkdirAll(fpath, os.ModePerm)
+			if err := os.MkdirAll(fpath, archiveutil.DirMode); err != nil {
+				return err
+			}
 			continue
 		}
 
-		if err = os.MkdirAll(filepath.Dir(fpath), os.ModePerm); err != nil {
+		if err := os.MkdirAll(filepath.Dir(fpath), archiveutil.DirMode); err != nil {
 			return err
 		}
 
-		outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
-		if err != nil {
-			return err
-		}
-
-		rc, err := f.Open()
-		if err != nil {
-			outFile.Close()
-			return err
-		}
-
-		_, err = io.Copy(outFile, rc)
-		outFile.Close()
-		rc.Close()
-
-		if err != nil {
-			return err
+		if err := writeZipEntry(f, fpath, budget); err != nil {
+			return fmt.Errorf("failed extracting %q: %w", f.Name, err)
 		}
 	}
 	return nil
+}
+
+func writeZipEntry(f *zip.File, fpath string, budget *archiveutil.Budget) error {
+	rc, err := f.Open()
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, archiveutil.EntryMode(f.Mode()))
+	if err != nil {
+		return err
+	}
+
+	if _, err := budget.Copy(outFile, rc); err != nil {
+		outFile.Close()
+		return err
+	}
+	return outFile.Close()
 }
 
 func extractTarGz(r io.Reader, destDir string) error {
@@ -517,6 +570,8 @@ func extractTar(tr *tar.Reader, destDir string) error {
 	spinner.Start()
 	defer spinner.Stop()
 
+	budget := archiveutil.NewBudget(archiveutil.DefaultSizeLimit)
+
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -526,34 +581,98 @@ func extractTar(tr *tar.Reader, destDir string) error {
 			return err
 		}
 
-		target := filepath.Join(destDir, header.Name)
+		// Extended headers carry metadata for the following entry and are consumed by the reader.
+		if header.Typeflag == tar.TypeXGlobalHeader || header.Typeflag == tar.TypeXHeader {
+			continue
+		}
 
-		// Prevention of Zip-Slip / Path Traversal for TAR archives
-		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path (zip slip vulnerability): %s", target)
+		target, err := archiveutil.SafeJoin(destDir, header.Name)
+		if err != nil {
+			return err
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0755); err != nil {
+			if err := os.MkdirAll(target, archiveutil.DirMode); err != nil {
 				return err
 			}
+
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(target), archiveutil.DirMode); err != nil {
 				return err
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
-			if err != nil {
-				return err
+			if err := writeTarFile(tr, target, header, budget); err != nil {
+				return fmt.Errorf("failed extracting %q: %w", header.Name, err)
 			}
-			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
-				return err
-			}
-			f.Close()
+
 		case tar.TypeSymlink:
-			os.Symlink(header.Linkname, target)
+			if err := writeSymlink(destDir, target, header); err != nil {
+				return err
+			}
+
+		case tar.TypeLink:
+			// A hard link names another entry of the same archive, so its source is resolved and
+			// checked exactly like an entry path.
+			source, err := archiveutil.SafeJoin(destDir, header.Linkname)
+			if err != nil {
+				return fmt.Errorf("hard link %q: %w", header.Name, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), archiveutil.DirMode); err != nil {
+				return err
+			}
+			_ = os.Remove(target)
+			if err := os.Link(source, target); err != nil {
+				return fmt.Errorf("failed linking %q -> %q: %w", header.Name, header.Linkname, err)
+			}
+
+		default:
+			// Character devices, block devices and FIFOs have no place in a toolchain archive.
+			// Skipping them silently used to leave an installation that looked complete.
+			return fmt.Errorf("unsupported archive entry type %q for %q", string(header.Typeflag), header.Name)
 		}
+	}
+	return nil
+}
+
+func writeTarFile(tr *tar.Reader, target string, header *tar.Header, budget *archiveutil.Budget) error {
+	// O_TRUNC matters when extracting over an existing tree: without it a shorter file leaves the
+	// tail of its predecessor in place. The zip path always had it, this one did not.
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, archiveutil.EntryMode(header.FileInfo().Mode()))
+	if err != nil {
+		return err
+	}
+	if _, err := budget.Copy(f, tr); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// writeSymlink creates a link only after checking where it points.
+//
+// The path check on the entry itself is lexical and cannot see through links: an archive that first
+// creates "evil -> /etc" and then writes "evil/passwd" passes it twice and still lands outside the
+// destination, because the operating system resolves the link on the second write.
+func writeSymlink(destDir, target string, header *tar.Header) error {
+	if err := archiveutil.SafeLinkTarget(destDir, target, header.Linkname); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), archiveutil.DirMode); err != nil {
+		return err
+	}
+	_ = os.Remove(target)
+
+	if err := os.Symlink(header.Linkname, target); err != nil {
+		// Windows only creates symlinks with Developer Mode or elevation. That is an environment
+		// limitation rather than a broken archive, so it is reported and skipped instead of
+		// aborting a provisioning run that would otherwise succeed. Everywhere else a failure here
+		// means the installation is incomplete, and a toolchain missing "gcc -> gcc-13" fails much
+		// later with a far more confusing message.
+		if runtime.GOOS == "windows" {
+			ui.Warn("Skipping symlink %s -> %s (Windows requires Developer Mode): %v", header.Name, header.Linkname, err)
+			return nil
+		}
+		return fmt.Errorf("failed creating symlink %q -> %q: %w", header.Name, header.Linkname, err)
 	}
 	return nil
 }

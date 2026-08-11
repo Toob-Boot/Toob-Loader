@@ -3,7 +3,6 @@
 package gateway
 
 import (
-	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -93,10 +92,11 @@ func (h *BlobHandler) HandleBlobDelivery(w http.ResponseWriter, r *http.Request)
 
 	// CRITICAL SAFETY GUARD: Unsatisfiable Range MUST return HTTP 416, NEVER HTTP 200!
 	if isUnsatisfiable {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", totalSize))
 		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(fmt.Sprintf("Requested Range Not Satisfiable: total size is %d bytes", totalSize)))
+			_, _ = w.Write([]byte("Requested Range Not Satisfiable\n"))
 		}
 		return
 	}

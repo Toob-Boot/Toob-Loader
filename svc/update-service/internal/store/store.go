@@ -6,7 +6,6 @@ package store
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 )
 

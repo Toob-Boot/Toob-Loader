@@ -20,6 +20,7 @@
 /* Source-level inclusion — compiles the bootloader C code in this TU. */
 #include "../../../../toobloader/core/boot_tbm1.c"
 #include "../../../../toobloader/core/utils/boot_crc32.c"
+#include "../../../../toobloader/core/utils/boot_secure_zeroize_host.c"
 
 /**
  * @brief CGo entry point: run tbm1_validate on a raw manifest blob.

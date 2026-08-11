@@ -414,13 +414,13 @@ static void proc_args(config *cfg, int argc, char **argv) {
         case 'd':               /* decode */
             cfg->cmd = OP_DEC; break;
         case 'i':               /* input buffer size */
-            cfg->decoder_input_buffer_size = atoi(optarg);
+            cfg->decoder_input_buffer_size = (size_t)strtoul(optarg, NULL, 10);
             break;
         case 'w':               /* window bits */
-            cfg->window_sz2 = atoi(optarg);
+            cfg->window_sz2 = (uint8_t)strtoul(optarg, NULL, 10);
             break;
         case 'l':               /* lookahead bits */
-            cfg->lookahead_sz2 = atoi(optarg);
+            cfg->lookahead_sz2 = (uint8_t)strtoul(optarg, NULL, 10);
             break;
         case 'v':               /* verbosity++ */
             cfg->verbose++;

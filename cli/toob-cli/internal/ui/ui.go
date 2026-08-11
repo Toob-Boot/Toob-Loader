@@ -227,7 +227,8 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 
 		visualLen := len(Strip(h))
 		padding := max(colWidths[i]-visualLen, 0)
-		hdr.WriteString(h + strings.Repeat(" ", padding))
+		hdr.WriteString(h)
+		hdr.WriteString(strings.Repeat(" ", padding))
 	}
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "  %s\n", Bold(hdr.String()))
@@ -257,7 +258,8 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 			visualLen := len(Strip(cell))
 			padding := max(w-visualLen, 0)
 
-			line.WriteString(cell + strings.Repeat(" ", padding))
+			line.WriteString(cell)
+			line.WriteString(strings.Repeat(" ", padding))
 		}
 		fmt.Fprintf(os.Stderr, "  %s\n", line.String())
 	}

@@ -1,5 +1,7 @@
 # CMake Build Directories & Files
-archive/
+# Anchored: an unanchored "archive/" also matches source directories at any depth, which silently
+# excluded cli/toob-cli/internal/archiveutil's predecessor from version control.
+/archive/
 builds/
 CMakeCache.txt
 CMakeFiles/

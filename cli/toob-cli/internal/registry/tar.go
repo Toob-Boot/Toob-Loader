@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/toob-boot/toob/internal/archiveutil"
 )
 
 // defaultIgnorePatterns are always excluded from tarballs, regardless of ignore files.
@@ -231,6 +233,8 @@ func ExtractTarball(r io.Reader, targetDir string) error {
 		return err
 	}
 
+	budget := archiveutil.NewBudget(archiveutil.DefaultSizeLimit)
+
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -250,36 +254,41 @@ func ExtractTarball(r io.Reader, targetDir string) error {
 			continue
 		}
 
-		relPath := filepath.FromSlash(parts[1])
-		destPath := filepath.Join(targetDir, relPath)
-
-		// Tar-Slip protection
-		cleanDest := filepath.Clean(destPath)
-		cleanTarget := filepath.Clean(targetDir) + string(os.PathSeparator)
-		if !strings.HasPrefix(cleanDest, cleanTarget) {
-			return fmt.Errorf("illegal path (tar-slip): %s", destPath)
+		// Tar-Slip protection. The rules are shared with the toolchain extractor: two
+		// implementations of "is this path inside the destination" is one too many.
+		destPath, err := archiveutil.SafeJoin(targetDir, parts[1])
+		if err != nil {
+			return err
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(destPath, 0o755); err != nil {
+			if err := os.MkdirAll(destPath, archiveutil.DirMode); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(destPath), archiveutil.DirMode); err != nil {
 				return err
 			}
-			outFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
-			if err != nil {
-				return err
+			if err := writeTarEntry(tr, destPath, header, budget); err != nil {
+				return fmt.Errorf("failed extracting %q: %w", header.Name, err)
 			}
-			if _, err := io.Copy(outFile, tr); err != nil {
-				outFile.Close()
-				return err
-			}
-			outFile.Close()
 		}
 	}
 
 	return nil
+}
+
+func writeTarEntry(tr *tar.Reader, destPath string, header *tar.Header, budget *archiveutil.Budget) error {
+	// O_TRUNC: extracting over an existing tree otherwise leaves the tail of a longer predecessor
+	// behind, which in a registry cache produces a file that is neither the old nor the new one.
+	outFile, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, archiveutil.EntryMode(header.FileInfo().Mode()))
+	if err != nil {
+		return err
+	}
+	if _, err := budget.Copy(outFile, tr); err != nil {
+		outFile.Close()
+		return err
+	}
+	return outFile.Close()
 }

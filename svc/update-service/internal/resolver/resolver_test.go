@@ -1,7 +1,6 @@
 package resolver_test
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -252,7 +251,7 @@ func TestResolve_PropertyAdmissibilityInvariant(t *testing.T) {
 	// Property test: Generate 100 random devices and candidates.
 	// For every resolution that returns an artifact, verify that it passes all admissibility criteria.
 	for i := 0; i < 100; i++ {
-		devID := sha256.Sum256([]byte(fmt.Sprintf("device-%d", i)))
+		devID := sha256.Sum256(fmt.Appendf(nil, "device-%d", i))
 		dev := resolver.Device{
 			ID:              devID[:],
 			Product:         "toob-lamp-01",

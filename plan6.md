@@ -1,1088 +1,478 @@
-# Backlog — Zitadel: Sicherheitsentwurf und Aufbau
+# Toob Identity — Review Addendum: OpenFGA-Modell
 
-**Grundlage:** `ARCHITEKTUR-identity-zitadel.md` (der Schnitt gegen die Produkte),
-`ARCHITEKTUR-devops.md` (der Identity-Spoke).
-
-**Was dieses Dokument zusätzlich leistet:** Es entwirft das Sicherheitsmodell aus dem
-Bedrohungsmodell heraus und leitet daraus die Tickets ab — nicht umgekehrt.
+**Prüfgrundlage:** `policy/model/*.fga`, `policy/model/fga.mod`, `policy/tests/*.fga.yaml` (Export 2026-08-07)
+**Bezug:** Ergänzt „Toob Identity — Review des Umsetzungsstands", dort Punkt AUTHZ-02…05 (bisher ❓) und Prüfpunkt P6.
 
 ---
 
-# TEIL 1 — Bedrohungsmodell und Entwurf
+## 0. Vorbemerkung: Diese Dateien wurden nie an OpenFGA übergeben
 
-## 1.1 Was auf dem Spiel steht
+Bevor es um Modellierung geht, das Ergebnis der Ladbarkeitsprüfung: **Das Modell kann in dieser Form nicht geschrieben werden.** Es gibt dafür mindestens zwei voneinander unabhängige Gründe (§ 1.1, § 1.2). Daraus folgt zwingend, dass
 
-Die Angriffskette ist kurz:
+- `fga model write` / `fga model test` nie gegen diese Dateien gelaufen ist,
+- die vier `*_test.fga.yaml` **nie ausgeführt** wurden (bestätigt P6 aus dem Hauptreview),
+- und `just validate-policy` (`go test ./shared/policy/...`) das Modell nicht anfasst.
 
+Die Go-Dateien `shared/policy/{core,fleet,marketplace,registry}_model_test.go` tragen die Modellnamen im Dateinamen. Falls sie die Modellsemantik in Go nachbauen, ist das eine **fünfte** Duplikationsstelle (Modell in DSL + Modell in Go + Erwartungen in YAML + Erwartungen in Go). Bitte prüfen — wenn sie stattdessen die `.fga`-Dateien parsen und gegen die YAMLs auswerten, wäre das die richtige Lösung, aber dann müssten sie die Fehler aus § 1 gefunden haben.
+
+Schweregrade wie im Hauptdokument: **S1** blockierend · **S2** Sicherheits-/Semantikfehler · **S3** strukturell.
+
+---
+
+## 1. S1 — Das Modell ist nicht ladbar
+
+### 1.1 `type device` ist doppelt deklariert
+
+```fga
+# core.fga
+type device                      # ohne Relationen
+
+# marketplace.fga
+type device
+  relations
+    define owner: [end_customer, marketplace, tenant]
+    …
 ```
-Konto kompromittiert (release-manager)
-  → Artefakt hochladen
-  → Signing Service signiert (er signiert, was autorisierte Aufrufer verlangen)
-  → Channel publizieren
-  → jedes Gerät der Flotte lädt und installiert
-  → Signatur ist gültig, weil WIR sie erzeugt haben
+
+Ob als Konkatenation oder als modulares Modell: ein Typ darf genau einmal definiert werden. In modularen Modellen wäre `extend type device` erforderlich. So wie es dasteht, bricht `WriteAuthorizationModel` mit einer Duplicate-Type-Fehlermeldung ab.
+
+Ursache ist ein Modellierungskonflikt, kein Tippfehler: In `core.fga` ist `device` als **Akteurstyp** gedacht (Subjekt), in `marketplace.fga` als **Ressource**. Beides in einem Typ ist möglich, aber dann muss es eine Deklaration sein.
+
+### 1.2 `fga.mod` passt zu keinem der beiden Formate
+
+```yaml
+schema: '1.1'
+contents: [core.fga, registry.fga, fleet.fga, marketplace.fga]
 ```
 
-Der Bootloader schützt hier nicht. Er prüft Ed25519 gegen den eFuse-Anker, und die Signatur
-ist echt. Anti-Rollback greift nicht, weil die SVN höher ist. Das Gerät tut genau das, wofür
-es gebaut wurde.
+- Als **modulares Modell**: OpenFGA erwartet `schema: '1.2'` in der `fga.mod`, und jede Moduldatei beginnt mit `module <name>` — nicht mit `model` / `schema 1.1`. Hier hat `core.fga` einen vollständigen Modell-Header, die drei anderen Dateien haben **gar keinen** und starten direkt mit `type channel` bzw. `type marketplace`.
+- Als **einfache Konkatenation**: Dann ist `fga.mod` bedeutungslos und es müsste einen Build-Schritt geben, der die Dateien in der genannten Reihenfolge zusammenfügt. Ein solcher Schritt existiert nicht (weder im `justfile` noch in `policygen`).
 
-**Konsequenz für den Entwurf:** Es genügt nicht, Kontoübernahme schwer zu machen. Ein
-einzelnes übernommenes Konto darf **nicht ausreichen**, um Firmware auszuliefern. Das ist
-der Unterschied zwischen einem gut konfigurierten IdP und einem, der dieser Verantwortung
-gerecht wird.
+▸ *Zu verifizieren:* Welche `fga`-CLI-Version ist im Einsatz? Der Fix hängt davon ab, ob modulare Modelle genutzt werden sollen (dann: `schema: '1.2'` + `module`-Header + `extend type`) oder ein Single-File-Modell (dann: `fga.mod` löschen, Header nur einmal, Konkatenation im Generator).
 
-## 1.2 Angriffsflächen, systematisch
+### 1.3 Heterogener Tupleset mit fehlenden Zielrelationen
 
-| # | Klasse | Konkret | Gegenmaßnahme |
+```fga
+type device
+  relations
+    define owner: [end_customer, marketplace, tenant]
+    define self_user: self from owner
+    define manager_user: manager from owner
+    define operator_user: operator from owner
+```
+
+| Arrow | `end_customer` | `marketplace` | `tenant` |
 |---|---|---|---|
-| A1 | Credential | Spraying, Stuffing, Wiederverwendung | **Kein Passwort** für privilegierte Rollen |
-| A2 | Phishing | AiTM-Proxy (Evilginx), relayed TOTP/Push | **WebAuthn** — Origin-gebunden, nicht relaybar |
-| A3 | Wiederherstellung | „Passwort vergessen" → E-Mail → Übernahme | Keine Selbstbedienung für privilegierte Rollen |
-| A4 | Sitzung | Token-Diebstahl, Replay, XSS | Kurze TTL, Step-up, Token-Bindung |
-| A5 | Registrierung | Selbstregistrierung, Enumeration | Einladung mit Ablauf, Genehmigung durch Owner |
-| A6 | Föderation | GitHub-Übernahme, Account-Linking-Angriff | Upstream reicht nicht für privilegierte Rollen |
-| A7 | Admin-Ebene | `IAM_OWNER` kann alles in allen Orgs | Break-Glass-Konto, nie im Alltag |
-| A8 | Insider | Toob-Mitarbeiter sehen Kundendaten | Zeitbegrenzte Impersonation, Kunde wird benachrichtigt |
-| A9 | Infrastruktur | Masterkey, DB, Backups | Vault, Verschlüsselung, getrennte Sicherung |
-| A10 | Lieferkette | Ein Konto → ganze Flotte | **Vier Augen + Verzögerung** |
+| `self from owner` | ✅ `self` | ❌ | ❌ |
+| `manager from owner` | ✅ `manager` | ❌ | ❌ |
+| `operator from owner` | ❌ | ✅ `operator` | ❌ |
 
-Die letzte Zeile ist die wichtigste. A1 bis A9 machen Übernahme schwer; A10 macht sie
-unzureichend.
+Die Grundregel für Arrows lautet: **Die berechnete Relation muss auf *jedem* Typ der Tupleset-Zuordnung existieren.** Hier existiert keine der drei auf allen drei Typen.
 
-## 1.3 Die sieben Entwurfsentscheidungen
+Je nach OpenFGA-Version ist das entweder ein Validierungsfehler beim Modell-Schreiben oder eine stille Leermenge zur Auswertungszeit. Die **semantische** Konsequenz ist in beiden Fällen dieselbe und ist der eigentliche Befund:
 
-### E1 — Drei Vertrauensstufen statt einer Hürde
+> Ein Gerät, dessen `owner` ein `tenant` ist, hat **keine Viewer und keine Manager**. Weder Tenant-Owner noch Tenant-Admin noch Plattform-Support können es sehen. Es ist für alle unsichtbar.
 
-Ein Hardware-Schlüssel als Voraussetzung für den ersten Login klingt sicher und ist es nicht:
-Wer die Anmeldung zu schwer macht, erzeugt geteilte Konten. Ein Konto, das sich drei Personen
-teilen, ist schlechter als drei Konten mit Passwort.
-
-Deshalb ein Stufenmodell — die Stufe bestimmt, was man **darf** und was man **sieht**:
-
-| Stufe | Faktoren | Darf | Sieht |
-|---|---|---|---|
-| **L1** | Passwort **und** TOTP, E-Mail verifiziert | nichts verändern | nur Aggregate: „847 Geräte, 94 % aktuell" |
-| **L2** | ein Passkey | Releases vorbereiten, Reports, Mitglieder ansehen | vollständige Lesesicht |
-| **L3** | zwei Passkeys | `operator`, `release-manager`, `admin`, `owner` | alles der Rolle entsprechend |
-
-**Der reduzierte Sichtbereich auf L1 ist der eigentliche Kniff.** Statt den Zugang zu
-verweigern, bekommt L1 weniger zu sehen. Das nimmt den Anreiz zum Kontoteilen und ist trotzdem
-sicher — denn ein `viewer` in einem Flottenprodukt ist nicht harmlos. Er sieht Geräte-IDs,
-ausgerollte Firmware-Versionen, **SBOM-Digests** (also welche bekannten Schwachstellen im Feld
-leben) und Verschleißdaten (also welche Geräte nahe am Lebensende sind). Für einen Angreifer,
-der einen Lieferkettenangriff vorbereitet, ist genau das die Aufklärung, die er braucht.
-
-Ein L1-Konto liefert diese Karte nicht.
-
-### E2 — Aufstieg ist Selbstbedienung, Rollenvergabe nicht
-
-Von L1 auf L2 kommt man in zwanzig Sekunden: Passkey registrieren. Kein Ticket, keine
-Freigabe. Von L2 auf L3 ebenso — zweiten Authentikator registrieren.
-
-**Die Rolle bekommt man dadurch nicht.** `operator` und höher vergibt ein Org-Owner mit
-frischem Step-up (`IDP-033`). L3 ist die *Voraussetzung* für die Rolle, nicht ihre Ursache.
-
-### E3 — Faktoren registriert man nicht im Moment des Bedarfs
-
-Hier liegt die Falle im naheliegenden Entwurf „ohne Passkey anmelden, und beim Klick auf
-Publish fragt das System nach einem".
-
-**Das Registrieren eines Authentikators ist selbst eine privilegierte Operation** — es ist
-genau der Schritt, mit dem sich ein Angreifer nach einer Übernahme Persistenz verschafft. Wer
-erlaubt, aus einer schwachen Sitzung heraus einen Passkey anzulegen, hat die Stärke des
-Passkeys an die Stärke der schwachen Sitzung gekoppelt.
-
-Der Ablauf ist deshalb umgekehrt:
-
-```
-Nicht:   Publish klicken → „bitte Passkey einrichten" → Passkey aus L1-Sitzung anlegen
-Sondern: Passkey vorher anlegen → L3 erreicht → Owner vergibt Rolle → Publish möglich
-```
-
-Das Anlegen des **ersten** Passkeys aus einer L1-Sitzung ist zulässig — mehr Schaden als L1
-ohnehin anrichten kann, entsteht dadurch nicht. Jeder **weitere** Authentikator erfordert
-Bestätigung mit einem bereits registrierten Passkey, und alle Org-Owner werden benachrichtigt
-(`IDP-071`).
-
-### E4 — Kein Abstieg, wer oben war
-
-Wer einmal L3 hatte, fällt nicht auf L1 zurück. Sonst lautet der Angriff: Operator verliert
-seine Schlüssel, das Konto fällt auf Passwort zurück, das Passwort wird angegriffen.
-
-Verliert ein L3-Konto seine Authentikatoren, greift der Wiederherstellungsprozess aus
-`IDP-021` — nicht der Passwort-Pfad. Ein Konto, das jemals eine Geräterolle trug, kennt den
-Passwort-Login nicht mehr.
-
-### E5 — Nur phishing-resistente Faktoren, wo Geräte betroffen sind
-
-TOTP und Push sind gegen einen AiTM-Proxy wirkungslos: Der Proxy leitet den Code in Echtzeit
-weiter, der Nutzer merkt nichts. WebAuthn bindet die Assertion an den Origin — ein Proxy auf
-`id.the-toob.corn` bekommt keine gültige Signatur.
-
-**Für L3 gilt WebAuthn ohne Rückfallebene.** Eine Rückfallebene macht die Maßnahme wertlos,
-weil der Angreifer sie wählt. Auf L1 ist TOTP zulässig, weil dort weder etwas veränderbar noch
-etwas Verwertbares sichtbar ist.
-
-### E6 — Wiederherstellung ist nie Selbstbedienung
-
-Der am häufigsten ausgenutzte Pfad in freier Wildbahn. Wer MFA erzwingt und dann einen Reset
-per E-Mail erlaubt, hat MFA nicht erzwungen — er hat sie an das E-Mail-Konto delegiert.
-
-1. **Zwei Authentikatoren** sind für L3 ohnehin Pflicht. Verlust eines Schlüssels ist damit
-   kein Notfall, sondern ein Dienstagnachmittag.
-2. Verlust beider: Verifikation außerhalb des Kanals, **technisch erzwungene Wartezeit von
-   24 Stunden**, Benachrichtigung an alle Org-Owner. Die Wartezeit ist der eigentliche Schutz —
-   sie gibt dem echten Inhaber Zeit zu widersprechen.
-3. **Wiederherstellung senkt das Niveau nicht** (siehe E4).
-
-### E7 — Step-up vor gefährlichen Operationen
-
-Eine Sitzung ist nicht dasselbe wie eine Freigabe. Selbst ein gestohlenes L3-Session-Token
-soll nicht ausreichen, um Firmware zu publizieren.
-
-Vor Publish, Channel-Wechsel und Rollout-Start: **frische Re-Authentifizierung mit dem
-Passkey**, maximal fünf Minuten alt. Der Angreifer mit gestohlenem Token kann lesen —
-ausliefern kann er nicht.
-
-Das ist der Mechanismus, den „erst wenn man etwas Kritisches berührt" eigentlich meint. Er
-wirkt auf die **Aktion**, nicht auf die Faktor-Ausstattung — die muss vorher stehen (E3).
-
-### E8 — Ein Konto genügt nicht
-
-Für Produktions-Channels mit Geräten im Feld:
-- **Vier-Augen-Prinzip**: zwei verschiedene `release-manager` müssen freigeben, beide mit
-  frischem Step-up.
-- **Soak-Zeit**: zwischen Freigabe und Beginn der Auslieferung liegen mindestens 30 Minuten,
-  in denen jeder Org-Owner abbrechen kann. Ein erfolgreicher Angriff hat damit ein
-  Erkennungsfenster, bevor das erste Gerät installiert.
-
-Beides ist pro Mandant konfigurierbar, aber **Default an** für jeden Mandanten mit Geräten in
-Produktion.
-
-## 1.4 Was das nicht leistet
-
-Ehrlichkeit gehört zum Entwurf: Kein IdP ist unangreifbar. Was dieser Aufbau erreicht:
-
-- Kontoübernahme erfordert **physischen Besitz** eines registrierten Authentikators.
-- Ein übernommenes Konto reicht **nicht** für Firmware-Auslieferung (E5).
-- Jeder erfolgreiche Angriff hat ein **Erkennungsfenster** vor der Wirkung.
-- Der Radius eines kompromittierten Toob-Mitarbeiters ist begrenzt und sichtbar.
-
-Was bleibt: ein Angreifer mit physischem Zugriff auf zwei Authentikatoren einer Person, oder
-zwei kollaborierende Insider, oder eine Schwachstelle in Zitadel selbst. Gegen die ersten
-beiden hilft nur Organisation, gegen die dritte nur zeitnahes Patchen (`IDP-090`).
+Der Testfall deckt das nicht auf, weil er nur `end_customer`-Besitz prüft.
 
 ---
 
-# TEIL 2 — Backlog
+## 2. S1 — Go-Code und Modell teilen kein Typvokabular
 
-**Legende**
-**Prio:** P0 muss vor dem ersten echten Nutzer · P1 vor Produktivgang · P2 vor dem ersten
-Kunden mit Flotte · P3 danach
-**Typ:** `security` `config` `feature` `infra` `process` `detect`
+Das ist der folgenschwerste Befund dieses Addendums, weil er unabhängig von § 1 besteht und auch nach dem Ladbarmachen sofort wieder zuschlägt.
 
-**Reihenfolgeprinzip:** Alles, was sich nicht ohne Zeitfenster nachrüsten lässt, kommt zuerst.
-Eine MFA-Policy nachträglich auf bestehende Konten anzuwenden, hinterlässt genau die Lücke,
-die ein Angreifer sucht.
+### 2.1 Drei Namen für denselben Typ
 
----
-
-## Übersicht
-
-| ID | Titel | Prio | Typ |
-|---|---|---|---|
-| **EPIC A — Fundament, vor dem ersten Nutzer** |||
-| IDP-001 | Masterkey aus Vault, nie aus Datei | P0 | security |
-| IDP-002 | Datenbank: eigene Instanz, verschlüsselte Backups, getrennter Bucket | P0 | infra |
-| IDP-003 | Netz- und Edge-Härtung des Identity-Spokes | P0 | infra |
-| IDP-004 | Selbstregistrierung aus, Enumeration verhindern | P0 | config |
-| IDP-005 | Instanz-Policies vor der ersten Org festschreiben | P0 | config |
-| **EPIC B — Authentifizierung** |||
-| IDP-010 | Stufenmodell L1/L2/L3 umsetzen | P0 | config |
-| IDP-011 | Sichtbereich an die Stufe binden | P0 | feature |
-| IDP-011b | WebAuthn ohne Rückfallebene für L3 | P0 | config |
-| IDP-011c | Registrierung weiterer Faktoren absichern | P0 | security |
-| IDP-012 | Kein Abstieg für Konten, die L3 hatten | P0 | feature |
-| IDP-013 | Rollenabhängige Authentifizierungsanforderung durchsetzen | P1 | feature |
-| IDP-014 | Sitzungsdauer, Token-TTL, Refresh-Rotation | P1 | config |
-| IDP-015 | Token-Bindung (DPoP oder mTLS) prüfen und aktivieren | P2 | security |
-| **EPIC C — Wiederherstellung und Notfallzugang** |||
-| IDP-020 | Selbstbedienungs-Reset für privilegierte Rollen abschalten | P0 | config |
-| IDP-021 | Wiederherstellungsprozess mit Wartezeit und Benachrichtigung | P1 | process |
-| IDP-022 | `IAM_OWNER` als Break-Glass-Konto | P0 | security |
-| IDP-023 | Break-Glass-Übung und Protokoll | P2 | process |
-| **EPIC D — Organisationen, Einladungen, Rollen** |||
-| IDP-030 | Projekt- und Rollenmodell anlegen | P1 | config |
-| IDP-031 | Einladungsfluss: einmalig, ablaufend, E-Mail-gebunden | P1 | feature |
-| IDP-032 | Org-Namensregeln über Action durchsetzen | P1 | feature |
-| IDP-033 | Rollenvergabe erfordert Owner-Genehmigung | P1 | feature |
-| IDP-034 | Org-Spiegel in die Produkte pushen | P1 | feature |
-| **EPIC E — Step-up und Freigabe** |||
-| IDP-040 | Step-up-Authentifizierung vor Geräteoperationen | P1 | feature |
-| IDP-041 | Vier-Augen-Freigabe für Produktions-Channels | P2 | feature |
-| IDP-042 | Soak-Zeit zwischen Freigabe und Auslieferung | P2 | feature |
-| IDP-043 | Signing Service verlangt Freigabenachweis | P2 | security |
-| **EPIC F — Föderation** |||
-| IDP-050 | GitHub als Upstream-IdP, mit Rollenschranke | P1 | config |
-| IDP-051 | Bestandsnutzer vorverknüpfen | P1 | feature |
-| IDP-052 | Kunden-IdP über OIDC/SAML | P3 | feature |
-| IDP-053 | Workload-Identity-Federation für CI | P3 | feature |
-| **EPIC G — Insider und Support** |||
-| IDP-060 | Impersonation zeitbegrenzt, begründet, sichtbar | P2 | security |
-| IDP-061 | Toob-Mitarbeiter ohne stehende Kundenrechte | P2 | process |
-| **EPIC H — Erkennung** |||
-| IDP-070 | Audit-Log nach Loki, unveränderlich, projektgetrennt | P1 | detect |
-| IDP-071 | Alarme auf sicherheitsrelevante Ereignisse | P1 | detect |
-| IDP-072 | Anomalie-Alarme: neue Geografie, neuer Authentikator | P2 | detect |
-| IDP-073 | Rate-Limits ohne DoS-Nebenwirkung | P1 | security |
-| **EPIC I — Nachweis** |||
-| IDP-080 | Angriffssimulation: AiTM-Phishing | P2 | process |
-| IDP-081 | Externe Sicherheitsprüfung vor dem ersten Kunden | P2 | process |
-| IDP-090 | Patch-Prozess mit Frist | P1 | process |
-
----
-
-# EPIC A — Fundament, vor dem ersten Nutzer
-
----
-
-### IDP-001 — Masterkey aus Vault, nie aus Datei
-
-**Prio:** P0 · **Typ:** security
-
-**Problem**
-Zitadel verschlüsselt Secrets in der Datenbank mit einem Masterkey. Wer Masterkey **und**
-Datenbank hat, hat die Identitätsinfrastruktur — inklusive aller Client-Secrets und
-IdP-Konfigurationen.
-
-Der Standardweg legt ihn in eine Datei oder eine Umgebungsvariable. Beides landet in Backups,
-Prozesslisten und Log-Ausgaben.
-
-**Lösung**
-Masterkey aus `secret/projects/identity/masterkey`, per Vault-Agent in ein Template gerendert,
-Dateimodus `0400`, Eigentümer `zitadel`. Die Lease-Regel der Plattform gilt: **mindestens 30
-Tage**, damit ein Vault-Ausfall den IdP nicht stoppt (`OPS-060`).
-
-Der Schlüssel wird bei der Einrichtung genau einmal erzeugt und offline gesichert — er ist
-nicht rotierbar, ohne die Datenbank neu zu verschlüsseln.
-
-**Akzeptanzkriterien**
-- [ ] Der Masterkey steht in keiner Umgebungsvariablen und in keinem Ansible-Vault-freien Pfad.
-- [ ] `systemctl show zitadel` und `/proc/<pid>/environ` enthalten ihn nicht.
-- [ ] Offline-Sicherung existiert und ihr Ort ist im Runbook vermerkt.
-
----
-
-### IDP-002 — Datenbank, Backups, Bucket
-
-**Prio:** P0 · **Typ:** infra
-
-**Lösung**
-Eigene Ubicloud-Instanz `toob-idp-db`, kein geteiltes Schema. `sslmode=verify-full` wie im
-Bestand. Firewall-Pinning über den zentralen Pruner.
-
-**Backups sind so sensibel wie der IdP selbst.** Eigener Bucket
-`toob-idp-backups-<env>` — nicht der geteilte Vault-Bucket, dessen Löschpfad in `BEF-003`
-auffiel. Verschlüsselung at rest, WORM, eigene Zugriffsschlüssel.
-
-**Akzeptanzkriterien**
-- [ ] Kein anderer Dienst hat Zugriff auf `toob-idp-db`.
-- [ ] Backup-Bucket ist umgebungspräfigiert und von keinem Teardown-Pfad erfasst.
-- [ ] Ein Restore ist getestet (analog `OPS-020`).
-
----
-
-### IDP-003 — Netz- und Edge-Härtung
-
-**Prio:** P0 · **Typ:** infra
-
-**Lösung**
-- Cloudflare vor `id.the-toob.com`, Origin-Cert, Full Strict. Ursprungs-IPs nur von
-  CF-Ranges erreichbar (Hetzner-Firewall).
-- **Admin-Konsole nicht öffentlich**: Zitadels Console-Pfad nur aus dem WireGuard-Netz
-  erreichbar, per Caddy-Matcher auf Quell-IP. Der Login-Endpunkt bleibt öffentlich, die
-  Verwaltungsoberfläche nicht.
-- Security-Header wie im Registry-Caddyfile, CSP eng.
-- Keine Introspection-Endpunkte öffentlich, wenn sie nicht gebraucht werden.
-- WAF-Regel gegen bekannte Phishing-Kit-Signaturen und ungewöhnliche `redirect_uri`-Muster.
-
-**Akzeptanzkriterien**
-- [ ] Portscan von außen: nur 443.
-- [ ] Console-Pfad aus dem Internet: `403`.
-- [ ] Ein Aufruf mit fremdem `Host`-Header wird abgewiesen.
-
----
-
-### IDP-004 — Selbstregistrierung aus, Enumeration verhindern
-
-**Prio:** P0 · **Typ:** config
-
-**Problem**
-Offene Selbstregistrierung erzeugt Konten, die später über Einladungsfehler oder Social
-Engineering in Organisationen wandern. Und unterschiedliche Fehlermeldungen für „Nutzer
-existiert nicht" gegenüber „falsches Passwort" verraten, wer Kunde ist — für einen
-gezielten Angriff auf einen bestimmten Hersteller ist das der erste Schritt.
-
-**Lösung**
-- Registrierung ausschließlich per Einladung (`IDP-031`).
-- Login-Antworten und -Zeiten für existierende und nicht existierende Konten ununterscheidbar.
-- Kein Hinweis darauf, welche Faktoren registriert sind, bevor die Identität feststeht.
-
-**Akzeptanzkriterien**
-- [ ] `POST` auf den Registrierungspfad ⇒ abgelehnt.
-- [ ] Antwortzeit für existierendes und nicht existierendes Konto unterscheidet sich nicht
-      messbar (Messung über 1000 Versuche).
-
----
-
-### IDP-005 — Instanz-Policies vor der ersten Org
-
-**Prio:** P0 · **Typ:** config
-
-**Problem**
-Zitadel-Organisationen erben Policies von der Instanz, können sie aber überschreiben. Werden
-die Instanz-Defaults erst nach der ersten Org gesetzt, gilt für diese weiter der alte Stand —
-und niemand merkt es.
-
-**Lösung**
-Alle Instanz-Policies festschreiben, **bevor** die erste Organisation existiert: Login-Policy,
-Passwort-Policy (ungenutzt, aber restriktiv als Sicherheitsnetz), MFA-Policy, Lockout-Policy,
-Domain-Policy. Als Terraform oder als versionierte API-Aufrufe, nicht per Klick.
-
-Zusätzlich: **Org-eigene Policy-Überschreibung deaktivieren**, wo möglich. Ein Kunde soll die
-MFA-Anforderung nicht senken können.
-
-**Akzeptanzkriterien**
-- [ ] Die Policy-Konfiguration liegt als Code vor und ist reproduzierbar anwendbar.
-- [ ] Eine neu angelegte Org erbt alle Einschränkungen (Negativtest: Versuch, MFA in einer Org
-      abzuschalten, schlägt fehl).
-
-> **Zu verifizieren:** Welche Policies Zitadel org-seitig überschreibbar lässt und ob sich das
-> instanzweit sperren lässt. Falls nicht, muss eine Action die Änderung zurücksetzen und
-> alarmieren.
-
----
-
-# EPIC B — Authentifizierung
-
----
-
-### IDP-010 — Stufenmodell L1/L2/L3 umsetzen
-
-**Prio:** P0 · **Typ:** config · **Ref:** E1, E2
-
-**Lösung**
-Drei Vertrauensstufen, die sich aus den registrierten Faktoren **ergeben** — nicht gesetzt
-werden:
-
-| Stufe | Bedingung |
-|---|---|
-| L1 | E-Mail verifiziert, Passwort + TOTP |
-| L2 | mindestens ein Passkey |
-| L3 | mindestens zwei Passkeys |
-
-Der Passkey-Weg ist der vorgegebene: Die Anmeldemaske bietet ihn zuerst an, der
-Passwort-Weg steht darunter als „andere Möglichkeit". Wer aus einem Unternehmensnetz kommt,
-das WebAuthn blockiert, oder ein altes Gerät nutzt, wird nicht ausgesperrt — er landet auf L1.
-
-Die Stufe wird bei jeder Faktoränderung neu berechnet und als Claim ins Token geschrieben.
-
-**Akzeptanzkriterien**
-- [ ] Ein Nutzer, der einen Passkey registriert, ist unmittelbar danach L2 — ohne Ticket.
-- [ ] Entfernt er ihn wieder, fällt er auf L1 zurück (Ausnahme: E4, siehe `IDP-012`).
-- [ ] Die Stufe steht als Claim im Token und ist im Produkt auswertbar.
-
----
-
-### IDP-011 — Sichtbereich an die Stufe binden
-
-**Prio:** P0 · **Typ:** feature · **Ref:** E1
-
-**Problem**
-Ein `viewer` im Flottenprodukt ist nicht harmlos. Er sieht Geräte-IDs, ausgerollte
-Firmware-Versionen, **SBOM-Digests** — also welche bekannten Schwachstellen im Feld leben —
-und `staging_slot_erase_count`, also welche Geräte nahe am Lebensende sind.
-
-Das ist exakt die Aufklärung, die ein Lieferkettenangriff braucht: Welche Geräte sind
-angreifbar, welche werden bald ersetzt, wann rollt der Hersteller normalerweise aus.
-
-Ein Konto mit Passwort und TOTP darf diese Karte nicht liefern.
-
-**Lösung**
-
-| Datum | L1 | L2+ |
+| Modell | Go-Code schreibt | Datei |
 |---|---|---|
-| Gerätezahl, Erfolgsquote, Versionsverteilung | ✓ aggregiert | ✓ |
-| Geräte-IDs, Einzelstatus | — | ✓ |
-| SBOM-Digests, CVE-Zuordnung | — | ✓ |
-| Verschleißdaten je Gerät | — | ✓ |
-| Audit-Log | — | ✓ |
-| Artefakt-Digests, `blob_path` | — | ✓ |
+| `tenant` | `organization:<id>` | `sync/jit.go`, `internal/fga/rebuild_test.go`, `celldir/migration_test.go`, `sync/deletion.go` |
+| — | `group:<id>` | `scim/mapping.go` |
 
-Durchgesetzt im **Produkt**, nicht in der UI — ein L1-Token bekommt die Felder auch über die
-API nicht.
+```go
+// sync/jit.go — JIT-Provisionierung
+objectURN := "organization:" + user.TenantID
+baselineTuples := []authz.TupleKey{{User: userSubject, Relation: "member", Object: objectURN}}
+```
 
-**Akzeptanzkriterien**
-- [ ] `GET /v1/management/devices` liefert mit L1-Token nur Aggregate.
-- [ ] Kein Endpunkt gibt mit L1-Token einen SBOM-Digest oder eine Geräte-ID heraus.
-- [ ] Die Prüfung sitzt in der Autorisierungsschicht, nicht im Handler.
+```go
+// scim/mapping.go — SCIM-Gruppensync
+objectURN := fmt.Sprintf("group:%s", group.ID)
+```
 
----
+Weder `organization` noch `group` existieren im Modell. **Jeder Tupel-Write aus dem Sync-Pfad wird von OpenFGA abgelehnt.** Damit sind SYNC-06 (SCIM-Gruppen → Tupel) und SYNC-07 (JIT-Provisionierung) funktionslos — beide haben grüne Tests, weil die Tests gegen `mockFGATupleWriter` laufen und nur prüfen, *dass* geschrieben wurde, nicht *was*.
 
-### IDP-011b — WebAuthn ohne Rückfallebene für L3
+### 2.2 `device` ist niemals ein gültiges Subjekt
 
-**Prio:** P0 · **Typ:** config · **Ref:** E5
+`authz.PrincipalToFGASubject` erzeugt für `ActorDevice` das Subjekt `device:<id>`. Im gesamten Modell akzeptiert **keine einzige Relation** `[device]` als Subjekttyp.
 
-**Problem**
-TOTP und Push sind gegen AiTM-Proxys wirkungslos — der Proxy leitet den Code in Echtzeit
-weiter. WebAuthn bindet die Assertion an den Origin und ist deshalb nicht relaybar.
+Konsequenz: Ein Gerät kann sich per mTLS authentifizieren (und bekommt sogar TrustLevel L3, siehe Hauptreview § 9.7), aber **jeder Autorisierungs-Check für ein Geräte-Subjekt liefert `false`**. Für eine OTA-Plattform, deren Kernakteur das Gerät ist, ist das eine vollständige Lücke.
 
-**Eine Rückfallebene macht die Maßnahme wertlos**, weil der Angreifer sie wählt.
+Was fehlt, ist die Subjektseite: Relationen wie `device_group.member: [device]` oder `channel.subscriber: [device]`, über die ein Gerät seinen Update-Kanal lesen darf.
 
-**Lösung**
-Rollen mit Geräteauswirkung (`operator`, `release-manager`, `admin`, `owner`) setzen L3
-voraus, und L3 kennt ausschließlich WebAuthn. Es gibt keinen Pfad, auf dem ein solches Konto
-sich mit TOTP anmeldet.
+### 2.3 `can_manage` existiert auf den meisten Typen nicht
 
-Bevorzugt Authentikatoren mit User-Verification (PIN oder Biometrie), damit ein gestohlener
-Schlüssel allein nicht genügt.
+`authz/explain.go` hartkodiert die Selbstautorisierung des Aufrufers:
 
-**Akzeptanzkriterien**
-- [ ] Ein Konto mit `operator` kann sich nicht per TOTP anmelden — auch nicht, wenn TOTP
-      früher registriert wurde.
-- [ ] Der Versuch, für ein L3-Konto TOTP als Faktor zu ergänzen, wird abgelehnt.
+```go
+adminReq := CheckRequest{ …, ObjectType: req.ObjectType, Permission: "can_manage", … }
+```
 
----
+`can_manage` ist im Modell nur auf `end_customer` und `device` (marketplace.fga) definiert. Für `tenant`, `channel`, `release`, `device_group`, `namespace`, `package` existiert die Relation nicht — OpenFGA antwortet mit einem Validierungsfehler, den `CheckPermission` als `err != nil` behandelt und zu `ErrForbiddenExplain` verdichtet.
 
-### IDP-011c — Registrierung weiterer Faktoren absichern
+**Der Explain-Endpunkt (AUTHZ-11) funktioniert damit für keinen der wichtigen Objekttypen.** Der Test nutzt `ObjectType: "document"` — einen Typ, den es im Modell gar nicht gibt — gegen einen Mock-Checker.
 
-**Prio:** P0 · **Typ:** security · **Ref:** E3
+### 2.4 GitHub-Workload-Subjekt weicht ab
 
-**Problem**
-Das Anlegen eines Authentikators ist der Schritt, mit dem sich ein Angreifer nach einer
-Übernahme Persistenz verschafft. Erlaubt man es aus einer schwachen Sitzung, ist der neue
-Passkey nur so stark wie die Sitzung, aus der er entstand.
+`principal.FormatGitHubWorkloadURN` ⇒ `toob:workload:github:acme/repo:deploy`, `ParseURN` setzt `ID = "acme/repo:deploy"`, `PrincipalToFGASubject` erzeugt also `workload:acme/repo:deploy`.
 
-**Lösung**
+Der Testfall in `fleet_test.fga.yaml` schreibt `workload:github:acme/repo:deploy` — ein Segment mehr. Zusätzlich enthält die ID Doppelpunkte und Schrägstriche; OpenFGA trennt Typ und ID am **ersten** Doppelpunkt, das funktioniert, ist aber fragil und macht jede spätere Zerlegung mehrdeutig.
 
-| Vorgang | Voraussetzung |
-|---|---|
-| **erster** Passkey (L1 → L2) | L1-Sitzung genügt — mehr Schaden als L1 kann, entsteht nicht |
-| **jeder weitere** Authentikator | Bestätigung mit einem bereits registrierten Passkey |
-| Entfernen eines Authentikators | Bestätigung mit einem verbleibenden Passkey |
-
-Jede Änderung an der Faktorliste benachrichtigt den Nutzer **und** alle Org-Owner
-(`IDP-071`). Das ist der wichtigste Einzelalarm des ganzen Systems: Ein neuer Authentikator,
-den der Inhaber nicht selbst angelegt hat, ist eine laufende Übernahme.
-
-**Akzeptanzkriterien**
-- [ ] Ein zweiter Passkey lässt sich aus einer Passwort-Sitzung nicht anlegen.
-- [ ] Jede Faktoränderung erzeugt binnen 60 Sekunden eine Benachrichtigung.
+▸ **Querschnittliche Ursache:** Es gibt keine gemeinsame Quelle für Typ- und Relationsnamen. Genau hier hätte die Policy-Pipeline greifen müssen: `policygen` sollte aus den `.fga`-Dateien ein `shared/policy/fgatypes_gen.go` mit Konstanten erzeugen (`TypeTenant`, `RelMember`, `PermCanView`, …), und jede Tupel-Konstruktion im Go-Code müsste diese verwenden. Dann wären § 2.1–2.4 Compile-Fehler statt Laufzeitfehler.
 
 ---
 
-### IDP-012 — Kein Abstieg für Konten, die L3 hatten
+## 3. S2 — Semantische Fehler im Modell
 
-**Prio:** P0 · **Typ:** feature · **Ref:** E4
+### 3.1 Plattform-Support ist ein unbefristeter Standing Grant
 
-**Problem**
-Ohne diese Regel lautet der Angriff: Operator verliert seine Schlüssel, das Konto fällt auf
-den Passwort-Pfad zurück, und das Passwort wird angegriffen. Die gesamte L3-Absicherung ist
-dann über einen Umweg umgangen.
+```fga
+type platform
+  relations
+    define support: [user]
 
-**Lösung**
-Ein Konto, das jemals L3 erreicht hat, trägt eine dauerhafte Markierung:
-- Der Passwort-Login ist für dieses Konto deaktiviert und nicht reaktivierbar.
-- Fällt die Zahl der Authentikatoren unter zwei, wird die Rolle **suspendiert** (nicht
-  entzogen), Nutzer und Org-Owner werden benachrichtigt, und das Konto verharrt auf L2.
-- Bei null Authentikatoren greift ausschließlich `IDP-021` — kein Selbstbedienungspfad.
+type tenant
+  relations
+    define platform: [platform]
+    define support: support from platform
+    define can_view: member or support
+```
 
-Die Zwei-Schlüssel-Anforderung aus dem Stufenmodell hat genau hier ihren Zweck: Sie sorgt
-dafür, dass der Verlust eines Schlüssels ein Dienstagnachmittag ist und kein Notfall, in dem
-jemand unter Druck eine Ausnahme genehmigt.
+Jeder Nutzer mit `support` auf `platform:global` hat **dauerhaft, unbefristet und ohne Begründung Leserecht auf jeden Tenant**. Der Test schreibt dieses Verhalten als gewünscht fest:
 
-**Akzeptanzkriterien**
-- [ ] Rollenvergabe an ein L2-Konto ist nicht möglich; die Meldung nennt den fehlenden zweiten
-      Faktor.
-- [ ] Entfernen des zweiten Authentikators suspendiert die Rolle und benachrichtigt alle Owner.
-- [ ] Ein Konto mit der L3-Markierung kann sich unter keinen Umständen per Passwort anmelden.
+```yaml
+- name: Platform support staff read access on tenant
+    - user: user:charlie, relation: can_view, object: tenant:tenant_acme, result: true
+```
+
+Das steht in direktem Widerspruch zu IDP-060/061 und zu § 10.2 der Zielarchitektur: Support-Zugriff muss zeitgebunden, begründungspflichtig, für den Kunden sichtbar und ohne Standing Grants sein. Hier ist er das genaue Gegenteil.
+
+Verschärfend im Zusammenspiel mit dem Go-Code: `authz/check.go` ersetzt bei Impersonation das Subjekt durch den **Operator**-URN. Impersonation schränkt also nicht ein — sie ist der Mechanismus, über den das globale Leserecht des Operators zur Anwendung kommt. Modell und Code erzählen dieselbe, falsche Geschichte konsistent.
+
+**Korrekte Form** — Support ausschließlich über eine befristete Condition:
+
+```fga
+type tenant
+  relations
+    define support_session: [operator with non_expired_grant]
+    define can_view: member or support_session
+
+condition non_expired_grant(current_time: timestamp, grant_time: timestamp, grant_duration: duration) {
+  current_time < grant_time + grant_duration
+}
+```
+
+Damit läuft der Zugriff ohne Aufräumjob aus, und `platform.support` als Dauerrelation entfällt.
+
+### 3.2 Marktplatz und Fleet sind nicht verbunden
+
+```fga
+type marketplace   { define parent: [tenant]; define operator: [user] or admin from parent }
+type device_group  { define parent: [tenant]; define operator: [user] or admin from parent }
+```
+
+Beide hängen an `tenant`, aber **nicht aneinander**. Ein direkt zugewiesener Marktplatz-Operator (`user:alice` im Test) ist kein Tenant-Admin und hat damit auf `device_group` **keinerlei Rechte** — weder aggregierte noch granulare Sicht, kein Deployment.
+
+Das Kernszenario der Zielarchitektur („Marktplatzbetreiber verwaltet die Geräte seiner Endkunden") funktioniert nur über den separaten `device`-Typ aus `marketplace.fga`, nicht über die Fleet-Struktur. Es gibt also **zwei unverbundene Gerätewelten**: `device_group` (Fleet, tenant-gebunden) und `device` (Marketplace, endkundengebunden). Kein Pfad verbindet sie; `device` hat keine `group`-Relation.
+
+Ebenso: `channel.parent: [tenant]` — ein Marktplatz kann **keine eigenen Release-Kanäle** haben. Das ist die zentrale Produktfunktion des B2B2C-Szenarios.
+
+**Korrekte Form** — heterogene Eltern über eine auf allen Elterntypen vorhandene Permission auflösen:
+
+```fga
+type tenant       { … define can_administer: admin }
+type marketplace  { … define can_administer: operator }
+
+type device_group
+  relations
+    define parent: [tenant, marketplace]
+    define operator: [user] or can_administer from parent
+
+type channel
+  relations
+    define parent: [tenant, marketplace]
+    define operator: [user] or can_administer from parent
+```
+
+Das ist zugleich die generelle Regel gegen § 1.3: **Bei heterogenen Tuplesets zeigt der Arrow auf eine Permission, die auf jedem Elterntyp definiert ist.**
+
+### 3.3 Öffentliche Pakete kollidieren mit Store-per-Tenant
+
+```fga
+type package
+  relations
+    define public: [user:*, service_account:*]
+    define can_view: viewer or public
+```
+
+Der Test verlangt:
+```yaml
+- user: user:external_user, relation: can_view, object: package:public_driver, result: true
+```
+
+Das ist nur wahr, wenn der Check **gegen den Store von Acme** läuft. `authz.CheckPermission` löst den Store aber aus `req.TenantID` bzw. `principal.OrgID` auf — also aus dem Tenant des **Aufrufers**. Ein Nutzer von Tenant B fragt gegen den Store von B und bekommt `false`, weil das Paket dort nicht existiert.
+
+Das ist keine Modellschwäche im engeren Sinne, sondern eine **Kollision zweier Architekturentscheidungen**: ADR-4 (Store pro Tenant) und die öffentliche Package-Registry (global). Sie wurde bisher nirgends aufgelöst.
+
+Drei mögliche Auflösungen, in absteigender Empfehlung:
+
+1. **Öffentlichkeit außerhalb von FGA entscheiden.** Ein `packages.visibility = 'public'`-Flag in der Produkt-DB wird *vor* dem FGA-Check ausgewertet; FGA wird nur für nicht-öffentliche Pakete gefragt. Einfach, schnell, und die Sichtbarkeit ist ohnehin ein Attribut, keine Beziehung.
+2. **Dedizierter globaler Store** für den öffentlichen Registry-Index, zusätzlich zum Tenant-Store. Zwei Checks pro Leseanfrage.
+3. Store-per-Tenant für die Registry-Domäne aufgeben. Widerspricht ADR-4.
+
+In jedem Fall gehört die Entscheidung in ein ADR — aktuell existiert ein Test, der eine Eigenschaft behauptet, die der Client nicht liefern kann.
+
+### 3.4 CI kann nicht publizieren
+
+```fga
+type namespace { define publisher: [user, service_account] or admin }
+type package   { define publisher: [user, service_account] or publisher from namespace }
+```
+
+`workload` fehlt in beiden Listen. `PrincipalToFGASubject` erzeugt für GitHub-Actions-Tokens aber `workload:<id>`. Ein CI-Publish-Check ist damit **immer `false`**.
+
+Gleichzeitig ist `workload` genau an einer Stelle im Modell zugelassen — `release.author: [user, workload]` — und diese Relation wird von **keiner Permission** referenziert. Der einzige Ort, an dem `workload` vorkommt, ist tot; der Ort, an dem er gebraucht wird, kennt ihn nicht.
+
+Das ist die Modellseite der Supply-Chain-Story: „CI darf bauen und nach dev publizieren, aber nicht nach production promoten." Die zweite Hälfte ist korrekt umgesetzt (§ 5.1), die erste gar nicht.
+
+### 3.5 Vier-Augen-Prinzip existiert im Modell nicht — und sonst auch nicht
+
+`channel.can_approve: release_manager` ist ein einzelnes Boolean. Ein Release-Manager, eine Freigabe.
+
+ReBAC kann Schwellwerte grundsätzlich nicht ausdrücken — das ist kein Modellfehler, sondern korrekt so. Der Punkt ist: Die Zielarchitektur hatte das Vier-Augen-Prinzip deshalb bewusst **außerhalb** von FGA verortet (ADR-13: 2-of-N-Signatur), und dieser Teil wurde nie gebaut (Hauptreview § 6.1).
+
+Ergebnis: `can_approve` ist derzeit die **gesamte** Freigabeautorisierung. Damit ist die Release-Governance im Modell schwächer als im alten `identity/approval`-Paket, das Dual-Control und ein Soak-Fenster hatte.
+
+### 3.6 Der Plattform-Link ist tenant-seitig schreibbar
+
+```fga
+type tenant
+  relations
+    define platform: [platform]
+```
+
+`platform` ist eine **direkt zuweisbare** Relation auf `tenant`. Wer Tupel im Tenant-Store schreiben darf, kann den Tenant auf ein anderes `platform`-Objekt zeigen lassen und damit die Support-Menge austauschen. Im Store-per-Tenant-Modell ist der Radius begrenzt, aber die Richtung stimmt nicht: Ein Tenant sollte die Plattform, unter der er hängt, nicht selbst bestimmen können.
+
+Da `platform` faktisch ein Singleton ist (`platform:global`), gehört der Link entweder in eine Contextual Tuple (vom Enforcement gesetzt, nicht persistiert) oder das Tupel muss beim Bootstrap geschrieben und danach durch Schreibrechte geschützt werden. Aktuell gibt es weder das eine noch das andere.
 
 ---
 
-### IDP-013 — Rollenabhängige Anforderung durchsetzen
+## 4. S3 — Strukturelle Schwächen
 
-**Prio:** P1 · **Typ:** feature
+### 4.1 Keine Rekursion — die versprochene Erweiterbarkeit besteht nicht
 
-**Problem**
-Die Anforderung aus `IDP-011` muss **zum Zeitpunkt der Aktion** gelten, nicht nur beim Login.
-Ein Nutzer, der als `viewer` mit TOTP eingeloggt ist und dann `operator` erhält, hat eine
-Sitzung mit zu schwachem Niveau.
+Die Zielarchitektur (§ 5.1) sagte zu: „Die Tiefe ist nicht auf diese vier Ebenen begrenzt. `parent`-Relationen sind rekursiv modelliert; eine fünfte Ebene ist ein Modell-Additiv, kein Umbau."
 
-**Lösung**
-Das Produkt prüft die `amr`- und `acr`-Claims des Tokens gegen die für die Aktion nötige
-Stufe. Reicht sie nicht, folgt eine Re-Authentifizierung (`IDP-040`) statt einer Ablehnung.
+Im Modell ist jede Ebene **fest an einen konkreten Elterntyp gebunden**: `marketplace.parent: [tenant]`, `end_customer.marketplace: [marketplace]`, `device.owner: [end_customer, marketplace, tenant]`. Es gibt keine einzige rekursive Relation (`parent: [gleicher Typ]`).
 
-**Akzeptanzkriterien**
-- [ ] Eine mit TOTP begonnene Sitzung kann keine Geräteoperation auslösen.
-- [ ] Der Nutzer bekommt eine Aufforderung zur Re-Authentifizierung, keine Fehlermeldung.
+Das Einfügen eines Distributors zwischen Marktplatz und Endkunde erfordert Änderungen an `end_customer.marketplace`, `end_customer.manager`, allen drei `*_user`-Relationen auf `device` und an jeder darauf aufbauenden Permission. Das ist genau der Umbau, den die Architektur ausgeschlossen hatte.
 
-> **Zu verifizieren:** Wie Zitadel `amr`/`acr` befüllt und ob sich eigene ACR-Werte definieren
-> lassen. Falls nicht, trägt eine Action einen eigenen Claim ein.
+**Korrekte Form** — ein rekursiver Hierarchieknoten:
 
----
+```fga
+type org_node
+  relations
+    define parent: [org_node]
+    define admin:  [user] or admin from parent
+    define member: [user, service_account] or admin or member from parent
+    define can_administer: admin
+```
+Tenant, Marketplace, Distributor und weitere Ebenen sind dann Instanzen desselben Typs; die Ressourcentypen hängen einheitlich an `parent: [org_node]`. Neue Ebenen sind reine Tupel — ohne jede Modelländerung.
 
-### IDP-014 — Sitzungsdauer, Token-TTL, Refresh-Rotation
+### 4.2 Tote Relationen
 
-**Prio:** P1 · **Typ:** config
-
-**Lösung**
-
-| Wert | Einstellung | Begründung |
+| Typ | Relation | Referenziert von |
 |---|---|---|
-| Access-Token | 15 min | Offline-Verifikation, Diebstahlfenster klein |
-| Refresh-Token | 8 h, rotierend | Wiederverwendung eines rotierten Tokens = Diebstahl ⇒ Familie invalidieren |
-| Sitzung (Browser) | 12 h absolut, 30 min inaktiv | Ein vergessener Laptop ist kein Dauerzugang |
-| Step-up-Gültigkeit | 5 min | `IDP-040` |
+| `platform` | `staff` | nichts |
+| `platform` | `security_admin` | nichts |
+| `release` | `author` | nichts |
+| `namespace` | `can_create_package` | keiner Permission-Katalogeintrag erkennbar [prüfen] |
 
-Refresh-Token-Rotation mit Reuse-Detection ist der wichtigste Punkt: Wird ein bereits
-eingelöster Refresh-Token erneut vorgelegt, wurde er gestohlen — die gesamte Token-Familie
-wird invalidiert und der Nutzer alarmiert.
+`staff` und `security_admin` sind besonders auffällig: Sie waren in der Zielarchitektur die Träger der Plattform-Administration; jetzt existieren sie als Deklaration ohne Wirkung — dasselbe Muster wie `RequiredProductRole` im Go-Code (Hauptreview § 6.3).
 
-**Akzeptanzkriterien**
-- [ ] Wiederverwendung eines rotierten Refresh-Tokens invalidiert die Familie und erzeugt einen
-      Alarm.
-- [ ] Cookies: `Secure`, `HttpOnly`, `SameSite=Lax`, `__Host-`-Präfix.
+### 4.3 Zwischenrelationen ohne Nutzen
 
----
+```fga
+define self_user:     self from owner
+define manager_user:  manager from owner
+define operator_user: operator from owner
+define can_view: self_user or manager_user or operator_user
+```
 
-### IDP-015 — Token-Bindung prüfen und aktivieren
+Die drei Zwischenrelationen tragen keine Semantik, verdoppeln die Traversierungstiefe und lesen sich wie zuweisbare Relationen (kein Typ-Suffix macht sichtbar, dass sie berechnet sind). Direkt in der Permission ist kürzer und schneller:
 
-**Prio:** P2 · **Typ:** security
+```fga
+define can_view: can_view from owner
+```
+— nach Vereinheitlichung des Elterntyps gemäß § 3.2.
 
-**Problem**
-Ein Bearer-Token ist so gut wie sein Besitz. Wer ihn stiehlt — Malware, XSS, Log-Leck — kann
-ihn überall verwenden.
+### 4.4 Keine Conditions definiert, obwohl der Code sie schreibt
 
-**Lösung**
-DPoP (RFC 9449) bindet das Token an einen clientseitigen Schlüssel; ein gestohlenes Token ist
-ohne den privaten Schlüssel wertlos. Alternativ mTLS-gebundene Tokens für Maschinenpfade.
+`authz/breakglass.go` erzeugt Grants mit
 
-> **Zu verifizieren:** DPoP-Unterstützung in Zitadel und in den Produkt-APIs. Falls nicht
-> verfügbar, bleibt `IDP-040` (Step-up) die wirksame Kompensation — ein gestohlenes Token
-> erlaubt dann Lesen, aber keine Auslieferung.
+```go
+ConditionName: "is_active_breakglass",
+ConditionParams: map[string]interface{}{ "current_time": …, "expires_at": … },
+```
 
----
+Im Modell ist **keine einzige `condition`** definiert. OpenFGA lehnt ein Tupel mit unbekannter Condition beim Schreiben ab. Der Break-Glass-Grant ist damit nicht nur unverdrahtet (Hauptreview § 5.4), er wäre auch nicht schreibbar.
 
-# EPIC C — Wiederherstellung und Notfallzugang
+Ebenso fehlen die in § 6.3 der Zielarchitektur vorgesehenen Conditions für befristete Grants und Regionsbindung.
 
----
+### 4.5 Namenskollision `support`
 
-### IDP-020 — Selbstbedienungs-Reset abschalten
+`tenant.support` (berechnet) und `platform.support` (direkt) heißen gleich und stehen in derselben Zeile:
 
-**Prio:** P0 · **Typ:** config
+```fga
+define support: support from platform
+```
 
-**Problem**
-Der meistgenutzte Übernahmepfad in der Praxis. Wer MFA erzwingt und dann Reset per E-Mail
-erlaubt, hat die MFA an das E-Mail-Konto delegiert.
+Das liest sich beim Überfliegen selbstreferenziell. `platform_support` auf dem Tenant oder `support_staff` auf der Plattform würde die Zeile eindeutig machen.
 
-**Lösung**
-Für Konten mit privilegierten Rollen: kein Selbstbedienungs-Reset, kein Magic Link, keine
-SMS. Für `viewer` und `contributor` zulässig, aber ohne Rollenerhöhung nach der
-Wiederherstellung.
+### 4.6 Fehlende Typen gegenüber dem Katalog
 
-**Akzeptanzkriterien**
-- [ ] „Zugang verloren" für ein `operator`-Konto führt zu einem Hinweis auf den Prozess aus
-      `IDP-021`, nicht zu einem automatischen Fluss.
+Aus dem Domänen-Mapping in `policygen`'s Markdown-Generator sind Katalogpräfixe erkennbar, für die es **keine Modellrelation** gibt:
 
----
-
-### IDP-021 — Wiederherstellungsprozess
-
-**Prio:** P1 · **Typ:** process
-
-**Lösung**
-Vier Schritte, alle zwingend:
-
-1. **Anfrage außerhalb des Kanals** — nicht über das kompromittierbare E-Mail-Konto allein.
-2. **Verifikation durch einen Menschen** gegen eine bei Vertragsschluss hinterlegte
-   Kontaktperson des Kunden.
-3. **Wartezeit 24 Stunden**, in der alle Org-Owner benachrichtigt werden und widersprechen
-   können. Das ist der eigentliche Schutz: Ein Angreifer, der die Verifikation besteht, hat
-   trotzdem einen Tag, in dem der echte Inhaber es merkt.
-4. **Registrierung neuer Authentikatoren**, mindestens zwei, ohne Absenkung des Niveaus.
-
-Bei Widerspruch: sofortiger Abbruch, Sicherheitsvorfall, Sitzungen des betroffenen Kontos
-invalidiert.
-
-**Akzeptanzkriterien**
-- [ ] Der Prozess ist im Runbook, mit Namen der verantwortlichen Rolle.
-- [ ] Ein Testdurchlauf ist protokolliert.
-- [ ] Die Wartezeit ist technisch erzwungen, nicht organisatorisch zugesagt.
-
----
-
-### IDP-022 — `IAM_OWNER` als Break-Glass-Konto
-
-**Prio:** P0 · **Typ:** security
-
-**Problem**
-Der Instanz-Administrator kann in Zitadel alles: jede Org verwalten, Nutzer anlegen, Policies
-ändern, Rollen vergeben. Ein übernommenes `IAM_OWNER`-Konto ist die Kompromittierung
-sämtlicher Kunden gleichzeitig.
-
-**Lösung**
-- Genau ein `IAM_OWNER`-Konto, **nicht im Alltag verwendet**.
-- Zwei Hardware-Schlüssel, physisch getrennt verwahrt.
-- Keine E-Mail-Adresse, die auch für anderes benutzt wird.
-- **Jede Anmeldung erzeugt sofort einen Alarm** — nicht „bei Auffälligkeit", sondern immer.
-- Alltägliche Toob-Arbeit läuft über org-gebundene Rollen (`IDP-061`).
-
-**Akzeptanzkriterien**
-- [ ] Es existiert genau ein Konto mit Instanz-Rechten.
-- [ ] Eine Anmeldung damit erzeugt binnen 60 Sekunden einen Alarm im Betriebskanal.
-- [ ] Kein Automatisierungspfad verwendet dieses Konto.
-
----
-
-### IDP-023 — Break-Glass-Übung
-
-**Prio:** P2 · **Typ:** process
-
-**Lösung**
-Halbjährlich: Zugriff mit dem `IAM_OWNER`-Konto herstellen, gemessene Zeit protokollieren,
-Alarm verifizieren, Schlüssel zurück in die Verwahrung. Zusammen mit der Übung aus `OPS-023`.
-
-Ein ungeübter Notfallpfad ist keiner — das gilt hier wie beim WireGuard-Hub.
-
----
-
-# EPIC D — Organisationen, Einladungen, Rollen
-
----
-
-### IDP-030 — Projekt- und Rollenmodell
-
-**Prio:** P1 · **Typ:** config
-
-**Lösung**
-Zwei Zitadel-Projekte mit ihren Rollen:
-
-| Projekt | Rollen |
+| Katalogpräfix | Modellentsprechung |
 |---|---|
-| `registry` | `contributor`, `core` |
-| `fleet` | `viewer`, `operator`, `release-manager`, `admin`, `owner` |
+| `admin.role.*` | keine — Rollenverwaltung ist nicht modelliert |
+| `admin.*` (Impersonation, Audit) | keine |
+| `release.*` (Emergency Controls) | nur `can_approve` |
+| `registry.*` (package_version) | `package_version` fehlt als Typ |
 
-Die Trennung zwischen `release-manager` (darf signieren lassen) und `operator` (darf ausrollen)
-ist Lieferkettenschutz: Ein übernommener Operator kann kein bösartiges Artefakt einschleusen,
-nur ein vorhandenes falsch ausrollen — und das ist über den Assignment-Verlauf rekonstruierbar.
-
-Als Code, nicht per Konsole.
-
-> **Zu verifizieren:** Welches Zitadel-Primitiv die org-gebundene Rolle trägt — Projektrolle
-> mit Org-Grant, Org-Member-Rolle oder User-Grant. Bestimmt die Claim-Struktur.
+Ein Abgleich Katalog ↔ Modell existiert nicht. Genau das wäre die Aufgabe des POL-06-Linters: *jede* Permission im Katalog muss auf eine im Modell vorhandene `(resource, relation)`-Kombination zeigen, und jede Modell-Permission sollte einen Katalogeintrag haben.
 
 ---
 
-### IDP-031 — Einladungsfluss
+## 5. Was gut ist
 
-**Prio:** P1 · **Typ:** feature
+Vier Dinge sind im Modell richtig gelöst und sollten beim Umbau erhalten bleiben:
 
-**Lösung**
-- Einladung ist **einmalig einlösbar**, läuft nach 72 Stunden ab, ist an die eingeladene
-  E-Mail gebunden.
-- Der Einladende sieht, ob sie eingelöst wurde.
-- Eine Einladung vergibt **niemals direkt** eine Rolle mit Geräteauswirkung — der Beitritt
-  erfolgt als `viewer`, die Erhöhung braucht `IDP-033`.
-- Widerruf jederzeit möglich.
+### 5.1 CI-Produktionssperre im Typsystem ✅
 
-**Akzeptanzkriterien**
-- [ ] Ein zweiter Einlöseversuch derselben Einladung schlägt fehl.
-- [ ] Eine Einladung, die auf eine andere E-Mail eingelöst wird, schlägt fehl.
+```fga
+define release_manager: [user]
+define can_approve: release_manager
+```
 
----
+`can_approve` erbt **nicht** von `admin from parent` und akzeptiert nur `[user]`. Ein `workload` kann die Relation auf keinem Pfad erlangen — die Regel ist strukturell, nicht per Laufzeitprüfung. Genau ADR-15. Der Test beweist es explizit:
 
-### IDP-032 — Org-Namensregeln über Action
+```yaml
+- name: Machine Workload CANNOT approve release (type constraint test)
+    result: false
+```
 
-**Prio:** P1 · **Typ:** feature
+Das ist die sauberste Stelle im gesamten Policy-Bereich.
 
-**Problem**
-Der Org-Name ist zugleich Paket-Scope (`@esp-alliance/foo`). Lässt Zitadel Namen zu, die
-`validate.ValidateOrgName` ablehnt, entstehen Organisationen, die keinen gültigen Scope ergeben
-— und der Fehler fällt erst beim ersten Publish auf.
+### 5.2 Delegierte Administration am Marktplatz ✅
 
-**Lösung**
-Action bei der Org-Erzeugung, die dieselbe Regel durchsetzt. Die Regel steht an einer Stelle
-und wird von der Action konsumiert, nicht nachgebaut.
+```fga
+type end_customer
+  relations
+    define manager: operator from marketplace
+```
 
----
+Ein Marktplatz-Operator verwaltet automatisch auch Endkunden, die **nach** der Rechtevergabe angelegt werden. Der Test prüft genau diese Eigenschaft mit zwei Endkunden. Das ist die Kernanforderung aus § 5.3 der Zielarchitektur und korrekt umgesetzt.
 
-### IDP-033 — Rollenerhöhung braucht Owner-Genehmigung
+### 5.3 Aggregat/Granular-Trennung ✅
 
-**Prio:** P1 · **Typ:** feature
+```fga
+define can_view_aggregate: viewer
+define can_view_granular:  operator
+```
 
-**Lösung**
-Die Vergabe von `operator`, `release-manager` oder `admin` erfordert die Bestätigung eines
-`owner` **mit frischem Step-up**. Alle Org-Owner werden benachrichtigt.
+Zwei getrennte Permissions statt eines Flags — richtig. Der Test prüft, dass ein Service-Account die aggregierte, nicht aber die granulare Sicht hat. (Dass kein Go-Code diese Permissions liest, ist ein Problem des Enforcements, nicht des Modells.)
 
-Damit reicht ein übernommener `admin` nicht, um sich still weitere Rechte zu verschaffen — der
-Vorgang ist sichtbar.
+### 5.4 Registry-Vererbungskette ✅
 
-**Akzeptanzkriterien**
-- [ ] Rollenerhöhung ohne Owner-Bestätigung ist nicht möglich.
-- [ ] Jede Erhöhung erzeugt eine Benachrichtigung an alle Owner.
+`tenant.owner → tenant.admin → namespace.admin → package.owner → can_delete` ist durchgängig und ohne Sprünge. Arrows zeigen auf Permissions bzw. auf direkt zuweisbare Relationen. Der Test prüft auch die Gegenrichtung (`user:alice` kann *nicht* löschen).
 
 ---
 
-### IDP-034 — Org-Spiegel in die Produkte
+## 6. Testabdeckung des Modells
 
-**Prio:** P1 · **Typ:** feature
+17 Checks in vier Dateien. Was geprüft wird, ist überwiegend sinnvoll (jeweils mit Negativfall). Was fehlt, ist die wichtigere Hälfte:
 
-**Lösung**
-Push aus Zitadel in `toob-registry.organizations`/`organization_members` und
-`toob-update.tenants`/`tenant_members`. Read-only im Produkt, geschrieben nur vom Sync.
-
-Damit liest `PolicyEngine.AuthorizeOrgAction` weiter lokal — kein Netzaufruf, kein
-Laufzeitpfad zum IdP.
-
-**Akzeptanzkriterien**
-- [ ] Eine Mitgliedschaftsänderung ist binnen 60 Sekunden im Produkt sichtbar.
-- [ ] Sync-Rückstand über 5 Minuten erzeugt einen Alarm.
-- [ ] Der Produktcode schreibt nachweislich nicht in die Spiegeltabellen (Grant-Test).
-
----
-
-# EPIC E — Step-up und Freigabe
-
----
-
-### IDP-040 — Step-up vor Geräteoperationen
-
-**Prio:** P1 · **Typ:** feature
-
-**Lösung**
-Vor Artefakt-Publish, Channel-Wechsel, Rollout-Start und Killswitch: frische
-Re-Authentifizierung mit phishing-resistentem Faktor, maximal fünf Minuten alt. Umgesetzt über
-`prompt=login` mit `max_age` und Prüfung von `auth_time`.
-
-**Wirkung:** Ein gestohlenes Session-Token erlaubt Lesen, aber keine Auslieferung. Das ist die
-Kompensation, falls `IDP-015` nicht verfügbar ist.
-
-**Akzeptanzkriterien**
-- [ ] Publish mit einem sechs Minuten alten `auth_time` wird abgelehnt.
-- [ ] Die Ablehnung führt zur Re-Authentifizierung, nicht zu einem Fehler.
-
----
-
-### IDP-041 — Vier-Augen-Freigabe für Produktions-Channels
-
-**Prio:** P2 · **Typ:** feature
-
-**Problem**
-Ohne diese Maßnahme genügt **ein** kompromittiertes Konto für die gesamte Flotte. Alles davor
-macht das schwer — das hier macht es unzureichend.
-
-**Lösung**
-Ein Channel-Wechsel in Produktion erfordert die Freigabe von **zwei verschiedenen**
-`release-manager`, beide mit frischem Step-up. Die zweite Freigabe kann nicht vom Ersteller
-kommen.
-
-Pro Mandant abschaltbar, aber **Default an**, sobald Geräte in Produktion registriert sind.
-
-**Akzeptanzkriterien**
-- [ ] Ein Nutzer kann nicht beide Freigaben erteilen.
-- [ ] Die Abschaltung erfordert eine `owner`-Entscheidung und erzeugt einen Audit-Eintrag.
-
----
-
-### IDP-042 — Soak-Zeit
-
-**Prio:** P2 · **Typ:** feature
-
-**Lösung**
-Zwischen der zweiten Freigabe und dem ersten ausgelieferten Byte liegen mindestens 30 Minuten,
-in denen jeder Org-Owner abbrechen kann. Alle Owner werden bei Freigabe benachrichtigt.
-
-**Warum das wichtig ist:** Es verwandelt einen erfolgreichen Angriff von „sofort auf allen
-Geräten" in „ein halbstündiges Erkennungsfenster". Für einen Angreifer, der auf Unauffälligkeit
-angewiesen ist, ist das ein erheblicher Unterschied.
-
-**Akzeptanzkriterien**
-- [ ] Kein Gerät bekommt eine Zuweisung vor Ablauf der Soak-Zeit.
-- [ ] Ein Abbruch innerhalb des Fensters verhindert jede Auslieferung.
-
----
-
-### IDP-043 — Signing Service verlangt Freigabenachweis
-
-**Prio:** P2 · **Typ:** security
-
-**Problem**
-Solange der Signing Service auf reine Rollenzugehörigkeit hin signiert, umgeht ein direkter
-API-Aufruf die Freigabe aus `IDP-041`.
-
-**Lösung**
-Der Signing Service akzeptiert nur Anfragen mit einem Nachweis über zwei Freigaben und
-frischen Step-up. Ohne diesen Nachweis wird nicht signiert — unabhängig davon, welche Rolle
-der Aufrufer hat.
-
-Damit ist die Vier-Augen-Regel technisch durchgesetzt und nicht nur in der UI abgebildet.
-
-**Akzeptanzkriterien**
-- [ ] Ein direkter Aufruf des Signing Service ohne Freigabenachweis wird abgelehnt.
-- [ ] Der Nachweis ist an Artefakt-Digest und Channel gebunden, nicht wiederverwendbar.
-
----
-
-# EPIC F — Föderation
-
----
-
-### IDP-050 — GitHub als Upstream, mit Rollenschranke
-
-**Prio:** P1 · **Typ:** config
-
-**Problem**
-GitHub-Login ist gute UX und ein Risiko: Eine GitHub-Übernahme wäre eine Toob-Übernahme, und
-GitHubs eigene MFA kann SMS sein.
-
-Zusätzlich das klassische **Account-Linking-Problem**: Ein Upstream, der E-Mail-Adressen nicht
-verifiziert, erlaubt Verknüpfung mit einer fremden Identität.
-
-**Lösung**
-- GitHub bleibt Anmeldemethode für `contributor` und `viewer`.
-- **Für Geräterollen genügt GitHub nicht** — dort ist zusätzlich ein lokaler Passkey
-  erforderlich, unabhängig vom Anmeldeweg.
-- Automatische Verknüpfung nur bei verifizierter E-Mail; sonst manuelle Bestätigung.
-
-**Akzeptanzkriterien**
-- [ ] Ein per GitHub angemeldeter Nutzer mit `operator` muss vor einer Geräteoperation den
-      lokalen Faktor vorlegen.
-- [ ] Verknüpfung mit unverifizierter Upstream-E-Mail ist nicht automatisch möglich.
-
----
-
-### IDP-051 — Bestandsnutzer vorverknüpfen
-
-**Prio:** P1 · **Typ:** feature
-
-**Lösung**
-Bestehende Registry-Nutzer über die Management-API anlegen und per `github_id` mit ihrer
-GitHub-Identität verknüpfen, damit der erste Login sie wiedererkennt statt ein Duplikat
-anzulegen.
-
-Wichtig: Verknüpfung über die **numerische** `github_id`, nicht über den Login-Namen — Namen
-sind änderbar und wiederverwendbar.
-
-> **Zu verifizieren:** Ob die Management-API das Vorverknüpfen externer Identitäten erlaubt.
-> Falls nicht, braucht der erste Login eine Action, die anhand der `github_id` zuordnet.
-
----
-
-### IDP-052 — Kunden-IdP über OIDC/SAML
-
-**Prio:** P3 · **Typ:** feature
-
-Industriekunden wollen ihren eigenen IdP. Wichtig dabei: Auch dann bleibt die Anforderung aus
-`IDP-011` bestehen — entweder der Kunden-IdP liefert nachweislich einen phishing-resistenten
-Faktor (`amr`-Claim), oder es ist zusätzlich ein lokaler Passkey nötig.
-
-Ein Kunde darf sein eigenes Sicherheitsniveau senken — aber nicht unbemerkt, und nicht für
-Geräteoperationen.
-
----
-
-### IDP-053 — Workload-Identity-Federation
-
-**Prio:** P3 · **Typ:** feature
-
-GitHub-/GitLab-OIDC-Token gegen kurzlebiges Toob-Token. Kein langlebiges Kundensecret mehr bei
-uns.
-
-Wichtig: Der Token-Tausch muss `repository`, `ref` und `workflow` prüfen — sonst kann jedes
-Repository derselben Organisation Firmware publizieren. Und Maschinenidentitäten erhalten
-**nie** `release-manager` für Produktions-Channels; sie können nach `dev` publizieren, die
-Promotion bleibt menschlich.
-
----
-
-# EPIC G — Insider und Support
-
----
-
-### IDP-060 — Impersonation zeitbegrenzt und sichtbar
-
-**Prio:** P2 · **Typ:** security
-
-**Problem**
-Die erste Frage eines Auditors: *Wer bei euch sieht unsere Flottendaten, und wie erfahren wir
-davon?* Ohne dieses Ticket lautet die Antwort „jeder mit DB-Zugriff, und ihr erfahrt es nicht".
-
-**Lösung**
-Support-Zugriff läuft ausschließlich über eine explizite Impersonation:
-- Begründung verpflichtend, freier Text
-- Zeitlich begrenzt, maximal 4 Stunden
-- Erscheint im **Audit-Log des Kunden**, nicht nur im unseren
-- Benachrichtigung an alle Org-Owner beim Start
-- Niemals mit `release-manager` — Support liest, Support liefert nicht aus
-
-**Akzeptanzkriterien**
-- [ ] Impersonation ohne Begründung ist nicht möglich.
-- [ ] Der Kunde sieht den Vorgang in seinem eigenen Audit-Log.
-- [ ] Impersonierte Sitzungen können keine Geräteoperationen auslösen.
-
----
-
-### IDP-061 — Toob-Mitarbeiter ohne stehende Kundenrechte
-
-**Prio:** P2 · **Typ:** process
-
-**Lösung**
-Kein Toob-Konto hat dauerhaft Rollen in Kundenorganisationen. Zugriff entsteht nur über
-`IDP-060` und endet automatisch. Das Alltagskonto ist ein normales Konto mit Passkey.
-
----
-
-# EPIC H — Erkennung
-
----
-
-### IDP-070 — Audit-Log nach Loki
-
-**Prio:** P1 · **Typ:** detect
-
-**Lösung**
-Zitadels Ereignisstrom nach Loki, mit `project=identity` und Mandanten-Label
-(`X-Scope-OrgID` aus `BEF-009`). Aufbewahrung mindestens so lang wie die CRA-Retention der
-Flottendaten.
-
-Das Log ist selbst schützenswert: Es enthält, wer wann welche Flotte verwaltet hat.
-
-**Akzeptanzkriterien**
-- [ ] Alle Anmelde-, Rollen- und Policy-Ereignisse landen in Loki.
-- [ ] Ein Mandant sieht ausschließlich seine eigenen Ereignisse.
-
----
-
-### IDP-071 — Alarme auf sicherheitsrelevante Ereignisse
-
-**Prio:** P1 · **Typ:** detect
-
-| Ereignis | Schwere |
+| Fehlende Prüfung | Hätte gefunden |
 |---|---|
-| `IAM_OWNER`-Anmeldung | **kritisch, immer** |
-| Neuer Authentikator registriert | hoch — an Nutzer und Org-Owner |
-| Privilegierte Rolle vergeben | hoch |
-| MFA-Policy geändert | **kritisch** |
-| Refresh-Token-Reuse erkannt | **kritisch** |
-| Wiederherstellungsprozess gestartet | hoch |
-| Impersonation gestartet | hoch, auch an den Kunden |
-| Upstream-IdP-Konfiguration geändert | kritisch |
+| Marktplatz-Operator auf `device_group` | § 3.2 (getrennte Gerätewelten) |
+| `workload` auf `package.can_publish` | § 3.4 (CI kann nicht publizieren) |
+| Gerät als Subjekt (`device:x can_view …`) | § 2.2 (Geräte nie autorisierbar) |
+| `device` mit `owner: tenant:…` | § 1.3 (unsichtbares Gerät) |
+| `can_manage` auf `tenant` / `channel` | § 2.3 (Explain unbrauchbar) |
+| Tenant-übergreifender Check | Die zentrale Isolationsaussage — derzeit vollständig ungetestet |
+| Substitution von `platform:global` | § 3.6 |
 
-Der Alarm auf „neuer Authentikator" ist besonders wichtig: Das ist der Schritt, den ein
-Angreifer nach der Übernahme unternimmt, um sich Persistenz zu verschaffen.
+Zum letzten Punkt: Wenn Tenant-Isolation im Store-per-Tenant-Modell außerhalb des Modells liegt, gehört das als Kommentar in die Testdatei — sonst liest es sich wie eine Lücke.
 
----
-
-### IDP-072 — Anomalie-Alarme
-
-**Prio:** P2 · **Typ:** detect
-
-Neue Geografie oder neues ASN bei privilegierten Konten, ungewöhnliche Uhrzeit,
-fehlgeschlagene WebAuthn-Versuche in Serie (deutet auf AiTM-Versuch hin — der Proxy bekommt
-keine gültige Assertion und probiert weiter).
-
-Kein automatisches Blockieren, sondern Benachrichtigung plus erzwungenes Step-up bei der
-nächsten Aktion.
+Zusätzlich: Die Testdateien enthalten keine `model_file:`-Angabe. Die FGA-CLI erwartet in der Test-YAML entweder `model_file: ../model/fga.mod` oder einen Inline-`model:`-Block. Ohne das lässt sich `fga model test` gar nicht ausführen — ein weiteres Indiz für § 0.
 
 ---
 
-### IDP-073 — Rate-Limits ohne DoS-Nebenwirkung
+## 7. Korrekturplan
 
-**Prio:** P1 · **Typ:** security
+Reihenfolge so, dass jeder Schritt den nächsten ermöglicht.
 
-**Problem**
-Harte Kontosperren nach N Fehlversuchen sind selbst ein Angriff: Ein Angreifer sperrt gezielt
-die Operatoren eines Kunden aus, kurz bevor ein Sicherheitsupdate ausgeliefert werden müsste.
+**Zuerst — ladbar machen und in CI verankern**
 
-**Lösung**
-Progressive Verzögerung statt Sperre, kombiniert mit Alarmierung. Rate-Limits pro IP **und**
-pro Konto, Cloudflare-Regel davor. Eine echte Sperre nur nach menschlicher Entscheidung.
+1. `type device` entwirren: In `core.fga` entfernen (`device` ist Ressource, nicht Akteur). Ressourcendefinition nach `fleet.fga`, wo auch `device_group` liegt.
+2. `fga.mod` und Datei-Header auf ein Format bringen. Empfehlung: **einfaches Single-File-Modell** — `fga.mod` löschen, `policygen` konkateniert `core → registry → fleet → marketplace` zu einem `policy/model/model.fga`. Modulare Modelle lohnen sich erst bei mehreren Teams.
+3. Heterogene Tuplesets auflösen (§ 3.2-Muster: `can_administer` auf jedem Elterntyp).
+4. `model_file:` in allen vier Test-YAMLs ergänzen.
+5. **`just validate-policy` erweitern:**
+   ```
+   fga model test --tests policy/tests/core_test.fga.yaml
+   fga model test --tests policy/tests/registry_test.fga.yaml
+   fga model test --tests policy/tests/fleet_test.fga.yaml
+   fga model test --tests policy/tests/marketplace_test.fga.yaml
+   go test ./shared/policy/...
+   ```
+   Ohne Schritt 5 wiederholt sich § 0 beim nächsten Mal.
 
-**Akzeptanzkriterien**
-- [ ] 1000 Fehlversuche gegen ein Konto sperren es nicht aus, erzeugen aber einen Alarm.
-- [ ] Der legitime Inhaber kann sich während des Angriffs weiterhin anmelden.
+**Dann — Vokabular erzwingen**
 
----
+6. `policygen` erweitern: Typ-, Relations- und Permissionnamen aus dem Modell parsen und nach `shared/policy/fgatypes_gen.go` als Konstanten schreiben.
+7. Alle Tupel-Konstruktionen im Go-Code auf diese Konstanten umstellen: `sync/jit.go`, `scim/mapping.go`, `internal/fga/*`, `celldir/migration.go`, `authz/explain.go`. Danach sind § 2.1–2.4 Compile-Fehler.
+8. POL-06-Linter um den Katalog↔Modell-Abgleich erweitern (§ 4.6).
 
-# EPIC I — Nachweis
+**Dann — Semantik korrigieren**
 
----
+9. `platform.support` durch `tenant.support_session` mit Zeit-Condition ersetzen; `non_expired_grant` und `is_active_breakglass` als Conditions definieren (§ 3.1, § 4.4).
+10. `workload` in `namespace.publisher` und `package.publisher` aufnehmen; `release.author` entweder an eine Permission anbinden oder entfernen (§ 3.4, § 4.2).
+11. `channel.parent` und `device_group.parent` um `marketplace` erweitern; `device` mit `group: [device_group]` an die Fleet-Struktur anbinden (§ 3.2).
+12. `device` als **Subjekt** zulassen, wo Geräte lesen dürfen (z. B. `channel.subscriber: [device]`) (§ 2.2).
+13. Entscheidung zu öffentlichen Paketen treffen und als ADR festhalten (§ 3.3). Empfehlung: Sichtbarkeit vor dem FGA-Check in der Produkt-DB auflösen.
+14. `platform`-Link auf Tenant als Contextual Tuple setzen statt persistieren (§ 3.6).
 
-### IDP-080 — Angriffssimulation: AiTM-Phishing
+**Später — Erweiterbarkeit tatsächlich herstellen**
 
-**Prio:** P2 · **Typ:** process
-
-**Lösung**
-Ein kontrollierter Versuch mit einem AiTM-Proxy gegen ein Testkonto mit Geräterolle. Erwartetes
-Ergebnis: **Der Angriff scheitert**, weil WebAuthn die Origin-Bindung durchsetzt.
-
-Derselbe Versuch gegen ein `viewer`-Konto mit TOTP: Erwartetes Ergebnis: er gelingt — und
-belegt damit, warum `IDP-011` keine Rückfallebene erlaubt.
-
-**Akzeptanzkriterien**
-- [ ] Beide Ergebnisse sind protokolliert.
-- [ ] Der Versuch gegen das Geräterollen-Konto erzeugt die Alarme aus `IDP-072`.
-
----
-
-### IDP-081 — Externe Sicherheitsprüfung
-
-**Prio:** P2 · **Typ:** process
-
-Vor dem ersten Kunden mit Geräten im Feld. Schwerpunkt: Wiederherstellungsfluss,
-Einladungsfluss, Rollenerhöhung, Impersonation, Step-up-Umgehung.
-
-Der Wiederherstellungsfluss zuerst — dort liegen erfahrungsgemäß die Findings.
+15. Auf rekursive Hierarchie umstellen (§ 4.1). Das ist der Schritt, der das Versprechen „neue Ebene = nur Tupel" einlöst. Solange er aussteht, ist die Aussage aus der Zielarchitektur zu Erweiterungsszenario 6 („fünfte Hierarchieebene, kein Code-Deploy") nicht gedeckt.
+16. Zwischenrelationen auf `device` durch direkte Arrows ersetzen (§ 4.3).
+17. Fehlende Testfälle aus § 6 ergänzen, insbesondere den Negativfall für Geräte-Sichtbarkeit und den Kommentar zur Tenant-Isolation.
 
 ---
 
-### IDP-090 — Patch-Prozess mit Frist
+## 8. Konsequenz für den Hauptbericht
 
-**Prio:** P1 · **Typ:** process
+Die Statuszeile im Hauptreview ändert sich:
 
-**Problem**
-Gegen eine Schwachstelle in Zitadel selbst hilft keine Konfiguration. Nur Geschwindigkeit.
+| Ticket | vorher | jetzt |
+|---|---|---|
+| AUTHZ-02…05 Modelle | ❓ | 🔴 — Modell nicht ladbar, Vokabular unverbunden, drei semantische Kernlücken |
+| P6 (werden die `.fga.yaml` ausgeführt?) | offen | **beantwortet: nein** |
 
-**Lösung**
-Abonnement der Zitadel-Sicherheitsmeldungen, feste Frist: kritische Lücken binnen 24 Stunden,
-hohe binnen 72 Stunden. Der Rolling-Deploy über zwei Knoten macht das unterbrechungsfrei.
+Und die Prioritätenliste bekommt zwei neue Positionen weit oben, weil sie den Weg zu Gate B blockieren:
 
-Ein Zitadel, das drei Versionen zurückliegt, macht jedes andere Ticket dieses Backlogs
-wirkungslos.
+- **Neu vor Position 11:** Modell ladbar machen und `fga model test` in `just validate-policy` aufnehmen (§ 7.1–7.5).
+- **Neu direkt danach:** Typkonstanten generieren und alle Tupel-Writes darauf umstellen (§ 7.6–7.7).
 
----
-
-## Reihenfolge
-
-**Vor dem ersten echten Nutzer** — nicht nachrüstbar ohne Zeitfenster:
-`IDP-001` → `IDP-002` → `IDP-003` → `IDP-004` → `IDP-005` → `IDP-010` → `IDP-011` →
-`IDP-011b` → `IDP-011c` → `IDP-012` → `IDP-020` → `IDP-022`
-
-**Vor Produktivgang:**
-`IDP-030` → `IDP-031` → `IDP-032` → `IDP-033` → `IDP-050` → `IDP-051` → `IDP-034` →
-`IDP-013` → `IDP-014` → `IDP-040` → `IDP-021` → `IDP-070` → `IDP-071` → `IDP-073` → `IDP-090`
-
-**Vor dem ersten Kunden mit Flotte:**
-`IDP-041` → `IDP-042` → `IDP-043` → `IDP-060` → `IDP-061` → `IDP-015` → `IDP-072` →
-`IDP-023` → `IDP-080` → `IDP-081`
-
-**Danach:** `IDP-052`, `IDP-053`
-
----
-
-## Merksatz
-
-> Alles vor `IDP-041` macht Kontoübernahme schwer. `IDP-041` bis `IDP-043` machen sie
-> unzureichend. Nur zusammen ergeben sie eine Antwort auf die Frage, warum ein Hersteller
-> uns die Kontrolle über hunderttausend Geräte anvertrauen sollte.
+Der vertikale Durchstich aus Gate B ist ohne beides nicht erreichbar: Ein einziger echter FGA-Check gegen einen echten Store scheitert derzeit bereits beim Laden des Modells.

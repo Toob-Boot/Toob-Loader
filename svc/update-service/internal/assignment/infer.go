@@ -100,9 +100,15 @@ func InferAssignmentOutcome(
 		}
 
 		// Revert to 'offered' state for retry
-		if err := TransitionState(ctx, db, a, StateOffered, fmt.Sprintf("install_failed_reverted_for_retry_attempt_%d", attempts)); err != nil {
+		if err := db.UpdateAssignmentState(ctx, a.ID, StateOffered); err != nil {
 			return OutcomeIncomplete, fmt.Errorf("infer: transition retry: %w", err)
 		}
+		a.State = StateOffered
+		_ = db.LogDeviceEvent(ctx, a.DeviceID, "assignment_retry", map[string]interface{}{
+			"assignment_id": a.ID,
+			"attempts":      attempts,
+			"reason":        fmt.Sprintf("install_failed_reverted_for_retry_attempt_%d", attempts),
+		})
 		return OutcomeRetrying, nil
 	}
 
