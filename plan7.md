@@ -2412,7 +2412,9 @@ Die Installationssequenz ist in einem Container durchgespielt worden, genau wie 
 
 ##### Die Kette endet weiterhin im Leeren — zwei Gründe
 
-**Es gibt keinen IdP-Knoten.** `terraform/projects/identity` legt Netz, Zitadel-Datenbank, OpenFGA-Datenbank und Backup-Bucket an; das `cell`-Modul enthält **keine** `hcloud_server`-Ressource. Server entstehen nur in `projects/ops` und `modules/nomad-workers`. `[idp]` wird deshalb leer erzeugt und das Play übersprungen — jetzt allerdings mit einer Zeile im Protokoll statt lautlos.
+**Die Knoten-Adressen verlassen Terraform nicht.** ~~Es gibt keinen IdP-Knoten.~~ **Diese Aussage war falsch und ist korrigiert:** `modules/cell` reicht an `modules/project-baseline` durch, und das legt sehr wohl zwei Server an — `node-fsn1` auf 10.20.1.10 und `node-hel1` auf 10.20.1.11, in zwei Rechenzentren. Mein Grep hatte nur `modules/cell/*.tf` nach `hcloud_server` durchsucht und die Delegation übersehen.
+
+Was tatsächlich fehlt, ist schmaler: **keines der Module gibt die Adressen als Output heraus.** `project-baseline` exportiert Netz, Subnetz und Firewall-ID, aber keine Knoten-IPs; `cell` und `projects/identity` können sie deshalb nicht durchreichen, und `stages/terraform.go` — das `api_private_ips` in den Pipeline-State schreibt — hat nichts aufzuzeichnen. `[idp]` wird darum leer erzeugt und das Play übersprungen, jetzt mit einer Zeile im Protokoll statt lautlos. Vier kleine Ergänzungen, eine je Ebene; siehe `docs/devops_architecture.md` §5.
 
 **`site.yml` parst noch immer nicht.** Nach der `when:`-Korrektur bleibt ein zweiter Fehler derselben Art: `roles/ubicloud-db/tasks/main.yml:44` hängt ein `loop:` an einen `block:`, was Ansible nie unterstützt hat. Das ist die Datenbank-Firewall, nicht diese Kette; es sauber zu übersetzen heißt, fremde Logik auf `include_tasks` umzubauen, und das ungeprüft zu tun wäre schlechter, als es zu benennen.
 
