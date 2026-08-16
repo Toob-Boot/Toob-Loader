@@ -2365,6 +2365,61 @@ Damit ist der Weg frei, den §10.3-AL suchte — aber in umgekehrter Reihenfolge
 
 ---
 
+#### 10.3-AN Befund: die Auslieferungskette hatte kein einziges vollständiges Glied
+
+Anlass war eine kleine Frage — wer legt eigentlich `zitadel-provision` auf den Host? Antwort: niemand. Beim Nachziehen der Kette fehlte **jedes** Glied, und das war nicht sichtbar, weil kein Schritt scheitern konnte.
+
+| # | Was passieren muss | Vorher |
+|---|---|---|
+| 1 | `site.yml` lässt sich überhaupt parsen | **neun ungültige `when:` auf Play-Ebene** |
+| 2 | Der IdP steht im Inventar | Generator kannte `[idp]` nicht |
+| 3 | `/usr/local/bin/zitadel` liegt auf dem Host | nichts lieferte es |
+| 4 | Die erste Instanz wird nach unseren Vorgaben angelegt | `DefaultInstance.Org`/`Admin` — beides verschluckt |
+| 5 | Ein Admin-Token existiert | nichts erzeugte es |
+| 6 | `/usr/local/bin/zitadel-provision` liegt auf dem Host | nichts lieferte es |
+| 7 | Die Provisionierung darf scheitern | `os.Exit(0)` bei fehlendem Token |
+
+**`when:` ist kein gültiges Attribut für ein Play.** ansible-core verweigert daraufhin das gesamte Playbook — nicht das eine Play, das ganze. Alle neun sagten dasselbe („nur ausführen, wenn die Gruppe nicht leer ist"), und genau das tut Ansible ohnehin: ein Play ohne passende Hosts wird übersprungen. Sie waren also redundant *und* tödlich.
+
+**Der Ansible-Stage erzeugt `inventory.ini` und überschreibt die Datei im Repo.** Er schrieb nur `[unseal_vault]`, `[api]` und `[workers]`. `groups['idp']` war damit nie definiert, Phase 6 wurde bei jedem Deploy übersprungen — und die `[idp:vars]`, aus denen die ausgehende Denylist berechnet wird, verschwanden gleich mit. Die sorgfältig kommentierte statische Inventardatei aus §10.3-AL hat nie ein Playbook gesehen.
+
+**`FirstInstance` ist keine Sektion der Config.** Zitadel liest sie ausschließlich aus der Datei hinter `--steps`. Unser Template legte `Org` und `Admin` unter `DefaultInstance` ab; viper verwirft beides wortlos. Gemessen, indem je eine Instanz mit beiden Schreibweisen gebootet und die Projektion gelesen wurde:
+
+| Konfiguriert als | Ergebnis |
+|---|---|
+| `DefaultInstance.Org.Name: Toob Alliance` | Org heißt `ZITADEL`, Admin `zitadel-admin@zitadel.localhost` |
+| `FirstInstance` in der Steps-Datei | Instanz „Toob Identity", Org „Toob Alliance", `provision-sa`, PAT geschrieben |
+
+Die Policies unter `DefaultInstance` wirken dagegen — das ist geprüft und bleibt, wo es ist. Es ist der fünfte Fund derselben Klasse in dieser Datei.
+
+**Der stille Erfolg im Provisioner.** `zitadel-provision` beendete sich mit 0, wenn die Token-Datei fehlte, und protokollierte „skipping provisioning until token rendering". Das ist derselbe Defekt wie das `failed_when: false` aus §10.3-AM, eine Ebene tiefer — und er hat dessen Entfernung überlebt, weil das Kommando von sich aus 0 zurückgab. Es verweigert jetzt, auch bei leerer Datei.
+
+**Zwei Templatesprachen in einer Datei.** `zitadel-config.yaml.tpl` mischt Vaults `{{ … }}` mit Ansibles `{% … %}` und wurde mit `copy:` unverändert abgelegt — der in §10.3-AL ergänzte Denylist-Block wäre also als wörtliches Jinja in der YAML gelandet. Jetzt `template:`, mit der Vault-Hälfte in einem Rohblock. Der erklärende Kommentar steht in einem *Jinja*-Kommentar davor, und das ist kein Stil: als YAML-Kommentar im Block geschrieben enthielt die Prosa den Terminator des Blocks und beendete ihn auf der Zeile, die ihn beschreibt. Ein `#jinja2:`-Kopf zum Umstellen der Trennzeichen war der erste Versuch; ansible-core 2.21 beachtet ihn nicht.
+
+##### Was gebaut wurde
+
+`zitadel-provision` wird von der **Artifacts-Stufe des Assistenten** gebaut, neben worker, autoscaler und vm-runner — nicht als Release-Artefakt ausgeliefert. Der Grund ist zwingend: das Binary trägt die deklarierte Instanz-Policy einkompiliert und prüft die Instanz **gegen die eigene Kopie davon**. Ein veralteter Stand meldete „applied and verified" und setzte die Policy vom letzten Monat durch.
+
+Das Zitadel-Binary kommt über die Rolle, mit **im Commit festgeschriebenem Digest** statt aus der `checksums.txt` neben dem Archiv: Zitadel signiert seine Releases nicht — kein cosign, kein GPG, anders als Nomad und Vault. Eine unsignierte Prüfsumme neben dem Artefakt beweist nur, dass derselbe Server beides ausgeliefert hat. Version und Digest stehen zusammen, damit ein Versionssprung nicht mit der alten Prüfsumme landet.
+
+Das Admin-Token durchbricht seinen eigenen Zirkel über die Steps-Datei: Zitadel schreibt das PAT des Maschinennutzers genau einmal bei der Einrichtung, Ansible legt es in Vault, löscht die lokale Kopie und der Vault-Agent rendert es danach wie jedes andere Geheimnis. Vault wird **zuerst** gefragt — die lokale Datei existiert nur beim allerersten Lauf, und unbedingt darauf zu warten würde jeden weiteren Deploy in den Timeout laufen lassen.
+
+`--check-drift` hat endlich einen Aufrufer: ein täglicher systemd-Timer, dessen `OnFailure` in denselben notify-failure-Handler läuft wie die Zitadel-Unit selbst.
+
+##### Was gemessen wurde
+
+Die Installationssequenz ist in einem Container durchgespielt worden, genau wie die Rolle sie fährt: Digest geprüft, `--strip-components=1 --wildcards '*/zitadel'` entpackt das Binary allein, `zitadel --version` meldet v4.16.2. Beide Vorlagen wurden mit dem echten Filter-Plugin gerendert — 29 Denylist-Einträge, der Hook-Host korrekt ausgeschnitten, kein Jinja-Rest, beide Ergebnisse gültiges YAML.
+
+##### Die Kette endet weiterhin im Leeren — zwei Gründe
+
+**Es gibt keinen IdP-Knoten.** `terraform/projects/identity` legt Netz, Zitadel-Datenbank, OpenFGA-Datenbank und Backup-Bucket an; das `cell`-Modul enthält **keine** `hcloud_server`-Ressource. Server entstehen nur in `projects/ops` und `modules/nomad-workers`. `[idp]` wird deshalb leer erzeugt und das Play übersprungen — jetzt allerdings mit einer Zeile im Protokoll statt lautlos.
+
+**`site.yml` parst noch immer nicht.** Nach der `when:`-Korrektur bleibt ein zweiter Fehler derselben Art: `roles/ubicloud-db/tasks/main.yml:44` hängt ein `loop:` an einen `block:`, was Ansible nie unterstützt hat. Das ist die Datenbank-Firewall, nicht diese Kette; es sauber zu übersetzen heißt, fremde Logik auf `include_tasks` umzubauen, und das ungeprüft zu tun wäre schlechter, als es zu benennen.
+
+Beides zusammen heißt: die Auslieferung ist gebaut und geprüft, so weit sie ohne Hetzner prüfbar ist, aber ein Deploy kann sie noch nicht ausführen. Der nächste Schritt ist die Server-Ressource für die Identity-Zelle — und das ist eine Infrastrukturentscheidung (Größe, Standort, Anzahl, Firewall), keine Fleißarbeit.
+
+---
+
 ## 11. Optimierungspotenziale
 
 Nicht Defekte, sondern Hebel — mehrere davon lösen gleich mehrere Befunde auf einmal.
