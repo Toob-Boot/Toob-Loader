@@ -2550,6 +2550,53 @@ Das ist mehr als toter Code: Regel 9 (`role_elevation_owner_approval`) prüft im
 
 ---
 
+#### 10.3-AR Befund und Plan: die Outbox hat keinen Konsumenten, und OpenFGA steht auf einem Knoten zu wenig
+
+Anlass war die Frage, was ohne laufende Zelle als Nächstes ansteht. Der Backlog-Durchgang schließt sechs der acht Prüfpunkte aus §13 — P1 (keine doppelten `*_gen.go` mehr), P2 (der Typ heißt `tenant`, Conditions gibt es keine, und `sync/jit.go` dokumentiert die Korrektur), P3 (`site.yml:238` bindet die openfga-Rolle ein), P4, P5, P6. P7 entpuppt sich als zweizeiliger leerer Stub. Übrig bleibt P8, deine Entscheidung.
+
+Der Rest dieses Abschnitts ist, was der Durchgang stattdessen zutage gefördert hat.
+
+##### `identity-sync` ist fertig und wird nicht ausgerollt
+
+`identity/deploy/nomad/jobs.yaml` lässt es aus und begründet das so: *„both files are TODO placeholders that Nomad rejects, because there is no artifact to schedule"*. **Für `identity-sync` stimmt das nicht mehr.** `identity/Dockerfile` baut das Binary und legt es nach `/usr/local/bin/identity-sync`; der Job ist 208 Zeilen ohne ein einziges TODO. Nur `celldir.nomad.hcl` ist noch ein 17-Zeilen-Platzhalter.
+
+Was dadurch nicht läuft, sagt das Binary selbst: *„It is the second half of every write identity-api makes … until now it had no consumer, so the tuples were never written."* Jede Mitgliedschafts- und Rollenänderung liegt in `outbox_events` und wird nie zu einem OpenFGA-Tupel. **Die Autorisierung entscheidet gegen einen Store, der nie erfährt, wer wo Mitglied ist.**
+
+Und es gibt keinen provisorischen Ersatz, den man ablösen müsste: `identity-migrate` bringt das Schema auf Stand und schreibt die Rollen-DSNs nach Vault. Outbox oder Tupel kommen dort nicht vor.
+
+##### Die Vorbedingung: OpenFGA fehlt ein Knoten
+
+Beide Verbraucher sprechen OpenFGA über `127.0.0.1:8180` an — Host-Networking, statischer Port, weil 8080 auf demselben Pool von registry-api belegt ist. Das heißt: **wer OpenFGA braucht, muss auf einem Knoten laufen, auf dem OpenFGA läuft.**
+
+| Job | `instance_count` | `distinct_hosts` |
+|---|---|---|
+| `openfga` | **1** | ja |
+| `identity-api` | **2** | ja |
+| `identity-sync` | **2** | ja |
+
+Die Zelle hat zwei Knoten. Das Phase-6-Protokoll vom 29.08. 02:47 zeigt die Folge unmittelbar: `openfga-cluster` wurde auf `7bd1388e` platziert, `identity-api` auf `3d2780c2` **und** `7bd1388e`. Die Allokation auf `3d2780c2` hat kein OpenFGA unter ihrem Loopback.
+
+Das ist heute schon falsch und nur deshalb nicht aufgefallen, weil identity-api nie über die Schemaprüfung hinauskam (§10.3-AO). Es hätte sich als „die Hälfte der Autorisierungsentscheidungen scheitert" gezeigt — ein Fehlerbild, das man an vielen Stellen sucht und nicht an dieser. Der Kommentar an `openfga`s `instance_count` sagt die Regel bereits richtig hin („must not exceed the number of API nodes in the cell"), nur ist die Zahl kleiner als sie sein müsste, nicht größer.
+
+##### Plan
+
+1. **`openfga.instance_count` auf die Zahl der Identity-Knoten ziehen.** Mit `distinct_hosts` legt Nomad dann je eine Allokation pro Knoten, und jeder Loopback-Verbraucher findet eine. Das ist die Vorbedingung für alles Weitere und repariert zugleich identity-api. Die Zahl gehört nicht als Literal in den Job: die Zellgröße steht in der Topologie, und der Deploy-Stage setzt heute keinerlei `instance_count` — das ist die Stelle, an der eine Zahl aus der Topologie kommen müsste, statt in drei Jobdateien getrennt zu altern.
+2. **`identity-sync` ins Manifest**, nach `identity-migrate` (Schema und die `outbox-worker`-Zugangsdaten) und nach `openfga-provision` (die Store-ID, die es aus `secret/data/identity/fga` liest). Als Artefakt-Job wie identity-api; dabei die Variable `image` auf `image_digest` ziehen, wie die drei anderen Artefakt-Jobs sie nennen.
+3. **Den überholten Kommentar in `jobs.yaml` korrigieren.** Er begründet die Auslassung mit einem fehlenden Artefakt, das es gibt.
+4. **`celldir` bleibt draußen** und behält seinen Platzhalter-TODO — dort stimmt die Begründung noch.
+
+##### Was schon steht, und was das Bauen erspart
+
+Die Verdrahtung ist vollständiger, als der TODO vermuten lässt. `identity-migrate` veröffentlicht `secret/data/projects/identity/db/outbox-worker`, genau die Rolle, unter der `identity-sync` sich verbindet. Migration 025 gibt eben dieser Rolle das `SELECT` auf `schema_migrations`, ohne das `identity-sync` beim Start abbräche — dieselbe Prüfung, an der identity-api achtmal starb. Und die Store-ID schreibt `openfga-provision` an den Pfad, den der Job liest.
+
+Kein Konflikt mit `identity/internal/fga`: das ist die **Pro-Mandant**-Variante, und ihr eigener TODO nennt sie ausdrücklich einen anderen Meilenstein, unvereinbar mit der zellweiten `IDENTITY_OPENFGA_STORE_ID`, die identity-api verlangt. `identity-sync` nutzt `cellStore` hinter derselben Schnittstelle, damit der Tag, an dem eine zweite Zelle existiert, genau eine Stelle betrifft.
+
+##### Wie man merkt, dass es wirkt
+
+Nicht daran, dass der Job läuft. `identity-sync` bringt einen internen Endpunkt mit, der den letzten erfolgreichen Drain und den letzten Fehler führt; die Prüfung ist eine Mitgliedschaftsänderung über die API und danach ein `Check` gegen OpenFGA, der vorher „denied" sagte. Ohne diesen zweiten Schritt bewiese ein grüner Deploy nur, dass zwei Allokationen laufen — was sie auch täten, wenn der Drainer nie eine Zeile fände.
+
+---
+
 ## 11. Optimierungspotenziale
 
 Nicht Defekte, sondern Hebel — mehrere davon lösen gleich mehrere Befunde auf einmal.
