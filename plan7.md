@@ -2519,6 +2519,21 @@ Die naheliegende Auflösung — `exchange.go` ruft sie — **ist keine.** Die ge
 
 Damit ist der Nebenfund der eigentliche: **ein generierter Policy-Validator, dessen Fehler nicht unterscheidbar sind, kann von keinem Aufrufer verschieden behandelt werden — und genau deshalb hat der einzige echte Aufrufer ihn nachgebaut.** Die Reparatur gehört in `cmd/policygen`: Sentinel-Fehler emittieren, dann kann `exchange.go` sie umschließen statt sie zu wiederholen.
 
+##### Nachtrag II: der dritte Validator ist gelöscht, nicht verdrahtet
+
+Der naheliegende Schritt wäre gewesen, `ValidateRoleElevation` in `SetRole` aufzurufen. Er wäre falsch gewesen, und die Prüfung zeigt warum:
+
+| Hälfte der Regel | wer sie tatsächlich durchsetzt |
+|---|---|
+| `max_stepup_age_seconds: 300` | Der Katalog führt `step_up_max_age` **pro Permission**; `admin.role.update` deklariert `5m` — dieselben 300 Sekunden. Der Interceptor reicht den Wert an `StepUpGate`. Die Zahl aus `elevation.yaml` las niemand, und global ist ohnehin die falsche Form. |
+| `require_owner: true` | `admin.role.update` deklariert `relation: owner`, und `core.fga` definiert `owner: [user]` als direkte Zuweisung. Nur ein Owner erreicht den Handler überhaupt. |
+
+Und die zweite Zeile ist der eigentliche Punkt: **die Regel hätte einen `admin` zugelassen, das Modell verlangt `owner`.** Sie war also nicht bloß tot, sie war die *schwächere* Fassung einer lebenden Regel — an genau der Stelle, an der ein Leser die Regel sucht. Wer sie später „repariert", indem er sie aufruft, weitet damit still aus, wer einen Owner erzeugen darf, und es sieht dabei nach einer Verbesserung aus.
+
+Gelöscht sind `ValidateRoleElevation`, `policy/rules/elevation.yaml` und die zugehörige Generator-Validierung. An ihre Stelle tritt `TestCatalog_RoleUpdateIsOwnerOnlyAndNeedsFreshAuth`, der die Aussage dort festnagelt, wo sie stimmt: `relation: owner`, `step_up: true`, `5m`, `L3`. Mutiert man den Katalog auf `relation: admin` und `step_up: false`, fällt er mit beiden Zeilen.
+
+Der alte Test bewies, dass eine Funktion sich verhält wie geschrieben. Der neue beweist, dass die Richtlinie gilt.
+
 ##### Nachtrag: der dritte Validator hat gar keinen Aufrufer
 
 Beim Umbau nachgezählt. `shared/policy` generiert drei Validatoren, und keiner davon steht so da, wie er sollte: `ValidateOrgName` wird richtig benutzt (drei Aufrufer), `ValidateImpersonationRequest` war vom handgeschriebenen Duplikat verdeckt — und **`ValidateRoleElevation` hat null Aufrufer**. Weder Produktions- noch Testcode.
