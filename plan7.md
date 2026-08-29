@@ -2486,6 +2486,49 @@ Die Lücke ist jetzt ausführbar statt Prosa. `TestContract_ActionsV2Webhooks` s
 
 ---
 
+#### 10.3-AQ Triage: wohin jede der vierzehn Regeln gehört
+
+§10.3-AL wollte diese Triage und musste sie zurückstellen, weil der Nachweis fehlte: die nativen Kontrollen waren nicht konfiguriert (§10.3-AM). Das ist nicht mehr so — und der Nachweis ist inzwischen **strukturell**, nicht anekdotisch. `ApplyInstancePolicies` schreibt die Deklaration aus `identity/internal/zitadel/policies.go` und **liest sie zurück**; eine Abweichung ist ein Fehler, kein Logeintrag. Was dort steht, gilt an der Instanz oder der Deploy schlägt fehl.
+
+Damit ist §10.3-AMs Bedingung erfüllt, ohne dass jemand von Hand messen muss. Vier Töpfe:
+
+| # | Regel | Verdikt | Beleg |
+|---|---|---|---|
+| 1 | `webauthn_only_privileged` | **nativ, und stärker** | `SecondFactors: [U2F]` mit entzogenem OTP, dazu `ForceMFA: true`. Der einzige erlaubte zweite Faktor ist damit phishing-resistent — für alle Nutzer, nicht nur privilegierte. `AllowTOTPForPrivileged = false` sagt dasselbe. |
+| 2 | `dual_authenticator_requirement` | **kein Pendant, falscher Ort** | Zitadel kennt keine Mindestzahl an Authenticatoren. Aber einen Login abzulehnen, weil jemand nur einen registriert hat, sperrt ihn vollständig aus — das gehört an die Registrierung, nicht an die Anmeldung. |
+| 3 | `permanent_l3_no_downgrade` | **unser Token-Verifier** | Trust-Level entstehen in `identity/token` aus `amr`/`acr`; Zitadel kennt den Begriff nicht und kann ihn nicht mitschicken. |
+| 4 | `secure_factor_registration` | **nativ ab 4.17.1** | Die Version bringt Berechtigungsprüfung beim Ausstellen von Passkey-Enrollment-Codes und einen MFA-Prompt vor der 2FA-Registrierung. |
+| 5 | `no_self_service_reset` | **nativ, und stärker** | `HidePasswordReset: true` gilt instanzweit, nicht nur für privilegierte Konten. |
+| 6 | `break_glass_audit` | **behalten** | Kein Pendant, und es ist kein Gate, sondern eine Aufzeichnung. Braucht die Rolle → Function-Bedingung mit `user_grants`. |
+| 7 | `invite_rules` | **nativ, und stärker** | `strings.Contains(email, "@")` ist schwächer als Zitadels eigene Adressvalidierung. |
+| 8 | `org_name_rules` | **bindbar, jetzt** | `request.name` aus `AddOrganization`; die Regel akzeptiert `name` neben `org_name` bereits. Die einzige, die heute an eine Execution kann. |
+| 9 | `role_elevation_owner_approval` | **unsere API** | `has_owner_approval` ist unser Begriff mit eigenem Speicher (`release_approvals`), nicht etwas, das Zitadel beim Login weiß. |
+| 10 | `github_upstream_policy` | **behalten, Bedingung messen** | Kein Pendant. `idp_type`/`github_org` müssen aus der IdP-Verknüpfung kommen; welche Bedingung sie trägt, ist ungemessen. |
+| 11 | `user_login_must_be_domain` | **schwach und gedeckt** | Prüft, ob ein Punkt vorkommt. `AllowDomainDiscovery: false` und Zitadels Domain-Verifikation decken das eigentliche Anliegen. |
+| 12 | `lockout_policy` | **sauberes Duplikat** | `LockoutPolicySpec.MaxPasswordAttempts` liest **dieselbe Konstante** `spolicy.MaxFailedPasswordAttempts`. Das ist die eine, die §10.3-AM schon gefunden hatte. |
+| 13 | `mfa_init_skip_disallowed` | **nativ** | `MFAInitSkipLifetime: "0s"` — der Kommentar dort begründet genau diesen Punkt. |
+| 14 | `impersonation_audit` | **schon durchgesetzt** | `token/exchange.go` prüft Begründungslänge und Höchstdauer gegen dieselben Konstanten, an der Stelle, an der Impersonation tatsächlich entsteht. |
+
+**Sieben nativ, vier gehören woanders in unseren eigenen Code, eine ist bindbar, zwei bleiben.** Damit bestätigt sich die Schätzung aus §10.3-AL („sieben, vielleicht neun") — aber auf dem umgekehrten Weg: nicht weil Zitadel es schon konnte, sondern weil unsere eigene Provisionierung es inzwischen einschaltet und nachweist.
+
+##### Nebenfund: eine Regel mit zwei Besitzern
+
+`spolicy.ValidateImpersonationRequest` hat **genau einen Aufrufer** — den ungebundenen Hook. `token/exchange.go` prüft dieselbe Sache noch einmal von Hand gegen dieselben zwei Konstanten. Dass die Werte nicht auseinanderlaufen können, liegt nur daran, dass beide dieselben Konstanten lesen; die *Regel* ist trotzdem zweimal geschrieben. Sobald Regel 14 aus dem Hook verschwindet, hat die generierte Funktion gar keinen Aufrufer mehr.
+
+Die naheliegende Auflösung — `exchange.go` ruft sie — **ist keine.** Die generierte Funktion gibt anonyme Fehler zurück (`errors.New`, `fmt.Errorf` ohne Sentinel), während `exchange.go` typisierte braucht: `ErrJustificationRequired`, `ErrLifetimeRequired` und `ErrExceededMaxExchangeLifetime` werden von der API auf Statuscodes abgebildet, und `exchange_test.go` prüft sie mit `errors.Is`. Ein Aufruf würde diese Unterscheidung verlieren.
+
+Damit ist der Nebenfund der eigentliche: **ein generierter Policy-Validator, dessen Fehler nicht unterscheidbar sind, kann von keinem Aufrufer verschieden behandelt werden — und genau deshalb hat der einzige echte Aufrufer ihn nachgebaut.** Die Reparatur gehört in `cmd/policygen`: Sentinel-Fehler emittieren, dann kann `exchange.go` sie umschließen statt sie zu wiederholen.
+
+##### Reihenfolge
+
+1. **`policygen` emittiert Sentinel-Fehler**, danach löst `exchange.go` seine Kopie auf. Ohne Instanz machbar, aber es ist eine Änderung am Generator und an generiertem Code — eigener Arbeitsposten.
+2. **Regel 8 an eine Execution binden** — `AddOrganization`, Request-Bedingung. Braucht die laufende Zelle.
+3. **Die sieben nativen löschen**, nachdem ein Deploy die Policies angewandt *und verifiziert* hat. Der Drift-Detektor ist der Nachweis; ohne grünen Lauf ist er nicht erbracht.
+4. **Die vier verlegen**, wo sie schon durchgesetzt sind (3, 9, 14) oder hingehören (2).
+5. **Zwei bleiben** (6, 10) und brauchen die Anreicherung aus §10.3-AP.
+
+---
+
 ## 11. Optimierungspotenziale
 
 Nicht Defekte, sondern Hebel — mehrere davon lösen gleich mehrere Befunde auf einmal.
