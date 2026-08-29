@@ -2683,6 +2683,16 @@ DNS ist bereits Terraform-verwaltet: `modules/cloudflare-dns` legt einen Hostnam
 
 Der Rest ist klein: ein zweiter Site-Block in `Caddyfile-identity.j2` mit zwei `handle`-Blöcken auf `localhost:8082` und `localhost:8083`, dieselben Sicherheitsheader, und die Blockade der Admin-Konsole bleibt beim IdP-Host, wo sie hingehört.
 
+##### Umgesetzt
+
+Der Name ist **`<env>.accounts.the-toob.com`**. Nicht `api`, weil die Registry eine API hat und behalten wird — ein generischer Name müsste beim ersten zweiten disambiguiert werden. Nicht `admin`, weil das die Verwechslung mit der VPN-only-Konsole einlädt. „accounts" beschreibt beide Flächen: Konten- und Organisationsverwaltung, und SCIM ist Konten-Provisionierung unter anderem Namen. Kunden tragen `accounts.the-toob.com/scim/v2/{tenant}` in ihren eigenen IdP ein, und dort liest es sich als das, was es ist.
+
+**Der Hostname ist einmal deklariert.** Terraform legt den Record an und gibt den Namen aus, der Wizard erfasst ihn, das Inventar reicht ihn weiter. Bewusst *nicht* wie `IdentityDomain` zusätzlich in `topology.Config` gespiegelt: dort stehen die Konstante und das Terraform-Local für dieselbe Tatsache, und verglichen hat sie nie jemand. Die Cache-Umgehung gilt jetzt für beide Hosts — bei einer API ist sie das stärkere Argument, denn eine zwischengespeicherte Mitgliederliste ist das Verzeichnis eines Mandanten in der Hand des nächsten Aufrufers.
+
+**Zwei Guards, weil Caddy an keinem von beidem Anstoß nimmt.** Ein leerer `accounts_domain` und ein Origin-Zertifikat, das den Host nicht nennt, führen beide zu einem Dienst, der startet und niemanden bedient; das zweite meldet sich beim Aufrufer als Cloudflare-526 gegen den Origin, was auf den Proxy zeigt statt auf das Zertifikat. Beides wird geprüft, bevor die Datei geschrieben wird — die Zertifikatsfrage aus dem Plan ist damit keine Vorbedingung mehr, sondern ein Fehlschlag mit Namen.
+
+**Und der API-Host endet in einem 404.** Der IdP-Host reicht durch, was er nicht trifft — dort landet ein unbekannter Pfad bei Zitadel und bekommt dessen 404. Diesen Bau wiederholt der neue Host nicht: was hier keine Fläche benennt, sagt das auch.
+
 ---
 
 ## 11. Optimierungspotenziale
