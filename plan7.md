@@ -2459,6 +2459,33 @@ Gemessen ist das nicht, und `writeDecision` schreibt heute für jede Route dasse
 
 ---
 
+#### 10.3-AP Ergebnis: der Adapter steht — und zeigt, dass nicht er der Engpass war
+
+§10.3-AO Punkt 1 ist erledigt. `ParseEnvelope` bildet alle drei Umschläge auf die Form ab, die die Regeln lesen; `TargetRequest` hat seine JSON-Tags verloren und ist kein Drahttyp mehr. Ein Rumpf, der zu keinem der drei passt, wird abgelehnt statt in eine leere Struktur gelesen, die ablehnt und dabei wie eine Entscheidung aussieht.
+
+`UserID` heißt jetzt `CallerUserID`. Zitadel nennt es `userID` und meint den Principal, der den abgefangenen Aufruf gemacht hat — nicht dessen Subjekt. Der alte Name lud genau die Verwechslung ein, vor der §10.3-AL warnt.
+
+##### Der Befund: von achtzehn Eingaben beantwortet ein echter Umschlag drei
+
+Die vierzehn Regeln lesen achtzehn verschiedene Payload-Felder. Gegen die gemessenen Umschläge gehalten:
+
+| beantwortet | `invitee_email`, `org_name`, `domain` |
+|---|---|
+| **methodenabhängig** | `is_self_service_reset`, `target_role`, `justification`, `duration_seconds` — steckt in `request`, sobald die Execution an die passende Methode gebunden ist |
+| **gar nicht** | `amr`, `authenticator_count`, `trust_level`, `current_trust_level`, `highest_trust_level`, `user_role`, `idp_type`, `github_org`, `failed_attempts`, `skip_mfa_setup`, `has_owner_approval` |
+
+**Der Adapter war also nie der Engpass — die Regeln sind es.** Sie wurden gegen eine erfundene Nutzlast geschrieben, und die Hälfte fragt nach Tatsachen, die Zitadel an dieser Stelle nicht mitschickt. Ein bloßer Formübersetzer hätte für die untere Zeile `denyIncomplete` geliefert und, weil die Hooks `Critical` und fail-closed sind, **jeden gebundenen Login abgelehnt**.
+
+Die Lücke ist jetzt ausführbar statt Prosa. `TestContract_ActionsV2Webhooks` schickte bislang einen `target.TargetRequest` und erwartete 200 — ein Vertragstest, der sich nur mit sich selbst einig war. Er schickt jetzt einen echten Request-Umschlag, hält fest, dass der Signaturvertrag gilt, und hält fest, dass die Regel **unter Nennung der fehlenden Eingaben** ablehnt. Schließt sich die Lücke, ist das die Zusicherung, die sich ändern muss, und sie sagt es.
+
+##### Was daraus folgt, in dieser Reihenfolge
+
+1. **Pro Regel entscheiden, wohin sie gehört.** Aus einem Umschlag zu füttern; per Anreicherung aus Zitadels API zu holen, binnen 500 ms und fail-closed; oder Zitadels eigener Policy zu überlassen. §10.3-AM verlangt für die dritte Möglichkeit den Nachweis an der laufenden Instanz — nicht aus dem Changelog.
+2. **Erst danach der Trigger→Regel-Tisch.** Der Dispatch liest den Regelnamen noch aus `payload["rule"]`, einem Feld, das der Absender schreibt. Es ist nicht ausnutzbar — der Rumpf ist HMAC-signiert und Zitadel sendet den Schlüssel nie, es fällt also ohnehin auf den Routentyp zurück —, aber es fällt weg, sobald der Auslöser die Regel bestimmt. Welche Methode welche Regel auslöst, ist zu messen, nicht zu erfinden.
+3. **Und erst dann Executions binden.** Für Function-Bedingungen vorher den Antwortmodus messen (§10.3-AO).
+
+---
+
 ## 11. Optimierungspotenziale
 
 Nicht Defekte, sondern Hebel — mehrere davon lösen gleich mehrere Befunde auf einmal.
