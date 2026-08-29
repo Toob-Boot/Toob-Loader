@@ -2643,6 +2643,48 @@ Zu entscheiden sind drei Dinge, und keines davon ist Caddy-Syntax: welche Pfade 
 
 ---
 
+#### 10.3-AT Die öffentliche Fläche der Identity-Zelle: drei Entscheidungen, an Belegen entschieden
+
+§10.3-AS nennt drei offene Fragen. Zwei davon beantwortet der Code, und bei der dritten widerlegt er die Antwort, die ich vorher nebenbei gegeben hatte.
+
+##### 1. Welche Pfade gehören identity-api — `/api/v1/*`
+
+`identity/api/routes.go` führt siebenundzwanzig Routen, und **alle** liegen unter `/api/v1/tenants/…`: Mitglieder, Rollen, Freigaben, Revocations, Audit, Break-Glass, Impersonation, SCIM-Token und Gruppenabbildung. Das ist keine Produkt-API, sondern eine **Governance-Fläche**.
+
+Der Präfix `/api/v1/*` statt `/api/v1/tenants*`, und der Grund ist die Falle der heutigen Konfiguration: Caddy proxyt alles Unerkannte an Zitadel. Ein Pfad, der keiner Regel entspricht, **schlägt nicht fehl — er landet beim falschen Dienst**. Heute beantwortet Zitadel `/api/v1/irgendwas` mit seinem eigenen 404, und ein Aufrufer sieht die Auskunft des Identitätsanbieters auf eine Frage, die nie bei ihm ankommen sollte. Ein Präfix, der die ganze Version umfasst, macht eine künftige Ressource neben `tenants` zu einem ehrlichen 404 statt zu einer stillen Fehlleitung.
+
+##### 2. Ist SCIM öffentlich — ja, notwendigerweise
+
+**Hier korrigiere ich mich.** Ich hatte „SCIM VPN-only" vorgeschlagen; das hätte die Funktion getötet.
+
+SCIM wird nicht von uns gerufen, sondern **vom IdP des Kunden** — Okta, Entra — aus dem Internet. Die Belege stehen beieinander: der Mandant erzeugt sich ein Token über `POST /api/v1/tenants/{id}/scim-token`, `identity/scim/handler.go` prüft einen Bearer gegen `scim_tokens.token_digest`, und `discovery.go` bewirbt „OAuth Bearer Token" in der ServiceProviderConfig, die genau dieser fremde IdP liest. Ein Token, das der Kunde sich selbst ausstellt, ergibt nur Sinn, wenn der Endpunkt von dort erreichbar ist, wo sein IdP läuft.
+
+VPN-only hieße: wir stellen Token aus, die niemand benutzen kann. Der Pfad ist `/scim/v2/{tenantID}/Users`, der Listener ist mit 8083 ohnehin ein eigener — „its own listener because it is its own audience".
+
+##### 3. Eigene Domain — ja, und als Geschwister, nicht als Kind
+
+Die Topologie begründet den bestehenden Schnitt selbst:
+
+> *„It is deliberately a different host from Domain: an IdP sharing a cookie domain with the application it authenticates is one cross-site scripting bug away from an authentication bypass."*
+
+Genau dieses Argument trifft die Governance-API. Legt man sie auf `id.the-toob.com`, teilt sie den Ursprung mit Zitadels Sitzungscookies — und ein XSS in einer API-Antwort läuft dann auf dem Ursprung des Identitätsanbieters. **Die Regel, die Domain und IdentityDomain trennt, trennt auch IdentityDomain und Governance-API.** Meine frühere Empfehlung, sie auf die Identity-Domain zu legen, widerspricht dem Kommentar, der zwei Felder darüber steht.
+
+Ein **Unterhost** genügt nicht: ein Cookie mit `Domain=id.the-toob.com` wird auch an `api.id.the-toob.com` gesendet. Die Trennung muss ein Geschwister sein — in der bestehenden Namenslogik neben `dev.registry.the-toob.com` und `dev.id.the-toob.com` also etwa `dev.api.the-toob.com`.
+
+Beide Flächen teilen diesen Host: `/api/v1/*` und `/scim/v2/*` laufen ohnehin im selben Prozess, nur auf zwei Listenern. Sie voneinander zu trennen kostet einen weiteren Host und kauft nichts, was der Prozess nicht schon teilt.
+
+**Nicht die Registry-Domain**, so verlockend der vorhandene Host ist: sie wird von der Caddy-Instanz der Registry-Zelle bedient, und die Governance-API muss von der Identity-Zelle kommen. Ein Umweg über die andere Zelle koppelt zwei Ingress-Pfade, die absichtlich getrennt sind.
+
+##### Was das an Arbeit bedeutet
+
+DNS ist bereits Terraform-verwaltet: `modules/cloudflare-dns` legt einen Hostnamen samt A-Record je Knoten an, also ist ein zweiter Host eine Modulinstanz und keine Handarbeit.
+
+**Der eine offene Punkt ist das Zertifikat.** Caddy liest `origin.pem` aus Vault; welche Namen dieses Cloudflare-Origin-CA-Zertifikat abdeckt, steht nirgends im Repository. Da `dev.registry.the-toob.com` dritter Ebene ist, kann es kein einfaches `*.the-toob.com` sein — es listet die Hosts vermutlich einzeln. **Vor dem Bau ist zu prüfen, ob der neue Name enthalten ist**; falls nicht, muss das Zertifikat neu ausgestellt und in Vault gelegt werden. Kostenlos, aber ein Schritt, der vor dem Deploy passieren muss und nicht danach.
+
+Der Rest ist klein: ein zweiter Site-Block in `Caddyfile-identity.j2` mit zwei `handle`-Blöcken auf `localhost:8082` und `localhost:8083`, dieselben Sicherheitsheader, und die Blockade der Admin-Konsole bleibt beim IdP-Host, wo sie hingehört.
+
+---
+
 ## 11. Optimierungspotenziale
 
 Nicht Defekte, sondern Hebel — mehrere davon lösen gleich mehrere Befunde auf einmal.
