@@ -2519,9 +2519,15 @@ Die naheliegende Auflösung — `exchange.go` ruft sie — **ist keine.** Die ge
 
 Damit ist der Nebenfund der eigentliche: **ein generierter Policy-Validator, dessen Fehler nicht unterscheidbar sind, kann von keinem Aufrufer verschieden behandelt werden — und genau deshalb hat der einzige echte Aufrufer ihn nachgebaut.** Die Reparatur gehört in `cmd/policygen`: Sentinel-Fehler emittieren, dann kann `exchange.go` sie umschließen statt sie zu wiederholen.
 
+##### Nachtrag: der dritte Validator hat gar keinen Aufrufer
+
+Beim Umbau nachgezählt. `shared/policy` generiert drei Validatoren, und keiner davon steht so da, wie er sollte: `ValidateOrgName` wird richtig benutzt (drei Aufrufer), `ValidateImpersonationRequest` war vom handgeschriebenen Duplikat verdeckt — und **`ValidateRoleElevation` hat null Aufrufer**. Weder Produktions- noch Testcode.
+
+Das ist mehr als toter Code: Regel 9 (`role_elevation_owner_approval`) prüft im Hook `has_owner_approval`, ein Feld, das kein Umschlag trägt. Der generierte Validator prüft daneben etwas anderes und Strengeres — Zielrolle gegen aktuelle Rolle plus Alter der Authentifizierung — und niemand ruft ihn. Die Elevation-Policy aus `policy/rules/elevation.yaml` wird also **an keiner Stelle durchgesetzt**. Das gehört zu Topf „unsere API" und ist der nächste Kandidat nach demselben Muster wie hier.
+
 ##### Reihenfolge
 
-1. **`policygen` emittiert Sentinel-Fehler**, danach löst `exchange.go` seine Kopie auf. Ohne Instanz machbar, aber es ist eine Änderung am Generator und an generiertem Code — eigener Arbeitsposten.
+1. ~~**`policygen` emittiert Sentinel-Fehler**, danach löst `exchange.go` seine Kopie auf.~~ **Erledigt.** Drei Sentinels pro Refusal, `exchange.go` fragt den Validator und übersetzt in seine eigenen Fehlertypen — die API bildet sie auf verschiedene Statuscodes ab, deshalb ging es nur so. Zwei Tests: einer durch `ExchangeToken`, dass alles Abgelehnte abgelehnt bleibt, und ein paketinterner für den Durchreiche-Zweig, den kein externer Test erreicht und der genau das ist, was eine künftige YAML-Bedingung beißen lässt.
 2. **Regel 8 an eine Execution binden** — `AddOrganization`, Request-Bedingung. Braucht die laufende Zelle.
 3. **Die sieben nativen löschen**, nachdem ein Deploy die Policies angewandt *und verifiziert* hat. Der Drift-Detektor ist der Nachweis; ohne grünen Lauf ist er nicht erbracht.
 4. **Die vier verlegen**, wo sie schon durchgesetzt sind (3, 9, 14) oder hingehören (2).
