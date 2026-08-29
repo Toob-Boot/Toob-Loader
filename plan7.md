@@ -2591,9 +2591,55 @@ Die Verdrahtung ist vollständiger, als der TODO vermuten lässt. `identity-migr
 
 Kein Konflikt mit `identity/internal/fga`: das ist die **Pro-Mandant**-Variante, und ihr eigener TODO nennt sie ausdrücklich einen anderen Meilenstein, unvereinbar mit der zellweiten `IDENTITY_OPENFGA_STORE_ID`, die identity-api verlangt. `identity-sync` nutzt `cellStore` hinter derselben Schnittstelle, damit der Tag, an dem eine zweite Zelle existiert, genau eine Stelle betrifft.
 
+##### Umgesetzt
+
+Alle vier Schritte sind drin. Die Allokationszahl kommt aus der Zelle statt aus drei Literalen, und **die Defaults sind weg**: der Deploy-Stage ist der einzige Aufrufer, und ein Default ist genau das, was die beiden Zahlen unbemerkt auseinanderlaufen ließ. `identity-sync` steht im Manifest, hinter `identity-migrate` und `openfga-provision`, und der überholte Kommentar ist korrigiert.
+
+Zwei Testlücken kamen dabei heraus, beide von derselben Art wie der Fund selbst:
+
+**Die Liste im `jobVars`-Test hatte zwei Einträge.** Sie prüft, dass jede übergebene Variable im Job deklariert ist und keinen Default trägt — abgedeckt waren `zitadel-setup` und `zitadel`. Dieselbe Schwäche, die `diffPolicy` an anderer Stelle mit Reflection umgeht: eine handgepflegte Liste kann einen Eintrag auslassen, und ein ausgelassener ist stillschweigend ungeprüft. Sie deckt jetzt alle fünf, und sie sucht eine Zuweisung statt des Wortes „default", damit eine Beschreibung sagen darf, was der Default gekostet hat.
+
+**Nichts verglich die Jobdateien mit dem Manifest.** Deshalb konnte eine vollständige `identity-sync.nomad.hcl` neben einem Manifest liegen, das sie nicht nennt, ohne dass es auffiel. Der neue Test in `deployspec_test.go` prüft beide Richtungen — jede `.nomad.hcl` ist eingeplant oder mit Begründung ausgenommen, und ein Eintrag, dessen Datei eingeplant wurde oder verschwunden ist, fällt ebenfalls. Eine Ausrede kann das, was sie entschuldigt, nicht überleben.
+
+##### Und eine Regression, die ich selbst eingebaut habe
+
+Das Entfernen der Defaults hat einen Aufrufer gebrochen, den ich zuerst übersehen hatte: `docs/runbooks/fga_outage.md` startet `openfga.nomad.hcl` von Hand, ohne `-var`. Der Befehl scheitert seither — in einem Störungs-Runbook, also genau dort, wo jemand ihn unter Zeitdruck befolgt und die Fehlermeldung am wenigsten gebrauchen kann. Korrigiert, mitsamt einer Zeile, die sagt, woher die Zahl kommt.
+
+Der Fund gehört hierher, weil er die Regel bestätigt, gegen die er verstößt: eine Zahl, die an zwei Stellen gebraucht wird, muss an einer stehen — und wer den Default entfernt, muss **jeden** Aufrufer kennen, nicht nur den, den die Änderung betrifft.
+
 ##### Wie man merkt, dass es wirkt
 
 Nicht daran, dass der Job läuft. `identity-sync` bringt einen internen Endpunkt mit, der den letzten erfolgreichen Drain und den letzten Fehler führt; die Prüfung ist eine Mitgliedschaftsänderung über die API und danach ein `Check` gegen OpenFGA, der vorher „denied" sagte. Ohne diesen zweiten Schritt bewiese ein grüner Deploy nur, dass zwei Allokationen laufen — was sie auch täten, wenn der Drainer nie eine Zeile fände.
+
+---
+
+#### 10.3-AS Was als Nächstes ansteht, und was worauf wartet
+
+Nach §10.3-AR sortiert sich die verbleibende Arbeit sauber in zwei Hälften.
+
+##### Wartet auf einen grünen Deploy
+
+Nicht auf Arbeit, sondern auf einen Nachweis, und in jedem Fall auf denselben: die laufende Zelle.
+
+- **Die sieben nativen Duplikate löschen** (§10.3-AQ). Der Drift-Detektor *ist* der Nachweis, aber erbracht ist er erst, wenn ein Lauf ihn ausgeführt hat. Mit ihnen gehen Regel 3, 9 und 14 aus dem Hook, die anderswo längst durchgesetzt sind.
+- **Regel 8 an eine Execution binden** — `AddOrganization`, Request-Bedingung. Die einzige der vierzehn, die ein echter Umschlag heute füttern kann.
+- **Den Antwortmodus für Function-Bedingungen messen** (§10.3-AO). Ungemessen, und `writeDecision` antwortet allen Routen gleich.
+- **Zitadel 4.17.1** einziehen, nachdem 4.16.2 einmal vollständig gelaufen ist.
+- **`identity-sync` verifizieren**: eine Mitgliedschaftsänderung über die API, danach ein `Check`, der vorher „denied" sagte.
+
+##### Geht ohne Cluster
+
+- **Die öffentliche Route für `identity-api`.** `Caddyfile-identity.j2` proxyt die Identity-Domain vollständig an Zitadel auf 8080; 8082 (API) und 8083 (SCIM) sind zellintern. Der TODO im Job nennt es beim Namen: *„Giving it a public route is a decision about the public API surface, not a deployment detail."* Das ist der Unterschied zwischen einer Zelle, die läuft, und einer, die benutzbar ist — und es ist eine Entscheidung, keine Konfigurationsaufgabe.
+- **`internal/vaultkv`**: zwei handgeschriebene Schreiber stehen neben dem gemeinsamen. Dasselbe Muster wie überall in diesem Abschnitt, diesmal beim Schreiben von Geheimnissen.
+- **Regel 2 an ihren richtigen Ort.** `dual_authenticator_requirement` hat kein natives Pendant, gehört aber an die Registrierung: einen Login abzulehnen, weil jemand nur einen Authenticator hat, sperrt ihn vollständig aus.
+- **`internal/fga`** und **`celldir`** sind eigene Meilensteine, beide groß, beide mit ihrer eigenen Begründung dokumentiert.
+- **P7**: `policy/tests/matrix/expectations.yaml` ist ein leerer Stub, den nichts liest — füllen oder löschen.
+
+##### Die Empfehlung
+
+**Die öffentliche Route**, weil sie die einzige offene Frage ist, deren Antwort den nächsten Deploy verändert. Alles andere Unblockierte ist Aufräumen; das hier entscheidet, ob die Zelle nach dem nächsten grünen Lauf erreichbar ist oder nur läuft.
+
+Zu entscheiden sind drei Dinge, und keines davon ist Caddy-Syntax: welche Pfade `identity-api` gehören (`/api/v1/*`), ob SCIM überhaupt öffentlich sein soll oder VPN-only wie die Admin-Konsole, und ob beides unter der Identity-Domain liegt oder unter einem eigenen Namen. Die dritte Frage ist die folgenreichste — eine Domain, die IdP und Anwendungs-API zugleich bedient, teilt deren Angriffsfläche und deren Ausfälle.
 
 ---
 
