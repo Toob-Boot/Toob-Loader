@@ -2422,6 +2422,43 @@ Beides zusammen heißt: die Auslieferung ist gebaut und geprüft, so weit sie oh
 
 ---
 
+#### 10.3-AO Abgleich: was von §10.3-AK bis AN zu ist, und zwei neue Funde
+
+Anlass war eine Zwangspause. Ubicloud bekommt eine Zellen-Datenbank seit zwölf Stunden nicht fertig, und die Identity-Zelle stand beim letzten Deploy **eine Migration** vor dem Laufen. Also der Rückvergleich des Backlogs gegen den Code statt gegen die Erinnerung.
+
+##### Geschlossen
+
+**Das Actions-v2-Target existiert.** §10.3-AK Punkt 1 und 3 sind zusammen erledigt: der Deploy legt es an und protokolliert `target_id=388351848840429834`, der Signaturschlüssel liegt unter `secret/data/identity/zitadel-hooks`. `IDENTITY_ZITADEL_SIGNING_KEY` hat damit endlich eine Quelle. Dieselbe Meldung sagt, was noch fehlt: *„no executions bound — the target is registered and inert until conditions are attached"*.
+
+**Die zehn Actions v1 sind weg.** `provision-instance-policies.sh` existiert nicht mehr, ebenso wenig `provision-projects-and-roles.sh` — die zweite Implementierung derselben Sache — und `identity/internal/zitadel/client.go`, der `type Client struct{}` ohne Methoden. §10.3-AK Punkt 2 und 4 sind gegenstandslos, und in der Zitadel-Rolle steht kein `failed_when: false` mehr (§10.3-AM).
+
+**Der Antwortvertrag stimmt.** Der schwerste Fund aus §10.3-AL — `200` zusammen mit `{"allow":true}` hätte jede abgefangene Anfrage *ersetzt* — ist in `identity/target/handler.go` behoben: `writeDecision` schreibt beim Erlauben einen leeren `200`, beim Ablehnen einen Statuscode, und der Kommentar hält die vier gemessenen Modi fest. Das war die Bedingung dafür, überhaupt eine Execution binden zu dürfen.
+
+**Und zuletzt scheiterte die Zelle nur noch an einem GRANT.** `schema_migrations` ist die einzige Tabelle, die keine Migration anlegt — der Runner erzeugt sie selbst —, also fiel sie durch jedes tabellenweise `GRANT` der Migrationen 009 bis 023. `identity-api` prüft beim Start die Schemaversion und starb achtmal an `permission denied for table schema_migrations (SQLSTATE 42501)`, während `identity-migrate` Erfolg meldete. Migration 025 vergibt `SELECT` an alle vier Serving-Rollen. Die Integrationssuite hatte es nicht gesehen, weil jeder Test dort auf der Migrator-Verbindung liest, der die Tabelle gehört; der neue fragt als die Rollen, die bedienen.
+
+##### Weiterhin offen
+
+1. **Der Umschlag-Adapter.** `handler.go` liest den Rumpf unverändert in `TargetRequest` — die Form, die Zitadel nachweislich nicht sendet. Solange das so ist, darf keine Execution gebunden werden: der Handler lehnte jeden Aufruf auf dem Anmeldepfad ab.
+2. **Der Routentisch trägt v1-Namen** — `pre-authentication`, `pre-token-creation`, `pre-user-creation`, `post-authentication`. Die Kritikalität ist richtig modelliert, die Bedingungsarten fehlen.
+3. **Zwei Regeln ohne Angriffspunkt** (`webauthn_only_privileged`, `dual_authenticator_requirement`). §10.3-AM hat den Verdacht widerlegt, sie seien nativ abgedeckt; sie bleiben und brauchen `amr` bzw. den Authenticator-Zähler aus Zitadels API, auf dem Anmeldepfad, fail-closed.
+4. **Der Bootstrap.** Von „Zitadel-Konto existiert" zu „darf `POST /api/v1/tenants`" führt weiterhin kein Weg.
+
+##### Neu: wir stehen zwei Minor-Versionen hinter der Sicherheit
+
+`versions.json` pinnt Zitadel auf **4.16.2**. Aktuell ist **4.17.1** (14. August 2026), und die Änderungen liegen genau auf unserem Gebiet: Login-V2-Auth für deaktivierte Organisationen wird blockiert, das Ausstellen von Passkey-Enrollment-Codes prüft Berechtigungen, OTP-Codes gehen nicht mehr über `returnCode` an den Browser, und vor der 2FA-Registrierung steht ein MFA-Prompt.
+
+Das ist mehr als ein Versionssprung: mehrere dieser Kontrollen sind Kandidaten für die Triage aus §10.3-AL, könnten also Go-Regeln nativ ablösen. Aber die teuer erkaufte Lehre aus §10.3-AM gilt weiter — **erst muss die native Kontrolle an der laufenden Instanz nachweislich greifen, dann darf die Regel weichen.** Nicht aus einem Changelog schließen. Und der Sprung gehört hinter den ersten grünen Deploy, nicht davor: eine ungetestete Version einzuziehen, während die Zelle noch nie vollständig lief, macht aus zwei Unbekannten eine.
+
+**Eine Warnung fürs Binden:** [zitadel/zitadel#12225](https://github.com/zitadel/zitadel/issues/12225) beschreibt eine Regression, bei der eine Execution auf einer **Event**-Bedingung — besonders auf allen Events — die Instanz instanzweit lahmlegt, mit `interrupt_on_error` vollständig. Unser Plan bindet Request- und Function-Bedingungen; Event bleibt draußen, und jetzt aus einem benannten Grund.
+
+##### Neu: der Antwortvertrag ist nicht für jede Bedingungsart derselbe
+
+§10.3-AL hat vier Modi an einer **Request**-Bedingung gemessen: leerer `200` reicht durch, ein anderer Rumpf *ersetzt* die Anfrage. Zitadels Dokumentation beschreibt Function-Ziele dagegen so, dass sie „modified claims or metadata objects" zurückgeben — dort ist der Rumpf bedeutungstragend, und ein leerer `200` könnte Claims löschen statt durchzureichen.
+
+Gemessen ist das nicht, und `writeDecision` schreibt heute für jede Route dasselbe. **Vor dem Binden einer Function-Bedingung ist deren Modus eigens zu messen** — aus demselben Grund wie damals bei den Request-Bedingungen: dort war die Annahme schon einmal genau falsch herum, und sie hätte jeden gebundenen Aufruf gebrochen.
+
+---
+
 ## 11. Optimierungspotenziale
 
 Nicht Defekte, sondern Hebel — mehrere davon lösen gleich mehrere Befunde auf einmal.
