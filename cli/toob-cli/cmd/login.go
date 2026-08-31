@@ -2,306 +2,158 @@ package cmd
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"embed"
-	"encoding/base64"
 	"fmt"
-	"net"
-	"net/http"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/apiclient"
+	"github.com/toob-boot/toob/internal/oidc"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-//go:embed assets/success.html
-var successAssets embed.FS
+// loginTimeout is how long a person has to finish in the browser before the command gives up. Long
+// enough to find a password manager and a second factor; short enough that a forgotten terminal
+// stops holding a loopback port open.
+const loginTimeout = 5 * time.Minute
 
 var loginCmd = &cobra.Command{
 	Use:   "login",
-	Short: "Authenticate with the Toob Registry via GitHub",
-	Long: `Authenticates your CLI with the Toob Registry API using GitHub OAuth.
+	Short: "Sign in to the Toob Registry",
+	Long: `Signs in through the Toob identity provider.
 
-After authentication, your API key is stored in ~/.toob/credentials.json
-and automatically used for package publishing and download tracking.
+The registry is asked who issues the tokens it accepts, so nothing about a particular
+environment is configured here: pointing the CLI at another registry signs you in to
+that registry's identity provider.
 
-Use --rotate to invalidate your current key and generate a new one.`,
+A browser opens by default. On a machine without one — a server over SSH, a container —
+pass --device and finish the sign-in on a device that has one.
+
+Your session is stored in ~/.toob/credentials.json and refreshed automatically. An API
+key created with 'toob tokens' is kept separately and is what CI should use.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := apiclient.New()
-
-		rotate, _ := cmd.Flags().GetBool("rotate")
 		force, _ := cmd.Flags().GetBool("force")
-		noBrowser, _ := cmd.Flags().GetBool("no-browser")
+		device, _ := cmd.Flags().GetBool("device")
 
-		if client.HasToken() && !force && !rotate {
-			ui.Info("Already authenticated. Use --force to re-authenticate or --rotate to get a new key.")
+		client := apiclient.New()
+		ctx, cancel := context.WithTimeout(cmd.Context(), loginTimeout)
+		defer cancel()
+
+		if apiclient.HasSession() && !force {
+			ui.Info("Already signed in. Use --force to sign in again.")
 			return nil
 		}
 
-		ui.Header("GitHub Authentication")
-
-		// Generate PKCE credentials and state
-		verifier, challenge, err := generatePKCE()
+		// Where to sign in, asked of the registry being signed in to.
+		config, err := client.FetchAuthConfig(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to generate PKCE credentials: %w", err)
+			return err
 		}
-
-		state, err := generateState()
+		provider, err := oidc.Discover(ctx, config.Issuer)
 		if err != nil {
-			return fmt.Errorf("failed to generate security state: %w", err)
+			return err
 		}
 
-		var code string
-		var useLocalServer bool
+		ui.Header("Sign in to " + config.Issuer)
 
-		// Start local server to receive loopback callback
-		if !noBrowser {
-			srvCtx, srvCancel := context.WithTimeout(cmd_defaultCtx(), 5*time.Minute)
-			defer srvCancel()
-
-			listener, port, codeChan, errChan := startLocalServer(srvCtx, state)
-			if listener != nil {
-				defer listener.Close()
-				useLocalServer = true
-
-				authURL := fmt.Sprintf("%s/api/v1/auth/github?state=%s&code_challenge=%s&redirect_uri=http://127.0.0.1:%d/callback", client.BaseURL, state, challenge, port)
-				if rotate {
-					authURL += "&rotate=true"
-				}
-
-				ui.Step("Opening your browser to authenticate...")
-				ui.KeyValue("URL", ui.Bold(authURL))
-
-				if err := openBrowser(authURL); err != nil {
-					ui.Warn("Failed to open browser automatically: %v", err)
-					ui.Step("Please visit the URL manually to complete login.")
-				}
-
-				// Wait for code or server error/timeout
-				select {
-				case c := <-codeChan:
-					code = c
-				case err := <-errChan:
-					ui.Warn("Local loopback server error: %v", err)
-					useLocalServer = false
-				case <-srvCtx.Done():
-					ui.Warn("Authentication timed out waiting for browser callback.")
-					useLocalServer = false
-				}
-			} else {
-				ui.Warn("Could not start local callback server: %v", <-errChan)
-			}
+		var token *oidc.Token
+		if device {
+			token, err = deviceSignIn(ctx, provider, config)
+		} else {
+			token, err = browserSignIn(ctx, provider, config)
+		}
+		if err != nil {
+			return err
 		}
 
-		// Fallback to manual flow
-		if !useLocalServer {
-			authURL := fmt.Sprintf("%s/api/v1/auth/github?state=%s&code_challenge=%s&redirect_uri=urn:ietf:wg:oauth:2.0:oob", client.BaseURL, state, challenge)
-			if rotate {
-				authURL += "&rotate=true"
-			}
-
-			ui.Step("Please visit the following URL in your browser:")
-			ui.KeyValue("URL", ui.Bold(authURL))
-			ui.Divider()
-
-			ui.Step("Enter the authorization code shown in your browser:")
-			fmt.Scanln(&code)
-
-			if code == "" {
-				return fmt.Errorf("no authorization code provided")
-			}
+		if err := apiclient.SaveIdentity(&apiclient.IdentityCredentials{
+			Issuer:   config.Issuer,
+			ClientID: config.ClientID,
+			Token:    token,
+		}, ""); err != nil {
+			return fmt.Errorf("failed to store the session: %w", err)
 		}
 
-		return handleTokenExchange(client, code, verifier, rotate)
+		// Ask the registry who it thinks we are. This is the only step that proves the whole chain —
+		// that the token was issued for this registry's audience and that it accepts it — and doing it
+		// here means a misconfigured deployment is reported at sign-in rather than at the first
+		// publish.
+		return reportWhoTheRegistrySees(ctx, client)
 	},
 }
 
-func handleTokenExchange(client *apiclient.Client, code, verifier string, rotate bool) error {
-	loginResp, err := client.TokenExchange(cmd_defaultCtx(), code, verifier)
+// browserSignIn runs the authorization code flow with PKCE against a loopback redirect.
+func browserSignIn(ctx context.Context, provider *oidc.Provider, config *apiclient.AuthConfig) (*oidc.Token, error) {
+	login, err := oidc.StartBrowserLogin(provider, config.ClientID, config.Audience, config.Scopes)
 	if err != nil {
-		return fmt.Errorf("authentication failed: %w", err)
+		return nil, err
+	}
+	defer login.Close()
+
+	if err := openBrowser(login.AuthorizationURL); err != nil {
+		ui.Warn("Could not open a browser: %v", err)
+	}
+	ui.Info("Open this address if a browser did not:")
+	fmt.Println("  " + login.AuthorizationURL)
+	ui.Step("Waiting for the sign-in to finish...")
+
+	return login.Wait(ctx)
+}
+
+// deviceSignIn runs the device authorization grant, for a machine with no browser of its own.
+func deviceSignIn(ctx context.Context, provider *oidc.Provider, config *apiclient.AuthConfig) (*oidc.Token, error) {
+	login, err := oidc.StartDeviceLogin(ctx, provider, config.ClientID, config.Audience, config.Scopes)
+	if err != nil {
+		return nil, err
 	}
 
-	if loginResp.APIKey != "" {
-		if err := apiclient.SaveCredentials(loginResp.APIKey, loginResp.Login); err != nil {
-			return fmt.Errorf("failed to save credentials: %w", err)
-		}
-		if rotate {
-			ui.Success("API key rotated for @%s", loginResp.Login)
-			ui.Tip("Your new key has been stored. The old key is now invalid.")
-		} else {
-			ui.Success("Authenticated as @%s (Role: %s)", loginResp.Login, loginResp.Role)
-			ui.Tip("Your API key has been stored in ~/.toob/credentials.json")
-		}
-	} else if loginResp.HasAPIKey {
-		ui.Success("Authenticated as @%s (Role: %s)", loginResp.Login, loginResp.Role)
-		ui.Info("You already have an API key. Use 'toob login --rotate' to generate a new one.")
+	if login.VerificationURIComplete != "" {
+		ui.Info("On any device with a browser, open:")
+		fmt.Println("  " + login.VerificationURIComplete)
+		ui.Info("It already carries the code below; check that it matches before approving.")
+	} else {
+		ui.Info("On any device with a browser, open:")
+		fmt.Println("  " + login.VerificationURI)
 	}
+	fmt.Printf("  Code: %s\n", login.UserCode)
+	ui.Step("Waiting for the sign-in to be approved...")
+
+	return login.Wait(ctx)
+}
+
+// reportWhoTheRegistrySees confirms the stored session against the registry.
+func reportWhoTheRegistrySees(ctx context.Context, client *apiclient.Client) error {
+	profile, err := client.Whoami(ctx)
+	if err != nil {
+		return fmt.Errorf("signed in, but %s did not accept the token: %w", client.BaseURL, err)
+	}
+
+	if profile.Username != "" {
+		ui.Success("Signed in as %s", profile.Username)
+	} else {
+		ui.Success("Signed in")
+	}
+	ui.Tip("Your session is stored in ~/.toob/credentials.json and refreshed automatically.")
+	ui.Tip("For CI, create a long-lived key with 'toob tokens create'.")
 
 	return nil
 }
 
-func generatePKCE() (verifier string, challenge string, err error) {
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", "", err
-	}
-	verifier = base64.RawURLEncoding.EncodeToString(bytes)
-	hash := sha256.Sum256([]byte(verifier))
-	challenge = base64.RawURLEncoding.EncodeToString(hash[:])
-	return verifier, challenge, nil
-}
-
-func generateState() (string, error) {
-	bytes := make([]byte, 16)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(bytes), nil
-}
-
+// openBrowser opens a URL in the platform's default browser.
 func openBrowser(url string) error {
-	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
 	case "darwin":
-		cmd = exec.Command("open", url)
+		return exec.Command("open", url).Start()
 	default:
-		cmd = exec.Command("xdg-open", url)
+		return exec.Command("xdg-open", url).Start()
 	}
-	return cmd.Start()
-}
-
-func startLocalServer(ctx context.Context, state string) (net.Listener, int, chan string, chan error) {
-	// Buffered to prevent goroutine leaks if the calling select exits early
-	codeChan := make(chan string, 1)
-	errChan := make(chan error, 1)
-
-	var listener net.Listener
-	var err error
-	var port int
-
-	for p := 54321; p <= 54330; p++ {
-		listener, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
-		if err == nil {
-			port = p
-			break
-		}
-	}
-
-	if listener == nil {
-		errChan <- fmt.Errorf("no free ports in range 54321-54330: %w", err)
-		return nil, 0, nil, errChan
-	}
-
-	mux := http.NewServeMux()
-	server := &http.Server{
-		Handler:        mux,
-		ReadTimeout:    5 * time.Second,
-		WriteTimeout:   5 * time.Second,
-		IdleTimeout:    10 * time.Second,
-		MaxHeaderBytes: 1 << 10, // Limit request header to 1KB (mitigates DoS)
-	}
-
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		// Enforce strict HTTP method and path
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Write([]byte("<h1>Error</h1><p>Method Not Allowed</p>"))
-			return
-		}
-
-		if r.URL.Path != "/callback" {
-			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte("<h1>Error</h1><p>Not Found</p>"))
-			return
-		}
-
-		// Enforce Host header validation (mitigates DNS rebinding attacks)
-		host, portStr, err := net.SplitHostPort(r.Host)
-		if err != nil {
-			host = r.Host
-			portStr = ""
-		}
-
-		host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-		if host != "127.0.0.1" && host != "localhost" {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("<h1>Error</h1><p>Invalid Host Header</p>"))
-			return
-		}
-
-		if portStr != "" && portStr != fmt.Sprintf("%d", port) {
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("<h1>Error</h1><p>Invalid Host Port</p>"))
-			return
-		}
-
-		retState := r.URL.Query().Get("state")
-		code := r.URL.Query().Get("code")
-
-		if retState != state {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("<h1>Error</h1><p>CSRF State mismatch</p>"))
-			return
-		}
-
-		if code == "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("<h1>Error</h1><p>Missing auth code</p>"))
-			return
-		}
-
-		htmlBytes, err := successAssets.ReadFile("assets/success.html")
-		if err != nil {
-			htmlBytes = []byte("<h1>Login Successful</h1><p>You can close this tab now.</p>")
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write(htmlBytes)
-
-		select {
-		case codeChan <- code:
-		default:
-		}
-
-		go func() {
-			time.Sleep(1 * time.Second)
-			server.Shutdown(context.Background())
-		}()
-	})
-
-	// Background worker to gracefully shut down the server when command context terminates
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		server.Shutdown(shutdownCtx)
-	}()
-
-	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			select {
-			case errChan <- err:
-			default:
-			}
-		}
-	}()
-
-	return listener, port, codeChan, errChan
 }
 
 func init() {
-	loginCmd.Flags().Bool("force", false, "Re-authenticate even if already logged in")
-	loginCmd.Flags().Bool("rotate", false, "Generate a new API key, invalidating the old one")
-	loginCmd.Flags().Bool("no-browser", false, "Do not attempt to open the browser automatically; fallback to manual code entry")
+	loginCmd.Flags().Bool("force", false, "Sign in again even if a session is already stored")
+	loginCmd.Flags().Bool("device", false, "Sign in on another device (for machines without a browser)")
 	rootCmd.AddCommand(loginCmd)
 }

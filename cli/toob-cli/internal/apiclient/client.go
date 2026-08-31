@@ -112,9 +112,14 @@ func resolveBaseURL() string {
 
 // Credentials holds the persisted authentication state.
 type Credentials struct {
+	// APIKey is the long-lived credential for machines: CI jobs, scripts, anything that cannot open
+	// a browser. It stays alongside a person's session rather than being replaced by it.
 	APIKey    string `json:"api_key"`
 	Login     string `json:"login,omitempty"`
 	CreatedAt string `json:"created_at,omitempty"`
+
+	// Identity is the person's own session, obtained from the identity provider.
+	Identity *IdentityCredentials `json:"identity,omitempty"`
 }
 
 func credentialsPath() string {
@@ -265,7 +270,6 @@ func (c *Client) GetIndex(ctx context.Context) ([]byte, error) {
 	return c.getRaw(ctx, "/api/v1/registry/index")
 }
 
-
 // ChipResolveResponse is the shape of GET /api/v1/resolve/chip.
 type ChipResolveResponse struct {
 	Name     string          `json:"name"`
@@ -328,7 +332,10 @@ func (c *Client) GetMatrix(ctx context.Context, chip string) ([]MatrixEntry, err
 	return entries, nil
 }
 
-// LoginResponse is the shape of POST /api/v1/auth/github.
+// LoginResponse was the shape of POST /api/v1/auth/github, an endpoint the registry does not serve.
+// Signing in goes to the identity provider now; see internal/oidc and AuthConfig.
+//
+// Kept only for the fields other commands still read from stored credentials.
 type LoginResponse struct {
 	PublisherID string `json:"publisher_id"`
 	Login       string `json:"login"`
@@ -553,32 +560,6 @@ func (c *Client) DownloadPackage(ctx context.Context, name, version string) (io.
 	return resp.Body, nil
 }
 
-// RotateKey rotates the publisher's API key.
-func (c *Client) RotateKey(ctx context.Context, code string) (*LoginResponse, error) {
-	payload, _ := json.Marshal(map[string]string{"code": code})
-	req, err := c.newRequest(ctx, "POST", "/api/v1/auth/rotate-key", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, extractError(resp)
-	}
-
-	var result LoginResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
 // Login with GitHub OAuth.
 func (c *Client) Login(ctx context.Context, code string) (*LoginResponse, error) {
 	payload, _ := json.Marshal(map[string]string{"code": code})
@@ -605,62 +586,9 @@ func (c *Client) Login(ctx context.Context, code string) (*LoginResponse, error)
 	return &result, nil
 }
 
-// TokenExchange exchanges the temporary session code and PKCE verifier for the final API key.
-func (c *Client) TokenExchange(ctx context.Context, code, verifier string) (*LoginResponse, error) {
-	payload, _ := json.Marshal(map[string]string{
-		"code":          code,
-		"code_verifier": verifier,
-	})
-	req, err := c.newRequest(ctx, "POST", "/api/v1/auth/token", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, extractError(resp)
-	}
-
-	var result LoginResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
 // LogoutResponse is the shape of POST /api/v1/auth/logout.
 type LogoutResponse struct {
 	Status string `json:"status"`
-}
-
-// Logout invalidates the publisher's API key on the server.
-func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
-	req, err := c.newRequest(ctx, "POST", "/api/v1/auth/logout", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, extractError(resp)
-	}
-
-	var result LogoutResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
 }
 
 // --- Token Management ---
@@ -786,8 +714,10 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Toob-CLI")
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
+	// Resolved per request rather than captured at construction: a session expires while a process
+	// runs, and the refresh has to happen between two commands as readily as between two runs.
+	if bearer := c.bearer(ctx); bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	return req, nil
 }

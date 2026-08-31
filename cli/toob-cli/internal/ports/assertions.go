@@ -89,19 +89,17 @@ func assertMatrixEntryFromPort() {
 	}
 }
 
-func assertLoginResponseToPort() {
-	var r apiclient.LoginResponse
-	_ = LoginResponse{
-		PublisherID: r.PublisherID, Login: r.Login, Role: r.Role,
-		APIKey: r.APIKey, HasAPIKey: r.HasAPIKey,
+func assertAuthConfigToPort() {
+	var r apiclient.AuthConfig
+	_ = AuthConfig{
+		Issuer: r.Issuer, Audience: r.Audience, ClientID: r.ClientID, Scopes: r.Scopes,
 	}
 }
 
-func assertLoginResponseFromPort() {
-	var p LoginResponse
-	_ = apiclient.LoginResponse{
-		PublisherID: p.PublisherID, Login: p.Login, Role: p.Role,
-		APIKey: p.APIKey, HasAPIKey: p.HasAPIKey,
+func assertAuthConfigFromPort() {
+	var p AuthConfig
+	_ = apiclient.AuthConfig{
+		Issuer: p.Issuer, Audience: p.Audience, ClientID: p.ClientID, Scopes: p.Scopes,
 	}
 }
 

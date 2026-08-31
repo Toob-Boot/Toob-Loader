@@ -95,18 +95,19 @@ type MatrixEntry struct {
 	Revision       *int64          `json:"revision"        port:"optional"`
 }
 
-// LoginResponse is the JSON body for POST /api/v1/auth/github.
-type LoginResponse struct {
-	PublisherID string `json:"publisher_id" port:"required"`
-	Login       string `json:"login"        port:"required"`
-	Role        string `json:"role"         port:"required"`
-	APIKey      string `json:"api_key"      port:"optional"`
-	HasAPIKey   bool   `json:"has_api_key"  port:"required"`
-}
-
-// LogoutResponse is the JSON body for POST /api/v1/auth/logout.
-type LogoutResponse struct {
-	Status string `json:"status" port:"required"`
+// AuthConfig is the JSON body for GET /api/v1/auth/config.
+//
+// It replaces LoginResponse and LogoutResponse, which described POST /api/v1/auth/github and
+// POST /api/v1/auth/logout — two endpoints the registry does not serve. Signing in goes to the
+// identity provider directly; the registry only says which one, and for what audience.
+//
+// Audience is optional because an identity provider that scopes tokens by client alone has none to
+// name, and the client sends it only when it is given one.
+type AuthConfig struct {
+	Issuer   string   `json:"issuer"    port:"required"`
+	Audience string   `json:"audience"  port:"optional"`
+	ClientID string   `json:"client_id" port:"required"`
+	Scopes   []string `json:"scopes"    port:"required"`
 }
 
 // CheckCombinationResponse is the JSON body for GET /api/v1/resolve/combination.
