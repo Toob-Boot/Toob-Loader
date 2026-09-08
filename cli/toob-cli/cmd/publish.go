@@ -112,13 +112,19 @@ Examples:
 
 		ui.Success("Tarball created (%d bytes)", buf.Len())
 
-		// Upload
-		spinner := ui.NewSpinner("Uploading to registry...")
-		spinner.Start()
+		// Upload. The body is kept as bytes rather than handed over as the buffer, because a
+		// step-up challenge means uploading it a second time after the person has signed in again,
+		// and a buffer is spent by the first attempt.
+		payload := buf.Bytes()
+		var resp *apiclient.PublishResponse
+		err = withStepUp(ctx, client, func() error {
+			spinner := ui.NewSpinner("Uploading to registry...")
+			spinner.Start()
+			defer spinner.Stop()
 
-		resp, err := client.Publish(ctx, &buf, mpw.FormDataContentType())
-		spinner.Stop()
-
+			resp, err = client.Publish(ctx, bytes.NewReader(payload), mpw.FormDataContentType())
+			return err
+		})
 		if err != nil {
 			return fmt.Errorf("publish failed: %w", err)
 		}

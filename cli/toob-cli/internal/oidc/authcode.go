@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -70,9 +71,28 @@ type callbackResult struct {
 	err  error
 }
 
+// StepUp is what a service asked for when it refused an operation with an RFC 9470 challenge: an
+// authentication no older than MaxAge, performed with the context ACRValues names.
+type StepUp struct {
+	ACRValues string
+	MaxAge    time.Duration
+}
+
 // StartBrowserLogin opens the loopback listener and builds the URL to send the person to. The caller
 // opens a browser, prints the URL, or both, and then calls Wait.
 func StartBrowserLogin(provider *Provider, clientID, audience string, scopes []string) (*BrowserLogin, error) {
+	return startBrowserLogin(provider, clientID, audience, scopes, nil)
+}
+
+// StartBrowserStepUp is StartBrowserLogin for a person who is already signed in and has been asked
+// to prove it again. The provider is told to prompt regardless of its session (prompt=login) and
+// what the ceremony has to satisfy, so that a cached session cannot answer a challenge that exists
+// precisely because a cached session is not enough.
+func StartBrowserStepUp(provider *Provider, clientID, audience string, scopes []string, stepUp StepUp) (*BrowserLogin, error) {
+	return startBrowserLogin(provider, clientID, audience, scopes, &stepUp)
+}
+
+func startBrowserLogin(provider *Provider, clientID, audience string, scopes []string, stepUp *StepUp) (*BrowserLogin, error) {
 	if !provider.SupportsS256() {
 		return nil, errors.New("the identity provider does not offer PKCE with S256, and this client will not log in without it")
 	}
@@ -114,6 +134,15 @@ func StartBrowserLogin(provider *Provider, clientID, audience string, scopes []s
 		// Which resource the token is for. Without it an issuer may hand back a token that is valid
 		// for its own userinfo endpoint and for nothing else, and the registry would reject it.
 		query.Set("audience", audience)
+	}
+	if stepUp != nil {
+		query.Set("prompt", "login")
+		if stepUp.ACRValues != "" {
+			query.Set("acr_values", stepUp.ACRValues)
+		}
+		if stepUp.MaxAge > 0 {
+			query.Set("max_age", strconv.Itoa(int(stepUp.MaxAge.Seconds())))
+		}
 	}
 	login.AuthorizationURL = provider.AuthorizationEndpoint + "?" + query.Encode()
 

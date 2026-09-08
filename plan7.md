@@ -2695,6 +2695,78 @@ Der Name ist **`<env>.accounts.the-toob.com`**. Nicht `api`, weil die Registry e
 
 ---
 
+#### 10.3-AU Das Bereitschaftstor prüfte einen Port und meldete einen Login
+
+Phase 5 nannte `toob-unseal-vault` SSH-ready, und Ansible bekam Sekunden später `Permission denied (publickey)` auf genau diesem Host. Beides stimmt: `waitForSSHReadiness` wählte TCP-Port 22, und der antwortet, sobald `sshd` ihn bindet — also **bevor** cloud-init den Operator-Schlüssel in `authorized_keys` geschrieben hat.
+
+Die zweite Hälfte wiegt schwerer als die falsche Antwort. Direkt hinter diesem Tor steht die Reboot-Recovery, und ein Neustart ist genau das Mittel für einen Knoten mit unfertigem cloud-init. Weil das Tor Erfolg meldete, lief sie nie. Die zu schwache Prüfung hat nicht nur falsch berichtet — sie hat die bereits gebaute Heilung zurückgehalten.
+
+**Die Prüfung meldet sich jetzt an** und zählt einen Host erst als bereit, wenn auf ihm ein Kommando gelaufen ist. Über `ssh(1)` statt über `x/crypto`, weil die Frage lautet, ob *Ansible* hineinkommt: `ssh(1)` löst dieselbe Identität, dieselbe Konfiguration und denselben Agenten auf, die Ansibles Connection-Plugin Minuten später nimmt. Mit einem selbstgewählten Schlüssel zu prüfen bewiese wieder etwas *neben* der Behauptung — und das ist der Fehler, der hier behoben wird.
+
+Aus demselben Grund kommt das Konto aus dem generierten Inventory statt aus einem fest verdrahteten `root`: eine Prüfung, die sich als jemand anderes anmeldet, beantwortet eine andere Frage. Ein fehlendes `ansible_user` ist jetzt ein Fehler, kein Vorgabewert.
+
+Beide neuen Zusagen sind durch Mutation belegt: das Login-Ergebnis aus der Entscheidung zu entfernen und ein fehlendes `ansible_user` auf `root` zurückfallen zu lassen — jedes lässt seinen Test fallen.
+
+**Offen bleibt, warum dieser eine Knoten ablehnte.** Sein Terraform ist identisch zu `ops-vault-1..3`, die alle hochkamen, und der Tunnel nach `10.9.1.13` lebt im Container, war von hier also nicht zu befragen. Der nächste Lauf beantwortet es so oder so: ein Startrennen wird jetzt ausgesessen und dann neugestartet, ein dauerhaft kaputter Knoten wird am Tor benannt — mit dem Grund, den `ssh` genannt hat, statt vierzig Sekunden später mitten in einem Play.
+
+---
+
+#### 10.3-AV Das Tor hielt, und der Knoten war wirklich kaputt
+
+Die neue Prüfung tat beim ersten Lauf, was sie soll: neun Hosts nahmen einen Login an, `10.9.1.13` nicht, die Reboot-Recovery lief zum ersten Mal überhaupt — und der Knoten kam trotzdem nicht wieder.
+
+`context deadline exceeded` benannte dabei keinen Fehler. `ssh` wurde nach 15 Sekunden abgeschnitten, bevor es etwas sagte, also fiel die Meldung auf den Kontextfehler zurück. Bekannt war mehr: `ConnectTimeout=5` hätte `ssh` selbst *„Connection timed out"* melden lassen, wäre TCP gescheitert — ein stummer 15-Sekunden-Versuch impliziert also bereits, dass die Verbindung zustande kam. Die Fehlermeldung wählt den Port jetzt selbst und sagt es, statt es aus einer Abwesenheit erschließen zu lassen. Das trennt die Heilungen: *Port antwortet nicht* ist Netz oder Interface, *Port nimmt an und schweigt* ist der Host.
+
+**Gegen einen systematischen Grund gemessen, nicht vermutet.** Image: identisch (`420932447`) — dasselbe trägt `ops-vault-1/2/3`, die im selben Lauf alle einen Login annahmen. Hetzner-Konfiguration: byte-gleich. Verwaiste Alt-Server nach dem verlorenen State-Bucket: keine, jede private IP genau einmal. Last: CPU 1,07–1,96 %, also Leerlauf. Der Neuaufbau kam sauber hoch — es war diese eine VM.
+
+---
+
+#### 10.3-AW `identity-sync` nannte kein Binary, und Phase 4 bürgte für ein Netz von vier
+
+Zwei unabhängige Defekte gleicher Form: etwas blieb ungesagt, und nichts war in der Lage, das zu bemerken.
+
+**`identity-sync` konnte nicht starten.** Das Identity-Image trägt fünf Binaries und deklariert keinen `ENTRYPOINT` — sein Dockerfile sagt die Regel im eigenen Kopf: *„a job that names none fails to start rather than silently running the wrong service"*. `identity-sync` nannte keinen. Docker verweigerte den Container mit `no command specified`, zehn Allocations starben über zehn Minuten am Progress-Deadline, und beide Log-Ströme blieben leer, weil die Task nie lief: ein lauter Fehlschlag mit dem leisestmöglichen Beleg.
+
+Der Wächter liest das Dockerfile, statt die Regel fest zu verdrahten — so folgt sie dem Image. `registry` deklariert `ENTRYPOINT ["/usr/local/bin/registry"]`, und seine Jobs nennen korrekt nichts; fiele diese Zeile je weg, beginnt der Test zu verlangen, was das Image nicht mehr liefert. Er prüft die *Zuweisung*, nicht das Wort: der Kommentar, der das `command` begründet, enthält „command" ebenfalls, und ein Wächter, den seine eigene Erklärung erfüllt, kann nicht fallen.
+
+**Phase 4 wählte den Unseal-Vault an und meldete daraufhin „VPN connected and verified".** Der Tunnel trägt vier Netze — Overlay, Ops-Netz und je eines pro Zelle, über getrennte Anbindungen am Hub —, also sagt ein Host in einem davon nichts über die anderen drei. Eine kaputte Zell-Route kam hier durch und zeigte sich zwei Phasen später als Play, das still keine Hosts traf.
+
+Jetzt ein Zeuge pro geroutetem Netz, abgeleitet aus `operatorRoutes` — derselben Liste, aus der die Tunnelkonfiguration geschrieben wird, sodass ein dort ergänztes Netz einen Zeugen braucht statt einen Freifahrtschein zu bekommen. Eine Route, in der der State keinen Host benennen kann, wird namentlich als ungeprüft gemeldet statt übergangen. Das Overlay ist bewusst ausgenommen: es *ist* der Tunnel, kein Netz dahinter, und jeder antwortende Zeuge wird über es erreicht.
+
+Die Prüfung bleibt ein TCP-Connect, anders als das Bereitschaftstor in Phase 5. Die Frage hier lautet, ob der Tunnel Pakete in ein Netz trägt, und ein abgeschlossener Handshake beantwortet genau das; ob ein Host einen Login annimmt, ist eine andere Frage — eine Phase später gestellt, von etwas, das einen versucht.
+
+---
+
+#### 10.3-AY Die Registry bekommt eine Umgebung — einmal, und ohne sie startet sie nicht
+
+Die Registry hatte kein Umgebungskonzept. Sie hatte **vier unabhängige Lesungen** einer Umgebung: drei Stellen fragten `os.Getenv("TOOB_ENV") != "production"`, eine vierte las `VAULT_ENV`, um einen Vault-Schlüsselnamen zu bauen. Zwei Namen für eine Tatsache, kein Feld, das sie hält, und nichts, das die beiden vergleicht — dass sie übereinstimmten, verdankte sich einer einzigen Job-Datei.
+
+Alle vier waren in dieselbe Richtung falsch, weil eine nicht gesetzte Variable nicht gleich `"production"` ist: der Compiler-Endpunkt landete auf dem **unauthentifizierten** Mux, eine für Integrationstests gebaute Admin-Route wurde registriert, und Pakete wurden als `toob-package-signing` signiert statt `toob-package-signing-<env>` — ein Schlüsselname, den keine Umgebung bereitstellt.
+
+`shared/env` benennt die drei Umgebungen einmal, in der einzigen Schicht, die Identity, Platform und Registry alle importieren dürfen. `Parse` hat keinen Default und keinen Nullwert für „nicht gesetzt" — genau darauf beruhten alle drei Fehler. `topology.Environments` leitet sich jetzt daraus ab, statt die Namen ein zweites Mal zu buchstabieren.
+
+**Zwei aus derselben Familie, beim Verdrahten gefunden.** Der Worker fiel bei `MIRROR_REPO` still auf `Toob-Boot/Toob-Registry-Public` zurück — jede Umgebung ohne eigenen Wert baute ihren Paket-Snapshot aus *Productions* Spiegel. Und **kein Job lieferte die fünf Repository-Einstellungen**: der Server verweigert ohne alle fünf den Start, `.env.dev` nannte vier, `MIRROR_REPO` existierte nirgends im Repository.
+
+Die Prereq-Liste ist handgeschrieben — so konnte Phase 6 dreißig Variablen als erfüllt melden und dann einen Server ausrollen, der an der einunddreißigsten starb. `envcheck_test` liest jetzt die Verweigerungen aus dem Config-Loader der Registry und verlangt für jede einen Lieferanten.
+
+---
+
+#### 10.3-AZ Die Registry prüft Identity-Token — und startet nicht, wenn sie es nicht kann
+
+Die Registry nahm **kein einziges** Identity-Token an. Nicht, weil der Code fehlte: `middleware/auth.go` hat einen vollständigen JWT-Zweig, importiert `identity/principal` und `identity/token` und ist getestet. Sondern weil er gegen eine Form geschrieben war, die es nie gab.
+
+Die Schnittstelle nannte `*token.TokenClaims`. `Verifier.Verify` gibt `*principal.Principal` zurück, und **nichts in `identity/` erzeugte je ein `TokenClaims`** — der Typ existierte nur, weil diese Schnittstelle ihn nannte. Der vorhandene Verifier konnte die für ihn geschriebene Schnittstelle also nicht erfüllen, die Verdrahtung wurde nie fertig, und übrig blieb ein `SetJWTVerifier`, das außerhalb von Tests niemand aufrief. `jwtVerifier` war damit in jeder laufenden Registry `nil`, und jedes Identity-Token bekam `"invalid token type"` — ein 401 pro Anfrage als Stellvertreter für eine deploymentweite Fehlkonfiguration.
+
+`TokenClaims` ist gelöscht, nicht adaptiert: **eine Form kann nicht von sich selbst abdriften.** `SetJWTVerifier` ebenfalls — der Verifier ist Konstruktorargument, `nil` wird abgelehnt, und aus dem ausgelieferten Fehler wird ein Prozess, der nicht startet.
+
+`identity/token` bekommt die eine Ableitung, die beide Seiten brauchen: Issuer, Audience und JWKS-URL folgen aus dem Hostnamen der Zelle und standen als Literale im HCL. Die Registry nimmt `IDENTITY_DOMAIN`, verpflichtend und ohne Default, von `jobVars` aus `topology.IdentityDomain` — dieselbe Zeichenkette, die `identity-api` bekommt.
+
+**Ein Defekt, den erst die Tests fanden:** ohne die `nil`-Verifier-Abfrage dereferenzierte ein Verifier, der `(nil, nil)` zurückgibt, ein leeres Principal. Vorher nur deshalb unerreichbar, weil die Abfrage eine Zeile darüber stand. Es scheitert jetzt geschlossen — eine unauthentifizierte Anfrage darf den Prozess nicht zum Absturz bringen.
+
+**Bewusst offen:** ein Identity-Subject, das die Registry nicht kennt, wird zu `&domain.User{ID: claims.URN}` erfunden — ein nicht persistierter Benutzer ohne Rollen. Unerreichbar, solange kein Token verifizierte; ab jetzt erreichbar.
+
+---
+
 ## 11. Optimierungspotenziale
 
 Nicht Defekte, sondern Hebel — mehrere davon lösen gleich mehrere Befunde auf einmal.

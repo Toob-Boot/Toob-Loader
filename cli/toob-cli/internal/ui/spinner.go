@@ -159,9 +159,10 @@ func (s *LiveSpinner) Start() {
 
 // clearLines encapsulates the mathematical logic for wiping the correct terminal geometry.
 func (s *LiveSpinner) clearLines(count int, clearOne, clearTwo string) {
-	if count == 2 {
+	switch count {
+	case 2:
 		fmt.Fprint(os.Stderr, clearTwo)
-	} else if count == 1 {
+	case 1:
 		fmt.Fprint(os.Stderr, clearOne)
 	}
 }

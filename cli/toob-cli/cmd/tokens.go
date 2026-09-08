@@ -55,8 +55,17 @@ Example:
 			req.ExpiresIn = &expiresIn
 		}
 
+		// Minting a durable credential asks for a fresh sign-in (the catalog's registry.token.create
+		// carries step-up), so this is answered with a challenge on any session older than a few
+		// minutes and runs the browser login before trying again.
 		ui.Step("Creating token '%s'...", name)
-		resp, err := client.CreateToken(cmd_defaultCtx(), req)
+		ctx := cmd_defaultCtx()
+		var resp *apiclient.TokenCreateResponse
+		err := withStepUp(ctx, client, func() error {
+			var err error
+			resp, err = client.CreateToken(ctx, req)
+			return err
+		})
 		if err != nil {
 			return fmt.Errorf("failed to create token: %w", err)
 		}

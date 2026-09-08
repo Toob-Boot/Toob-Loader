@@ -20,6 +20,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/toob-boot/toob/internal/paths"
@@ -219,30 +222,88 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
+// StepUpRequired is the registry asking for a fresher or stronger authentication before it will
+// perform the operation (RFC 9470).
+//
+// It is its own error type because it is not a failure: the credential was accepted, and what is
+// missing is a ceremony the person can perform right now. A command that receives it signs in again
+// with what the challenge names and retries once — see cmd.withStepUp — instead of reporting a 401
+// the person has no way to act on.
+type StepUpRequired struct {
+	// ACRValues is the authentication context the registry asks for, passed through to the
+	// identity provider as acr_values.
+	ACRValues string
+	// MaxAge is how recent the authentication has to be.
+	MaxAge time.Duration
+	Detail string
+}
+
+func (e *StepUpRequired) Error() string {
+	if e.Detail != "" {
+		return "the registry requires a fresh sign-in for this operation: " + e.Detail
+	}
+	return "the registry requires a fresh sign-in for this operation"
+}
+
+// stepUpChallenge is the WWW-Authenticate value the registry sends for a step-up, e.g.
+//
+//	DPoP error="insufficient_user_authentication", acr_values="urn:toob:mfa:webauthn", max_age=300
+var stepUpChallenge = regexp.MustCompile(`error="insufficient_user_authentication"`)
+
+// parseStepUp reads a step-up challenge from a 401, or reports that the response is not one.
+func parseStepUp(resp *http.Response, detail string) (*StepUpRequired, bool) {
+	header := resp.Header.Get("WWW-Authenticate")
+	if resp.StatusCode != http.StatusUnauthorized || !stepUpChallenge.MatchString(header) {
+		return nil, false
+	}
+
+	challenge := &StepUpRequired{Detail: detail}
+	for _, param := range strings.Split(header, ",") {
+		key, value, found := strings.Cut(strings.TrimSpace(param), "=")
+		if !found {
+			continue
+		}
+		value = strings.Trim(value, `"`)
+		switch strings.TrimSpace(key) {
+		case "acr_values":
+			challenge.ACRValues = value
+		case "max_age":
+			if seconds, err := strconv.Atoi(value); err == nil {
+				challenge.MaxAge = time.Duration(seconds) * time.Second
+			}
+		}
+	}
+	return challenge, true
+}
+
 // extractError reads the response body and creates a structured error.
 // This ensures all API methods surface the server's error message to the user.
+//
+// Every service answers RFC 9457 Problem Details, whose text for a person is "detail" and whose
+// name for a program is "code". A body in another shape — an edge proxy's page, a body of no
+// shape at all — is shown as it is when short.
 func extractError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 
-	var apiErr struct {
-		Error   string `json:"error"`
-		Message string `json:"message"`
+	var problem struct {
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
 	}
-	if json.Unmarshal(body, &apiErr) == nil {
-		msg := apiErr.Error
+	var msg string
+	if json.Unmarshal(body, &problem) == nil {
+		msg = problem.Detail
 		if msg == "" {
-			msg = apiErr.Message
+			msg = problem.Code
 		}
-		if msg != "" {
-			return &APIError{StatusCode: resp.StatusCode, Message: msg}
-		}
+	}
+	if msg == "" && len(body) > 0 && len(body) < 512 {
+		msg = string(body)
 	}
 
-	// Fallback: use raw body if it's short enough, otherwise just the status
-	if len(body) > 0 && len(body) < 512 {
-		return &APIError{StatusCode: resp.StatusCode, Message: string(body)}
+	if challenge, ok := parseStepUp(resp, msg); ok {
+		return challenge
 	}
-	return &APIError{StatusCode: resp.StatusCode}
+	return &APIError{StatusCode: resp.StatusCode, Message: msg}
 }
 
 // --- API Methods ---
@@ -722,18 +783,34 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	return req, nil
 }
 
-// doWithRetry executes a request with exponential backoff for transient server errors (5xx).
-// Non-5xx responses and client errors are returned immediately without retry.
+// maxRetryAfter caps how long a Retry-After header may make this client wait.
+//
+// The registry names its windows in seconds and none is longer than a minute, so a value above
+// this is not one the registry sent — and waiting an hour because a proxy said so is not something
+// a command-line tool does silently.
+const maxRetryAfter = 60 * time.Second
+
+// doWithRetry executes a request again after a transient failure: a 5xx, or a 429 that says when
+// to come back.
+//
+// A 429 is retried only when it carries Retry-After, and then after exactly that long. The server
+// computed the wait from the budget it refused; guessing with a backoff of our own would either
+// hammer a limit that has not reset or sit out one that has. A 429 without the header is returned
+// as it is, because there is nothing to act on.
 func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	var lastErr error
+	var wait time.Duration
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * 500 * time.Millisecond
+			if wait == 0 {
+				wait = time.Duration(math.Pow(2, float64(attempt-1))) * 500 * time.Millisecond
+			}
 			select {
 			case <-req.Context().Done():
 				return nil, req.Context().Err()
-			case <-time.After(backoff):
+			case <-time.After(wait):
 			}
+			wait = 0
 		}
 
 		resp, err := c.HTTPClient.Do(req)
@@ -742,7 +819,22 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 			continue
 		}
 
-		// Only retry on 5xx server errors
+		// A wait the server named is honoured before any backoff of our own: a 429 is the caller's
+		// budget, a 503 with Retry-After is the registry at capacity or its authorization store not
+		// answering (overloaded, authz_unavailable), and in both the header is the whole instruction.
+		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) && attempt < maxRetries {
+			if retryAfter, ok := retryAfterOf(resp); ok {
+				resp.Body.Close()
+				wait = retryAfter
+				lastErr = fmt.Errorf("server asked to retry after %s (HTTP %d, attempt %d/%d)", retryAfter, resp.StatusCode, attempt+1, maxRetries+1)
+				continue
+			}
+		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			// No wait named: nothing to act on, and a backoff of our own would be a guess about a
+			// budget the server did not describe.
+			return resp, nil
+		}
 		if resp.StatusCode >= 500 && attempt < maxRetries {
 			resp.Body.Close()
 			lastErr = fmt.Errorf("server returned HTTP %d (attempt %d/%d)", resp.StatusCode, attempt+1, maxRetries+1)
@@ -752,6 +844,19 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 	return nil, lastErr
+}
+
+// retryAfterOf reads a Retry-After given in seconds, and reports whether there was one to read.
+func retryAfterOf(resp *http.Response) (time.Duration, bool) {
+	seconds, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	wait := time.Duration(seconds) * time.Second
+	if wait > maxRetryAfter {
+		wait = maxRetryAfter
+	}
+	return wait, true
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, target any) error {
