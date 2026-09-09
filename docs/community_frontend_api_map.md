@@ -5,8 +5,10 @@ gegen ihr Backend (`toob-infra/community`): welche Komponenten genutzt werden, w
 jede Seite macht, welche Felder sie davon anfasst — und welche Dinge die Oberfläche zeigt, für
 die es bis heute keine Datenquelle gibt.
 
-Der Vertrag ist `community/web/openapi.yaml`; `TestRoutes_AreTheContracts` hält die Routen des
-Backends dagegen. Dieses Dokument ist die Ebene darüber: es sagt, warum die Fläche so aussieht.
+Der Vertrag ist `community/web/openapi.yaml` — er liegt im Frontend-Repository, damit die Seite
+ihn selbst ändern kann; `TestRoutes_AreTheContracts` hält die Routen des Backends dagegen. Wie
+dieser Kreislauf gemeint ist, steht dort daneben in `community/web/API.md`. Dieses Dokument ist
+die Ebene darüber: es sagt, warum die Fläche so aussieht.
 
 ---
 
@@ -45,14 +47,32 @@ Vier Komponenten hatten keinen einzigen Importeur und sind gelöscht: `CategoryS
 `ForumHeader`, `QuickAccessBox`, `ThreadFilterSwitch`. Dazu `BountiesClientView` samt CSS, dessen
 Seite seit einiger Zeit nur noch auf `/discussions` weiterleitet.
 
-Alle verbleibenden 18 Komponenten haben mindestens einen Importeur. Die drei, die überall
+Alle verbleibenden Komponenten haben mindestens einen Importeur. Die drei, die überall
 auftauchen: `StationSidebar` (9 Seiten), `ThreadCard` (6), `StationHeader` (5).
 
-`@toob/ui` exportiert 14 Module. Das Forum nutzt 11 davon (Badge, Button, Card, Dropdown,
-FilterPills, Input, SearchBar, SegmentedControl, Select, Skeleton, TabNav), die Website nutzt
-zusätzlich `PixelIcon` und `Tooltip`. Übrig bleibt `Accordion`, das keine der beiden Anwendungen
-importiert — die einzige tote Stelle im gemeinsamen Paket, und sie gehört der Website-Seite, also
-lasse ich sie stehen.
+**Stand 2026-09-09, nach dem Refactoring.** Was zwei Detailseiten doppelt hatten, ist ein Satz
+Bausteine unter `components/`: `PostHeader` (Autor, Zeit, „edited", Rollen-Pille),
+`PostActionsMenu` (Bearbeiten/Zitieren, Link kopieren, Text kopieren, Melden hinter Flag),
+`InlinePostEditor` (Bearbeiten an Ort und Stelle, mit Secret-Prüfung), `StatusChangeRow` (ein
+Statuswechsel in der Konversation), `VoteButton` (Hochstimmen, vom Backend bestätigt) und ein
+`StatusBadge`, der das Vokabular des Forums (`lib/status.tsx`) auf den `StatusBadge` des
+Packages abbildet. Die Zustandslogik dahinter sind Hooks in `lib/`: `useVote`, `useInlineEdit`,
+`useReactions` (Flag), `useNotifications`, `useTickets`, `useThreads`. Gelöscht, weil das Package
+sie hat: `UserAvatar` (→ `UserBadge`), `TicketStatusBadge`, die Forum-Kopie von
+`PixelDataStreams`, der Re-Export `PixelArrow`.
+
+`@toob/ui` exportiert 20 Module; `packages/ui/INDEX.md` beschreibt jedes mit Props, Varianten
+und Defaults. Neu darin: `StatusBadge` (Töne statt Vokabular), `PixelDataStreams`, das
+Token-Blatt `tokens.css`, das beide Apps in ihrem Layout einbinden. Weg: `Accordion` (kein
+Importeur; die Website hat ein eigenes `SafetyAccordion`), die Aliase `Tabs` und
+`CategoryPills`, die Altnamen `showClear`/`showKbd` der `SearchBar`.
+
+Was die Seite kennt und das Backend nicht speichert, steht hinter Feature-Flags
+(`lib/flags.ts`, `NEXT_PUBLIC_FLAGS`): Reaktionen, Folgen, Melden. Vorschau-Zustände zum
+Anschauen (`?preview=upload_error,quote`, `lib/preview.ts`) gibt es nur in einem Build mit
+`NEXT_PUBLIC_PREVIEW=1`; die `?test_*`-Parameter in den Komponenten sind weg. Und
+`NEXT_PUBLIC_BACKEND_MODE` hat keinen Default mehr: `.env.development` setzt `mock`, das Image
+`real` (`lib/config.ts`).
 
 ## 3. Was jede Seite anfordert
 
@@ -98,7 +118,8 @@ hätte je funktioniert; es fiel nur nicht auf, weil bei jedem Fehler Mock-Daten 
 
 Nach Dringlichkeit, so wie ich sie sehe:
 
-**1. ~~Paginierung~~ — Backend erledigt am 2026-09-08, Frontend offen (§8).**
+**1. ~~Paginierung~~ — Backend erledigt am 2026-09-08; der Client liest seit dem 2026-09-09 die
+erste Seite (`{items, next_cursor}`), das Nachladen in der Oberfläche ist offen (§8).**
 
 **2. Suche nur über Titel.** `search` prüft `t.title ILIKE`. Der Beitragstext wird nicht
 durchsucht, was für ein Support-Forum die halbe Suche ist. Vorschlag: Volltext über den ersten
@@ -113,8 +134,9 @@ Hardware zuzuordnen, und die Templates-Seite nimmt ersatzweise eine ganze Katego
 der Datenbank, werden gelesen und angezeigt, aber von keiner Route gesetzt. Die Startseite besteht
 im Wesentlichen aus angehefteten Threads. Vorschlag: beide in `PATCH /api/v1/threads/{id}`.
 
-**5. Kein Bearbeiten, kein Löschen.** Weder Thread noch Beitrag. Für ein Forum, in dem Leute Logs
-einfügen, ist „ich habe die falsche Datei eingefügt" der Normalfall.
+**5. ~~Kein Bearbeiten~~, kein Löschen.** Bearbeiten gibt es seit dem 2026-09-09
+(`PATCH /api/v1/posts/{id}`, `Post.edited_at`, `Post.viewer_is_author` sagt der Seite, wem der
+Beitrag gehört). Löschen fehlt weiterhin — Thread wie Beitrag.
 
 **6. Bounties.** Die Sektion ist deaktiviert, die Karte hat den Badge auskommentiert, und
 `bounty` ist ein `int`, das immer 0 ist. Ein echtes Bounty braucht Betrag, Währung, Status
@@ -127,9 +149,10 @@ Upload-Endpunkt. Ein Screenshot zählt damit gegen das 20 000-Zeichen-Limit eine
 ein größeres Bild macht den Beitrag unschickbar. Vorschlag: Upload nach S3 wie bei den Paketen,
 Beitrag verweist per URL.
 
-**8. Benachrichtigungen.** Weder für eine Antwort auf den eigenen Thread noch für ein Ticket, das
-das Team beantwortet hat. Die E-Mail des Gastes liegt am Ticket; für angemeldete Personen liefert
-der IdP sie seit §10.114 mit.
+**8. ~~Benachrichtigungen~~ — im Forum erledigt am 2026-09-09.** `GET /api/v1/me/notifications`
+und `POST /api/v1/me/notifications/read`: eine Antwort im eigenen Thread, ein Statuswechsel durch
+das Team (Migration 008). Offen bleibt der Versand per E-Mail; die Adresse des Gastes liegt am
+Ticket, die der angemeldeten Person liefert der IdP seit §10.114.
 
 **9. Keine Profile.** Ein Beitrag trägt `author_name` als Zeichenkette, keine URN. Das Frontend
 kann niemanden verlinken und zwei Leute mit demselben Anzeigenamen nicht unterscheiden. Die URN
@@ -137,6 +160,25 @@ steht in der Datenbank (`author_urn`) und wird bewusst nicht ausgeliefert.
 
 **10. `view_count` zählt jeden Aufruf.** Ohne Entprellung, ohne Unterscheidung von Bots. Die Zahl
 steht auf der Detailseite.
+
+**11. Keine aufsteigenden Sortierungen.** Die neue Suchmaske bietet „älteste zuerst" und
+„wenigste Stimmen zuerst"; das Backend sortiert jede Liste absteigend. Beide fallen derzeit auf
+ihr Gegenteil zurück. Eine Seite umzudrehen wäre falsch — das sind andere Zeilen, nicht dieselben
+rückwärts. Vorschlag: eine Richtung pro Sortierung, mitsamt gedrehtem Vergleich im Cursor.
+
+**12. ~~„Threads, an denen ich beteiligt bin"~~ — erledigt am 2026-09-09.** `voted=1` (was ich
+hochgestimmt habe) und `replied=1` (worin ich geschrieben habe, ohne es eröffnet zu haben) neben
+`mine=1`; die Reiter unter „My threads" sind je eine dieser Abfragen. „Following" hat weiterhin
+kein Backend und steht hinter dem Feature-Flag `following` (`lib/flags.ts`).
+
+**13. Status-Vokabular und Verlauf — erledigt am 2026-09-09.** Ein Thread kennt elf Status
+(`ThreadStatus` im Vertrag, `store.ThreadStatuses`, Migration 007), der Filter zusätzlich `active`
+und `done`. Jeder Statuswechsel wird als `ThreadEvent` festgehalten (Migration 008) und in
+`events` der Thread- und Ticket-Antwort geliefert; die Detailseiten zeigen ihn in der Konversation.
+
+**14. Reaktionen, Folgen, Melden.** Die Oberfläche hat Emoji-Reaktionen, einen Folgen-Knopf und
+„Melden" im Menü; kein Backend speichert davon etwas. Alle drei stehen hinter Feature-Flags
+(`reactions`, `following`, `reporting` in `lib/flags.ts`), die ein Produktionsbuild nicht setzt.
 
 ## 6. Wo Frontend und Backend jetzt die Grenze ziehen
 
@@ -153,15 +195,17 @@ steht auf der Detailseite.
 
 ## 7. Nächste sinnvolle Schritte
 
-1. Paginierung und Volltextsuche (§5.1, §5.2) — beides betrifft dieselbe Abfrage.
+1. Nachladen weiterer Seiten in der Oberfläche (§8) und Volltextsuche (§5.2).
 2. `mcu_target` als Filter, dann Integrations- und Templates-Seite darauf umstellen (§5.3).
 3. Anheften und Schließen in `PATCH /api/v1/threads/{id}` (§5.4).
-4. Die Team-Inbox als Seite; der Client kann sie schon (`listTickets`, `setTicketStatus`).
-5. Bearbeiten und Löschen (§5.5).
+4. Die Team-Inbox als Seite; der Client kann sie schon (`listTickets`, `setTicketStatus`), und das
+   UI-Package hat seit dem 2026-09-09 `StatusBadge`, `UserBadge` und die Post-Bausteine des
+   Forums (`PostHeader`, `PostActionsMenu`, `InlinePostEditor`, `StatusChangeRow`, `VoteButton`).
+5. Löschen (§5.5), Reaktionen und Folgen mit Backend (§5.14).
 
 ---
 
-## 8. Paginierung: Backend fertig, Frontend offen
+## 8. Paginierung: Backend fertig, Client liest die erste Seite, Nachladen offen
 
 Vorher war nichts paginiert. Threads und Tickets waren bei `LIMIT 200` hart abgeschnitten,
 ohne Cursor und ohne Hinweis darauf, dass etwas fehlt; die Beiträge eines Threads waren
