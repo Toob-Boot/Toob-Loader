@@ -221,6 +221,16 @@ static toob_status_t _payload_chunk_cb(const uint8_t* chunk, uint32_t len, void*
 /* OTA session context (static: survives across resume cycles) */
 static toob_ota_ctx_t s_ota_ctx;
 
+/* Lower-case hex of len bytes into out, which holds 2 * len + 1 characters. */
+static void _hex_encode(const uint8_t *in, size_t len, char *out) {
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0U; i < len; i++) {
+        out[2U * i] = digits[(size_t)(in[i] >> 4U)];
+        out[(2U * i) + 1U] = digits[(size_t)(in[i] & 0x0FU)];
+    }
+    out[2U * len] = '\0';
+}
+
 toob_status_t toob_network_trigger_ota(const char* server_url) {
     if (!server_url) server_url = CONFIG_TOOB_SERVER_URL;
     
@@ -261,11 +271,8 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
         return TOOB_ERR_HARDWARE;
     }
 
-    char dev_id_hex[65];
-    for (int i = 0; i < 32; i++) {
-        snprintf(&dev_id_hex[i * 2], 3, "%02x", dev_id[i]);
-    }
-    dev_id_hex[64] = '\0';
+    char dev_id_hex[(2U * sizeof(dev_id)) + 1U];
+    _hex_encode(dev_id, sizeof(dev_id), dev_id_hex);
 
     /* UPD-004 Step 2: Format POST Checkin URL: %s/v1/devices/%s/checkin */
     char check_url[256];
@@ -283,15 +290,31 @@ toob_status_t toob_network_trigger_ota(const char* server_url) {
         return TOOB_ERR_HARDWARE;
     }
 
-    /* UPD-004 Step 4: Sequence counter & Headers assembly */
+    /* UPD-004 Step 4: Sequence counter & Headers assembly. A sequence that did not reach NVS could
+     * be sent again after a reboot, so the check-in stops rather than send it. */
     uint64_t seq = 0;
-    (void)toob_cred_bump_seq(&seq);
+    toob_status_t seq_stat = toob_cred_bump_seq(&seq);
+    if (seq_stat != TOOB_OK) {
+        TOOB_LOGE(TAG, "Failed to persist the check-in sequence (0x%08X), skipping checkin", (unsigned)seq_stat);
+        return seq_stat;
+    }
 
-    char auth_hdr[96];
-    snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s\r\n", (const char*)cred.device_token);
+    char token_hex[(2U * TOOB_DEVICE_TOKEN_LEN) + 1U];
+    _hex_encode(cred.device_token, TOOB_DEVICE_TOKEN_LEN, token_hex);
+
+    char auth_hdr[sizeof("Authorization: Bearer \r\n") + (2U * TOOB_DEVICE_TOKEN_LEN)];
+    written = snprintf(auth_hdr, sizeof(auth_hdr), "Authorization: Bearer %s\r\n", token_hex);
+    if (written < 0 || (size_t)written >= sizeof(auth_hdr)) {
+        TOOB_LOGE(TAG, "Authorization header truncated");
+        return TOOB_ERR_INVALID_ARG;
+    }
 
     char seq_hdr[64];
-    snprintf(seq_hdr, sizeof(seq_hdr), "X-Toob-Seq: %llu\r\n", (unsigned long long)seq);
+    written = snprintf(seq_hdr, sizeof(seq_hdr), "X-Toob-Seq: %llu\r\n", (unsigned long long)seq);
+    if (written < 0 || (size_t)written >= sizeof(seq_hdr)) {
+        TOOB_LOGE(TAG, "Sequence header truncated");
+        return TOOB_ERR_INVALID_ARG;
+    }
 
     const char *const headers[3] = {
         auth_hdr,

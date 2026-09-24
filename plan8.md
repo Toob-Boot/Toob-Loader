@@ -1,6 +1,6 @@
 # Backlog — Toob Update Service
 
-**Grundlage:** `ARCHITEKTUR-update-service-v2.md` (plan7.md). Jedes Ticket referenziert den Abschnitt (§)
+**Grundlage:** `docs/update_service_architecture.md` (bis 2026-07-30 `plan7.md`). Jedes Ticket referenziert den Abschnitt (§)
 bzw. den Befund (B), den es umsetzt. Doku und Code dürfen nicht driften — ändert ein Ticket
 eine Entscheidung, wird die Architektur im selben PR angepasst.
 

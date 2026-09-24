@@ -1,6 +1,6 @@
 // Package store provides content-addressed WORM (Write Once, Read Many) storage
 // for firmware artifacts, with mandatory post-upload read-back digest verification
-// (§7.4 in plan7.md, UPD-013 in plan8.md).
+// (§7.4 in update_service_architecture.md, UPD-013 in plan8.md).
 package store
 
 import (

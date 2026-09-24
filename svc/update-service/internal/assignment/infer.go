@@ -1,4 +1,4 @@
-// Package assignment implements the Confirm-Inferenz Engine (§6 in plan7.md, UPD-026 in plan8.md).
+// Package assignment implements the Confirm-Inferenz Engine (§6 in update_service_architecture.md, UPD-026 in plan8.md).
 package assignment
 
 import (
@@ -29,7 +29,7 @@ const (
 	SlotRecovery uint8 = 2
 )
 
-// InferAssignmentOutcome evaluates device boot telemetry against an open assignment (§6 in plan7.md, UPD-026 in plan8.md).
+// InferAssignmentOutcome evaluates device boot telemetry against an open assignment (§6 in update_service_architecture.md, UPD-026 in plan8.md).
 //
 // Inference Rules:
 //  1. Successful Boot: obs.ReportedBuild == want.BuildNumber && obs.BootedPartition == SlotApp (0)

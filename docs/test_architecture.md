@@ -297,10 +297,10 @@ E14
   `alice` lädt `name@1.0.0` zweimal mit *unterschiedlichem* Inhalt (anderer SHA) in dev → zweiter Insert `409` `VERSION_CONFLICT` (Per-Publisher-Unique-Index dev/testing).
 
 - [ ] **PUB-05 — Dev-Quota (TOCTOU-frei genug)**
-  `alice` (`free`, MaxDev=10, Host-Cap 10) füllt 10 dev-Pakete → 11. Upload `429` `QUOTA_EXCEEDED` „max 10". **Variante:** Nach `unpublish` eines dev-Pakets ist wieder ein Slot frei.
+  `alice` (`free`, MaxDev=10) füllt 10 dev-Pakete → 11. Upload `402` `quota_exceeded` „max 10". **Variante:** Nach `unpublish` eines dev-Pakets ist wieder ein Slot frei.
 
-- [ ] **PUB-06 — Plan- vs. Host-Cap (`min`-Logik)**
-  Publisher auf `enterprise` (MaxDev=200) bleibt dennoch durch Host-`MAX_DEV_PACKAGES` gedeckelt → effektives Limit = `min(plan, host)`. Test: setze Host-Cap niedrig, Plan hoch → Host-Cap greift.
+- [ ] **PUB-06 — Der Plan ist das einzige Limit**
+  Publisher auf `enterprise` (MaxDev=200) veröffentlicht das 11. dev-Paket → `201`. Ein Plan-Override, das nicht parst (unbekanntes Feld, negativer Wert), beantwortet jede Quoten-Frage mit `500` statt mit dem Free-Limit.
 
 - [ ] **PUB-07 — Heuristik-Warnings sind nicht-blockierend**
   Tarball mit `system(`+`stdlib.h` bzw. Inline-ASM außerhalb `arch` → `201`, aber `ingestion_warnings` im Response **und** im persistierten Manifest (`ingestion_warnings`-Key) für Staging-Review.

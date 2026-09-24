@@ -176,6 +176,30 @@ kein Backend und steht hinter dem Feature-Flag `following` (`lib/flags.ts`).
 und `done`. Jeder Statuswechsel wird als `ThreadEvent` festgehalten (Migration 008) und in
 `events` der Thread- und Ticket-Antwort geliefert; die Detailseiten zeigen ihn in der Konversation.
 
+**15. Ratenlimits — erledigt am 2026-09-09.** Dieselbe Engine wie Identity und Registry
+(`identity/ratelimit`), Klassen `forum_edge` (600/min pro Adresse), `forum_write` (30/min pro
+Sitzung, 120/min pro Adresse), `forum_guest_write` (10/min pro Adresse) in `policy/ratelimits.yaml`;
+pro Instanz, davor eine Cloudflare-Regel für Schreibzugriffe (20 in 10 s pro Adresse). Der Client
+liest `Retry-After` und die Oberfläche nennt die Wartezeit.
+
+**16. Fehlerzustände — erledigt am 2026-09-09.** Listen sagen, wenn sie nicht geladen werden
+konnten (`ListingError`), Formulare zeigen die Backend-Meldung mit Sign-in-Link oder Wartezeit
+(`RequestFailure`), `error.tsx`/`global-error.tsx` fangen Render-Fehler, Grenzwerte
+(`lib/limits.ts`) werden vor dem Absenden geprüft, ein gesperrter Thread zeigt keinen Composer,
+das Team setzt Status an Thread und Ticket (`StatusControl`), ein Gast öffnet ein Ticket per
+E-Mail und bekommt den Link einmal gezeigt (`TicketLinkModal`). Der Session-Cookie ist `Lax`,
+damit ein externer Link zum eigenen privaten Thread mit Sitzung ankommt.
+
+**17. Zugänge — erledigt am 2026-09-09.** Schreiben nur mit Sitzung (Thread, Antwort, Bearbeiten,
+Stimme, Status); der Gast-Ticket-Pfad mit E-Mail und Token ist aus Vertrag, Backend und Seite
+entfernt, ein privates Ticket ist der private Thread einer angemeldeten Person. Private Sektionen
+gelten auf jeder ID-Route (`reach` im Store), `bounty` ist nicht mehr setzbar, die Team-Relation
+wird alle fünf Minuten neu gefragt (`teamRecheck`), schreibende Anfragen müssen von der eigenen
+Origin kommen und JSON sein, 5xx-Antworten tragen keinen internen Fehlertext, die Suche escaped
+Wildcards, ein Aufruf zählt einmal pro Leser und Tag (`thread_views`), das Server-Rendering
+reicht die Leseradresse an den Limiter weiter, und die CSP kommt mit Nonce aus `proxy.ts` statt
+mit `unsafe-inline` aus Caddy.
+
 **14. Reaktionen, Folgen, Melden.** Die Oberfläche hat Emoji-Reaktionen, einen Folgen-Knopf und
 „Melden" im Menü; kein Backend speichert davon etwas. Alle drei stehen hinter Feature-Flags
 (`reactions`, `following`, `reporting` in `lib/flags.ts`), die ein Produktionsbuild nicht setzt.

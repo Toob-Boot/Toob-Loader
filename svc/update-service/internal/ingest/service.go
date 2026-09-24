@@ -1,5 +1,5 @@
 // Package ingest implements firmware artifact ingestion, Header Authority verification,
-// and atomic channel release pointers (§5, §7.4 in plan7.md, UPD-014 in plan8.md).
+// and atomic channel release pointers (§5, §7.4 in update_service_architecture.md, UPD-014 in plan8.md).
 package ingest
 
 import (

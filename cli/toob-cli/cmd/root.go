@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/regcheck"
 	"github.com/toob-boot/toob/internal/ui"
 	"github.com/toob-boot/toob/internal/updater"
@@ -62,6 +64,10 @@ and orchestrates the full build pipeline for Toob-Boot firmware.`,
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		var refused *apiclient.APIError
+		if errors.As(err, &refused) && refused.Code == "insufficient_trust_level" {
+			ui.Tip("This needs a sign-in with a passkey: run 'toob login --force' and sign in with it.")
+		}
 		os.Exit(1)
 	}
 }

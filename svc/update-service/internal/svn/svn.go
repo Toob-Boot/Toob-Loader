@@ -1,5 +1,5 @@
 // Package svn enforces per-product, per-target-slot SVN (Security Version Number)
-// monotonicity invariants at the database level (§7.3 in plan7.md, UPD-012 in plan8.md).
+// monotonicity invariants at the database level (§7.3 in update_service_architecture.md, UPD-012 in plan8.md).
 package svn
 
 import (

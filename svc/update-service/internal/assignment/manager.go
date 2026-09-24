@@ -1,5 +1,5 @@
 // Package assignment implements the Lazy Materialization engine and Assignment State Machine
-// with strict monotonicity enforcement and audit event logging (§5.1, §5.2, §5.3 in plan7.md, UPD-022, UPD-025 in plan8.md).
+// with strict monotonicity enforcement and audit event logging (§5.1, §5.2, §5.3 in update_service_architecture.md, UPD-022, UPD-025 in plan8.md).
 package assignment
 
 import (
@@ -56,7 +56,7 @@ func (s State) String() string {
 }
 
 // CanTransition evaluates whether moving from currentState to targetState is allowed
-// according to the explicit state transition permission matrix (§5.1 in plan7.md).
+// according to the explicit state transition permission matrix (§5.1 in update_service_architecture.md).
 func CanTransition(from, to State) bool {
 	if from.Ordinal() < 0 || to.Ordinal() < 0 {
 		return false
@@ -116,7 +116,7 @@ type DatabaseOps interface {
 	LogDeviceEvent(ctx context.Context, deviceID []byte, eventType string, payload map[string]interface{}) error
 }
 
-// Reconcile performs lazy materialization of desired state assignments (§5.2 in plan7.md).
+// Reconcile performs lazy materialization of desired state assignments (§5.2 in update_service_architecture.md).
 func Reconcile(
 	ctx context.Context,
 	db DatabaseOps,

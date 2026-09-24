@@ -1,5 +1,5 @@
 // Package resolver implements the pure, side-effect-free, deterministic device resolution engine
-// for update assignment (§6 in plan7.md, UPD-021 in plan8.md).
+// for update assignment (§6 in update_service_architecture.md, UPD-021 in plan8.md).
 package resolver
 
 import (

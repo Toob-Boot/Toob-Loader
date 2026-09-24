@@ -1,4 +1,4 @@
-// Package gateway implements the device check-in HTTP gateway (Hot Path, §4.2 in plan7.md, UPD-020 in plan8.md).
+// Package gateway implements the device check-in HTTP gateway (Hot Path, §4.2 in update_service_architecture.md, UPD-020 in plan8.md).
 package gateway
 
 import (
@@ -146,7 +146,7 @@ func (h *CheckinHandler) HandleCheckinRoute(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// 4. Parse & Enforce X-Toob-Seq header for OS-NVS idempotency (§4.2, B2 in plan7.md, UPD-028 in plan8.md)
+	// 4. Parse & Enforce X-Toob-Seq header for OS-NVS idempotency (§4.2, B2 in update_service_architecture.md, UPD-028 in plan8.md)
 	seqHeader := strings.TrimSpace(r.Header.Get("X-Toob-Seq"))
 	if seqHeader == "" {
 		h.writeError(w, http.StatusBadRequest, "X-Toob-Seq header required")

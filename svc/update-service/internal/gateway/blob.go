@@ -1,5 +1,5 @@
 // Package gateway implements blob payload delivery with strict Range 206, 416 guard,
-// identity encoding, and zero 3xx redirects (§3.3 in plan7.md, UPD-023 in plan8.md).
+// identity encoding, and zero 3xx redirects (§3.3 in update_service_architecture.md, UPD-023 in plan8.md).
 package gateway
 
 import (
@@ -77,7 +77,7 @@ func (h *BlobHandler) HandleBlobDelivery(w http.ResponseWriter, r *http.Request)
 	}
 	_ = rc.Close() // Close probe reader immediately
 
-	// Mandatory Invariant Headers (§3.3 plan7.md)
+	// Mandatory Invariant Headers (§3.3 update_service_architecture.md)
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("ETag", fmt.Sprintf("%q", digestHex))
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")

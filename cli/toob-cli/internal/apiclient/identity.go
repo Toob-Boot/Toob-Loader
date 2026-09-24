@@ -22,6 +22,8 @@ type AuthConfig struct {
 	Audience string   `json:"audience"`
 	ClientID string   `json:"client_id"`
 	Scopes   []string `json:"scopes"`
+	// AccountsURL is where identity-api answers: organizations are managed there, not at the registry.
+	AccountsURL string `json:"accounts_url"`
 }
 
 // FetchAuthConfig asks the registry who issues the tokens it accepts.

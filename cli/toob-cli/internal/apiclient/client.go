@@ -212,7 +212,9 @@ func GetLogin() string {
 // APIError represents a structured error response from the server.
 type APIError struct {
 	StatusCode int
-	Message    string
+	// Code is the platform's error code (shared/errors), such as insufficient_trust_level.
+	Code    string
+	Message string
 }
 
 func (e *APIError) Error() string {
@@ -303,7 +305,7 @@ func extractError(resp *http.Response) error {
 	if challenge, ok := parseStepUp(resp, msg); ok {
 		return challenge
 	}
-	return &APIError{StatusCode: resp.StatusCode, Message: msg}
+	return &APIError{StatusCode: resp.StatusCode, Code: problem.Code, Message: msg}
 }
 
 // --- API Methods ---

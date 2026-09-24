@@ -100,6 +100,22 @@ Zitadel bereits kann:
 Nicht geplant: ein Typ `forum` in OpenFGA. Erst, wenn jemand Rechte pro Kategorie oder pro Thread
 an Personen vergeben soll, die nicht Team sind.
 
+## 9. Team und Trust Level (Stand 2026-09-09)
+
+Ein Login für alle: BFF, Zitadel, Code plus PKCE. Ob die Person das Team ist, entscheidet die
+Relation `platform:global#support` (`openfga-provision --support`, Staff automatisch) zusammen mit
+dem Trust Level des Logins: `forum-api` hält die Relation gegen `min_trust_level` von
+`community.support.act` im Katalog (`api.teamTrustLevel`). Die Sitzung trägt beides
+(`sessions.trust_level`, `sessions.support`, Migration 010); `author_type` ist daraus abgeleitet,
+und `/api/auth/session` sagt mit `team_needs_passkey`, wenn die Relation hält, der Login aber unter
+dem Level lag.
+
+Normale Nutzer bleiben bei L1: ein Social-Login trägt kein phishing-resistentes `amr` und ist L1,
+das Forum verlangt von der Community nichts darüber. Der Katalog steht auf **L1** und ist der
+Schalter: auf L2, sobald die Messung aus `identity_l1_integration.md` §9 zeigt, dass Zitadel einen
+Passkey-Login als `urn:zitadel:iam:mfa:l2` meldet — sonst würde die Umstellung jedes Teammitglied
+aussperren, bis `authn.yaml` Zitadels `amr`-Wert `user` kennt.
+
 ## 7. Offen
 
 - Der Netzpfad `community` → OpenFGA zwischen den Hetzner-Projekten ist so wenig gemessen wie der

@@ -56,24 +56,27 @@ Hier sind zwei Ebenen zu trennen, und sie werden leicht verwechselt:
 
 | Ebene | Selbstregistrierung? |
 |---|---|
-| **Konto beim IdP** (Zitadel-Benutzer, Passkey, MFA) | **Nein.** Invitation-only, hart gesperrt (§2.1) |
-| **Konto in der Registry** (Publisher, Pakete, Orgs) | **Ja, automatisch** beim ersten Login (§2.3) |
+| **Konto beim IdP** (Zitadel-Benutzer) | **Ja, über GitHub oder Google.** Die erste Anmeldung legt das Konto an; ein Formular gibt es nicht (§2.1) |
+| **Konto in der Registry** (Benutzerzeile, Pakete, Namensräume) | **Ja, automatisch** beim ersten Aufruf (§2.3) |
 
-Anders gesagt: **wer sich anmelden kann, ist in der Registry sofort und ohne Antrag vollwertig
-dabei.** Der Flaschenhals sitzt eine Ebene tiefer — beim Anlegen des IdP-Kontos.
+Jedes so entstandene Konto liegt in der Default-Organisation der Instanz („Toob Alliance"). Sie ist
+**kein Tenant** (§2.4). Mandant wird ein Konto über eine Mitgliedschaft: es legt selbst einen Tenant
+an oder nimmt eine Einladung an (E1, `identity_customer_model_plan.md`). Konten, die sich
+über den IdP eines Kunden anmelden, liegen in dessen Tenant-Organisation (§2.7).
 
-### 2.1 Beim IdP gibt es keine Selbstregistrierung
+### 2.1 Beim IdP: Selbstregistrierung nur über GitHub und Google
 
-**Ein „Sign up"-Button hat auf der IdP-Ebene keinen Endpunkt.** Zwei Stellen setzen das unabhängig
-voneinander durch.
+**Ein Registrierungsformular hat keinen Endpunkt.** Ein Konto entsteht bei der ersten Anmeldung über
+GitHub oder Google (`IsCreationAllowed` und `IsAutoCreation`, §2.5), in der Default-Organisation.
 
 **1. Instanz-Policy** (`identity/internal/zitadel/policies.go`, `InstancePolicy()`):
 
 ```go
-AllowRegister:          false   // keine Selbstregistrierung
+AllowRegister:          false   // kein Registrierungsformular
 AllowUsernamePassword:  true
-AllowExternalIDP:       true    // Kunden-IdP (Okta, Entra, …) erlaubt
+AllowExternalIDP:       true    // GitHub, Google, Kunden-IdP
 ForceMFA:               true
+ForceMFALocalOnly:      true    // MFA-Pflicht nur für lokale Konten; Social-Konten kommen als L1
 PasswordlessType:       "PASSWORDLESS_TYPE_ALLOWED"   // Passkeys
 HidePasswordReset:      true    // kein Self-Service-Reset
 IgnoreUnknownUsernames: true    // keine Konto-Enumeration
@@ -89,106 +92,90 @@ Passwort-Policy, falls doch mit Passwort angemeldet wird: **16 Zeichen**, Groß,
 Sonderzeichen; 90 Tage Maximalalter, 14 Tage Vorwarnung. Lockout nach
 `spolicy.MaxFailedPasswordAttempts`.
 
-**2. Caddy blockt die Endpunkte hart**
-(`platform/deploy/ansible/roles/caddy/templates/Caddyfile-identity.j2`):
-
-```
-respond /ui/login/register*        "Registration is invitation-only"                403
-respond /v2/users/register*        "Registration is invitation-only"                403
-respond /v1/users/register*        "Registration is invitation-only"                403
-respond /ui/login/password*        "Password authentication is disabled. Use Passkeys/WebAuthn" 403
-respond /v2/users/*/password       "Password authentication is disabled"            403
-respond /ui/login/password/reset*  "Self-service recovery is disabled …"            403
-```
+**2. Caddy sperrt die Formulare, nicht den Social-Weg**
+(`platform/deploy/ansible/roles/caddy/templates/Caddyfile-identity.j2`): 403 für die
+Registrierungsformulare von Login v1 (`/ui/login/register`, `/register/option`, `/register/org*`) und
+Login v2 (`/ui/v2/login/register`, `/register/password*`), für `/v1|v2/users/register*`, die
+Passwort-Masken und den Self-Service-Reset. Offen bleiben `/ui/login/register/externalidp*` und
+`/ui/v2/login/idp/*`: das ist die Kontoanlage über GitHub und Google.
 
 Zusätzlich sind `/ui/console*`, `/ui/admin*`, `/console*`, `/metrics*`, `/debug*` von außen 403 —
 die Admin-Konsole ist **nur über WireGuard** (`10.9.0.0/16`, `10.20.0.0/16`) erreichbar.
 
 ### 2.2 Wie ein IdP-Konto also entsteht
 
-Drei legitime Wege, alle ohne Beteiligung des Login-Screens:
+1. **Social Sign-up** über GitHub oder Google, in die Default-Organisation. Der einzige Weg, auf dem
+   jemand sich selbst ein Konto anlegt.
+2. **Bootstrap:** `admin` und `provision-sa` legt `zitadel-setup` an (FirstInstance), die
+   Maschinen-User legt `zitadel-provision` an.
+3. **Externer IdP (Federation).** `AllowExternalIDP: true`. Der Trust Level kommt aus dem `amr` der
+   Anmeldung (§4.4): ohne phishing-resistenten Wert bleibt die Sitzung L1.
 
-1. **SCIM-Provisionierung durch den Kunden-IdP.** Der Mandant stellt sich über
-   `POST /api/v1/tenants/{id}/scim-token` ein Bearer-Token aus und trägt
-   `https://accounts-dev.the-toob.com/scim/v2/{tenantID}` in Okta/Entra ein. Deren SCIM-Connector
-   legt Benutzer und Gruppen an (`identity/scim`). Eine Gruppe trägt dabei **keine Rolle** — die
-   Rolle kommt aus einem Mapping, das ein Operator mit L2 und Step-Up setzt
-   (`PUT /api/v1/tenants/{id}/scim-groups/{groupId}`). Eine ungemappte Gruppe gewährt nichts.
-2. **Einladung durch einen Organisations-Admin**:
-   `POST /api/v1/tenants/{id}/members` mit `{"user_id": …, "role": "owner"|"admin"|"member"}`.
-   Nur diese drei Rollen sind direkt zuweisbar — `operator`, `manager`, `self_user`, `support`
-   sind im FGA-Modell *berechnet*, `break_glass_operator` darf nie in den Store geschrieben werden.
-   Die Zuweisung wird gegen das erzeugte Modell validiert (`ValidateMembershipRole`), nicht gegen
-   eine Liste im Handler.
-3. **Externer IdP (Federation).** `AllowExternalIDP: true`. Der Trust Level kommt auch hier aus
-   `amr`/`acr` des ausgestellten Tokens (§4.4): ohne phishing-resistenten Wert vom fremden IdP
-   bleibt die Sitzung L1, und jede L2-Route antwortet mit der Step-Up-Challenge (§5.3).
+Kein Konto entsteht über die Mitglieder-API oder SCIM. `POST /api/v1/tenants/{id}/members` gibt
+einem **bestehenden** Konto eine Rolle (`owner`, `admin`, `member` — gegen das Modell validiert,
+`ValidateMembershipRole`); eine URN wird dabei auf die Zitadel-User-ID reduziert, eine
+Operator-URN abgewiesen. Vergeben, ändern und entziehen darf jeder nur bis zur eigenen Rolle, ein
+Admin also keinen Owner, und der letzte Owner kann weder entfernt noch herabgestuft werden
+(`409`). SCIM (`POST /api/v1/tenants/{id}/scim-token`, Rollen per
+`PUT /api/v1/tenants/{id}/scim-groups/{groupId}`) schreibt ins eigene Verzeichnis von identity
+(`scim_users`), nicht nach Zitadel.
 
 ### 2.3 In der Registry gibt es sehr wohl Selbstregistrierung — und keinen Org-Zwang
 
-Das ist die Antwort auf „wie meldet man sich normal an, ohne Organisation": **die Registry legt den
-Benutzer beim ersten Login selbst an.**
-
+**Die Registry legt den Benutzer beim ersten Aufruf selbst an:**
 `registry/internal/server/middleware/auth.go` → `EnsureFromIdentity`
-(`registry/internal/server/postgres/users.go:64`):
+(`registry/internal/server/postgres/users.go`):
 
 ```go
-// EnsureFromIdentity records a person the identity provider has already authenticated.
-//
-// The registry does not keep accounts of its own: a user here is a projection of one over there,
-// and a verified token is the assertion that the person exists. What this creates carries no roles
-// and no organization membership, so the row grants nothing.
 INSERT INTO users (id, username, display_name) VALUES ($1, $1, NULLIF($2, ''))
 ON CONFLICT (id) DO UPDATE SET display_name = COALESCE(NULLIF(EXCLUDED.display_name,''), users.display_name)
 ```
 
-Ablauf beim allerersten Login: Token verifiziert → `GetByID(urn)` findet nichts → Zeile wird
-angelegt → `plan_tier` fällt auf `free`. **Keine Organisation nötig, kein Antrag, kein Freischalten.**
-Wiedersehen aktualisiert nur den Anzeigenamen; Plan, Sperrstatus und alles, was die Registry selbst
-entscheidet, bleibt unberührt.
+`id` ist die URN des Principals (`users.id` ist seit Migration 039 `TEXT`, samt aller Spalten, die
+darauf verweisen). Wiedersehen aktualisiert nur den Anzeigenamen; Plan, Sperrstatus und alles, was
+die Registry selbst entscheidet, bleibt unberührt.
 
-Und was darf so ein frischer Benutzer? `registry/internal/domain/permission.go`:
-
-```go
-func HasPermission(user *User, perm Permission) bool {
-	if user == nil || !user.IsActive() { return false }
-	switch perm {
-	case PermPackagePublish, PermOrgCreate:
-		return true      // jeder aktive Benutzer
-	default:
-		return false
-	}
-}
-```
-
-**Veröffentlichen und eine Organisation anlegen kann jeder aktive Benutzer sofort.** Das ist genau
-die niedrige Einstiegshürde, die man für schnelles Onboarding will.
+Was ein frischer Benutzer darf, entscheidet der Katalog (`policy/permissions.yaml`) wie überall:
+lesen, `GET /api/v1/me`, Tokens auflisten ab L1; einen Namensraum anlegen
+(`registry.namespace.create`) und veröffentlichen ab L2 — also nach dem ersten Passkey (§2.6).
+Die Menge kommt allein aus dem Plan (`shared/plan`): free erlaubt einen Namensraum und zehn
+dev-Pakete, pro fünf und fünfzig. Einen Host-Deckel darüber gibt es nicht.
 
 ### 2.4 Zwei Org-Welten — und nur eine davon braucht man am Anfang
 
-Das ist die Stelle, an der man sich sonst verrennt: „Organisation" bedeutet an zwei Orten etwas
-anderes, und die beiden sind heute **nicht** miteinander verbunden.
+„Organisation" bedeutet an zwei Orten etwas anderes. Verbunden sind die beiden über
+Tenant-Namensräume: ein Namensraum, den ein Tenant-Admin mit `tenant_id` anlegt, gehört dem Tenant,
+und dessen Plan setzt die Quote.
 
 | | **Registry-Org** | **Identity-Tenant** |
 |---|---|---|
-| Endpunkt | `POST /api/v1/orgs` (Registry-Host) | `POST /api/v1/tenants` (accounts-Host) |
-| Was passiert | Zeile in der Registry-DB | Mandant + FGA-Scope + Audit-Ledger + RLS |
-| Wer darf | **jeder aktive Benutzer** | `admin.tenant.create`, L2 + Step-Up |
-| Wofür | Paket-Namensraum, Mitglieder, Publishing | Governance, SCIM, Break-Glass, Impersonation |
-| Quote | Plan: free **1**, pro 5, enterprise 999 | keine durchgesetzte |
-| Code | `registry/internal/server/handler/organization.go:51` | `identity/api/tenants.go` |
+| Endpunkt | `POST /api/v1/orgs` (Registry-Host) | `POST /api/v1/me/tenants` selbst, `POST /api/v1/tenants` durch Staff (accounts-Host) |
+| Was passiert | Zeile in der Registry-DB, Aufrufer wird Owner | Zitadel-Org + Mandantenzeile + Owner + Audit; Staff lädt den Owner per `owner_email` ein |
+| Wer darf | `registry.namespace.create`: jedes Konto mit Passkey (L2) | `identity.tenant.create`: jedes Konto mit Passkey (L2); `admin.tenant.create`: `platform#staff` |
+| Wofür | Paket-Namensraum, Mitglieder, Publishing | Mitglieder per Einladung oder SSO, Plan, Geräte, SCIM, Break-Glass, Impersonation |
+| Quote | persönlich: Plan des Kontos, free **1**, pro 5, enterprise 999; Tenant-Namensraum: Plan des Tenants | fünf selbst angelegte je Konto; mehr über Staff |
+| Code | `registry/internal/server/handler/organization.go` | `identity/api/tenants.go` |
 
-Für den Produkteinstieg zählt **nur die linke Spalte**. `POST /api/v1/orgs` prüft Namensregel →
-globale Eindeutigkeit → Plan-Quote → legt an, und macht den Aufrufer zum Owner. Kein Zitadel-Aufruf,
-kein OpenFGA, kein Step-Up.
+Für den Produkteinstieg zählt **die linke Spalte**. `POST /api/v1/orgs` prüft Namensregel →
+globale Eindeutigkeit → Plan-Quote → legt an und macht den Aufrufer zum Owner. Kein Zitadel-Aufruf;
+OpenFGA fragt die Mitgliedschaft in der eigenen Organisation, die der Token belegt. Wer einen
+Namensraum verlässt, nimmt `DELETE /api/v1/orgs/{name}/membership`; der letzte Owner kann nicht
+gehen, und niemand kann ihn herabstufen (`409`).
 
-Die rechte Spalte ist die Enterprise-Fläche. Wer sie braucht, hat einen Vertrag; wer ein Paket
-veröffentlichen will, braucht sie nicht.
+Die rechte Spalte entsteht per Self-Service oder über Staff; wer darin handeln darf, entscheidet
+eine Mitgliedschaft (`tenant_members` → OpenFGA), nicht die Organisation, in der das Konto liegt.
+Den Plan eines Tenants setzt
+Staff mit `PUT /api/v1/tenants/{id}/entitlement`: Permissions auf dem Plattform-Objekt gelten
+mandantenübergreifend, die Relation auf `platform:global` entscheidet.
+
+**Die Default-Organisation ist kein Tenant.** `zitadel-provision --record-default-org` legt ihre ID
+nach `secret/data/identity/default-org`; identity-api weist sie als Tenant-Pfad ab (`404`), und das
+Rate-Limit zählt ihre Konten einzeln statt als einen gemeinsamen Mandanten.
 
 > **Entschieden, nicht gebaut (plan7-Backlog E.1 Q4):** `identity/internal/orgs` — der Manager, der
 > Zitadel-Org und lokalen Spiegel verband, samt `ProvisionPersonalOrganization` — ist gelöscht. Der
 > persönliche Namensraum eines Entwicklers *ist* die Registry-Org (linke Spalte); ein Identity-Tenant
-> ist die Enterprise-Fläche und entsteht über `POST /api/v1/tenants` durch Staff. Zwei Wege zu
+> ist die Firmenfläche und entsteht über `POST /api/v1/me/tenants` oder durch Staff. Zwei Wege zu
 > einer Organisation wären zwei Wahrheiten darüber, wer wozu gehört.
 
 ### 2.5 Social Login — GitHub und Google, deklariert und abgeglichen
@@ -208,7 +195,7 @@ Divergenz.
 
 Das Linking-Verbot ist die Sicherheitsentscheidung: ein Provider-Konto mit fremder E-Mail-Adresse
 darf sich nicht an ein bestehendes Konto hängen. Verknüpfen passiert aus einer authentifizierten
-Sitzung heraus, nach Step-Up — und ist noch nicht gebaut (§8).
+Sitzung heraus, nach Step-Up, in den Einstellungen (`POST /api/v1/me/identities/{idpId}/start`).
 
 **Credentials.** Eine OAuth-App je Umgebung, nie geteilt. Client-ID und Secret stehen als
 `SEED_IDP_GITHUB_CLIENT_ID`, `SEED_IDP_GITHUB_CLIENT_SECRET`, `SEED_IDP_GOOGLE_CLIENT_ID`,
@@ -219,7 +206,7 @@ Wert, scheitert Phase 0 am Prerequisite-Check, nicht Phase 6 an einem leeren Pro
 Secret erreicht die Instanz nur über `--rotate-idp-secret <provider>`; Zitadel gibt Secrets nie
 zurück, also vergleicht der Drift-Check sie nicht.
 
-**Was ein Social-Login im Vertrauensmodell ist: L1.** `computeTrustLevel` kennt kein GitHub; ein
+**Was ein Social-Login im Vertrauensmodell ist: L1.** `trustLevelOf` kennt kein GitHub; ein
 Token ohne phishing-resistentes `amr` ist L1, egal was der Provider intern verlangt hat. Dafür ist
 `ForceMFALocalOnly: true` gesetzt — lokale Konten registrieren beim ersten Login einen Passkey,
 IdP-Konten kommen als L1 herein und werden beim ersten L2-Bedarf per RFC-9470-Challenge zum Passkey
@@ -241,6 +228,13 @@ Login-Seite, sobald die Provider existieren, und der `authorization_endpoint` bl
 
 Der alte GitHub-**OAuth**-Login der CLI (`/api/v1/auth/github`, `/api/v1/auth/token`) ist gelöscht —
 die Registry hat nie OAuth-Code gehabt, die Endpunkte antworteten 404.
+
+**E-Mail.** Zitadel verschickt über den Provider aus `SEED_SMTP_HOST` (mit Port), `SEED_SMTP_USER`,
+`SEED_SMTP_PASSWORD`, `SEED_SMTP_SENDER_ADDRESS` und `SEED_SMTP_SENDER_NAME`: Phase 5 legt sie nach
+`secret/identity/smtp`, Phase 6 legt den Provider mit `zitadel-provision --apply-smtp` an, gleicht ihn
+ab und aktiviert ihn. TLS ist immer an; Zitadel fällt davon auf STARTTLS zurück, nie auf Klartext. Ein
+neues Passwort erreicht die Instanz nur über `--rotate-smtp-password`. SPF und DKIM der
+Absenderdomain trägt der Betreiber beim Mail-Anbieter und im DNS ein.
 
 ### 2.6 Sicherheit hochfahren im Laufe des Prozesses
 
@@ -268,6 +262,16 @@ fällig und nicht aufschiebbar, und der einzige erlaubte zweite Faktor ist WebAu
 niedrigste denkbare Einstiegshürde ist damit *ein Passkey*, nicht *nichts*.
 
 ---
+
+### 2.7 Enterprise-SSO — der IdP des Kunden
+
+Ein Tenant-Owner beweist eine Domain per DNS-TXT-Record und hinterlegt den OIDC-IdP seiner Firma
+(`/api/v1/tenants/{id}/domains`, `/api/v1/tenants/{id}/sso`). Die Tenant-Organisation bekommt dann
+eine eigene, deklarierte Login-Policy: Anmeldung nur über den Firmen-IdP, danach ein
+Sicherheitsschlüssel als zweiter Faktor (L2). Das Forum startet sie mit
+`/api/auth/login?sso=<Arbeitsadresse>`; das Konto entsteht bei der ersten Anmeldung in der
+Tenant-Organisation und ist darüber Mitglied. Optional nimmt der Tenant neue Mitglieder nur noch so
+auf. Einzelheiten, Grenzen und Drift-Prüfung: `identity_customer_model_plan.md` §9.2.
 
 ## 3. Anmeldung
 
@@ -457,13 +461,16 @@ toob:device:<cell>:<tenantId>:<deviceId>
 
 ### 4.4 Trust Level — L1/L2, und Step-Up statt L3
 
-Das Modell, das über Schreibrechte entscheidet (`computeTrustLevel`):
+Das Modell, das über Schreibrechte entscheidet (`trustLevelOf`, `identity/token/amr.go`):
 
-1. Ein **explizites `acr`** vom IdP ist autoritativ. Genau ein anerkannter Wert:
-   `urn:zitadel:iam:mfa:l2` → **L2**. Exakter Vergleich; ein unbekannter `acr` wird ignoriert.
-2. Mit phishing-resistenter `amr`-Methode: **L2**, sonst **L1**, egal wie viele Faktoren.
-   Phishing-resistent sind exakt: `webauthn`, `fido2`, `passkey`, `phr`.
+1. Mit phishing-resistenter `amr`-Methode: **L2**, sonst **L1**, egal wie viele Faktoren.
+   Phishing-resistent sind: `webauthn`, `fido2`, `passkey`, `phr` — und Zitadels `user`, das Zitadel
+   nur für eine WebAuthn-Zeremonie schreibt (Passkey: `["user","mfa"]`).
    *Nicht* `hwk` und `pop` — Hardware-Speicherung sagt nichts über Origin-Binding.
+2. Ein `acr` wird nicht gelesen: Zitadel (v4.16.2) stellt keins aus und ignoriert `acr_values`.
+3. Zitadels JWT-Access-Tokens tragen weder `amr` noch `auth_time`. identity-api und die Registry
+   holen beides per Token-Introspection (`identity/token/introspection.go`); das Forum-BFF liest es
+   aus seinem ID-Token.
 
 **Es gibt kein L3 mehr** (plan7-Backlog E.1 Q1). Was das Modell früher L3 nannte — zwei registrierte
 Authenticatoren, vom IdP in `authenticator_count` behauptet — hat kein IdP je behauptet. Eine
@@ -497,7 +504,8 @@ TokenGate → DPoPGate → ImpersonationGate → KillSwitchGate → TenantGate �
 2. **DPoPGate** — Besitznachweis. Muss vor allem anderen stehen.
 3. **ImpersonationGate** — validiert `act`, damit die effektive Identität feststeht.
 4. **KillSwitchGate** — Revocation, bevor Policy ausgewertet wird.
-5. **TenantGate** — Scope.
+5. **TenantGate** — Scope. Menschen passieren jeden Tenant außer der Default-Organisation, die
+   Relation in Stage 2 entscheidet; Maschinen bleiben an ihre Organisation gebunden.
 6. **TrustGate** — geforderte Assurance.
 7. **StepUpGate** — zuletzt, weil sein Fehlschlag eine *Challenge* ist und kein Fehler.
 8. **RelationGate** (`identity/enforce/relation.go`) — fragt OpenFGA, ob der Principal die
@@ -615,9 +623,11 @@ Tupel der Identity-Tenants.
 
 Ein **Tenant ist eine Zitadel-Organisation**, und ihre ID ist die Tenant-ID überall: im Token
 (Resource Owner), in der URN, in `tenants.id` der Identity-API, als `tenant:<id>` im Store und als
-`tenant_id` eines CI-Tokens in der Registry. `POST /api/v1/tenants` legt die Organisation zuerst in
-Zitadel an (Service-User `toob-identity-api`, provisioniert von `zitadel-provision --apply-api-user`)
-und dann die lokale Zeile mit derselben ID.
+`tenant_id` eines CI-Tokens in der Registry. `POST /api/v1/me/tenants` und `POST /api/v1/tenants`
+legen die Organisation zuerst in Zitadel an (Service-User `toob-identity-api`, provisioniert von
+`zitadel-provision --apply-api-user`) und dann die lokale Zeile mit derselben ID. Die Organisation,
+in der ein Konto liegt, macht es nur für diesen einen Tenant zum Mitglied (kontextuelles Tupel,
+§5.1) — das ist der Weg der SSO-Konten; alle anderen Mitgliedschaften sind Zeilen.
 
 ```
 type tenant
@@ -641,8 +651,8 @@ Anfrage als kontextuelles Tupel** gewährt und nie persistiert — das Modell ma
 ein Mitarbeiter eine stehende Rolle in einer Kundenorganisation hält, statt dass Code daran denken
 muss, etwas zu löschen.
 
-Der Weg einer Mitgliedschaftsänderung: `POST /members` → DB-Zeile + Outbox-Event in *einer*
-Transaktion → `identity-sync` schreibt das FGA-Tupel. Kein FGA-Write in der Transaktion, weil das
+Der Weg einer Mitgliedschaftsänderung (angenommene Einladung, Rollenwechsel, Austritt): DB-Zeile +
+Outbox-Event in *einer* Transaktion → `identity-sync` schreibt das FGA-Tupel. Kein FGA-Write in der Transaktion, weil das
 ein verteilter Schreibvorgang ohne Atomarität wäre. Für die UI heißt das: **eine Rollenänderung ist
 kurz nach der 201-Antwort noch nicht wirksam.**
 
@@ -650,14 +660,16 @@ kurz nach der 201-Antwort noch nicht wirksam.**
 
 ## 7. Zitadel Actions v2 — Hooks auf dem Anmeldepfad
 
-`identity/target` bedient vier Hook-Routen mit vierzehn Regeln (WebAuthn-Pflicht für Privilegierte,
-Trust-Level, Lockout, Organisationsnamen, Rollen-Elevation, Break-Glass-Audit …). Der Signaturheader
-ist verifiziert korrekt: `Zitadel-Signature: t=<unix>,v1=<hex>`, HMAC-SHA256 über
-`<timestamp>.<body>`, 300 s Toleranz, Replay-Fenster in beide Richtungen.
+`identity/target` trägt die Transportschicht der Hooks: Signaturprüfung, Umschlag, Latenzbudget,
+Nebenläufigkeitsgrenze, Fail-closed pro Route. Der Signaturheader ist verifiziert korrekt:
+`Zitadel-Signature: t=<unix>,v1=<hex>`, HMAC-SHA256 über `<timestamp>.<body>`, 300 s Toleranz,
+Replay-Fenster in beide Richtungen.
 
-**Status:** Das Hook-Target wird provisioniert (`zitadel-provision --apply-hooks`, Signaturschlüssel
-nach Vault). **Executions sind noch nicht gebunden** — die Regeln laufen also derzeit nicht auf dem
-echten Anmeldepfad. Wichtig für das Verständnis der Semantik, falls das später greift:
+**Status:** Gebunden ist ein Hook, der Token-Hook (`zitadel-provision --apply-claims`, nicht
+blockierend, an `preaccesstoken` und `preuserinfo`): er schreibt `toob_plan` in jedes Token. Die
+Regel-Hooks sind leer (`target.Routes()` liefert nichts), und `--apply-hooks` registriert das Ziel
+ohne Executions — die erste Regel wird zusammen mit ihrer Execution eingebaut, sobald ihr Payload an
+der laufenden Instanz gemessen ist. Für die Semantik, wenn das greift:
 
 | Antwort des Hooks | Wirkung auf den abgefangenen Aufruf |
 |---|---|
@@ -685,21 +697,15 @@ Ehrlich benannt, weil sie die Frontend-Arbeit direkt betreffen:
    (`ErrOrgClaimConflict`). Ein Login-Screen fordert einfach die Scopes aus `/api/v1/auth/config`
    an. Der Claim-Name ist gegen die laufende 4.16.2 zu messen (Prüfpunkt P3 im Umsetzungsplan).
 
-2. **Bootstrap des ersten Identity-Tenants.** Von „Zitadel-Konto existiert" zu „darf
-   `POST /api/v1/tenants`" führt kein Produktionspfad; `identity-seed` behilft sich mit
-   Entwicklungstoken aus `identity/test/tokens`. Betrifft nur die Governance-Fläche — für das
-   Produkt-Onboarding reicht `POST /api/v1/orgs` (§2.4).
-3. **Persönliche Organisation ist gebaut, aber unaufgerufen.**
-   `orgs.ProvisionPersonalOrganization` (AUTH-022) und `orgs.CreateOrganization` (AUTH-023, mit
-   Quota-Guard und kompensierendem Rollback) haben außerhalb von Tests keinen Aufrufer. Wer den
-   `npm`-artigen Einstieg „Login = eigener Namensraum" will, verdrahtet diese Funktion und
-   entscheidet dabei T-5.3.1 (Benutzername `support`/`api`/`admin` kollidiert mit der
-   Reserved-Liste).
+2. ~~**Bootstrap des ersten Identity-Tenants.**~~ **Gelöst** (E1): jedes Konto mit Passkey legt mit
+   `POST /api/v1/me/tenants` eigene Tenants an und wird ihr Owner (§2.4).
+3. ~~**Persönliche Organisation ist gebaut, aber unaufgerufen.**~~ **Entfernt** (plan7-Backlog E.1
+   Q4): der persönliche Namensraum ist die Registry-Org (§2.4).
 4. ~~**Kein Social Login konfiguriert.**~~ **Gelöst** (§2.5): GitHub und Google werden von
    `zitadel-provision --apply-idps` deklariert und abgeglichen. Offen bleibt die Messung gegen die
    laufende Instanz: Admin-API-Pfade und die Form des Read-Backs (P4), und ob Caddys
    `respond /ui/login/register* 403` den Auto-Creation-Schritt eines IdP-Logins trifft (P5).
-   Die Konto-Verknüpfung aus den Einstellungen heraus ist nicht gebaut.
+   Die Konto-Verknüpfung aus den Einstellungen heraus ist gebaut (§2.5).
 4b. **Die Registry setzt jetzt Berechtigungsstufen durch.** Jede Route trägt in
    `registry/internal/server/router/routes.go` ein Pflichtfeld `Access` — Credential, Katalog-Permission,
    CI-Permission, Scope — und die Stufe kommt aus `policy/permissions.yaml`. Konsequenzen für einen
@@ -752,12 +758,12 @@ Für ein Web-Frontend, mit dem heute Vorhandenen:
    sondern Step-Up mit den genannten `acr_values`/`max_age` fahren.
 9. Logout: lokale Session löschen + `end_session_endpoint`. Es gibt nichts serverseitig
    zu invalidieren.
-10. Kein „Registrieren"- und kein „Passwort vergessen"-Link **auf der IdP-Ebene** — beide Endpunkte
-    antworten 403. Der Registry-Benutzer entsteht dagegen von selbst (§2.3): nach dem ersten
-    erfolgreichen `/api/v1/me` ist die Person vollwertig, ohne weiteren Schritt.
+10. Kein „Registrieren"- und kein „Passwort vergessen"-Link **auf der IdP-Ebene** — beide Formulare
+    antworten 403; neu angelegt wird über „Continue with GitHub/Google" (§2.1). Der Registry-Benutzer
+    entsteht von selbst (§2.3): nach dem ersten erfolgreichen `/api/v1/me` gibt es ihn.
 11. **Keine Organisation verlangen.** `/api/v1/me` liefert `orgs: []` für einen frischen Benutzer,
     und das ist der Normalfall, kein Fehlerzustand. Wer eine braucht, legt sie mit
-    `POST /api/v1/orgs {"name": …}` an — jeder aktive Benutzer darf das, free-Plan erlaubt eine.
+    `POST /api/v1/orgs {"name": …}` an — jedes Konto mit Passkey (L2), der free-Plan erlaubt eine.
     Fehlerfälle, die die UI kennen sollte: `409` Name vergeben, `402` Quote erreicht
     (mit `(n/max unter Plan x)` im Text), `400` Namensregel — Kleinbuchstaben, 3–63 Zeichen, keines
     der 25 reservierten Wörter.

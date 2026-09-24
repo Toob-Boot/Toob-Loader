@@ -22,6 +22,7 @@
 extern "C" {
 #endif
 
+/* Sent as 64 lower-case hex characters (Authorization: Bearer <hex>); the server HMACs that string. */
 #define TOOB_DEVICE_TOKEN_LEN 32
 
 /**

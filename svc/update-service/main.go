@@ -1,7 +1,7 @@
 // Package main is the entry point for the Toob Update Service.
 //
 // The service manages firmware artifact ingestion, release assignment,
-// and device check-in for OTA updates. See plan7.md for the full
+// and device check-in for OTA updates. See docs/update_service_architecture.md for the full
 // architecture specification.
 package main
 
