@@ -313,3 +313,29 @@ oder Zitadel brauchen (Docker): `-tags integration` (u. a. `sso_integration_test
   verweigern alles andere, auch im Scope eines lebenden Tenants. Solange Outbox-Ereignisse des Tenants
   offen sind, wartet der Purge. Es bleiben das Audit-Ledger und die Tenant-Sperre (ohne
   Personenbezug). Die Registry erfährt davon nur über den Plan-Snapshot; ihre Namensräume sind RG-003.
+
+### 9.6 Organisationen im Alltag (Feedback 2026-09-24)
+
+- **Logo.** `PUT/DELETE /api/v1/tenants/{id}/logo` für Admins (`admin.tenant.update`), `GET` für
+  Mitglieder. identity nimmt PNG oder JPEG bis 256 KB, liest erst die Maße (16 bis 4096 px),
+  schneidet mittig quadratisch zu, skaliert auf 256 px und speichert nur das neu codierte PNG
+  (Migration 039); SVG und alles andere wird abgelehnt. `/me/tenants` nennt den Digest, die
+  Bild-Adresse trägt ihn (`?v=`), das Bild darf dauerhaft im Cache liegen. Ohne Logo zeigt
+  `OrganizationIcon` Initialen auf einer Farbe aus der Org-Id.
+- **Kontext.** Ein Knopf oben in der Sidebar für Konto und Kontext (Persönlich oder eine
+  Organisation), nach dem Muster von Vercel und Linear. `OrganizationContextProvider` im
+  Account-Paket hält die Organisationen des angemeldeten Kontos: ein Konto-Wechsel liest sie neu von
+  identity, die letzte Wahl liegt je Konto. Die Adresse nennt den Kontext, wo sie eine Organisation
+  nennt (`/settings/organizations/<name>`, `?org=`); die Wahl gewährt nichts, identity prüft jede
+  Anfrage. Organisationsseiten heißen nach dem Namen (Zitadel hält Org-Namen eindeutig).
+- **Tickets.** Ein privates Ticket kann für eine Organisation der Person eingereicht werden
+  (`threads.tenant_id`, Forum-Migration 024); deren Admins und Owner lesen es mit, antworten
+  bleibt Autor und Team. Der BFF fragt identity dafür jedes Mal nach den Mitgliedschaften.
+- **Settings.** Wie bei GitHub: Kopfzeile mit dem Kontext und „Switch settings context“, je Kontext
+  eine eigene Navigation. Persönlich: Profile, Appearance, Access, Plan. Je Organisation unter
+  `/settings/organizations/<name>`: General (Name, Rolle, Plan, Logo, Danger zone), `/people`,
+  `/sso` (Admins). Ein Kontextwechsel nimmt die Settings mit.
+- **CLI.** `toob org use <org>` / `--personal`, `toob org current`, `--org` auf den Org-Befehlen;
+  der Kontext gehört zum angemeldeten Konto.
+- **Offen.** Eine SSO-Pflicht beim Betreten einer Organisation (ID-040): Zitadels Access-Token
+  sagt nicht, über welchen IdP angemeldet wurde, eine Prüfung nur in der Oberfläche wäre keine.

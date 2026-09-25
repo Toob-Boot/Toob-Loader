@@ -108,6 +108,9 @@ type AuthConfig struct {
 	Audience string   `json:"audience"  port:"optional"`
 	ClientID string   `json:"client_id" port:"required"`
 	Scopes   []string `json:"scopes"    port:"required"`
+	// AccountsURL is where identity-api answers: organizations are managed there, not at the
+	// registry. Optional as the registry declares it; the organization commands need it.
+	AccountsURL string `json:"accounts_url" port:"optional"`
 }
 
 // CheckCombinationResponse is the JSON body for GET /api/v1/resolve/combination.
