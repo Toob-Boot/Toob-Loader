@@ -24,6 +24,8 @@ type AuthConfig struct {
 	Scopes   []string `json:"scopes"`
 	// AccountsURL is where identity-api answers: organizations are managed there, not at the registry.
 	AccountsURL string `json:"accounts_url"`
+	// SettingsURL is where account settings open in a browser.
+	SettingsURL string `json:"settings_url"`
 }
 
 // FetchAuthConfig asks the registry who issues the tokens it accepts.
@@ -161,9 +163,13 @@ func mergeCredentials(change func(*Credentials)) error {
 
 // bearer returns the credential to present, refreshing an expired session first.
 //
-// A session is preferred over an API key when both are present: the key is the long-lived credential
-// meant for machines, and a person who has just logged in should be acting as themselves.
+// TOOB_TOKEN comes first, since it was set for this run. Otherwise a session is preferred over an
+// API key: the key is the long-lived credential meant for machines, and a person who has just
+// logged in should be acting as themselves.
 func (c *Client) bearer(ctx context.Context) string {
+	if token := os.Getenv(TokenEnv); token != "" {
+		return token
+	}
 	creds := loadCredentials()
 	if creds.Identity == nil || creds.Identity.Token == nil {
 		return c.Token

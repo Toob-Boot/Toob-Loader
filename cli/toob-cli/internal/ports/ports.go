@@ -111,6 +111,8 @@ type AuthConfig struct {
 	// AccountsURL is where identity-api answers: organizations are managed there, not at the
 	// registry. Optional as the registry declares it; the organization commands need it.
 	AccountsURL string `json:"accounts_url" port:"optional"`
+	// SettingsURL is where account settings open in a browser (toob settings).
+	SettingsURL string `json:"settings_url" port:"optional"`
 }
 
 // CheckCombinationResponse is the JSON body for GET /api/v1/resolve/combination.

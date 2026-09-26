@@ -238,19 +238,41 @@ Wizard-Phasen je Lieferung: identity/registry → Phase 1 und 6; Vault-Policies 
 ### 9.2 Enterprise-SSO (Phase 7)
 
 - **Domains.** `GET/POST /api/v1/tenants/{id}/domains`, `POST …/domains/{domain}/challenge` und
-  `…/verify`, `DELETE …/domains/{domain}`. Bewiesen wird per TXT-Record `_zitadel-challenge.<domain>`.
-  Die erste bewiesene Domain wird primär; eine primäre gibt die Rolle beim Entfernen an eine andere
-  bewiesene oder an die von Zitadel erzeugte zurück. Die Instanz deklariert dafür
-  `validateOrgDomains: true` (Domain-Policy mit Rücklesen) — Zitadels Standard hätte jede
-  hinzugefügte Domain sofort als verifiziert geführt, und ein Tenant hätte die Anmeldungen einer
-  fremden Firma zu seinem IdP umleiten können.
+  `…/verify`, `DELETE …/domains/{domain}`. identity beweist selbst (`identity/domainproof`): ein
+  TXT-Record `_toob-challenge.<domain>` mit dem ausgegebenen Wert (`tenant_domain_claims`, Migration
+  047). Der Wert bleibt lesbar, bis die Domain bewiesen ist; eine Domain beweist höchstens eine
+  Organisation (Unique-Index). Erst eine bewiesene Domain geht an Zitadel. Die Instanz deklariert
+  dafür `validateOrgDomains: false`: Hinzufügen ist dort Beweisen, und nur identitys Service-Account
+  fügt hinzu, nach dem DNS-Nachweis; Tenants haben in Zitadel keine Rolle. Kommt eine Domain
+  unverifiziert zurück, ist die Policy gedriftet — identity nimmt sie wieder weg. Den Eintrag sucht
+  identity-sync selbst (Migration 048, `sync.DomainChecks`, als `identity_purger` mit Rechten nur auf
+  die Nachweis-Spalten): alle 2 Minuten, ab 15 Minuten alle 15, ab 2 Stunden stündlich, bis 72
+  Stunden nach dem letzten Anstoß (Anlegen, neuer Wert, „Check now"). Gefunden, beweist es die Domain
+  mit Ledger-Eintrag als `identity-sync` und schreibt dem, der sie angelegt hat
+  (`organization.domains`, nicht abbestellbar). Die erste bewiesene
+  Domain wird primär; eine primäre gibt die Rolle beim Entfernen an eine andere bewiesene oder an die
+  von Zitadel erzeugte zurück.
 - **Provider.** `GET/PUT/DELETE /api/v1/tenants/{id}/sso`: ein generischer OIDC-IdP der Tenant-Org
-  (PKCE, Anlegen beim ersten Login, Profil-Abgleich, kein Auto-Linking) und die deklarierte
-  Org-Login-Policy `SSOPolicy`: kein Passwort, kein Passkey als erster Faktor (ein Passkey
-  überlebte sonst den Austritt beim Kunden), nach dem IdP ein Sicherheitsschlüssel als zweiter
-  Faktor — das ergibt `amr ["user","mfa"]` und damit L2. Unbekannte Adressen gehen zum IdP,
-  Domain-Discovery ist an. Jede Änderung wird zurückgelesen. Der Kunde erlaubt bei seinem IdP
+  (PKCE, Anlegen beim ersten Login, Profil-Abgleich, kein Auto-Linking). Speichern macht ihn noch
+  nicht zum Weg hinein: `POST …/sso/test` startet einen Test-Login über einen Zitadel-Intent, der
+  nichts anlegt und nichts verknüpft; `…/sso/test/complete` löst das Ticket ein (Zweck `sso_test`,
+  einmal, 15 min, nur für den Owner, der ihn begann; `admin.tenant_sso.test`) und liest die Person
+  aus der Antwort des Providers. Ein Test, der vor dem letzten Speichern begann, zählt nicht.
+  `POST …/sso/activate` setzt erst nach einem bestandenen Test die deklarierte Org-Login-Policy
+  `SSOPolicy`: kein Passwort, kein Passkey als erster Faktor (ein Passkey überlebte sonst den
+  Austritt beim Kunden), nach dem IdP ein Sicherheitsschlüssel als zweiter Faktor — das ergibt
+  `amr ["user","mfa"]` und damit L2. Ob er live ist, sagt diese Policy. Ein live Provider behält
+  Issuer und Client (die Konten sind seine Leute unter diesen beiden); ein neues Secret wirkt
+  sofort und verlangt einen neuen Test. Unbekannte Adressen gehen zum IdP, Domain-Discovery ist an.
+  Jede Änderung wird zurückgelesen. Der Kunde erlaubt bei seinem IdP
   `https://<identity-domain>/idps/callback`.
+- **Notaus.** `POST …/sso/deactivate` (owner, L2, Step-up 5 min, `critical`): die Org-Login-Policy
+  geht (zurückgelesen), der Provider bleibt; die Sitzungen aller Konten der Tenant-Org enden
+  (`sessions:<urn>`, wie beim Abmelden überall), weil ein übernommener Provider auch sie angemeldet
+  hat. Wieder live erst nach einem neuen Test; solange `sso_required` gilt, verweigert.
+- **Directory-Sync.** `GET /api/v1/tenants/{id}/scim-token` (`admin.scim_token.read`) nennt den
+  SCIM-Endpunkt `https://<identity-domain>/scim/v2/<tenant>` und ob ein Token existiert, nie das
+  Token selbst.
 - **Drift.** `zitadel-provision` akzeptiert genau diese Org-Policy mit genau einem eigenen Provider
   der Org; jede andere Org-Policy bleibt ein Fehler. Die Organisationen liest es jetzt seitenweise.
 - **Anmeldung.** Forum `/api/auth/login?sso=<Arbeitsadresse>` setzt den Scope
@@ -258,8 +280,9 @@ Wizard-Phasen je Lieferung: identity/registry → Phase 1 und 6; Vault-Policies 
   direkt zum IdP der Org. Zitadel nimmt dafür nur die *primäre* Domain der Org an.
 - **Mitglied.** Das beim ersten Login angelegte Konto liegt in der Tenant-Org und ist über
   `withOwnOrganization` Mitglied (role `member`); Rollen darüber vergibt eine Einladung.
-- **„Nur SSO-Konten"** (`sso_required`): Einladungen nur an Adressen bewiesener Domains, Annehmen nur
-  mit einem Konto aus der Tenant-Org; bestehende Mitglieder bleiben. Setzen verlangt eine bewiesene
+- **„Nur SSO-Konten"** (`sso_required`, `PUT …/sso/requirement`): Einladungen nur an Adressen
+  bewiesener Domains, Annehmen nur mit einem Konto aus der Tenant-Org; bestehende Mitglieder bleiben.
+  Setzen verlangt einen live Provider, der seit dem letzten Speichern getestet ist, und eine bewiesene
   Domain; die letzte bewiesene Domain oder das SSO selbst lassen sich erst nach Aufheben der Pflicht
   entfernen.
 - **E-Mail-Vertrauen.** Ein Konto aus einer Tenant-Org gilt beim Annehmen nur für Adressen einer

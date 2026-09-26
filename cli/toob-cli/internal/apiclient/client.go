@@ -10,6 +10,7 @@ package apiclient
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -45,6 +46,9 @@ const (
 
 	// maxErrorBodySize limits how much of an error response body we read.
 	maxErrorBodySize = 4096
+
+	// TokenEnv carries a TOOB credential for one run, ahead of anything stored: how CI authenticates.
+	TokenEnv = "TOOB_TOKEN"
 )
 
 // Client communicates with the Toob Registry API.
@@ -60,7 +64,7 @@ func New() *Client {
 	creds := loadCredentials()
 	return &Client{
 		BaseURL: baseURL,
-		Token:   creds.APIKey,
+		Token:   cmp.Or(os.Getenv(TokenEnv), creds.APIKey),
 		HTTPClient: &http.Client{
 			Timeout:   defaultTimeout,
 			Transport: BuildTransport(),
@@ -197,9 +201,9 @@ func DeleteCredentials() error {
 	return err
 }
 
-// HasToken returns true if the client has a stored API key.
+// HasToken reports whether the client can authenticate: TOOB_TOKEN, a stored API key or a session.
 func (c *Client) HasToken() bool {
-	return c.Token != ""
+	return c.Token != "" || HasSession()
 }
 
 // GetLogin returns the stored login name from credentials, if available.
@@ -652,92 +656,6 @@ func (c *Client) Login(ctx context.Context, code string) (*LoginResponse, error)
 // LogoutResponse is the shape of POST /api/v1/auth/logout.
 type LogoutResponse struct {
 	Status string `json:"status"`
-}
-
-// --- Token Management ---
-
-// TokenCreateRequest is the payload for POST /api/v1/tokens.
-type TokenCreateRequest struct {
-	Name      string   `json:"name"`
-	Scopes    []string `json:"scopes"`
-	ExpiresIn *int     `json:"expires_in_days,omitempty"`
-}
-
-// TokenCreateResponse is the shape of POST /api/v1/tokens.
-type TokenCreateResponse struct {
-	Token string `json:"token"`
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-}
-
-// CreateToken creates a new scoped API token.
-func (c *Client) CreateToken(ctx context.Context, req *TokenCreateRequest) (*TokenCreateResponse, error) {
-	payload, _ := json.Marshal(req)
-	httpReq, err := c.newRequest(ctx, "POST", "/api/v1/tokens", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.HTTPClient.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, extractError(resp)
-	}
-
-	var result TokenCreateResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-// TokenSummary is one element from GET /api/v1/tokens.
-type TokenSummary struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	Scopes    []string `json:"scopes"`
-	CreatedAt string   `json:"created_at"`
-	ExpiresAt string   `json:"expires_at,omitempty"`
-	LastUsed  string   `json:"last_used_at,omitempty"`
-}
-
-// TokenListResponse is the shape of GET /api/v1/tokens.
-type TokenListResponse struct {
-	Tokens []TokenSummary `json:"tokens"`
-}
-
-// ListTokens returns all API tokens for the authenticated publisher.
-func (c *Client) ListTokens(ctx context.Context) (*TokenListResponse, error) {
-	var resp TokenListResponse
-	if err := c.getJSON(ctx, "/api/v1/tokens", &resp); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-// RevokeToken invalidates a specific API token by ID.
-func (c *Client) RevokeToken(ctx context.Context, tokenID string) error {
-	path := fmt.Sprintf("/api/v1/tokens/%s", tokenID)
-	req, err := c.newRequest(ctx, "DELETE", path, nil)
-	if err != nil {
-		return err
-	}
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return extractError(resp)
-	}
-	return nil
 }
 
 // --- Search ---

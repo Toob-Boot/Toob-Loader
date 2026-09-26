@@ -69,12 +69,18 @@ func (c *Client) identity(ctx context.Context, method, path string, body, out an
 	if !HasSession() {
 		return ErrNoSession
 	}
+	return c.accounts(ctx, method, path, c.bearer(ctx), body, out)
+}
+
+// accounts calls identity-api at the origin the registry publishes; bearer is empty for a call
+// nobody is signed in to.
+func (c *Client) accounts(ctx context.Context, method, path, bearer string, body, out any) error {
 	config, err := c.FetchAuthConfig(ctx)
 	if err != nil {
 		return err
 	}
 	if config.AccountsURL == "" {
-		return fmt.Errorf("%s does not say where organizations are managed; it is older than this client", c.BaseURL)
+		return fmt.Errorf("%s does not say where accounts are managed; it is older than this client", c.BaseURL)
 	}
 
 	var payload io.Reader
@@ -91,7 +97,9 @@ func (c *Client) identity(ctx context.Context, method, path string, body, out an
 	}
 	req.Header.Set("User-Agent", "Toob-CLI")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.bearer(ctx))
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

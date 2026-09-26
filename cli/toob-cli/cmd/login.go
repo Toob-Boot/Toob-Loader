@@ -30,8 +30,8 @@ that registry's identity provider.
 A browser opens by default. On a machine without one — a server over SSH, a container —
 pass --device and finish the sign-in on a device that has one.
 
-Your session is stored in ~/.toob/credentials.json and refreshed automatically. An API
-key created with 'toob tokens' is kept separately and is what CI should use.`,
+Your session is stored in ~/.toob/credentials.json and refreshed automatically. CI uses a
+personal token ('toob tokens create') or, in GitHub Actions, 'toob tokens exchange'.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		force, _ := cmd.Flags().GetBool("force")
 		device, _ := cmd.Flags().GetBool("device")
@@ -135,7 +135,7 @@ func reportWhoTheRegistrySees(ctx context.Context, client *apiclient.Client) err
 		ui.Success("Signed in")
 	}
 	ui.Tip("Your session is stored in ~/.toob/credentials.json and refreshed automatically.")
-	ui.Tip("For CI, create a long-lived key with 'toob tokens create'.")
+	ui.Tip("For CI, make a token with 'toob tokens create' and pass it as %s.", apiclient.TokenEnv)
 
 	return nil
 }
