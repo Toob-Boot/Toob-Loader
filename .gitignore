@@ -3,6 +3,7 @@
 # excluded cli/toob-cli/internal/archiveutil's predecessor from version control.
 /archive/
 builds/
+/build/
 CMakeCache.txt
 CMakeFiles/
 Makefile
@@ -30,13 +31,14 @@ coverage/
 *.gcno
 
 # lockfiles
-*/toob.lock
+**/toob.lock
 
 # local utility repos
 .release-repo/
 
 # Export Scripts and Review Files
-*.ps1
+/*.ps1
+scripts/export_*.ps1
 *_review_export.txt
 cli/.pipeline-repo/
 .secrets
@@ -44,6 +46,8 @@ cli/.pipeline-repo/
 # Third-party libraries
 
 # CLI Build Artifacts
+/toob.exe
+/toob
 cli/toob-cli/toob.exe
 cli/toob-cli/toob
 
@@ -53,6 +57,18 @@ mock_efuse.o
 # Toob-Loader Spawned HALs
 toobloader/hal/
 
-# Chip registry builds
-toob-registry/registry/chips/*/builds/
+# Local scratch, bringup & secrets (never commit)
+/.gemini_scratch/
+/scratch/
+/test/test_c6_bringup/
+/wifi.txt
+
+# Rocq / Coq compiled artifacts & tactic caches
+*.vo
+*.vok
+*.vos
+*.glob
+.*.aux
+.lia.cache
+**/.lia.cache
 
