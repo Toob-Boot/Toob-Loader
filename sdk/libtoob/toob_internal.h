@@ -117,9 +117,42 @@ static inline toob_status_t toob_ct_memcmp_glitch_safe(const uint8_t *a,
  * ============================================================================== */
 uint32_t toob_lib_crc32(const uint8_t *data, size_t length);
 
+/* ==============================================================================
+ * 5. Immutable Boot Flash Write/Erase Firewall (Stage-0 Non-Brickability)
+ * ============================================================================== */
+#ifndef CHIP_FLASH_IMMUTABLE_BOOT_END
+#if defined(CHIP_STAGE0_ABS_ADDR) && defined(CHIP_STAGE0_SIZE) && ((CHIP_STAGE0_SIZE) > 0U)
+#define CHIP_FLASH_IMMUTABLE_BOOT_END ((uint64_t)(CHIP_STAGE0_ABS_ADDR) + (uint64_t)(CHIP_STAGE0_SIZE))
+#else
+#define CHIP_FLASH_IMMUTABLE_BOOT_END 0x00000000ULL
+#endif
+#endif
+
+static inline bool toob_flash_range_hits_immutable_boot(uint32_t addr, uint32_t len) {
+  uint64_t end_excl = (uint64_t)addr + (uint64_t)len;
+  if (end_excl > 0x100000000ULL) {
+    return true;
+  }
+  uint64_t imm_end = (uint64_t)(CHIP_FLASH_IMMUTABLE_BOOT_END);
+  if (imm_end > 0ULL && (uint64_t)addr < imm_end) {
+    return true;
+  }
+#if defined(CHIP_STAGE0_ABS_ADDR) && defined(CHIP_STAGE0_SIZE)
+  if ((uint64_t)(CHIP_STAGE0_SIZE) > 0ULL) {
+    uint64_t s0_start = (uint64_t)(CHIP_STAGE0_ABS_ADDR);
+    uint64_t s0_end   = s0_start + (uint64_t)(CHIP_STAGE0_SIZE);
+    uint64_t op_end   = (len == 0U) ? ((uint64_t)addr + 1ULL) : end_excl;
+    if (((uint64_t)addr < s0_end) && (op_end > s0_start)) {
+      return true;
+    }
+  }
+#endif
+  return false;
+}
+
 #include "toob_mailbox.h"
 
 /* Private SDK Linkage: Hidden from public API to prevent unvalidated memory access */
-extern TOOB_NOINIT toob_handoff_t toob_handoff_state;
+extern TOOB_NOINIT_VAR(toob_handoff_state) toob_handoff_t toob_handoff_state;
 
 #endif /* TOOB_INTERNAL_H */

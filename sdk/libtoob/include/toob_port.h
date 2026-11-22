@@ -114,6 +114,35 @@ TOOB_MUST_CHECK toob_status_t toob_os_nvs_read(const char *key,
 TOOB_MUST_CHECK toob_status_t toob_os_nvs_write(const char *key,
                                                  const uint8_t *buf, size_t len);
 
+/* ==============================================================================
+ * 4. Optional RTOS Concurrency & Hardware Confirm Hooks (MED-23 / LOW-10)
+ *
+ * Weak defaults (no-op for bare-metal single-threaded systems; direct MMIO
+ * write for memory-mapped RTC RAM) are provided inside libtoob so existing
+ * single-threaded ports require zero boilerplate changes, while RTOS ports
+ * (FreeRTOS, Zephyr, ThreadX) or banked backup-register MCUs (e.g. STM32
+ * PWR_CR1_DBP + 2x32-bit RTC_BKPxR) can override them cleanly.
+ * ============================================================================== */
+
+/**
+ * @brief Optional Hook: Acquire libtoob critical-section mutex (flash/mailbox/OTA).
+ */
+void toob_os_lock(void);
+
+/**
+ * @brief Optional Hook: Release libtoob critical-section mutex.
+ */
+void toob_os_unlock(void);
+
+/**
+ * @brief Optional Hook: Write 64-bit boot confirmation nonce into battery-backed
+ *        RTC RAM or hardware backup registers and verify readback.
+ * @param nonce Non-zero 64-bit boot_nonce from toob_handoff_t.
+ * @return TOOB_OK on verified write, TOOB_ERR_NOT_SUPPORTED if no RTC confirm
+ *         storage exists on this target, or TOOB_ERR_VERIFY on readback mismatch.
+ */
+TOOB_MUST_CHECK toob_status_t toob_os_confirm_rtc_write(uint64_t nonce);
+
 #ifdef __cplusplus
 }
 #endif

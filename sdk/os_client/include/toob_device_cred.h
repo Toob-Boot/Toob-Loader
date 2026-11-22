@@ -23,14 +23,15 @@ extern "C" {
 #endif
 
 /* Sent as 64 lower-case hex characters (Authorization: Bearer <hex>); the server HMACs that string. */
-#define TOOB_DEVICE_TOKEN_LEN 32
+#define TOOB_DEVICE_TOKEN_LEN   32
+/* Persistent NVS envelope size: 4B magic + 4B CRC-32 + 8B checkin_seq + 32B token (TCI1-07). */
+#define TOOB_CRED_NVS_BLOB_SIZE 48U
 
 /**
- * @brief Persistent device credential blob.
+ * @brief Decoded device credential state.
  *
- * Stored as a single atomic blob under the NVS key "toob_sys/cred".
- * The struct is serialized byte-for-byte — no versioning header, because
- * the ABI is locked by _Static_assert and the key is namespaced.
+ * Persisted atomically under the NVS key "toob_sys/cred" inside a 48-byte
+ * Magic + IEEE 802.3 CRC-32 envelope protected by toob_os_lock().
  */
 typedef struct {
     uint8_t  device_token[TOOB_DEVICE_TOKEN_LEN];
@@ -39,6 +40,18 @@ typedef struct {
 
 _Static_assert(sizeof(toob_device_cred_t) == 40,
                "toob_device_cred_t ABI size drift");
+
+/**
+ * @brief Enroll initial 32-byte device token into OS NVS with checkin_seq = 0 (TCI1-07).
+ *
+ * Rejects NULL, all-0x00, and all-0xFF tokens. Writes a CRC-32-sealed 48-byte
+ * NVS envelope under toob_os_lock().
+ *
+ * @param token 32-byte provisioned bearer token.
+ * @return TOOB_OK on success, TOOB_ERR_INVALID_ARG on NULL/degenerate token,
+ *         or TOOB_ERR_FLASH on NVS write failure.
+ */
+TOOB_MUST_CHECK toob_status_t toob_cred_enroll(const uint8_t token[TOOB_DEVICE_TOKEN_LEN]);
 
 /**
  * @brief Load device credentials from OS NVS.

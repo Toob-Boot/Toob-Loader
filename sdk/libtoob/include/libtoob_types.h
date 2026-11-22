@@ -7,7 +7,7 @@
  *
  * Relevante Spezifikationen:
  * - docs/libtoob_api.md: Definition der toob_handoff_t OS-Boundary & RAM Section.
- * - docs/toob_telemetry.md: CBOR Diagnostic Structs (toob_boot_diag_t).
+ * - docs/toob_telemetry.md: Diagnostic Structs (toob_boot_diag_t & TDR1 wire).
  * - docs/concept_fusion.md: TENTATIVE/COMMITTED State-Machine Logik.
  */
 
@@ -36,22 +36,22 @@
 /* ========================================================
  * 1. Status & Boot States
  * ======================================================== */
-/* GAP-06: Spezifische libtoob Fehlercodes für sauberes OS-Handling */
-typedef enum {
-    TOOB_OK             = 0x55AA55AA,
-    TOOB_ERR_NOT_FOUND  = 0xE1101CAE, /* Abstandskorrekte Hamming-Hex Werte */
-    TOOB_ERR_WAL_FULL   = 0xE2201CAE,
-    TOOB_ERR_WAL_LOCKED = 0xE3301CAE,
-    TOOB_ERR_FLASH      = 0xE4401CAE,
-    TOOB_ERR_INVALID_ARG= 0xE5501CAE,
-    TOOB_ERR_VERIFY     = 0xE6601CAE, /* RAM Korruption / CRC-32 Mismatch */
-    TOOB_ERR_REQUIRES_RESET = 0xE7701CAE, /* Fataler WAL Lock (Reset zwingend) */
-    TOOB_ERR_COUNTER_EXHAUSTED = 0xE8801CAE, 
-    TOOB_ERR_FLASH_HW   = 0xE9901CAE,
-    TOOB_ERR_STATE      = 0xEAA01CAE, /* GAP-N03: Invalid State/Initialization */
-    TOOB_ERR_TIMEOUT    = 0xEBB01CAE, /* GAP-N03: Network/Operation Timeout */
-    TOOB_ERR_NOT_SUPPORTED = 0xECC01CAE /* GAP-N03: Feature not implemented */
-} toob_status_t;
+/* GAP-06 / MISRA C:2012 R10.1, R10.3: Explicit uint32_t with U-suffixed constants */
+typedef uint32_t toob_status_t;
+
+#define TOOB_OK                    0x55AA55AAU
+#define TOOB_ERR_NOT_FOUND         0xE1101CAEU /* Abstandskorrekte Hamming-Hex Werte */
+#define TOOB_ERR_WAL_FULL          0xE2201CAEU
+#define TOOB_ERR_WAL_LOCKED        0xE3301CAEU
+#define TOOB_ERR_FLASH             0xE4401CAEU
+#define TOOB_ERR_INVALID_ARG       0xE5501CAEU
+#define TOOB_ERR_VERIFY            0xE6601CAEU /* RAM Korruption / CRC-32 Mismatch */
+#define TOOB_ERR_REQUIRES_RESET    0xE7701CAEU /* Fataler WAL Lock (Reset zwingend) */
+#define TOOB_ERR_COUNTER_EXHAUSTED 0xE8801CAEU
+#define TOOB_ERR_FLASH_HW          0xE9901CAEU
+#define TOOB_ERR_STATE             0xEAA01CAEU /* GAP-N03: Invalid State/Initialization */
+#define TOOB_ERR_TIMEOUT           0xEBB01CAEU /* GAP-N03: Network/Operation Timeout */
+#define TOOB_ERR_NOT_SUPPORTED     0xECC01CAEU /* GAP-N03: Feature not implemented */
 
 /* Partition Layout für boot_target Auswertung */
 typedef enum {
@@ -75,6 +75,33 @@ typedef enum {
 #define TOOB_STATE_TENTATIVE  0xAAAA5555
 #define TOOB_STATE_COMMITTED  0x55AA55AA
 
+/* Canonical Transport Provider & Backup Mode IDs (shared by Core and libtoob) */
+#ifndef TOOB_TRANSPORT_SWAPSCRATCH
+#  define TOOB_TRANSPORT_SWAPSCRATCH 1
+#  define TOOB_TRANSPORT_ONEWAY      2
+#  define TOOB_TRANSPORT_SWAPMOVE    3
+#  define TOOB_TRANSPORT_POINTER     4
+#  define TOOB_TRANSPORT_SWAPOFFSET  5
+#endif
+
+#ifndef TOOB_ONEWAY_BACKUP_NONE
+#  define TOOB_ONEWAY_BACKUP_NONE          0
+#  define TOOB_ONEWAY_BACKUP_FULL          1
+#  define TOOB_ONEWAY_BACKUP_REVERSE_DELTA 2
+#endif
+
+/* Zero-Copy Trailer-TBM1 Locator (16 bytes, placed at tail of OTA stream) */
+#define TOOB_TBM1_TRAILER_MAGIC 0x544D4254U /* "TBMT" LE */
+
+typedef struct {
+    uint32_t magic;    /* TOOB_TBM1_TRAILER_MAGIC (0x544D4254) */
+    uint32_t tbm1_off; /* Offset of TBM1 header relative to slot base */
+    uint32_t tbm1_len; /* Total TBM1 envelope length (header + regions + sig) */
+    uint32_t crc32;    /* CRC-32 over [magic, tbm1_off, tbm1_len] (12 bytes) */
+} toob_tbm1_trailer_locator_t;
+
+_Static_assert(sizeof(toob_tbm1_trailer_locator_t) == 16, "toob_tbm1_trailer_locator_t must be 16 bytes");
+
 /* ========================================================
  * 2. OS Interface (.noinit Handoff)
  * ======================================================== */
@@ -91,7 +118,8 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t resume_offset;      /* Partielle Download Resume-Stelle (aus WAL Checkpoint) */
     uint8_t  device_id[32];      /* P10: Unique DICE Device Identity for Cloud Sync */
     uint8_t  wipe_requested;     /* OS Instruction to wipe user partitions */
-    uint8_t  _padding[7];        /* P10: 8-Byte Alignment Padding */
+    uint8_t  active_slot;        /* 0 = Slot A / Primary, 1 = Slot B / Secondary */
+    uint8_t  _padding[6];        /* P10: 8-Byte Alignment Padding */
     uint32_t crc32_trailer;      /* Kryptographische Versiegelung in .noinit durch S1 */
 } toob_handoff_t;
 
@@ -113,18 +141,32 @@ _Static_assert(offsetof(toob_handoff_t, net_search_accum_ms) == 28, "net_search_
 _Static_assert(offsetof(toob_handoff_t, resume_offset) == 32, "resume_offset offset drift");
 _Static_assert(offsetof(toob_handoff_t, device_id) == 36, "device_id offset drift");
 _Static_assert(offsetof(toob_handoff_t, wipe_requested) == 68, "wipe_requested offset drift");
-_Static_assert(offsetof(toob_handoff_t, _padding) == 69, "_padding offset drift");
+_Static_assert(offsetof(toob_handoff_t, active_slot) == 69, "active_slot offset drift");
+_Static_assert(offsetof(toob_handoff_t, _padding) == 70, "_padding offset drift");
 _Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 76, "crc32_trailer offset drift");
 
 /* Konstante für struct_version des Handoff-Headers zur Vermeidung von ABI-Drift */
 #define TOOB_HANDOFF_STRUCT_VERSION 0x02000000
 
 /*
- * Cross-Compiler Abstraktion für die ".noinit" Linker-Section.
- * Da libtoob OS-seitig eingebunden wird, müssen wir verschiedene Compiler tolerieren.
+ * Cross-Compiler Abstraktion für die ".noinit" Linker-Section (CRIT-26).
+ * Jedes Shared-RAM-Objekt bekommt eine dedizierte benannte Untersektion
+ * (.noinit.<name>), damit Linker-Skripte in Stage 1, Recovery-OS und Feature-OS
+ * deterministische Adressen garantieren, unabhängig von der Archiv-Linkreihenfolge.
+ * Auf Host-Betriebssystemen (Windows PE / macOS Mach-O / Host-Fuzzing) entfallen
+ * ELF-spezifische Sektionsattribute zugunsten regulärer statischer Speicherung.
  */
-#if defined(__GNUC__) || defined(__clang__) || defined(__ICCARM__)
+#if defined(_WIN32) || defined(__APPLE__) || defined(TOOB_HOST_FUZZING)
+    #define TOOB_NOINIT
+    #define TOOB_NOINIT_VAR(name)
+    #if defined(__GNUC__) || defined(__clang__)
+        #define TOOB_TRAP() __builtin_trap()
+    #else
+        #define TOOB_TRAP() do { volatile int *p = (volatile int *)0; *p = 0; } while (0)
+    #endif
+#elif defined(__GNUC__) || defined(__clang__) || defined(__ICCARM__)
     #define TOOB_NOINIT __attribute__((section(".noinit")))
+    #define TOOB_NOINIT_VAR(name) __attribute__((section(".noinit." #name)))
     #define TOOB_TRAP() __builtin_trap()
 #elif defined(__CC_ARM) || defined(__ARMCC_VERSION) /* ARM Compiler (Keil) */
     /* 
@@ -133,15 +175,17 @@ _Static_assert(offsetof(toob_handoff_t, crc32_trailer) == 76, "crc32_trailer off
      * otherwise the C-Runtime WILL zeroize it!
      */
     #define TOOB_NOINIT __attribute__((section(".bss.noinit")))
+    #define TOOB_NOINIT_VAR(name) __attribute__((section(".bss.noinit." #name)))
     #define TOOB_TRAP() __breakpoint(0)
 #else
     #warning "Compiler not officially supported by libtoob. Defaulting to GCC syntax."
     #define TOOB_NOINIT __attribute__((section(".noinit")))
+    #define TOOB_NOINIT_VAR(name) __attribute__((section(".noinit." #name)))
     #define TOOB_TRAP() do { volatile int* p = 0; *p = 0; } while(0)
 #endif
 
 /* ========================================================
- * 3. Telemetrie & Health Diagnostik (CBOR Extraction)
+ * 3. Telemetrie & Health Diagnostik (TDR1 Wire Extraction)
  * ======================================================== */
 
 /* Health & Wear Data (Sub-Struct für Verschleißdaten) */
@@ -153,7 +197,7 @@ typedef struct {
 } toob_ext_health_t;
 
 /* 
- * Strukturierte Boot-Diagnostik für OS CBOR Extraction 
+ * Strukturierte Boot-Diagnostik für OS TDR1 Wire-Extraktion
  * Harmonisiert GAP-F29 & GAP-16 mit toob_telemetry.md
  */
 typedef struct __attribute__((aligned(8))) {
@@ -197,7 +241,7 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t boot_session_id;        /* Monotoner Boot-Counter */
     uint8_t  sbom_digest[32];        /* SHA-256 der letzten Stückliste (deterministisch 32 Bytes) */
     
-    /* Extended Health (Optional gem. CBOR Spec) */
+    /* Extended Health (Optional gem. TDR1 Wire Spec) */
     uint8_t  ext_health_present;     /* P10: Explicit uint8_t statt bool für ABI Sicherheit */
     uint8_t  _padding[3];            /* P10: Explizites Padding für exaktes 4-Byte Alignment vor der Sub-Struct */
     toob_ext_health_t ext_health;    /* Health & Wear Data */
@@ -263,6 +307,6 @@ _Static_assert(offsetof(toob_boot_diag_t, crc32_trailer) == 128, "crc32_trailer 
 #endif
 
 /* Extern Definitions (After structs are fully typed!) */
-extern TOOB_NOINIT toob_boot_diag_t toob_diag_state;
+extern TOOB_NOINIT_VAR(toob_diag_state) toob_boot_diag_t toob_diag_state;
 
 #endif /* LIBTOOB_TYPES_H */

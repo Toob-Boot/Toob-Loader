@@ -37,6 +37,7 @@
 #include <stddef.h>
 
 #include "libtoob_types.h"
+#include "toob_checkin_wire.h"
 #include "toob_swap_event_wire.h"
 
 #ifdef __cplusplus
@@ -190,7 +191,7 @@ TOOB_MUST_CHECK toob_status_t toob_recovery_resolved(void);
 typedef struct __attribute__((aligned(8))) {
     uint8_t              state;              /* Internal state machine (opaque) */
     uint8_t              is_verified;        /* SHA-256 stream verification active */
-    uint8_t              _reserved[2];       /* Alignment padding */
+    uint16_t             erased_sectors;     /* Incremental sectors erased so far (MED-19, ABI-compatible with _reserved[2]) */
     uint32_t             write_cursor;       /* Absolute flash address of next write */
     uint32_t             total_size;         /* Declared image size from manifest */
     uint32_t             bytes_queued;       /* Bytes received so far */
@@ -226,6 +227,15 @@ TOOB_MUST_CHECK toob_status_t toob_ota_ctx_init(toob_ota_ctx_t *ctx);
 TOOB_MUST_CHECK toob_status_t toob_ota_begin(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32]);
 
 /**
+ * @brief Initializes the OTA Daemon for receiving a new update stream bound to a 16-byte assignment UUID (TCI1-05).
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_begin_assigned(
+    toob_ota_ctx_t *ctx,
+    uint32_t total_size,
+    const uint8_t expected_sha256[32],
+    const uint8_t assignment_id[16]);
+
+/**
  * @brief Resumes a partially downloaded OTA update.
  *
  * Restores the internal write cursor and byte counter from the handoff RAM
@@ -245,18 +255,43 @@ typedef struct __attribute__((aligned(8))) {
     uint32_t bytes_staged;
     uint8_t  artifact_sha256[32];
     uint8_t  assignment_id[16];
-    uint32_t crc32_trailer;
-    uint8_t  _padding[4];              /* Explicit padding to 64 bytes */
+    uint32_t target_addr;              /* Bound staging base address (HIGH-21, replaces _padding[4]) */
+    uint32_t crc32_trailer;            /* CRC-32 over [0 .. 60) */
 } toob_ota_resume_state_t;
 
 _Static_assert(sizeof(toob_ota_resume_state_t) == 64, "toob_ota_resume_state_t size drift");
+_Static_assert(offsetof(toob_ota_resume_state_t, crc32_trailer) == 60, "toob_ota_resume_state_t crc32 offset drift");
 
-extern TOOB_NOINIT toob_ota_resume_state_t g_toob_ota_resume_state;
+extern TOOB_NOINIT_VAR(toob_ota_resume_state) toob_ota_resume_state_t g_toob_ota_resume_state;
 
 void toob_ota_checkpoint_save(uint32_t bytes_staged, const uint8_t sha256[32]);
+void toob_ota_checkpoint_save_bound(uint32_t bytes_staged, uint32_t target_addr, const uint8_t sha256[32]);
+void toob_ota_checkpoint_save_bound_ex(
+    uint32_t bytes_staged,
+    uint32_t target_addr,
+    const uint8_t sha256[32],
+    const uint8_t assignment_id[16]);
 void toob_ota_checkpoint_clear(void);
 
 TOOB_MUST_CHECK toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t total_size, const uint8_t expected_sha256[32], uint32_t* resume_offset);
+
+/**
+ * @brief Resumes a partially downloaded OTA update only if the checkpoint also matches assignment_id (TCI1-05).
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_resume_assigned(
+    toob_ota_ctx_t *ctx,
+    uint32_t total_size,
+    const uint8_t expected_sha256[32],
+    const uint8_t expected_assignment_id[16],
+    uint32_t *resume_offset);
+
+/**
+ * @brief Pauses an active OTA download on transient transport loss, zeroizing
+ *        sensitive RAM buffers while preserving the .noinit resume checkpoint.
+ * @param ctx OTA session context to pause.
+ * @return TOOB_OK, or TOOB_ERR_INVALID_ARG if ctx is NULL.
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_pause(toob_ota_ctx_t *ctx);
 
 /**
  * @brief Aborts an active OTA download and securely zeroizes buffers.
@@ -264,6 +299,15 @@ TOOB_MUST_CHECK toob_status_t toob_ota_resume(toob_ota_ctx_t *ctx, uint32_t tota
  * @return TOOB_OK.
  */
 TOOB_MUST_CHECK toob_status_t toob_ota_abort(toob_ota_ctx_t *ctx);
+
+/**
+ * @brief Shrinks the upper-bound total_size of an active OTA session to the
+ *        exact payload length once discovered (e.g. XMODEM trailer scan).
+ * @param ctx OTA session context in TOOB_OTA_STATE_RECEIVING.
+ * @param exact_total_size Exact byte length in [ctx->bytes_queued, ctx->total_size].
+ * @return TOOB_OK, or TOOB_ERR_INVALID_ARG if out of bounds or invalid state.
+ */
+TOOB_MUST_CHECK toob_status_t toob_ota_trim_total_size(toob_ota_ctx_t *ctx, uint32_t exact_total_size);
 
 /**
  * @brief Processes a chunk of incoming bytes, writing them linearly to Staging.
@@ -309,12 +353,12 @@ TOOB_MUST_CHECK toob_status_t toob_set_next_update(uint32_t manifest_flash_addr)
 
 /**
  * @brief Extrahiert die rohen Hardware-Metriken aus dem .noinit RAM.
- * 
- * @note  [CRA Regulatorik & CBOR Extraktion]
- *        Liest die `toob_boot_diag_t` Struktur. Diese enthält u.A. den 
- *        kryptographischen SHA-256 Digest der SBOM, was direkt der Erfüllung
- *        des EU Cyber Resilience Acts 2027 (CRA) dient. Die weiterführende 
- *        Telemetrie zur Hardware-Lebensdauer ist optional via CBOR verpackt.
+ *
+ * @note  [CRA Regulatorik & TDR1 Extraktion]
+ *        Liest die `toob_boot_diag_t` Struktur. Diese enthält u.A. den
+ *        kryptographischen SHA-256 Digest der SBOM zur Erfüllung des EU Cyber
+ *        Resilience Acts (CRA). Für den Netzwerk-Versand steht die CRC-32-
+ *        gesicherte Little-Endian-Serialisierung `toob_get_boot_diag_wire()` bereit.
  *
  * @param diag Zeiger auf die vom OS bereitgestellte Struct-Instanz.
  * @return TOOB_OK bei Erfolg, TOOB_ERR_VERIFY bei gebrochener Checksumme.
@@ -322,20 +366,36 @@ TOOB_MUST_CHECK toob_status_t toob_set_next_update(uint32_t manifest_flash_addr)
 TOOB_MUST_CHECK toob_status_t toob_get_boot_diag(toob_boot_diag_t* diag);
 
 /**
- * @brief Extrahiert die Diagnosedaten kodiert im Cloud-tauglichen CBOR-Format.
- * @param out_buf Buffer für den CBOR-Stream
- * @param max_len Maximale Größe von out_buf
- * @param out_len Tatsächliche Größe des geschriebenen CBOR-Streams
- * @return TOOB_OK bei Erfolg
+ * @brief Serialisiert die Diagnosedaten deterministisch im festen Little-Endian
+ *        TDR1-Wire-Format (`toob_tdr1_wire_hdr_t` + optionales `toob_ext_health_t` + 4B CRC-32 Trailer).
+ * @param out_buf Zielpuffer (mindestens `TOOB_TDR1_MIN_FRAME_SIZE` bzw. `TOOB_TDR1_MAX_SIZE` Bytes).
+ * @param max_len Kapazität von `out_buf` in Bytes.
+ * @param out_len Tatsächlich geschriebene Frame-Länge (`136` oder `152` Bytes).
+ * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL/zu kleinem Puffer,
+ *         TOOB_ERR_VERIFY bei korruptem `.noinit`-Diagnose- oder Handoff-Block.
  */
-TOOB_MUST_CHECK toob_status_t toob_get_boot_diag_cbor(uint8_t* out_buf, size_t max_len, size_t* out_len);
+TOOB_MUST_CHECK toob_status_t toob_get_boot_diag_wire(uint8_t* out_buf, size_t max_len, size_t* out_len);
+
+/**
+ * @brief Serialisiert TDR1 inkl. kryptographischer Bindung an den aktuellen `checkin_seq` (`X-Toob-Seq`, TDR1-04).
+ */
+TOOB_MUST_CHECK toob_status_t toob_get_boot_diag_wire_seq(
+    uint8_t *out_buf,
+    size_t max_len,
+    uint64_t checkin_seq,
+    size_t *out_len);
+
+/**
+ * @brief Berechnet die IEEE 802.3 CRC-32 Prüfsumme über einen Byte-Puffer.
+ */
+uint32_t toob_lib_crc32(const uint8_t *data, size_t length);
 
 /* ==============================================================================
  * Cloud-Command Submission API (Phase 7)
  * ==============================================================================
- * Das OS empfängt Cloud-Command Envelopes (CBOR, Ed25519-signiert) vom Server
- * und delegiert sie über dieses API an den Bootloader. Der Bootloader evaluiert
- * den Command beim nächsten Boot (Step 2.5 in boot_state.c).
+ * Das OS empfängt Cloud-Command Envelopes (TCC1 Binärformat, Ed25519-signiert)
+ * vom Server und delegiert sie über dieses API an den Bootloader. Der Bootloader
+ * evaluiert den Command beim nächsten Boot (Step 2.5 in boot_state.c).
  */
 
 /**
@@ -344,7 +404,7 @@ TOOB_MUST_CHECK toob_status_t toob_get_boot_diag_cbor(uint8_t* out_buf, size_t m
  * Sequenz: Guard → Erase → Write → CRC Read-Back → Zeroize.
  * Der Bootloader evaluiert den Slot beim nächsten Boot autonom.
  *
- * @param envelope  Zeiger auf das rohe CBOR-Envelope (inkl. Signatur).
+ * @param envelope  Zeiger auf das rohe TCC1-Binär-Envelope (inkl. Signatur).
  * @param len       Länge des Envelopes in Bytes.
  * @return TOOB_OK bei Erfolg, TOOB_ERR_INVALID_ARG bei NULL/Überlänge,
  *         TOOB_ERR_FLASH bei Erase/Write-Fehler,

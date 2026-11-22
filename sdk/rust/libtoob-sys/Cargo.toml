@@ -5,5 +5,10 @@ edition = "2021"
 authors = ["Toob-Loader Developers"]
 description = "Raw FFI bindings for libtoob"
 license = "MIT OR Apache-2.0"
+links = "toob_c"
+
+[features]
+default = ["compile-c"]
+compile-c = []
 
 [dependencies]

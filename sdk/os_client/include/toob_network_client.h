@@ -38,31 +38,44 @@ extern "C" {
 typedef toob_status_t (*toob_http_chunk_cb_t)(const uint8_t* chunk, uint32_t len, void* ctx);
 
 /**
- * @brief SUIT-CBOR basierte Update Metadaten (Phase 1 Meta-Check)
- * 
- * CDDL Definition für den /check Endpoint:
- * toob_meta_check = {
- *     1: uint .size 4,              ; remote_svn (Security Version Number)
- *     2: uint .size 4,              ; total_size (Blob Size in Bytes)
- *     3: bstr .size 32,             ; sha256 (Full Blob SHA-256 für den OS-Stream)
- *     ? 4: uint .size 1             ; image_type (0=OS, 3=Bootloader)
- * }
+ * @brief TCI1-based Check-In Update Metadata (Phase 1 Meta-Check).
+ *
+ * Parsed and HMAC-SHA256-128 authenticated from `TCI1` (`toob_checkin_wire.h`).
  */
 typedef struct __attribute__((aligned(4))) {
-    uint32_t total_size;       /**< Payload size in bytes */
-    uint8_t  sha256[32];       /**< Expected SHA-256 digest of the payload */
-    uint8_t  image_type;       /**< 0 = OS Update, 3 = Bootloader */
-    uint8_t  _padding[3];      /**< GAP-N15: Explicit padding for ABI safety */
-    uint32_t remote_svn;       /**< Server-side Security Version Number */
-    bool     update_available; /**< True if the server has a newer version */
-    bool     has_rotated_token;/**< UPD-032: True if Key 7 token rotation present */
-    uint8_t  _padding2[2];     /**< GAP-N15: Explicit padding for ABI safety */
-    char     blob_path[129];   /**< UPD-005: Relative path+query (max 128 bytes) */
-    uint8_t  rotated_token[32];/**< UPD-032: New 32-byte rotated token */
-    uint8_t  _padding3[3];     /**< Explicit padding to 4-byte boundary (216 bytes total) */
+    uint32_t total_size;        /**< Payload size in bytes (>= 576 for updates) */
+    uint8_t  sha256[32];        /**< Expected SHA-256 digest of the payload */
+    uint8_t  assignment_id[16]; /**< TCI1-05: 16B UUID assignment identifier */
+    uint8_t  target_slot;       /**< TCI1-01: 0 = App, 1 = Netcore, 3 = Stage1 */
+    bool     update_available;  /**< True if the server assigned a firmware update */
+    bool     has_rotated_token; /**< UPD-032: True if TCI1 rotated_token present */
+    uint8_t  _padding1;         /**< Explicit padding to 4-byte boundary */
+    uint32_t remote_svn;        /**< Server-side target-slot SVN */
+    uint32_t remote_build;      /**< TCI1-01: Server-side TBM1 build_number */
+    uint32_t retry_after_sec;   /**< TCI1-03: Authenticated server poll/backoff hint */
+    char     blob_path[124];    /**< UPD-005: RFC-3986 relative path (max 120 + NUL) */
+    uint8_t  rotated_token[32]; /**< UPD-032: Unmasked 32-byte rotated token */
 } toob_update_info_t;
 
-_Static_assert(sizeof(toob_update_info_t) == 216, "toob_update_info_t ABI size drift");
+_Static_assert(sizeof(toob_update_info_t) == 224U, "toob_update_info_t ABI size drift");
+
+/**
+ * @brief Authenticate and parse a const-pure TCI1 check-in response frame (TCI1-06 / TCI1-07).
+ *
+ * Verifies Trunc_128(HMAC-SHA256(token_key, "TCI1-AUTH-V1" || device_id || body))
+ * in constant time before parsing offsets, enforces seq_echo == expected_seq,
+ * validates blob_path via a closed O(n) RFC-3986 DFA without <string.h>, and
+ * XOR-unmasks rotated_token when present.
+ */
+TOOB_MUST_CHECK toob_status_t toob_tci1_parse(
+    const uint8_t *data,
+    size_t len,
+    const uint8_t token_key[32],
+    const uint8_t device_id[32],
+    uint64_t expected_seq,
+    toob_update_info_t *out,
+    const uint8_t **out_cloud_cmd,
+    uint16_t *out_cloud_cmd_len);
 
 /**
  * @brief Initialize the RTOS specific network stack (L1 Smoke Test).

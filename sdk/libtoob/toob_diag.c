@@ -1,189 +1,204 @@
 /**
  * @file toob_diag.c
- * @brief Boot Diagnostics — telemetry extraction and diag struct management.
+ * @brief Boot Diagnostics — telemetry extraction and TDR1 wire serialization.
  *
  * Extracts toob_boot_diag_t from .noinit shared RAM with TOCTOU defense,
- * CRC-32 validation, and CBOR telemetry encoding for cloud submission.
+ * glitch-hardened double-read CRC-32 validation, and deterministic Little-Endian
+ * TDR1 binary wire encoding for cloud check-in submission.
  */
 
 #include "libtoob.h"
 #include "toob_internal.h"
-#include "toob_telemetry_encode.h"
 #include <stddef.h>
 #include <string.h>
 
 /* ==============================================================================
- * .noinit RAM Definition (GAP-39 / Diagnostics)
+ * .noinit RAM Definition (GAP-39 / CRIT-26)
  * ============================================================================== */
 #ifndef TOOB_MOCK_TEST
-TOOB_NOINIT toob_boot_diag_t toob_diag_state;
+TOOB_NOINIT_VAR(toob_diag_state) toob_boot_diag_t toob_diag_state;
 #endif
+
+static void _volatile_snapshot_diag(toob_boot_diag_t *dst) {
+  const volatile uint8_t *src =
+      (const volatile uint8_t *)&toob_diag_state;
+  uint8_t *out = (uint8_t *)dst;
+  for (size_t i = 0U; i < sizeof(toob_boot_diag_t); i++) {
+    out[i] = src[i];
+  }
+}
+
+static bool _verify_diag_snapshot(const toob_boot_diag_t *d) {
+  if (d->struct_version != TOOB_DIAG_STRUCT_VERSION) {
+    return false;
+  }
+  size_t payload_len = offsetof(toob_boot_diag_t, crc32_trailer);
+  uint32_t calc_crc = toob_lib_crc32((const uint8_t *)d, payload_len);
+  return (calc_crc == d->crc32_trailer);
+}
 
 /* ==============================================================================
  * PUBLIC API IMPLEMENTATION
- * ==============================================================================
- */
+ * ============================================================================== */
 
 toob_status_t toob_get_boot_diag(toob_boot_diag_t *diag) {
-  /* P10 Pointer Zero-Trust Check */
   if (!diag) {
     return TOOB_ERR_INVALID_ARG;
   }
 
-  /* ====================================================================
-   * P10 LEAKAGE DEFENSE & MEMORY SANITIZATION
-   * ====================================================================
-   * Präemptive Nullifizierung des Ziel-Speichers. Verhindert, dass das OS
-   * nach einem TOOB_ERR_VERIFY auf Garbage/Secrets aus seinem eigenen
-   * uninitialisierten Thread-Stack zugreift (Memory Disclosure Attack).
-   * Da 'diag' den Scope überlebt, ist dieser Aufruf durch C-Compiler
-   * niemals als Dead Code eliminierbar (DCE-sicher).
-   */
+  /* Snapshot 1 directly into caller buffer + single stack local_diag_2 (-136B stack, TDR1-07).
+   * On any validation or glitch cross-check mismatch, diag is zeroized before return. */
+  toob_boot_diag_t local_diag_2 __attribute__((aligned(8)));
   toob_secure_zeroize(diag, sizeof(toob_boot_diag_t));
+  toob_secure_zeroize(&local_diag_2, sizeof(local_diag_2));
 
-  /* ====================================================================
-   * TOCTOU SHIELDING (Time-Of-Check to Time-Of-Use)
-   * ====================================================================
-   * Zieht das asynchrone .noinit Struct in den lokalen, sicheren C-Stack.
-   * Das verhindert asynchrone Manipulationen (z.B. durch bösartiges DMA oder
-   * OS-Interrupts), die das RAM zwischen Verifikation und Nutzung verändern.
-   */
-  toob_boot_diag_t local_diag __attribute__((aligned(8)));
-  toob_secure_zeroize(&local_diag,
-                      sizeof(local_diag)); /* P10 Uninitialized Mem Trap */
+  _volatile_snapshot_diag(diag);
 
-  /* Atomarer 1-Way Read aus dem Shared-RAM */
-  memcpy(&local_diag, &toob_diag_state, sizeof(toob_boot_diag_t));
+  volatile uint32_t shield_1 = 0U;
+  volatile uint32_t shield_2 = 0U;
 
-  /* ====================================================================
-   * MAGIC & ABI-VERSION CHECK (Glitch-Shielded)
-   * ==================================================================== */
-  volatile uint32_t version_shield_1 = 0;
-  volatile uint32_t version_shield_2 = 0;
-
-  bool is_version_ok = (local_diag.struct_version == TOOB_DIAG_STRUCT_VERSION);
-
-  if (is_version_ok) {
-    version_shield_1 = TOOB_OK;
+  if (_verify_diag_snapshot(diag)) {
+    shield_1 = TOOB_OK;
   }
 
   TOOB_GLITCH_DELAY();
 
-  if (version_shield_1 == TOOB_OK && is_version_ok) {
-    version_shield_2 = TOOB_OK;
+  _volatile_snapshot_diag(&local_diag_2);
+
+  if (shield_1 == TOOB_OK && _verify_diag_snapshot(&local_diag_2) &&
+      toob_ct_memcmp_glitch_safe((const uint8_t *)diag,
+                                 (const uint8_t *)&local_diag_2,
+                                 offsetof(toob_boot_diag_t, _padding_end)) == TOOB_OK) {
+    shield_2 = TOOB_OK;
   }
 
-  if (version_shield_1 != TOOB_OK || version_shield_2 != TOOB_OK ||
-      version_shield_1 != version_shield_2) {
-    toob_secure_zeroize(&local_diag, sizeof(local_diag));
-    return TOOB_ERR_VERIFY; /* Trapped Version Mismatch or Glitch */
-  }
+  toob_secure_zeroize(&local_diag_2, sizeof(local_diag_2));
 
-  /* ====================================================================
-   * P10 CRC-32 PAYLOAD VERIFICATION (Glitch-Shielded)
-   * ====================================================================
-   * P10 Robustness: CRC-32 Validation relies dynamically on offsetof,
-   * mitigating ABI tail-padding drifts (Padding bytes sind undefiniert!).
-   */
-  size_t payload_len = offsetof(toob_boot_diag_t, crc32_trailer);
-  uint32_t calculated_crc =
-      toob_lib_crc32((const uint8_t *)&local_diag, payload_len);
-
-  volatile uint32_t crc_shield_1 = 0;
-  volatile uint32_t crc_shield_2 = 0;
-
-  bool is_crc_ok = (calculated_crc == local_diag.crc32_trailer);
-
-  if (is_crc_ok) {
-    crc_shield_1 = TOOB_OK;
-  }
-
-  TOOB_GLITCH_DELAY();
-
-  if (crc_shield_1 == TOOB_OK && calculated_crc == local_diag.crc32_trailer) {
-    crc_shield_2 = TOOB_OK;
-  }
-
-  /* P10 Leakage Defense: Wenn CRC fehlschlägt, den Klon SOFORT vernichten! */
-  if (crc_shield_1 != TOOB_OK || crc_shield_2 != TOOB_OK ||
-      crc_shield_1 != crc_shield_2) {
-    toob_secure_zeroize(&local_diag, sizeof(local_diag));
-    return TOOB_ERR_VERIFY; /* Trapped Hardware Bit-Rot or Glitch */
-  }
-
-  /* ====================================================================
-   * SAFE-PASSING (By-Value Copy) & P10 PADDING ZEROIZATION
-   * ==================================================================== */
-
-  /* P10 Zero-Trust: Sicherstellen, dass das explizite 3-Byte Padding genullt
-   * ist. Das verhindert subtiles Data-Leakage von Stack-Resten bei einer
-   * nachgelagerten CBOR Serialisierung durch das Betriebssystem (EU CRA
-   * Export). */
-  local_diag._padding[0] = 0;
-  local_diag._padding[1] = 0;
-  local_diag._padding[2] = 0;
-
-  /* Sicheres Kopieren des 100% verifizierten Klons in das Feature-OS RAM */
-  memcpy(diag, &local_diag, sizeof(toob_boot_diag_t));
-
-  /* O(1) Stack Clean-Up (DCE Proof) */
-  toob_secure_zeroize(&local_diag, sizeof(local_diag));
-
-  return TOOB_OK;
-}
-
-toob_status_t toob_get_boot_diag_cbor(uint8_t *out_buf, size_t max_len, size_t *out_len) {
-  if (!out_buf || !out_len) {
-    return TOOB_ERR_INVALID_ARG;
-  }
-
-  toob_boot_diag_t diag;
-  toob_status_t status = toob_get_boot_diag(&diag);
-  if (status != TOOB_OK) {
-    return status;
-  }
-
-  struct toob_telemetry tel;
-  toob_secure_zeroize(&tel, sizeof(tel));
-
-  /* P10 Fix: Sicherer Shift des 32-bit Magic Headers in die 8-Bit CDDL Schema-Version */
-  tel.toob_telemetry_uint0uint = (uint8_t)(diag.struct_version >> 24);
-  tel.toob_telemetry_uint1uint = diag.boot_duration_ms;
-  tel.toob_telemetry_uint2uint = diag.edge_recovery_events;
-
-  tel.toob_telemetry_uint3uint = diag.hardware_fault_record;
-  tel.toob_telemetry_uint4uint = diag.vendor_error;
-  tel.toob_telemetry_uint5uint = diag.wdt_kicks;
-
-  tel.toob_telemetry_uint6uint = diag.current_svn;
-  tel.toob_telemetry_uint7uint = (uint8_t)diag.active_key_index;
-
-  tel.toob_telemetry_uint8bool = (diag.fallback_occurred != 0);
-
-  tel.toob_telemetry_uint9bstr.value = diag.sbom_digest;
-  tel.toob_telemetry_uint9bstr.len = sizeof(diag.sbom_digest);
-
-  tel.toob_telemetry_uint11uint = diag.boot_session_id;
-
-  /* P10 Fix: Akkurates C-Struct Mapping auf das CDDL Element */
-  if (diag.ext_health_present) {
-    tel.toob_telemetry_ext_health_m_present = true;
-    tel.toob_telemetry_ext_health_m.toob_telemetry_ext_health_m.ext_health_uint101uint = diag.ext_health.wal_erase_count;
-    tel.toob_telemetry_ext_health_m.toob_telemetry_ext_health_m.ext_health_uint102uint = diag.ext_health.app_slot_erase_count;
-    tel.toob_telemetry_ext_health_m.toob_telemetry_ext_health_m.ext_health_uint103uint = diag.ext_health.staging_slot_erase_count;
-    tel.toob_telemetry_ext_health_m.toob_telemetry_ext_health_m.ext_health_uint104uint = diag.ext_health.swap_buffer_erase_count;
-  } else {
-    tel.toob_telemetry_ext_health_m_present = false;
-  }
-
-  bool encoded = cbor_encode_toob_telemetry(out_buf, max_len, &tel, out_len);
-  
-  toob_secure_zeroize(&tel, sizeof(tel));
-  toob_secure_zeroize(&diag, sizeof(diag));
-
-  if (!encoded) {
+  if (shield_1 != TOOB_OK || shield_2 != TOOB_OK || shield_1 != shield_2) {
+    toob_secure_zeroize(diag, sizeof(toob_boot_diag_t));
     return TOOB_ERR_VERIFY;
   }
 
+  /* MED-24: Sanitize ALL padding regions before exposing to caller RAM. */
+  memset(diag->_padding_v3, 0, sizeof(diag->_padding_v3));
+  memset(diag->_padding, 0, sizeof(diag->_padding));
+  memset(diag->_padding_end, 0, sizeof(diag->_padding_end));
   return TOOB_OK;
+}
+
+toob_status_t toob_get_boot_diag_wire_seq(uint8_t *out_buf,
+                                          size_t max_len,
+                                          uint64_t checkin_seq,
+                                          size_t *out_len) {
+  if (out_len != NULL) {
+    *out_len = 0U;
+  }
+  if (!out_buf || !out_len || max_len < TOOB_TDR1_MIN_FRAME_SIZE) {
+    return TOOB_ERR_INVALID_ARG;
+  }
+
+  toob_boot_diag_t diag __attribute__((aligned(8)));
+  toob_status_t status = toob_get_boot_diag(&diag);
+  if (status != TOOB_OK) {
+    toob_secure_zeroize(&diag, sizeof(diag));
+    return status;
+  }
+
+  /* TDR1-05 / TDR1-06: Fail closed if .noinit handoff is corrupted or out of domain. */
+  toob_handoff_t handoff __attribute__((aligned(8)));
+  status = toob_get_handoff(&handoff);
+  if (status != TOOB_OK) {
+    toob_secure_zeroize(&diag, sizeof(diag));
+    toob_secure_zeroize(&handoff, sizeof(handoff));
+    return status;
+  }
+
+  bool part_ok = (handoff.booted_partition == (uint32_t)TOOB_PARTITION_APP ||
+                  handoff.booted_partition == (uint32_t)TOOB_PARTITION_RECOVERY);
+  bool domain_ok = part_ok &&
+                   (handoff.active_slot <= 1U) &&
+                   (handoff.reset_reason <= TOOB_TDR1_MAX_RESET_REASON) &&
+                   (diag.active_key_index <= 0xFFFFU) &&
+                   (diag.last_update_outcome <= TOOB_TDR1_MAX_OUTCOME);
+  if (!domain_ok) {
+    toob_secure_zeroize(&diag, sizeof(diag));
+    toob_secure_zeroize(&handoff, sizeof(handoff));
+    return TOOB_ERR_VERIFY;
+  }
+
+  bool has_ext = (diag.ext_health_present != 0U);
+  size_t total_len = has_ext ? TOOB_TDR1_MAX_SIZE : TOOB_TDR1_MIN_FRAME_SIZE;
+  if (max_len < total_len) {
+    toob_secure_zeroize(&diag, sizeof(diag));
+    toob_secure_zeroize(&handoff, sizeof(handoff));
+    return TOOB_ERR_INVALID_ARG;
+  }
+
+  uint8_t wire_part = (handoff.booted_partition == (uint32_t)TOOB_PARTITION_RECOVERY)
+                          ? TOOB_TDR1_PARTITION_RECOVERY
+                          : TOOB_TDR1_PARTITION_APP;
+  uint8_t wire_boot_state = (handoff.magic == TOOB_STATE_TENTATIVE)
+                                ? TOOB_TDR1_BOOT_STATE_TENTATIVE
+                                : TOOB_TDR1_BOOT_STATE_COMMITTED;
+  uint16_t flags = has_ext ? TOOB_TDR1_FLAG_EXT_HEALTH : 0U;
+
+  memset(out_buf, 0, total_len);
+  toob_wire_put_le32(&out_buf[0], TOOB_TDR1_MAGIC);
+  out_buf[4] = TOOB_TDR1_VERSION;
+  out_buf[5] = wire_part;
+  toob_wire_put_le16(&out_buf[6], flags);
+  toob_wire_put_le16(&out_buf[8], TOOB_TDR1_HDR_SIZE);
+  out_buf[10] = (uint8_t)(diag.struct_version >> 24U);
+  out_buf[11] = wire_boot_state;
+  out_buf[12] = handoff.active_slot;
+  out_buf[13] = (uint8_t)handoff.reset_reason;
+  out_buf[14] = (diag.fallback_occurred != 0U) ? 1U : 0U;
+  out_buf[15] = (handoff.wipe_requested != 0U) ? 1U : 0U;
+  out_buf[16] = diag.last_update_outcome;
+  out_buf[17] = diag.last_update_reject;
+  toob_wire_put_le16(&out_buf[18], (uint16_t)diag.active_key_index);
+  toob_wire_put_le16(&out_buf[20], diag.reader_major);
+  toob_wire_put_le16(&out_buf[22], diag.reader_minor);
+  toob_wire_put_le16(&out_buf[24], diag.fw_ver_major);
+  toob_wire_put_le16(&out_buf[26], diag.fw_ver_minor);
+  toob_wire_put_le16(&out_buf[28], diag.fw_ver_patch);
+  toob_wire_put_le16(&out_buf[30], 0U);
+  toob_wire_put_le64(&out_buf[32], checkin_seq);
+  toob_wire_put_le32(&out_buf[40], diag.current_svn);
+  toob_wire_put_le32(&out_buf[44], diag.build_number);
+  toob_wire_put_le32(&out_buf[48], diag.installed_app_svn);
+  toob_wire_put_le32(&out_buf[52], diag.installed_stage1_svn);
+  toob_wire_put_le32(&out_buf[56], diag.monotonic_counter);
+  toob_wire_put_le32(&out_buf[60], diag.boot_duration_ms);
+  toob_wire_put_le32(&out_buf[64], diag.verify_time_ms);
+  toob_wire_put_le32(&out_buf[68], diag.last_error_code);
+  toob_wire_put_le32(&out_buf[72], diag.vendor_error);
+  toob_wire_put_le32(&out_buf[76], diag.hardware_fault_record);
+  toob_wire_put_le32(&out_buf[80], diag.edge_recovery_events);
+  toob_wire_put_le32(&out_buf[84], handoff.boot_failure_count);
+  toob_wire_put_le32(&out_buf[88], handoff.net_search_accum_ms);
+  toob_wire_put_le32(&out_buf[92], diag.wdt_kicks);
+  memcpy(&out_buf[96], diag.sbom_digest, sizeof(diag.sbom_digest));
+  toob_wire_put_le32(&out_buf[128], diag.boot_session_id);
+
+  if (has_ext) {
+    toob_wire_put_le32(&out_buf[132], diag.ext_health.wal_erase_count);
+    toob_wire_put_le32(&out_buf[136], diag.ext_health.app_slot_erase_count);
+    toob_wire_put_le32(&out_buf[140], diag.ext_health.staging_slot_erase_count);
+    toob_wire_put_le32(&out_buf[144], diag.ext_health.swap_buffer_erase_count);
+  }
+
+  toob_secure_zeroize(&diag, sizeof(diag));
+  toob_secure_zeroize(&handoff, sizeof(handoff));
+
+  size_t crc_off = total_len - TOOB_TDR1_CRC_TRAILER_SIZE;
+  uint32_t crc = toob_lib_crc32(out_buf, crc_off);
+  toob_wire_put_le32(&out_buf[crc_off], crc);
+
+  *out_len = total_len;
+  return TOOB_OK;
+}
+
+toob_status_t toob_get_boot_diag_wire(uint8_t *out_buf, size_t max_len, size_t *out_len) {
+  return toob_get_boot_diag_wire_seq(out_buf, max_len, 0ULL, out_len);
 }

@@ -11,9 +11,32 @@
 #include "toob_internal.h"
 #include <string.h>
 
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32) && !defined(__CYGWIN__)
+#  define TOOB_WEAK __attribute__((weak))
+#else
+#  define TOOB_WEAK
+#endif
+
 /* ==============================================================================
- * .noinit RAM Definition (GAP-39)
- * (Wird durch den Linker in die uninitialisierte Sektion gemappt)
+ * Weak Default Concurrency Hooks (MED-23)
+ * ==============================================================================
+ * Single-threaded / bare-metal consumers link automatically with zero changes;
+ * RTOS ports (FreeRTOS, Zephyr, ThreadX) may override with strong mutex hooks.
+ * Note: PE/COFF (_WIN32) lacks ELF global weak definitions across TUs, so host
+ * Windows builds emit regular defaults unless TOOB_CUSTOM_OS_LOCK is defined.
+ */
+#if !defined(_WIN32) && !defined(__CYGWIN__)
+TOOB_WEAK void toob_os_lock(void) {}
+TOOB_WEAK void toob_os_unlock(void) {}
+#elif !defined(TOOB_CUSTOM_OS_LOCK)
+void toob_os_lock(void) {}
+void toob_os_unlock(void) {}
+#endif
+
+/* ==============================================================================
+ * .noinit RAM Definition (GAP-39 / CRIT-26)
+ * (Wird durch den Linker in die dedizierte .noinit.toob_handoff_state Sektion
+ * gemappt)
  *
  * Arch-Note (Zero-Dependency): This library defines the OS-side boundary.
  * The Bootloader (S1) uses its own isolated definition. Since the OS and S1
@@ -22,68 +45,28 @@
  */
 /* Arch-Note: Für Cross-Compilation Linker-Collisions (Unit Tests) */
 #ifndef TOOB_MOCK_TEST
-TOOB_NOINIT toob_handoff_t toob_handoff_state;
+TOOB_NOINIT_VAR(toob_handoff_state) toob_handoff_t toob_handoff_state;
 #endif
 
-toob_status_t toob_validate_handoff(void) {
-  /* ====================================================================
-   * 1. MAGIC & ABI-VERSION CHECK (Glitch-Shielded)
-   * ====================================================================
-   * LOGIK-FIX: Das OS MUSS TENTATIVE Boots zulassen, um sie via
-   * toob_confirm_boot() in COMMITTED wandeln zu können!
-   */
-  volatile uint32_t shield_1 = 0;
-  volatile uint32_t shield_2 = 0;
-
-  bool is_magic_ok = (toob_handoff_state.magic == TOOB_STATE_COMMITTED ||
-                      toob_handoff_state.magic == TOOB_STATE_TENTATIVE);
-  bool is_version_ok =
-      (toob_handoff_state.struct_version == TOOB_HANDOFF_STRUCT_VERSION);
-
-  if (is_magic_ok && is_version_ok) {
-    shield_1 = TOOB_OK;
+static void _volatile_snapshot_handoff(toob_handoff_t *dst) {
+  const volatile uint8_t *src =
+      (const volatile uint8_t *)&toob_handoff_state;
+  uint8_t *out = (uint8_t *)dst;
+  for (size_t i = 0U; i < sizeof(toob_handoff_t); i++) {
+    out[i] = src[i];
   }
+}
 
-  TOOB_GLITCH_DELAY();
-
-  if (shield_1 == TOOB_OK && (is_magic_ok && is_version_ok)) {
-    shield_2 = TOOB_OK;
+static bool _verify_handoff_snapshot(const toob_handoff_t *h) {
+  bool magic_ok = (h->magic == TOOB_STATE_COMMITTED ||
+                   h->magic == TOOB_STATE_TENTATIVE);
+  bool version_ok = (h->struct_version == TOOB_HANDOFF_STRUCT_VERSION);
+  if (!magic_ok || !version_ok) {
+    return false;
   }
-
-  if (shield_1 != TOOB_OK || shield_2 != TOOB_OK || shield_1 != shield_2) {
-    return TOOB_ERR_VERIFY;
-  }
-
-  /* ====================================================================
-   * 2. P10 CRC-32 PAYLOAD VERIFICATION
-   * ====================================================================
-   * Robustness: Berechne CRC per offsetof statt sizeof zwecks Tail-Padding
-   * Immunität
-   */
   size_t payload_len = offsetof(toob_handoff_t, crc32_trailer);
-  uint32_t calculated_crc =
-      toob_lib_crc32((const uint8_t *)&toob_handoff_state, payload_len);
-
-  volatile uint32_t crc_shield_1 = 0;
-  volatile uint32_t crc_shield_2 = 0;
-
-  if (calculated_crc == toob_handoff_state.crc32_trailer) {
-    crc_shield_1 = TOOB_OK;
-  }
-
-  TOOB_GLITCH_DELAY();
-
-  if (crc_shield_1 == TOOB_OK &&
-      calculated_crc == toob_handoff_state.crc32_trailer) {
-    crc_shield_2 = TOOB_OK;
-  }
-
-  if (crc_shield_1 != TOOB_OK || crc_shield_2 != TOOB_OK ||
-      crc_shield_1 != crc_shield_2) {
-    return TOOB_ERR_VERIFY;
-  }
-
-  return TOOB_OK;
+  uint32_t calc_crc = toob_lib_crc32((const uint8_t *)h, payload_len);
+  return (calc_crc == h->crc32_trailer);
 }
 
 toob_status_t toob_get_handoff(toob_handoff_t *out_handoff) {
@@ -92,70 +75,48 @@ toob_status_t toob_get_handoff(toob_handoff_t *out_handoff) {
     return TOOB_ERR_INVALID_ARG;
   }
 
-  /* P10 Leakage Defense: Zielspeicher sofort nullen.
-   * Verhindert, dass das Betriebssystem bei einem Boot-Fail auf veralteten
-   * Stack-Garbage (Memory Leakage) zugreift, falls es den Return-Status
-   * fahrlässig ignoriert! Da 'out_handoff' den Scope überlebt, ist dieser
-   * memset() durch C-Compiler niemals als Dead Code eliminierbar (DCE-sicher).
-   */
-  memset(out_handoff, 0, sizeof(toob_handoff_t));
+  /* Snapshot 1 directly into caller buffer + single stack local_h2 (-80B stack, TDR1-07).
+   * On any validation or glitch cross-check mismatch, out_handoff is zeroized before return. */
+  toob_handoff_t local_h2 __attribute__((aligned(8)));
+  toob_secure_zeroize(out_handoff, sizeof(toob_handoff_t));
+  toob_secure_zeroize(&local_h2, sizeof(local_h2));
 
-  /* Strikte Garbage-Abwehr: Wenn CRC nicht stimmt, Vorgang abbrechen! */
-  toob_status_t status = toob_validate_handoff();
+  _volatile_snapshot_handoff(out_handoff);
 
-  /* Glitch-Schild für die Error-Propagation:
-   * Verhindert, dass ein fehlerhafter Status (z.B. TOOB_ERR_VERIFY)
-   * durch EMFI in der Register-Zuweisung zu einem TOOB_OK geflippt wird.
-   */
-  volatile uint32_t prop_shield_1 = 0;
-  volatile uint32_t prop_shield_2 = 0;
+  volatile uint32_t shield_1 = 0U;
+  volatile uint32_t shield_2 = 0U;
 
-  if (status == TOOB_OK) {
-    prop_shield_1 = TOOB_OK;
+  if (_verify_handoff_snapshot(out_handoff)) {
+    shield_1 = TOOB_OK;
   }
 
   TOOB_GLITCH_DELAY();
 
-  if (prop_shield_1 == TOOB_OK && status == TOOB_OK) {
-    prop_shield_2 = TOOB_OK;
+  /* Snapshot 2: Independent volatile re-read + constant-time cross-check */
+  _volatile_snapshot_handoff(&local_h2);
+
+  if (shield_1 == TOOB_OK && _verify_handoff_snapshot(&local_h2) &&
+      toob_ct_memcmp_glitch_safe((const uint8_t *)out_handoff,
+                                 (const uint8_t *)&local_h2,
+                                 sizeof(toob_handoff_t)) == TOOB_OK) {
+    shield_2 = TOOB_OK;
   }
 
-  if (prop_shield_1 != TOOB_OK || prop_shield_2 != TOOB_OK ||
-      prop_shield_1 != prop_shield_2) {
-    /* Force Error-Propagation mask, preventing logic manipulation */
-    return (status != TOOB_OK) ? status : TOOB_ERR_VERIFY;
-  }
+  toob_secure_zeroize(&local_h2, sizeof(local_h2));
 
-  /* Sicheres Kopieren by-value ins isolierte OS-Feature-RAM */
-  memcpy(out_handoff, &toob_handoff_state, sizeof(toob_handoff_t));
-
-  /* ====================================================================
-   * Post-Copy Re-Validation (TOCTOU Defense)
-   * ====================================================================
-   * In Multithreading/Interrupt-lastigen RTOS Umgebungen könnte der asynchrone
-   * .noinit RAM zwischen der Validierung und dem memcpy() von außen korrumpiert
-   * worden sein (Time-of-Check to Time-of-Use). Wir verifizieren den isolierten
-   * Klon mathematisch, bevor das OS ihn nutzt!
-   */
-  size_t payload_len = offsetof(toob_handoff_t, crc32_trailer);
-  uint32_t local_crc =
-      toob_lib_crc32((const uint8_t *)out_handoff, payload_len);
-
-  bool local_magic_ok = (out_handoff->magic == TOOB_STATE_COMMITTED ||
-                         out_handoff->magic == TOOB_STATE_TENTATIVE);
-  bool local_version_ok =
-      (out_handoff->struct_version == TOOB_HANDOFF_STRUCT_VERSION);
-
-  if (local_crc != out_handoff->crc32_trailer || !local_magic_ok ||
-      !local_version_ok) {
-    /* Zeiger-Inhalt radikal radieren, damit das Feature-OS niemals Garbage
-     * liest! */
-    memset(out_handoff, 0, sizeof(toob_handoff_t));
+  if (shield_1 != TOOB_OK || shield_2 != TOOB_OK || shield_1 != shield_2) {
+    toob_secure_zeroize(out_handoff, sizeof(toob_handoff_t));
     return TOOB_ERR_VERIFY;
   }
 
-  /* P10 Zero-Trust: Sicherstellen, dass das Struct-Padding im OS-Heap
-   * genullt ist (Verhindert subtiles Data-Leakage bei Serialisierung). */
-
+  /* P10 Zero-Trust: Explicitly zeroize struct padding before exposing to OS */
+  memset(out_handoff->_padding, 0, sizeof(out_handoff->_padding));
   return TOOB_OK;
+}
+
+toob_status_t toob_validate_handoff(void) {
+  toob_handoff_t tmp __attribute__((aligned(8)));
+  toob_status_t st = toob_get_handoff(&tmp);
+  toob_secure_zeroize(&tmp, sizeof(tmp));
+  return st;
 }

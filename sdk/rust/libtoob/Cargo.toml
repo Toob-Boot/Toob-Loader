@@ -6,5 +6,9 @@ authors = ["Toob-Loader Developers"]
 description = "Safe idiomatic wrapper for libtoob"
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["compile-c"]
+compile-c = ["libtoob-sys/compile-c"]
+
 [dependencies]
-libtoob-sys = { path = "../libtoob-sys" }
+libtoob-sys = { path = "../libtoob-sys", default-features = false }
