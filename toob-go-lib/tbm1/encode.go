@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
+
+	"github.com/Toob-Boot/Toob-Loader/toob-go-lib/heatshrink"
+	"github.com/Toob-Boot/Toob-Loader/toob-go-lib/tds1"
 )
 
 // ---- Tuning constants ---------------------------------------------------
@@ -69,6 +74,15 @@ type Image struct {
 	// "same as the installed image", i.e. a raw, uncompressed staging copy.
 	StoredSize uint32 `json:"stored_size,omitempty"`
 
+	// Base is the base image used to automatically generate a TDS1 patch
+	// if DeltaAlg == DeltaTDS1 and Stored is not pre-computed.
+	Base []byte `json:"base,omitempty"`
+
+	// PayloadOffset and TailGap allow configuring custom gap offsets in staging
+	// (useful for swapoffset T2B).
+	PayloadOffset uint32 `json:"payload_offset,omitempty"`
+	TailGap       uint32 `json:"tail_gap,omitempty"`
+
 	ChunkSize uint32 `json:"chunk_size,omitempty"` // 0 → DefaultChunkSize
 	BaseSVN   uint32 `json:"base_svn,omitempty"`
 
@@ -76,6 +90,21 @@ type Image struct {
 	VerMinor        uint16 `json:"ver_minor,omitempty"`
 	VerPatch        uint16 `json:"ver_patch,omitempty"`
 	BaseFingerprint []byte `json:"base_fingerprint,omitempty"` // 0 or 8 bytes
+}
+
+// ReverseDelta describes a rollback patch stored in staging and described in Region 6.
+type ReverseDelta struct {
+	TargetSlot     uint8       `json:"target_slot"`
+	DeltaAlg       uint8       `json:"delta_alg"` // TBM1_DELTA_TDS1 = 3
+	Data           []byte      `json:"data,omitempty"`
+	DataAt         io.ReaderAt `json:"-"`
+	StoredSize     uint32      `json:"stored_size,omitempty"`
+	RestoredSize   uint32      `json:"restored_size,omitempty"`
+	RestoredSHA256 [32]byte    `json:"restored_sha256,omitempty"`
+
+	// OldImage allows automatic derivation of RestoredSize, RestoredSHA256
+	// and TDS1 reverse delta data.
+	OldImage []byte `json:"old_image,omitempty"`
 }
 
 // Manifest is the full input for one TBM1 package.
@@ -110,8 +139,24 @@ type Manifest struct {
 	PQCSig     []byte `json:"pqc_sig,omitempty"`     // must be paired with PQCPubkey
 	PQCPubkey  []byte `json:"pqc_pubkey,omitempty"`
 
+	// ReverseDeltas are encoded into Region 6 for rollback support.
+	ReverseDeltas []ReverseDelta `json:"reverse_deltas,omitempty"`
+
+	// TrailerLayout places image[0] at slot offset 0 and appends the signed TBM1
+	// envelope + 16-byte TrailerLocator after the payloads for true Zero-Copy XIP/bank-swap.
+	TrailerLayout bool `json:"trailer_layout,omitempty"`
+
 	SectorSize uint32  `json:"sector_size,omitempty"` // power of two; 0 → DefaultSectorSize
 	Images     []Image `json:"images"`
+}
+
+// PayloadInfo holds layout metadata for one staging payload.
+type PayloadInfo struct {
+	TargetSlot uint8  `json:"target_slot"`
+	Offset     uint32 `json:"offset"`
+	Length     uint32 `json:"length"`
+	Data       []byte `json:"-"`
+	IsRDelta   bool   `json:"is_rdelta"`
 }
 
 // Package is the assembled manifest block plus derived metadata.
@@ -120,12 +165,15 @@ type Package struct {
 	// trailing 64 bytes are zero; Sign / SetSignature fill them.
 	Block []byte `json:"-"`
 
-	TotalLen   uint32   `json:"total_len"`
-	SignedLen  uint32   `json:"signed_len"` // TotalLen - 64
-	DataOff    []uint32 `json:"data_off"`   // per-image staging offset (flat layout)
-	StoredLen  []uint32 `json:"stored_len"` // per-image stored size, as recorded in the header
-	SectorSize uint32   `json:"sector_size"`
-	Signed     bool     `json:"signed"`
+	TotalLen      uint32        `json:"total_len"`
+	SignedLen     uint32        `json:"signed_len"` // TotalLen - 64
+	DataOff       []uint32      `json:"data_off"`   // per-image staging offset (flat layout)
+	StoredLen     []uint32      `json:"stored_len"` // per-image stored size, as recorded in the header
+	Payloads      []PayloadInfo `json:"payloads,omitempty"`
+	SectorSize    uint32        `json:"sector_size"`
+	TrailerLayout bool          `json:"trailer_layout,omitempty"`
+	TrailerOffset uint32        `json:"trailer_offset,omitempty"`
+	Signed        bool          `json:"signed"`
 }
 
 // Encoder holds the knobs a host backend wants control over. The zero value is
@@ -162,11 +210,14 @@ func (s chunkSource) read(scratch []byte, off uint64, n uint32) ([]byte, error) 
 	if s.mem != nil {
 		return s.mem[off : off+uint64(n)], nil
 	}
+	if off > math.MaxInt64 {
+		return nil, fmt.Errorf("%w: offset %d exceeds int64", ErrLayoutOverflow, off)
+	}
 	buf := scratch[:n]
 	got, err := s.at.ReadAt(buf, int64(off))
 	// ReadAt is allowed to report io.EOF together with a full read.
-	if err != nil && !(err == io.EOF && got == len(buf)) {
-		return nil, fmt.Errorf("%w: ReadAt(off=%d, n=%d): %v", ErrPayload, off, n, err)
+	if err != nil && (!errors.Is(err, io.EOF) || got != len(buf)) {
+		return nil, fmt.Errorf("%w: ReadAt(off=%d, n=%d): %w", ErrPayload, off, n, err)
 	}
 	if got != len(buf) {
 		return nil, fmt.Errorf("%w: short read at %d: %d of %d bytes", ErrPayload, off, got, n)
@@ -178,12 +229,15 @@ func (s chunkSource) read(scratch []byte, off uint64, n uint32) ([]byte, error) 
 
 // imagePlan is the derived, fully validated geometry of one image.
 type imagePlan struct {
-	src          chunkSource
-	installedLen uint32
-	storedLen    uint32
-	chunkSize    uint32
-	numChunks    uint32
-	hashOff      uint64 // byte offset of this image's digests inside the region
+	src           chunkSource
+	installedLen  uint32
+	storedLen     uint32
+	chunkSize     uint32
+	numChunks     uint32
+	hashOff       uint64 // byte offset of this image's digests inside the region
+	payloadOffset uint32
+	tailGap       uint32
+	storedData    []byte
 
 	// Descriptor metadata, copied out of the caller's Image so the encoder
 	// never re-reads a struct the caller might mutate mid-build.
@@ -215,6 +269,60 @@ func (e *Encoder) BuildUnsigned(m Manifest) (*Package, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Prepare Reverse Deltas if requested
+	for i := range m.ReverseDeltas {
+		rd := &m.ReverseDeltas[i]
+		if rd.OldImage != nil {
+			oldLen := len(rd.OldImage)
+			if oldLen < 0 || oldLen > math.MaxUint32 {
+				return nil, fmt.Errorf("%w: reverse delta OldImage size %d exceeds uint32", ErrLayoutOverflow, oldLen)
+			}
+			rd.RestoredSize = uint32(oldLen)
+			rd.RestoredSHA256 = sha256.Sum256(rd.OldImage)
+			if rd.Data == nil && len(m.Images) > 0 {
+				var targetInstalled []byte
+				for j := range m.Images {
+					if m.Images[j].TargetSlot == rd.TargetSlot && m.Images[j].Installed != nil {
+						targetInstalled = m.Images[j].Installed
+						break
+					}
+				}
+				if targetInstalled == nil {
+					return nil, fmt.Errorf("cannot derive reverse delta: no installed image for slot %d", rd.TargetSlot)
+				}
+				rdelta, rErr := tds1.GenerateDelta(targetInstalled, rd.OldImage)
+				if rErr != nil {
+					return nil, fmt.Errorf("generate reverse delta: %w", rErr)
+				}
+				recon, aErr := tds1.Apply(targetInstalled, rdelta)
+				if aErr != nil || !bytes.Equal(recon, rd.OldImage) {
+					return nil, errors.New("reverse delta roundtrip verification failed")
+				}
+				rdeltaLen := len(rdelta)
+				if rdeltaLen < 0 || rdeltaLen > math.MaxUint32 {
+					return nil, fmt.Errorf("%w: reverse delta size %d exceeds uint32", ErrLayoutOverflow, rdeltaLen)
+				}
+				rd.Data = rdelta
+				rd.StoredSize = uint32(rdeltaLen)
+				rd.DeltaAlg = DeltaTDS1
+			}
+		}
+		if rd.StoredSize == 0 && rd.Data != nil {
+			rdLen := len(rd.Data)
+			if rdLen < 0 || rdLen > math.MaxUint32 {
+				return nil, fmt.Errorf("%w: reverse delta data size %d exceeds uint32", ErrLayoutOverflow, rdLen)
+			}
+			rd.StoredSize = uint32(rdLen)
+		}
+		if rd.StoredSize == 0 {
+			return nil, fmt.Errorf("reverse delta for slot %d has 0 stored size", rd.TargetSlot)
+		}
+		if rd.DeltaAlg == 0 {
+			rd.DeltaAlg = DeltaTDS1
+		}
+	}
+
 	plans, hashBytes, err := planImages(m.Images)
 	if err != nil {
 		return nil, err
@@ -231,6 +339,11 @@ func (e *Encoder) BuildUnsigned(m Manifest) (*Package, error) {
 	if len(m.DeviceBind) > 0 {
 		specs = append(specs, regionSpec{RegionDeviceBind, uint64(len(m.DeviceBind)), m.DeviceBind})
 	}
+	if len(m.ReverseDeltas) > 0 {
+		rdeltaBytes := uint64(len(m.ReverseDeltas) * RDeltaDescSize)
+		specs = append(specs, regionSpec{RegionReverseDelta, rdeltaBytes, nil})
+	}
+
 	regions, totalLen, err := layoutRegions(specs)
 	if err != nil {
 		return nil, err
@@ -260,20 +373,88 @@ func (e *Encoder) BuildUnsigned(m Manifest) (*Package, error) {
 
 	writeFixedHeader(block, &m, len(plans), totalLen, sbom, autoSBOM)
 
-	dataOff, storedLen, err := writeImageTable(block, plans, totalLen, sector)
+	dataOff, storedLen, nextCursor, err := writeImageTable(block, plans, totalLen, sector, m.TrailerLayout)
 	if err != nil {
 		return nil, err
 	}
 
+	trailerCursor := nextCursor
+	var rdeltaPayloads []PayloadInfo
+	if len(m.ReverseDeltas) > 0 {
+		var rdeltaRegion *regionPlan
+		for i := range regions {
+			if regions[i].id == RegionReverseDelta {
+				rdeltaRegion = &regions[i]
+				break
+			}
+		}
+		if rdeltaRegion == nil {
+			return nil, errors.New("missing reverse delta region plan")
+		}
+		rdeltaBytes := make([]byte, len(m.ReverseDeltas)*RDeltaDescSize)
+		rCursor := nextCursor
+		for idx, rd := range m.ReverseDeltas {
+			rCursor = alignUp64(rCursor, uint64(sector))
+			if rCursor > math.MaxUint32 || rCursor+uint64(rd.StoredSize) > MaxImageLen {
+				return nil, fmt.Errorf("%w: reverse delta %d ends at staging offset %d, past the uint32 limit",
+					ErrLayoutOverflow, idx, rCursor+uint64(rd.StoredSize))
+			}
+			desc := RDeltaDesc{
+				TargetSlot:     rd.TargetSlot,
+				DeltaAlg:       rd.DeltaAlg,
+				DataOff:        uint32(rCursor),
+				StoredSize:     rd.StoredSize,
+				RestoredSize:   rd.RestoredSize,
+				RestoredSHA256: rd.RestoredSHA256,
+			}
+			copy(rdeltaBytes[idx*RDeltaDescSize:(idx+1)*RDeltaDescSize], desc.Serialize())
+			rdeltaPayloads = append(rdeltaPayloads, PayloadInfo{
+				TargetSlot: rd.TargetSlot,
+				Offset:     uint32(rCursor),
+				Length:     rd.StoredSize,
+				Data:       rd.Data,
+				IsRDelta:   true,
+			})
+			rCursor += uint64(rd.StoredSize)
+		}
+		copy(block[rdeltaRegion.off:rdeltaRegion.off+rdeltaRegion.len], rdeltaBytes)
+		trailerCursor = rCursor
+	}
+
+	var trailerOffset uint32
+	if m.TrailerLayout {
+		aligned := alignUp64(trailerCursor, uint64(sector))
+		if aligned > math.MaxUint32 || aligned+uint64(totalLen)+TrailerLocatorLen > MaxImageLen {
+			return nil, fmt.Errorf("%w: trailer TBM1 offset %d overflows uint32", ErrLayoutOverflow, aligned)
+		}
+		trailerOffset = uint32(aligned)
+	}
+
 	binary.LittleEndian.PutUint32(block[offFixedCRC32:], headerCRC(block))
 
+	payloads := make([]PayloadInfo, 0, len(plans)+len(rdeltaPayloads))
+	for i := range plans {
+		p := &plans[i]
+		payloads = append(payloads, PayloadInfo{
+			TargetSlot: p.targetSlot,
+			Offset:     dataOff[i],
+			Length:     p.storedLen,
+			Data:       p.storedData,
+			IsRDelta:   false,
+		})
+	}
+	payloads = append(payloads, rdeltaPayloads...)
+
 	pkg := &Package{
-		Block:      block,
-		TotalLen:   totalLen,
-		SignedLen:  totalLen - SigLen,
-		DataOff:    dataOff,
-		StoredLen:  storedLen,
-		SectorSize: sector,
+		Block:         block,
+		TotalLen:      totalLen,
+		SignedLen:     totalLen - SigLen,
+		DataOff:       dataOff,
+		StoredLen:     storedLen,
+		Payloads:      payloads,
+		SectorSize:    sector,
+		TrailerLayout: m.TrailerLayout,
+		TrailerOffset: trailerOffset,
 	}
 	if err := validateBlock(block); err != nil {
 		return nil, fmt.Errorf("tbm1: internal self-check failed: %w", err)
@@ -340,7 +521,7 @@ func planImages(images []Image) ([]imagePlan, uint64, error) {
 			return nil, 0, fmt.Errorf("%w: image %d BaseFingerprint must be 0 or 8 bytes, got %d",
 				ErrInvalidManifest, i, l)
 		}
-		if im.TargetSlot > SlotStage1 || im.CompAlg > CompLZ4 || im.DeltaAlg > DeltaDETools {
+		if im.TargetSlot > SlotStage1 || im.CompAlg > CompLZ4 || im.DeltaAlg > DeltaTDS1 {
 			return nil, 0, fmt.Errorf("%w: image %d has an out-of-range slot/alg field", ErrInvalidManifest, i)
 		}
 		if slotUsed[im.TargetSlot] {
@@ -359,12 +540,15 @@ func planImages(images []Image) ([]imagePlan, uint64, error) {
 
 		numChunks := ceilDivU32(installedLen, cs)
 		plans[i] = imagePlan{
-			src:          src,
-			installedLen: installedLen,
-			storedLen:    storedLen,
-			chunkSize:    cs,
-			numChunks:    numChunks,
-			hashOff:      hashBytes,
+			src:           src,
+			installedLen:  installedLen,
+			storedLen:     storedLen,
+			chunkSize:     cs,
+			numChunks:     numChunks,
+			hashOff:       hashBytes,
+			payloadOffset: im.PayloadOffset,
+			tailGap:       im.TailGap,
+			storedData:    im.Stored,
 
 			typ:        im.Type,
 			targetSlot: im.TargetSlot,
@@ -396,13 +580,14 @@ func resolveInstalled(im *Image, i int) (chunkSource, uint32, error) {
 			"%w: image %d must set exactly one of Installed and InstalledAt", ErrInvalidManifest, i)
 
 	case inMem:
-		if len(im.Installed) == 0 {
+		instLen := len(im.Installed)
+		if instLen == 0 {
 			return chunkSource{}, 0, fmt.Errorf("%w: image %d has an empty installed image", ErrInvalidManifest, i)
 		}
-		if uint64(len(im.Installed)) > MaxImageLen {
+		if instLen < 0 || instLen > math.MaxUint32 {
 			return chunkSource{}, 0, fmt.Errorf("%w: image %d installed size exceeds uint32", ErrLayoutOverflow, i)
 		}
-		n := uint32(len(im.Installed))
+		n := uint32(instLen)
 		if im.InstalledSize != 0 && im.InstalledSize != n {
 			return chunkSource{}, 0, fmt.Errorf("%w: image %d InstalledSize %d != len(Installed) %d",
 				ErrInvalidManifest, i, im.InstalledSize, n)
@@ -423,16 +608,75 @@ func resolveInstalled(im *Image, i int) (chunkSource, uint32, error) {
 // bytes out of this process entirely.
 func resolveStored(im *Image, installedLen uint32, i int) (uint32, error) {
 	if im.Stored != nil {
-		if uint64(len(im.Stored)) > MaxImageLen {
+		storedLen := len(im.Stored)
+		if storedLen < 0 || storedLen > math.MaxUint32 {
 			return 0, fmt.Errorf("%w: image %d stored size exceeds uint32", ErrLayoutOverflow, i)
 		}
-		n := uint32(len(im.Stored))
+		n := uint32(storedLen)
 		if im.StoredSize != 0 && im.StoredSize != n {
 			return 0, fmt.Errorf("%w: image %d StoredSize %d != len(Stored) %d",
 				ErrInvalidManifest, i, im.StoredSize, n)
 		}
+		if im.DeltaAlg == DeltaTDS1 {
+			tdsHdr, err := tds1.ParseHeader(im.Stored)
+			if err != nil {
+				return 0, fmt.Errorf("%w: image %d invalid TDS1 header: %w", ErrInvalidManifest, i, err)
+			}
+			if tdsHdr.ExpectedTargetSize != installedLen {
+				return 0, fmt.Errorf("%w: image %d TDS1 target size %d != installed size %d",
+					ErrInvalidManifest, i, tdsHdr.ExpectedTargetSize, installedLen)
+			}
+			if len(im.BaseFingerprint) == 0 {
+				im.BaseFingerprint = append([]byte(nil), tdsHdr.BaseFingerprint[:]...)
+			} else if !bytes.Equal(im.BaseFingerprint, tdsHdr.BaseFingerprint[:]) {
+				return 0, fmt.Errorf("%w: image %d BaseFingerprint does not match TDS1 header", ErrInvalidManifest, i)
+			}
+		}
 		return n, nil
 	}
+
+	// Auto-compression with Heatshrink
+	if im.CompAlg == CompHeatshrink && im.Installed != nil {
+		comp, err := heatshrink.Compress(im.Installed)
+		if err != nil {
+			return 0, fmt.Errorf("compress image %d: %w", i, err)
+		}
+		decomp, err := heatshrink.Decompress(comp)
+		if err != nil || !bytes.Equal(decomp, im.Installed) {
+			return 0, fmt.Errorf("heatshrink roundtrip verification failed for image %d", i)
+		}
+		compLen := len(comp)
+		if compLen < 0 || compLen > math.MaxUint32 {
+			return 0, fmt.Errorf("%w: compressed image %d exceeds uint32", ErrLayoutOverflow, i)
+		}
+		im.Stored = comp
+		im.StoredSize = uint32(compLen)
+		return im.StoredSize, nil
+	}
+
+	// Auto-delta with TDS1
+	if im.DeltaAlg == DeltaTDS1 && im.Installed != nil && im.Base != nil {
+		delta, err := tds1.GenerateDelta(im.Base, im.Installed)
+		if err != nil {
+			return 0, fmt.Errorf("generate delta for image %d: %w", i, err)
+		}
+		recon, err := tds1.Apply(im.Base, delta)
+		if err != nil || !bytes.Equal(recon, im.Installed) {
+			return 0, fmt.Errorf("tds1 roundtrip verification failed for image %d", i)
+		}
+		deltaLen := len(delta)
+		if deltaLen < 0 || deltaLen > math.MaxUint32 {
+			return 0, fmt.Errorf("%w: delta image %d exceeds uint32", ErrLayoutOverflow, i)
+		}
+		im.Stored = delta
+		im.StoredSize = uint32(deltaLen)
+		if len(im.BaseFingerprint) == 0 {
+			h := sha256.Sum256(im.Base)
+			im.BaseFingerprint = append([]byte(nil), h[:8]...)
+		}
+		return im.StoredSize, nil
+	}
+
 	if im.StoredSize != 0 {
 		return im.StoredSize, nil
 	}
@@ -451,12 +695,16 @@ func layoutRegions(specs []regionSpec) ([]regionPlan, uint32, error) {
 	for i, s := range specs {
 		off := alignUp64(cursor, 8)
 		cursor = off + s.size
-		if cursor+SigLen > MaxManifestLen {
+		if off > math.MaxUint32 || s.size > math.MaxUint32 || cursor+SigLen > MaxManifestLen {
 			return nil, 0, fmt.Errorf("%w: manifest block would exceed %d bytes", ErrLayoutOverflow, MaxManifestLen)
 		}
 		regions[i] = regionPlan{id: s.id, off: uint32(off), len: uint32(s.size), data: s.data}
 	}
-	return regions, uint32(cursor + SigLen), nil
+	totalBlockLen := cursor + SigLen
+	if totalBlockLen > math.MaxUint32 {
+		return nil, 0, fmt.Errorf("%w: manifest block exceeds uint32", ErrLayoutOverflow)
+	}
+	return regions, uint32(totalBlockLen), nil
 }
 
 // writeFixedHeader fills the 512-byte fixed header except the trailing CRC.
@@ -467,6 +715,9 @@ func writeFixedHeader(block []byte, m *Manifest, imageCount int, totalLen uint32
 	var flagsCritical, flagsInfo uint16
 	if len(m.PQCSig) > 0 && len(m.PQCPubkey) > 0 {
 		flagsCritical |= CritPQCRequired
+	}
+	if m.TrailerLayout {
+		flagsCritical |= CritTrailerLayout
 	}
 	if len(m.DeviceBind) == 32 {
 		flagsInfo |= InfoDeviceBind
@@ -484,7 +735,9 @@ func writeFixedHeader(block []byte, m *Manifest, imageCount int, totalLen uint32
 	le.PutUint16(hdr[offHWRevMin:], m.HWRevMin)
 	le.PutUint16(hdr[offHWRevMax:], m.HWRevMax)
 	hdr[offKeyIndex] = m.KeyIndex
-	hdr[offImageCount] = uint8(imageCount)
+	if imageCount >= 0 && imageCount <= math.MaxUint8 {
+		hdr[offImageCount] = uint8(imageCount)
+	}
 	le.PutUint16(hdr[offBootRetryLimit:], m.BootRetryLimit)
 	le.PutUint16(hdr[offMinReaderMajor:], m.MinReaderMajor)
 	le.PutUint16(hdr[offMinReaderMinor:], m.MinReaderMinor)
@@ -508,19 +761,34 @@ func writeFixedHeader(block []byte, m *Manifest, imageCount int, totalLen uint32
 // writeImageTable fills the image descriptors and returns the staging layout.
 // Payload areas start after the signed block and are sector-aligned so a flash
 // driver can erase and program them independently.
-func writeImageTable(block []byte, plans []imagePlan, totalLen, sector uint32) (dataOff, storedLen []uint32, err error) {
+func writeImageTable(block []byte, plans []imagePlan, totalLen, sector uint32, trailerLayout bool) (dataOff, storedLen []uint32, nextCursor uint64, err error) {
 	le := binary.LittleEndian
 	dataOff = make([]uint32, len(plans))
 	storedLen = make([]uint32, len(plans))
 
 	cursor := alignUp64(uint64(totalLen), uint64(sector))
+	if trailerLayout {
+		cursor = 0
+	}
 	for i := range plans {
 		p := &plans[i]
+		if trailerLayout && i == 0 {
+			if p.compAlg == CompNone && p.deltaAlg == DeltaNone {
+				if p.payloadOffset > 0 {
+					return nil, nil, 0, fmt.Errorf("%w: trailer-layout raw primary image must have payload_offset == 0", ErrInvalidManifest)
+				}
+			} else if p.payloadOffset == 0 {
+				cursor = alignUp64(uint64(p.installedLen), uint64(sector))
+			}
+		}
+		if p.payloadOffset > 0 {
+			cursor = alignUp64(cursor+uint64(p.payloadOffset), uint64(sector))
+		}
 		// The reader adds data_off + stored_len in uint32 arithmetic, so the
 		// payload *end* — not just its start — has to stay below 2^32.
 		end := cursor + uint64(p.storedLen)
 		if end > MaxImageLen {
-			return nil, nil, fmt.Errorf("%w: image %d ends at staging offset %d, past the uint32 limit",
+			return nil, nil, 0, fmt.Errorf("%w: image %d ends at staging offset %d, past the uint32 limit",
 				ErrLayoutOverflow, i, end)
 		}
 		base := offImages + i*imageStride
@@ -544,8 +812,11 @@ func writeImageTable(block []byte, plans []imagePlan, totalLen, sector uint32) (
 		dataOff[i] = uint32(cursor)
 		storedLen[i] = p.storedLen
 		cursor = alignUp64(end, uint64(sector))
+		if p.tailGap > 0 {
+			cursor = alignUp64(cursor+uint64(p.tailGap), uint64(sector))
+		}
 	}
-	return dataOff, storedLen, nil
+	return dataOff, storedLen, cursor, nil
 }
 
 // ---- Digest phase -------------------------------------------------------
@@ -643,7 +914,7 @@ func (e *Encoder) hashImage(dst []byte, p *imagePlan, box *errBox) {
 		next atomic.Uint64
 		wg   sync.WaitGroup
 	)
-	for i := 0; i < workers; i++ {
+	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -685,6 +956,9 @@ func hashRange(dst []byte, p *imagePlan, scratch []byte, lo, hi uint64) error {
 		if off+n > size { // the tail chunk is short unless chunkSize divides size
 			n = size - off
 		}
+		if n > math.MaxUint32 {
+			return fmt.Errorf("%w: chunk size %d overflows uint32", ErrLayoutOverflow, n)
+		}
 		buf, err := p.src.read(scratch, off, uint32(n))
 		if err != nil {
 			return err
@@ -707,6 +981,9 @@ func hashRange(dst []byte, p *imagePlan, scratch []byte, lo, hi uint64) error {
 // already that big; buying alignment at the price of parallelism would be a bad
 // trade, since false sharing costs one line per boundary and nothing more.
 func stripeChunks(p *imagePlan, workers int) uint64 {
+	if workers < 1 {
+		workers = 1
+	}
 	s := uint64(ceilDivU32(hashStripeBytes, p.chunkSize))
 	if fair := uint64(p.numChunks) / uint64(4*workers); fair < s {
 		s = fair
@@ -744,6 +1021,9 @@ func (e *Encoder) hashWorkers(p *imagePlan) int {
 			w = affordable
 		}
 	}
+	if w < 1 {
+		w = 1
+	}
 	if uint64(w) > uint64(p.numChunks) {
 		w = int(p.numChunks)
 	}
@@ -761,7 +1041,7 @@ func sbomDigest(src chunkSource, size uint32) ([32]byte, error) {
 	} else {
 		buf := make([]byte, sbomCopyBuffer)
 		if _, err := io.CopyBuffer(h, io.NewSectionReader(src.at, 0, int64(size)), buf); err != nil {
-			return [32]byte{}, fmt.Errorf("%w: SBOM pass: %v", ErrPayload, err)
+			return [32]byte{}, fmt.Errorf("%w: SBOM pass: %w", ErrPayload, err)
 		}
 	}
 	var out [32]byte
@@ -789,7 +1069,7 @@ func (p *Package) SetSignature(sig []byte) error {
 }
 
 // flatSize validates the payload sizes against the header and returns the size
-// of the assembled staging image.
+// of the assembled staging image (including any Region 6 reverse-delta streams).
 func (p *Package) flatSize(sizes []uint64) (uint64, error) {
 	if !p.Signed {
 		return 0, ErrUnsigned
@@ -807,6 +1087,20 @@ func (p *Package) flatSize(sizes []uint64) (uint64, error) {
 		}
 		end = uint64(p.DataOff[i]) + n
 	}
+	for _, pay := range p.Payloads {
+		if !pay.IsRDelta {
+			continue
+		}
+		if uint64(len(pay.Data)) != uint64(pay.Length) {
+			return 0, fmt.Errorf("%w: reverse-delta payload for slot %d is %d bytes, header says %d",
+				ErrPayload, pay.TargetSlot, len(pay.Data), pay.Length)
+		}
+		if uint64(pay.Offset) < end {
+			return 0, fmt.Errorf("%w: reverse-delta payload at %d overlaps preceding data ending at %d",
+				ErrLayoutOverflow, pay.Offset, end)
+		}
+		end = uint64(pay.Offset) + uint64(pay.Length)
+	}
 	return end, nil
 }
 
@@ -819,8 +1113,9 @@ func blobSizes(stored [][]byte) []uint64 {
 }
 
 // AssembleFlat produces the full staging image in memory: signed block, then
-// each image's stored bytes at its data_off. stored[i] pairs with image i and
-// must match the size recorded in the header; alignment gaps are zero-filled.
+// each image's stored bytes at its data_off (plus any Region 6 reverse-delta
+// payloads). stored[i] pairs with image i and must match the size recorded in
+// the header; alignment gaps are zero-filled.
 //
 // Prefer StreamFlat for anything large — this allocates the whole bundle.
 func (p *Package) AssembleFlat(stored [][]byte) ([]byte, error) {
@@ -836,6 +1131,69 @@ func (p *Package) AssembleFlat(stored [][]byte) ([]byte, error) {
 	for i, blob := range stored {
 		copy(out[p.DataOff[i]:], blob)
 	}
+	for _, pay := range p.Payloads {
+		if pay.IsRDelta {
+			copy(out[pay.Offset:], pay.Data)
+		}
+	}
+	return out, nil
+}
+
+// AssembleTrailer produces a Zero-Copy TrailerLayout bundle in memory:
+// [image 0][sub-images...][reverse-deltas...][sector-aligned signed TBM1 block][16B TrailerLocator].
+func (p *Package) AssembleTrailer(stored [][]byte) ([]byte, error) {
+	if !p.Signed {
+		return nil, ErrUnsigned
+	}
+	if !p.TrailerLayout {
+		return nil, fmt.Errorf("%w: Package was not built with TrailerLayout", ErrInvalidManifest)
+	}
+	if len(stored) != len(p.DataOff) {
+		return nil, fmt.Errorf("tbm1: got %d payloads, want %d", len(stored), len(p.DataOff))
+	}
+	var end uint64
+	for i, blob := range stored {
+		if uint64(len(blob)) != uint64(p.StoredLen[i]) {
+			return nil, fmt.Errorf("tbm1: image %d payload is %d bytes, header says %d", i, len(blob), p.StoredLen[i])
+		}
+		if uint64(p.DataOff[i]) < end {
+			return nil, fmt.Errorf("tbm1: image %d payload overlaps preceding payload", i)
+		}
+		end = uint64(p.DataOff[i]) + uint64(len(blob))
+	}
+	for _, pay := range p.Payloads {
+		if !pay.IsRDelta {
+			continue
+		}
+		if uint64(len(pay.Data)) != uint64(pay.Length) {
+			return nil, fmt.Errorf("%w: reverse-delta payload for slot %d is %d bytes, header says %d",
+				ErrPayload, pay.TargetSlot, len(pay.Data), pay.Length)
+		}
+		if uint64(pay.Offset) < end {
+			return nil, fmt.Errorf("%w: reverse-delta payload at %d overlaps preceding payload ending at %d",
+				ErrLayoutOverflow, pay.Offset, end)
+		}
+		end = uint64(pay.Offset) + uint64(pay.Length)
+	}
+	if uint64(p.TrailerOffset) < end {
+		return nil, fmt.Errorf("%w: trailer offset %d overlaps payloads ending at %d", ErrLayoutOverflow, p.TrailerOffset, end)
+	}
+	totalBundle := uint64(p.TrailerOffset) + uint64(p.TotalLen) + TrailerLocatorLen
+	if totalBundle > uint64(maxInt) {
+		return nil, fmt.Errorf("%w: trailer bundle of %d bytes exceeds addressable memory", ErrLayoutOverflow, totalBundle)
+	}
+	out := make([]byte, totalBundle)
+	for i, blob := range stored {
+		copy(out[p.DataOff[i]:], blob)
+	}
+	for _, pay := range p.Payloads {
+		if pay.IsRDelta {
+			copy(out[pay.Offset:], pay.Data)
+		}
+	}
+	copy(out[p.TrailerOffset:], p.Block)
+	loc := EncodeTrailerLocator(p.TrailerOffset, p.TotalLen)
+	copy(out[uint64(p.TrailerOffset)+uint64(p.TotalLen):], loc[:])
 	return out, nil
 }
 
@@ -874,10 +1232,11 @@ func (p *Package) StreamFlat(w io.Writer, payloads []io.Reader) (int64, error) {
 	}
 	for i, src := range payloads {
 		target := int64(p.DataOff[i])
-		if target < total { // flatSize proved this cannot happen; belt and braces
+		gap := target - total
+		if gap < 0 { // flatSize proved this cannot happen; belt and braces
 			return total, fmt.Errorf("%w: image %d starts before the write cursor", ErrLayoutOverflow, i)
 		}
-		pad, err := writeZeros(w, uint64(target-total))
+		pad, err := writeZeros(w, uint64(gap))
 		total += pad
 		if err != nil {
 			return total, err
@@ -886,10 +1245,30 @@ func (p *Package) StreamFlat(w io.Writer, payloads []io.Reader) (int64, error) {
 		got, err := io.CopyN(w, src, want)
 		total += got
 		if err != nil {
-			return total, fmt.Errorf("%w: image %d payload: %v", ErrPayload, i, err)
+			return total, fmt.Errorf("%w: image %d payload: %w", ErrPayload, i, err)
 		}
 		if got != want {
 			return total, fmt.Errorf("%w: image %d yielded %d of %d bytes", ErrPayload, i, got, want)
+		}
+	}
+	for _, pay := range p.Payloads {
+		if !pay.IsRDelta {
+			continue
+		}
+		target := int64(pay.Offset)
+		gap := target - total
+		if gap < 0 {
+			return total, fmt.Errorf("%w: reverse-delta payload starts before the write cursor", ErrLayoutOverflow)
+		}
+		pad, err := writeZeros(w, uint64(gap))
+		total += pad
+		if err != nil {
+			return total, err
+		}
+		nw, err := w.Write(pay.Data)
+		total += int64(nw)
+		if err != nil {
+			return total, fmt.Errorf("%w: reverse-delta payload: %w", ErrPayload, err)
 		}
 	}
 	return total, nil
@@ -905,6 +1284,9 @@ func writeZeros(w io.Writer, n uint64) (int64, error) {
 			step = n
 		}
 		c, err := w.Write(zeroPad[:step])
+		if c < 0 || uint64(c) > n {
+			return written, io.ErrShortWrite
+		}
 		written += int64(c)
 		if err != nil {
 			return written, err

@@ -97,3 +97,119 @@ func TestCeilDivNeverOverflows(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateDeepNegativeCases(t *testing.T) {
+	base := mustBuild(t, &Encoder{}, sampleManifest()).Block
+
+	runCheck := func(name string, mutate func(b []byte) []byte) {
+		t.Helper()
+		b := append([]byte(nil), base...)
+		b = mutate(b)
+		if err := validateBlock(b); err == nil {
+			t.Fatalf("%s: expected validation error, got nil", name)
+		} else if !errors.Is(err, ErrMalformedBlock) {
+			t.Fatalf("%s: expected ErrMalformedBlock, got %v", name, err)
+		}
+	}
+
+	runCheck("short block < FixedLen", func(b []byte) []byte {
+		return b[:300]
+	})
+
+	runCheck("bad fixed_len field", func(b []byte) []byte {
+		binary.LittleEndian.PutUint16(b[offFixedLen:], 256)
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("unsupported version major", func(b []byte) []byte {
+		b[offVersionMajor] = 99
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("total_len below minimum", func(b []byte) []byte {
+		binary.LittleEndian.PutUint32(b[offTotalLen:], 500)
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("total_len does not match buffer length", func(b []byte) []byte {
+		binary.LittleEndian.PutUint32(b[offTotalLen:], uint32(len(b))+8)
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("region leaves signed area", func(b []byte) []byte {
+		// Set region 0 length to something that extends into trailing signature
+		binary.LittleEndian.PutUint32(b[offRegions+8:], uint32(len(b)))
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("missing chunk-hash region", func(b []byte) []byte {
+		// Zero out region ID
+		binary.LittleEndian.PutUint16(b[offRegions:], RegionNone)
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("image_count 0", func(b []byte) []byte {
+		b[offImageCount] = 0
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("image target slot out of range", func(b []byte) []byte {
+		b[offImages+imgTargetSlot] = 99
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("image comp alg out of range", func(b []byte) []byte {
+		b[offImages+imgCompAlg] = 99
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("image delta alg out of range", func(b []byte) []byte {
+		b[offImages+imgDeltaAlg] = 99
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("image chunk size 0", func(b []byte) []byte {
+		binary.LittleEndian.PutUint32(b[offImages+imgChunkSize:], 0)
+		resealCRC(b)
+		return b
+	})
+
+	runCheck("chunk-hash region size mismatch", func(b []byte) []byte {
+		// Decrease chunk-hash region length by 32
+		curLen := binary.LittleEndian.Uint32(b[offRegions+8:])
+		binary.LittleEndian.PutUint32(b[offRegions+8:], curLen-32)
+		resealCRC(b)
+		return b
+	})
+}
+
+// TestReaderToleranceReservedFields verifies Section 6: Non-zero reserved fields
+// inside the signed block must be tolerated by the reader for future-compatibility.
+func TestReaderToleranceReservedFields(t *testing.T) {
+	b := mustBuild(t, &Encoder{}, sampleManifest()).Block
+
+	// Populate reserved tail fields in fixed header
+	b[offReservedTail] = 0xAA
+	b[offReservedTail+1] = 0xBB
+
+	// Populate region descriptor padding byte (base+2)
+	b[offRegions+2] = 0xCC
+
+	// Reseal CRC
+	resealCRC(b)
+
+	// ValidateBlock must succeed!
+	if err := ValidateBlock(b); err != nil {
+		t.Fatalf("reader rejected non-zero reserved fields: %v", err)
+	}
+}

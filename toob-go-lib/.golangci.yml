@@ -1,0 +1,208 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  relative-path-mode: gomod
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra:
+        group-params: true
+        clothe-returns: true
+    goimports:
+      local-prefixes:
+        - github.com/Toob-Boot/Toob-Loader
+        - github.com/toob-boot/toob
+        - github.com/Toob-Boot/Toob-Registry
+
+linters:
+  default: none
+  enable:
+    # --- 1. Security, SAST & Supply-Chain ---
+    - gosec                      # SAST: G115 int overflow, G122 Walk TOCTOU, G204 exec, G304/G305/G703 path/tar, G402 TLS, G404 RNG
+    - bidichk                    # Blocks Trojan Source bidirectional Unicode (CVE-2021-42574)
+    - asciicheck                 # Blocks homoglyph identifier spoofing
+    - depguard                   # Enforces module/layer architecture boundaries & banned packages
+    - gomoddirectives            # Guards unexpected replace/retract directives in go.mod
+
+    # --- 2. Correctness, Error Handling & Nil-Safety (Uber-Go Core) ---
+    - govet                      # Official Go analyzer suite (+ shadow)
+    - staticcheck                # Full Honnef SA/S/QF dataflow & bug engine
+    - errcheck                   # Unchecked errors + unchecked type assertions (Uber-Go)
+    - nilerr                     # Returns nil error when err != nil
+    - nilnesserr                 # Returns a different nil error var when err != nil
+    - errorlint                  # Enforces %w wrapping, errors.Is, and errors.As
+    - errname                    # Sentinel ErrXxx / type XxxError naming (Uber-Go)
+    - errchkjson                 # Catches unmarshalable types passed to encoding/json
+    - exhaustive                 # Exhaustive enum switches
+    - gocheckcompilerdirectives  # Validates //go:embed, //go:build, //go:noinline
+    - reassign                   # Prevents mutating package-level sentinel errors (io.EOF, Err*)
+    - predeclared                # Prevents shadowing min, max, clear, len, error, byte
+    - asasalint                  # Catches []any passed as any to variadic funcs
+    - durationcheck              # Catches duration * duration multiplication bugs
+    - makezero                   # Catches append() onto make([]T, n) with non-zero initial length (Uber-Go)
+
+    # --- 3. Context, HTTP, Network & DB Resource Leaks (CLI + Backend Services) ---
+    - bodyclose                  # Ensures http.Response.Body is always closed
+    - noctx                      # Ensures HTTP requests / subprocesses pass context.Context
+    - contextcheck               # Detects dropping inherited context.Context
+    - containedctx               # Bans storing context.Context inside structs (Uber-Go)
+    - fatcontext                 # Detects nested context growth inside loops
+    - canonicalheader            # Canonical net/http header keys
+    - nosprintfhostport          # Enforces net.JoinHostPort for IPv6 safety
+    - rowserrcheck               # Ensures sql.Rows.Err() is checked (Backend)
+    - sqlclosecheck              # Ensures sql.Rows / sql.Stmt / pgx rows are closed (Backend)
+    - unqueryvet                 # Prevents SELECT * in SQL queries (Backend)
+    - spancheck                  # Prevents unended OpenTelemetry spans (Backend)
+    - loggercheck                # Key/value pair validation for structured loggers
+    - sloglint                   # Consistent log/slog usage
+
+    # --- 4. Uber-Go Architecture, Concurrency & Modern Go 1.26 Idioms ---
+    - revive                     # Tuned Uber-Go style, concurrency & control-flow rules
+    - embeddedstructfieldcheck   # Embedded types at top of struct, separated by blank line (Uber-Go)
+    - recvcheck                  # Consistent value vs pointer receivers per type
+    - gocritic                   # High-signal bug, performance & diagnostic checks
+    - forbidigo                  # Bans os.Exit / log.Fatal / fmt.Print* in libraries & service packages
+    - nolintlint                 # Requires //nolint:<specific-linter> // <reason> (auditability)
+    - ineffassign                # Dead variable assignments
+    - wastedassign               # Overwritten assignments never read
+    - unused                     # Dead functions, types, constants & struct fields (YAGNI)
+    - unconvert                  # Redundant type conversions
+    - unparam                    # Unused function parameters
+    - copyloopvar                # Modern loop-variable hygiene
+    - intrange                   # Modern for i := range n loops
+    - exptostd                   # Prefer stdlib slices/maps/cmp over golang.org/x/exp
+    - usestdlibvars              # Prefer http.StatusOK, os.DevNull, time.RFC3339, etc.
+    - usetesting                 # Prefer t.TempDir(), t.Setenv(), t.Context() in tests
+    - mirror                     # Avoid unnecessary []byte <-> string allocations
+    - perfsprint                 # Faster string/int formatting on hot paths
+    - tparallel                  # Detects invalid t.Parallel() combinations
+    - thelper                    # Ensures test helpers call t.Helper()
+    - misspell                   # Catches English spelling mistakes in docs/diagnostics
+    - dupword                    # Catches accidental repeated words ("the the")
+
+  settings:
+    govet:
+      enable:
+        - shadow
+    staticcheck:
+      checks:
+        - all
+        - -ST1000 # Package comments not mandatory on every internal package
+        - -ST1005 # Intentional structured "FATAL [CODE]: ...!" compiler/CLI diagnostics
+    gomoddirectives:
+      replace-local: true
+      replace-allow-list:
+        - golang.org/x/crypto
+        - github.com/Toob-Boot/Toob-Loader/toob-go-lib
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    gosec:
+      excludes:
+        - G104 # Covered more accurately by errcheck without duplicate diagnostics
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    exhaustive:
+      default-signifies-exhaustive: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - hugeParam
+    revive:
+      rules:
+        - name: atomic
+        - name: blank-imports
+        - name: bool-literal-in-expr
+        - name: constant-logical-expr
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: datarace
+        - name: deep-exit
+        - name: defer
+        - name: dot-imports
+        - name: duplicated-imports
+        - name: early-return
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: identical-branches
+        - name: range
+        - name: range-val-in-closure
+        - name: range-val-address
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: string-of-int
+        - name: struct-tag
+        - name: superfluous-else
+        - name: time-equal
+        - name: time-naming
+        - name: unconditional-recursion
+        - name: unexported-return
+        - name: unhandled-error
+          disabled: true # Handled by errcheck
+        - name: unnecessary-stmt
+        - name: unreachable-code
+        - name: unused-parameter
+          disabled: true # Handled by unparam with whole-package callgraph awareness
+        - name: var-declaration
+        - name: waitgroup-by-value
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: "Use structured logger or explicit io.Writer (cmd.OutOrStdout()) instead of fmt.Print*"
+        - pattern: ^log\.Fatal.*$
+          msg: "Return an error to main() instead of calling log.Fatal* (Uber-Go Exit Once)"
+    depguard:
+      rules:
+        modern_stdlib:
+          deny:
+            - pkg: "math/rand$"
+              desc: "Use crypto/rand for security-sensitive values or math/rand/v2 for non-crypto simulations"
+            - pkg: "io/ioutil"
+              desc: "Deprecated since Go 1.16; use io and os directly"
+            - pkg: "github.com/pkg/errors"
+              desc: "Use standard library errors and fmt.Errorf('%w') instead"
+
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+    rules:
+      # CLI entrypoints legitimately print to stdout/stderr or exit in main.go
+      - path: ^(cmd/|main\.go)
+        linters:
+          - forbidigo
+      - path: ^main\.go$
+        linters:
+          - revive
+        text: "deep-exit"
+      # Tests may use helper subprocesses, test fixtures, and relaxed security/errcheck patterns
+      - path: _test\.go$
+        linters:
+          - gosec
+          - forbidigo
+          - bodyclose
+          - noctx
+          - unparam
+          - dupword
+          - errchkjson
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

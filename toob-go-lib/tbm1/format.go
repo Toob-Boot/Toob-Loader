@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math"
+	"slices"
 )
 
 // ---- Layout constants (mirror boot_tbm1.h) ------------------------------
@@ -46,7 +47,7 @@ import (
 const (
 	Magic        = 0x314D4254 // 'TBM1' little-endian
 	VersionMajor = 2
-	VersionMinor = 0
+	VersionMinor = 1
 	FixedLen     = 512
 	SigLen       = 64
 	MaxImages    = 4
@@ -66,6 +67,7 @@ const (
 	RegionPQCPubkey    = 3
 	RegionDeviceBind   = 4
 	RegionDeltaScript  = 5
+	RegionReverseDelta = 6
 )
 
 // Compression / delta enums.
@@ -77,7 +79,47 @@ const (
 	DeltaNone    = 0
 	DeltaBSDiff  = 1
 	DeltaDETools = 2
+	DeltaTDS1    = 3
 )
+
+const RDeltaDescSize = 48
+
+// RDeltaDesc mirrors tbm1_rdelta_desc_t in boot_tbm1.h.
+type RDeltaDesc struct {
+	TargetSlot     uint8
+	DeltaAlg       uint8
+	DataOff        uint32
+	StoredSize     uint32
+	RestoredSize   uint32
+	RestoredSHA256 [32]byte
+}
+
+func (d *RDeltaDesc) Serialize() []byte {
+	buf := make([]byte, RDeltaDescSize)
+	buf[0] = d.TargetSlot
+	buf[1] = d.DeltaAlg
+	// buf[2:4] reserved 0
+	binary.LittleEndian.PutUint32(buf[4:8], d.DataOff)
+	binary.LittleEndian.PutUint32(buf[8:12], d.StoredSize)
+	binary.LittleEndian.PutUint32(buf[12:16], d.RestoredSize)
+	copy(buf[16:48], d.RestoredSHA256[:])
+	return buf
+}
+
+func ParseRDeltaDesc(buf []byte) (*RDeltaDesc, error) {
+	if len(buf) < RDeltaDescSize {
+		return nil, ErrBufferTooSmall
+	}
+	d := &RDeltaDesc{
+		TargetSlot:   buf[0],
+		DeltaAlg:     buf[1],
+		DataOff:      binary.LittleEndian.Uint32(buf[4:8]),
+		StoredSize:   binary.LittleEndian.Uint32(buf[8:12]),
+		RestoredSize: binary.LittleEndian.Uint32(buf[12:16]),
+	}
+	copy(d.RestoredSHA256[:], buf[16:48])
+	return d, nil
+}
 
 // Target slots.
 const (
@@ -89,9 +131,54 @@ const (
 
 // flags_critical / flags_info bits.
 const (
-	CritPQCRequired = 1 << 0
-	InfoDeviceBind  = 1 << 0
+	CritPQCRequired   = 1 << 0
+	CritTrailerLayout = 1 << 1
+	CritKnownMask     = CritPQCRequired | CritTrailerLayout
+	InfoDeviceBind    = 1 << 0
+
+	TrailerMagic      = 0x544D4254 // 'TBMT' little-endian
+	TrailerLocatorLen = 16
 )
+
+// EncodeTrailerLocator serializes the 16-byte Zero-Copy trailer locator placed
+// immediately after the signed TBM1 block in TrailerLayout bundles.
+func EncodeTrailerLocator(tbm1Off, tbm1Len uint32) [TrailerLocatorLen]byte {
+	var out [TrailerLocatorLen]byte
+	binary.LittleEndian.PutUint32(out[0:4], TrailerMagic)
+	binary.LittleEndian.PutUint32(out[4:8], tbm1Off)
+	binary.LittleEndian.PutUint32(out[8:12], tbm1Len)
+	binary.LittleEndian.PutUint32(out[12:16], crc32.ChecksumIEEE(out[0:12]))
+	return out
+}
+
+// ParseTrailerLocator validates and decodes a 16-byte Zero-Copy trailer locator.
+func ParseTrailerLocator(b []byte) (tbm1Off, tbm1Len uint32, err error) {
+	if len(b) < TrailerLocatorLen {
+		return 0, 0, ErrBufferTooSmall
+	}
+	tail := b[len(b)-TrailerLocatorLen:]
+	if binary.LittleEndian.Uint32(tail[0:4]) != TrailerMagic {
+		return 0, 0, malformed("bad trailer locator magic")
+	}
+	if binary.LittleEndian.Uint32(tail[12:16]) != crc32.ChecksumIEEE(tail[0:12]) {
+		return 0, 0, malformed("trailer locator CRC mismatch")
+	}
+	tbm1Off = binary.LittleEndian.Uint32(tail[4:8])
+	tbm1Len = binary.LittleEndian.Uint32(tail[8:12])
+	if tbm1Len < FixedLen+SigLen || tbm1Len > MaxManifestLen {
+		return 0, 0, malformed("trailer locator tbm1_len %d out of range", tbm1Len)
+	}
+	if uint64(tbm1Off)+uint64(tbm1Len)+TrailerLocatorLen > MaxImageLen {
+		return 0, 0, malformed("trailer locator bounds overflow uint32")
+	}
+	if len(b) > TrailerLocatorLen {
+		rem := len(b) - TrailerLocatorLen
+		if rem > 0 && uint64(tbm1Off)+uint64(tbm1Len) > uint64(rem) {
+			return 0, 0, malformed("trailer locator [%d,+%d) exceeds bundle body %d", tbm1Off, tbm1Len, rem)
+		}
+	}
+	return tbm1Off, tbm1Len, nil
+}
 
 // Fixed-header field offsets.
 const (
@@ -199,6 +286,8 @@ var (
 	ErrNoSigner = errors.New("tbm1: no signer configured")
 	// ErrPayload — a caller-supplied payload source failed or lied about its size.
 	ErrPayload = errors.New("tbm1: payload source error")
+	// ErrBufferTooSmall — byte buffer is shorter than the required struct size.
+	ErrBufferTooSmall = errors.New("tbm1: buffer too small")
 )
 
 // ---- Arithmetic helpers -------------------------------------------------
@@ -257,6 +346,9 @@ type Header struct {
 func ParseHeader(block []byte) (Header, error) {
 	if err := validateBlock(block); err != nil {
 		return Header{}, err
+	}
+	if len(block) < FixedLen {
+		return Header{}, ErrBufferTooSmall
 	}
 	le := binary.LittleEndian
 	h := Header{
@@ -327,8 +419,8 @@ func validateBlock(b []byte) error {
 		return malformed("unsupported version_major %d", b[offVersionMajor])
 	}
 	total := le.Uint32(b[offTotalLen:])
-	if total < FixedLen+SigLen {
-		return malformed("total_len %d below the minimum %d", total, FixedLen+SigLen)
+	if total < FixedLen+SigLen || total > MaxManifestLen {
+		return malformed("total_len %d out of [%d..%d]", total, FixedLen+SigLen, MaxManifestLen)
 	}
 	if uint64(total) != uint64(len(b)) {
 		return malformed("total_len %d != block length %d", total, len(b))
@@ -336,6 +428,21 @@ func validateBlock(b []byte) error {
 	if le.Uint32(b[offFixedCRC32:]) != headerCRC(b) {
 		return malformed("header CRC mismatch")
 	}
+	flagsCrit := le.Uint16(b[offFlagsCritical:])
+	if flagsCrit&^CritKnownMask != 0 {
+		return malformed("unknown critical flags 0x%04x", flagsCrit)
+	}
+	minMaj := le.Uint16(b[offMinReaderMajor:])
+	minMin := le.Uint16(b[offMinReaderMinor:])
+	if minMaj > VersionMajor || (minMaj == VersionMajor && minMin > VersionMinor) {
+		return malformed("min_reader %d.%d exceeds supported %d.%d", minMaj, minMin, VersionMajor, VersionMinor)
+	}
+	hwMin := le.Uint16(b[offHWRevMin:])
+	hwMax := le.Uint16(b[offHWRevMax:])
+	if hwMin > hwMax {
+		return malformed("hw_rev_min %d > hw_rev_max %d", hwMin, hwMax)
+	}
+	isTrailer := flagsCrit&CritTrailerLayout != 0
 
 	// Regions: unique, ascending, non-overlapping, wholly inside the signed area.
 	sigStart := total - SigLen
@@ -344,17 +451,17 @@ func validateBlock(b []byte) error {
 	prevEnd := uint32(FixedLen)
 	var chunkHashLen uint32
 	foundChunkHashes := false
+	var rdeltaOff, rdeltaLen uint32
+	hasRDelta := false
 
-	for i := 0; i < MaxRegions; i++ {
+	for i := range MaxRegions {
 		base := offRegions + i*regionStride
 		id := le.Uint16(b[base:])
 		if id == RegionNone {
 			continue
 		}
-		for _, s := range seen[:nSeen] {
-			if s == id {
-				return malformed("duplicate region %d", id)
-			}
+		if slices.Contains(seen[:nSeen], id) {
+			return malformed("duplicate region %d", id)
 		}
 		seen[nSeen] = id
 		nSeen++
@@ -367,11 +474,41 @@ func validateBlock(b []byte) error {
 		if off < prevEnd {
 			return malformed("region %d starts at %d, before the previous region ends at %d", id, off, prevEnd)
 		}
+		if (off & 7) != 0 {
+			return malformed("region %d offset %d is not 8-byte aligned", id, off)
+		}
 		prevEnd = off + ln
 
-		if id == RegionChunkHashes {
+		switch id {
+		case RegionChunkHashes:
 			chunkHashLen = ln
 			foundChunkHashes = true
+		case RegionReverseDelta:
+			if ln == 0 || ln%RDeltaDescSize != 0 {
+				return malformed("invalid reverse delta region length %d", ln)
+			}
+			rdeltaOff = off
+			rdeltaLen = ln
+			hasRDelta = true
+			for r := uint32(0); r < ln; r += RDeltaDescSize {
+				descBytes := b[off+r : off+r+RDeltaDescSize]
+				desc, err := ParseRDeltaDesc(descBytes)
+				if err != nil {
+					return malformed("malformed reverse delta descriptor: %v", err)
+				}
+				if desc.TargetSlot > SlotStage1 {
+					return malformed("reverse delta slot %d out of range", desc.TargetSlot)
+				}
+				if desc.DeltaAlg != DeltaTDS1 {
+					return malformed("reverse delta unsupported alg %d", desc.DeltaAlg)
+				}
+				if desc.StoredSize == 0 || desc.RestoredSize == 0 {
+					return malformed("reverse delta stored_size and restored_size must be > 0")
+				}
+				if (!isTrailer && uint64(desc.DataOff) < uint64(total)) || uint64(desc.DataOff)+uint64(desc.StoredSize) > MaxImageLen {
+					return malformed("reverse delta payload out of bounds")
+				}
+			}
 		}
 	}
 	if !foundChunkHashes {
@@ -386,7 +523,10 @@ func validateBlock(b []byte) error {
 	}
 	var hashAcc uint64
 	payloadFloor := uint64(total)
-	for i := 0; i < nImg; i++ {
+	if isTrailer {
+		payloadFloor = 0
+	}
+	for i := range nImg {
 		base := offImages + i*imageStride
 		slot, comp, delta := b[base+imgTargetSlot], b[base+imgCompAlg], b[base+imgDeltaAlg]
 		dataOff := le.Uint32(b[base+imgDataOff:])
@@ -395,21 +535,39 @@ func validateBlock(b []byte) error {
 		chunkSize := le.Uint32(b[base+imgChunkSize:])
 		numChunks := le.Uint32(b[base+imgNumChunks:])
 
-		if slot > SlotStage1 || comp > CompLZ4 || delta > DeltaDETools {
+		if slot > SlotStage1 || comp > CompLZ4 || delta > DeltaTDS1 {
 			return malformed("image %d has an out-of-range slot/alg field", i)
+		}
+		if installed == 0 || storedLen == 0 {
+			return malformed("image %d has zero installed (%d) or stored (%d) size", i, installed, storedLen)
 		}
 		if chunkSize == 0 || numChunks != ceilDivU32(installed, chunkSize) {
 			return malformed("image %d chunk math: %d bytes / %d != %d chunks", i, installed, chunkSize, numChunks)
+		}
+		if isTrailer && i == 0 && comp == CompNone && delta == DeltaNone && dataOff != 0 {
+			return malformed("trailer-layout raw primary image must have data_off == 0, got %d", dataOff)
 		}
 		if uint64(dataOff) < payloadFloor {
 			return malformed("image %d payload at %d overlaps the preceding data", i, dataOff)
 		}
 		payloadFloor = uint64(dataOff) + uint64(storedLen)
+		if payloadFloor > MaxImageLen {
+			return malformed("image %d payload [%d,+%d) overflows uint32", i, dataOff, storedLen)
+		}
 
 		hashAcc += uint64(numChunks) * DigestLen
 	}
 	if hashAcc != uint64(chunkHashLen) {
 		return malformed("chunk-hash region is %d bytes, images need %d", chunkHashLen, hashAcc)
+	}
+	if hasRDelta {
+		for r := uint32(0); r < rdeltaLen; r += RDeltaDescSize {
+			desc, _ := ParseRDeltaDesc(b[rdeltaOff+r : rdeltaOff+r+RDeltaDescSize])
+			if uint64(desc.DataOff) < payloadFloor {
+				return malformed("reverse delta payload at %d overlaps preceding data ending at %d", desc.DataOff, payloadFloor)
+			}
+			payloadFloor = uint64(desc.DataOff) + uint64(desc.StoredSize)
+		}
 	}
 	return nil
 }

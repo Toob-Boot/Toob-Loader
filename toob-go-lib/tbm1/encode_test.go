@@ -63,7 +63,7 @@ func TestStreamedAndInMemoryAgree(t *testing.T) {
 func chunkHashRegion(t *testing.T, b []byte) []byte {
 	t.Helper()
 	le := binary.LittleEndian
-	for i := 0; i < MaxRegions; i++ {
+	for i := range MaxRegions {
 		base := offRegions + i*regionStride
 		if le.Uint16(b[base:]) == RegionChunkHashes {
 			off, ln := le.Uint32(b[base+4:]), le.Uint32(b[base+8:])
@@ -127,6 +127,29 @@ func TestManifestRejections(t *testing.T) {
 		"size disagreement": func(m *Manifest) { m.Images[0].InstalledSize = 1 },
 		"stored disagreement": func(m *Manifest) {
 			m.Images[1].StoredSize = uint32(len(m.Images[1].Stored)) + 1
+		},
+		"too many images": func(m *Manifest) {
+			for len(m.Images) <= MaxImages {
+				m.Images = append(m.Images, Image{
+					Type:       uint8(len(m.Images)),
+					TargetSlot: SlotRecovery,
+					Installed:  netImage,
+				})
+			}
+		},
+		"bad sbom length": func(m *Manifest) {
+			m.SBOMDigest = []byte{1, 2, 3, 4}
+		},
+		"pqc pubkey without sig": func(m *Manifest) {
+			m.PQCPubkey = []byte{1, 2, 3}
+			m.PQCSig = nil
+		},
+		"huge chunk": func(m *Manifest) {
+			m.Images[0].ChunkSize = MaxChunkSize + 1
+		},
+		"future minor reader": func(m *Manifest) {
+			m.MinReaderMajor = VersionMajor
+			m.MinReaderMinor = VersionMinor + 1
 		},
 	}
 	for name, mutate := range cases {
@@ -224,7 +247,8 @@ func TestStripeSizing(t *testing.T) {
 }
 
 func BenchmarkBuild(b *testing.B) {
-	for _, p := range []int{1, 0} { // 0 = GOMAXPROCS
+	// p == 0 uses runtime.GOMAXPROCS(0) workers.
+	for _, p := range []int{1, 0} {
 		name := "parallel"
 		if p == 1 {
 			name = "sequential"
@@ -234,7 +258,7 @@ func BenchmarkBuild(b *testing.B) {
 			m := sampleManifest()
 			b.SetBytes(int64(len(appImage) + len(netImage)))
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				if _, err := e.BuildUnsigned(m); err != nil {
 					b.Fatal(err)
 				}

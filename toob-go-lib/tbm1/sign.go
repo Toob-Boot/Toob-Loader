@@ -36,7 +36,11 @@ func NewLocalSigner(priv ed25519.PrivateKey) (*LocalSigner, error) {
 	}
 	own := make(ed25519.PrivateKey, ed25519.PrivateKeySize)
 	copy(own, priv)
-	return &LocalSigner{priv: own, pub: own.Public().(ed25519.PublicKey)}, nil
+	pub, ok := own.Public().(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("tbm1: unexpected public key type %T", own.Public())
+	}
+	return &LocalSigner{priv: own, pub: pub}, nil
 }
 
 // Public returns a copy, so a caller cannot corrupt the verification key.
@@ -113,6 +117,22 @@ func SignBlock(unsigned []byte, s Signer) ([]byte, error) {
 	}
 	copy(out[signedLen:total], sig)
 	return out, nil
+}
+
+// ExtractSignature validates signedBlock and returns a fresh copy of its
+// trailing 64-byte Ed25519 signature.
+func ExtractSignature(signedBlock []byte) ([]byte, error) {
+	if err := validateBlock(signedBlock); err != nil {
+		return nil, err
+	}
+	total := binary.LittleEndian.Uint32(signedBlock[offTotalLen:])
+	if total < SigLen || uint64(total) > uint64(len(signedBlock)) {
+		return nil, malformed("total_len %d out of bounds for block length %d", total, len(signedBlock))
+	}
+	signedLen := total - SigLen
+	sig := make([]byte, SigLen)
+	copy(sig, signedBlock[signedLen:total])
+	return sig, nil
 }
 
 // signAndCheck signs msg and, when the signer exposes a usable public key,

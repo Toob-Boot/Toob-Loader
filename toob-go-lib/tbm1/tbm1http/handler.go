@@ -242,6 +242,7 @@ func (o Options) authorize(w http.ResponseWriter, block []byte) bool {
 // panic handler knows if it can still produce a clean 500.
 type guardedWriter struct {
 	http.ResponseWriter
+
 	wrote bool
 }
 
