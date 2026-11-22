@@ -55,13 +55,14 @@ var chipListCmd = &cobra.Command{
 
 		ui.Header("Chip Registry")
 
-		headers := []string{"Chip", "Version", "Arch", "Verified CLI"}
+		headers := []string{"Chip", "Version", "Arch", "Tier", "Verified CLI"}
 		var rows [][]string
 		for _, ci := range idx.Chips {
 			if query != "" && !strings.Contains(strings.ToLower(ci.Name), query) {
 				continue
 			}
 
+			tier := registry.ClassifyTier(ci.Name, ci.Author, ci.Tier, false)
 			verifiedClisStr := ui.Yellow("unverified")
 			if matrix != nil {
 				if chipEntry, has := (*matrix)[ci.Name]; has {
@@ -83,7 +84,7 @@ var chipListCmd = &cobra.Command{
 				}
 			}
 
-			rows = append(rows, []string{ui.Bold(ci.Name), ui.Brand(ci.Version), ci.Arch, verifiedClisStr})
+			rows = append(rows, []string{ui.Bold(ci.Name), ui.Brand(ci.Version), ci.Arch, formatTierBadge(tier), verifiedClisStr})
 		}
 
 		if len(rows) == 0 {
@@ -126,9 +127,17 @@ var chipInfoCmd = &cobra.Command{
 
 		fmt.Fprintln(os.Stderr)
 		ui.KeyValue("Version", ui.BoldBrand(ci.Version))
+		ui.KeyValue("Trust Tier", formatTierBadge(registry.ClassifyTier(ci.Name, ci.Author, ci.Tier, false)))
 		ui.KeyValue("Architecture", fmt.Sprintf("%s %s", ci.Arch, ui.Gray("(v"+aVer+")")))
 		ui.KeyValue("Compiler", ui.Cyan(ci.CompilerPrefix))
 		ui.KeyValue("Registry Path", ui.Gray(ci.Path))
+		if len(ci.HalBindings) > 0 {
+			var binds []string
+			for k, v := range ci.HalBindings {
+				binds = append(binds, k+"="+v)
+			}
+			ui.KeyValue("HAL Bindings", strings.Join(binds, ", "))
+		}
 		if ci.Description != "" {
 			ui.KeyValue("Description", ci.Description)
 		}

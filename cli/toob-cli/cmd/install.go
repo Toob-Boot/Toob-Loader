@@ -59,11 +59,15 @@ var installCmd = &cobra.Command{
 
 			// 2. Parse chip_manifest.json to resolve drivers & other dependencies
 			var chipManifest struct {
-				Drivers    []string `json:"drivers"`
-				Arch       string   `json:"arch"`
-				Toolchain  string   `json:"toolchain"`
-				MinCoreSDK string   `json:"min_core_sdk"`
-				Includes   []string `json:"includes"`
+				Arch        string            `json:"arch"`
+				Toolchain   string            `json:"toolchain"`
+				MinCoreSDK  string            `json:"min_core_sdk"`
+				HalBindings map[string]string `json:"hal_bindings"`
+				Drivers     []string          `json:"drivers"`
+				Sources     *struct {
+					Drivers []string `json:"drivers"`
+				} `json:"sources"`
+				Includes []string `json:"includes"`
 			}
 			manifestPath := filepath.Join(chipDir, "chip_manifest.json")
 			if manifestData, err := os.ReadFile(manifestPath); err == nil {
@@ -75,11 +79,34 @@ var installCmd = &cobra.Command{
 							ui.Warn("Failed to pre-fetch architecture '%s': %v", chipManifest.Arch, err)
 						}
 					}
-					// Pre-fetch Drivers
-					for _, drv := range chipManifest.Drivers {
+					// Pre-fetch HAL Trait-Bound Drivers & Legacy Drivers
+					seenDrv := make(map[string]bool)
+					for _, drv := range chipManifest.HalBindings {
+						if drv == "" || seenDrv[drv] {
+							continue
+						}
+						seenDrv[drv] = true
 						ui.Step("Pre-fetching driver '%s'...", drv)
 						if _, err := cache.DriverSourcePath(drv); err != nil {
 							ui.Warn("Failed to pre-fetch driver '%s': %v", drv, err)
+						}
+					}
+					drvFiles := chipManifest.Drivers
+					if chipManifest.Sources != nil {
+						drvFiles = append(drvFiles, chipManifest.Sources.Drivers...)
+					}
+					for _, drvFile := range drvFiles {
+						drvDir := filepath.ToSlash(filepath.Dir(drvFile))
+						if drvDir == "." {
+							drvDir = drvFile
+						}
+						if seenDrv[drvDir] || seenDrv[filepath.Base(drvDir)] {
+							continue
+						}
+						seenDrv[drvDir] = true
+						ui.Step("Pre-fetching driver '%s'...", drvDir)
+						if _, err := cache.DriverSourcePath(drvDir); err != nil {
+							ui.Warn("Failed to pre-fetch driver '%s': %v", drvDir, err)
 						}
 					}
 					// Pre-fetch SoC package if needed

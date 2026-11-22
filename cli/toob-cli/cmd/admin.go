@@ -156,7 +156,9 @@ var adminReleaseCmd = &cobra.Command{
 		var resp struct {
 			Released int `json:"released"`
 		}
-		json.Unmarshal(body, &resp)
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return fmt.Errorf("failed to parse release response: %w", err)
+		}
 
 		ui.Success("Released %d package(s) to stable.", resp.Released)
 		return nil
@@ -164,6 +166,8 @@ var adminReleaseCmd = &cobra.Command{
 }
 
 // --- Admin HTTP Helpers ---
+
+const maxAdminResponseBytes = 10 << 20 // 10 MiB
 
 func adminGET(client *apiclient.Client, path string) ([]byte, error) {
 	ctx := cmd_defaultCtx()
@@ -180,12 +184,12 @@ func adminGET(client *apiclient.Client, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, readAdminError(resp)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxAdminResponseBytes))
 }
 
 func adminPOST(client *apiclient.Client, path string, payload any) ([]byte, error) {
@@ -194,7 +198,10 @@ func adminPOST(client *apiclient.Client, path string, payload any) ([]byte, erro
 
 	var body io.Reader
 	if payload != nil {
-		data, _ := json.Marshal(payload)
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request payload: %w", err)
+		}
 		body = bytes.NewReader(data)
 	}
 
@@ -210,12 +217,12 @@ func adminPOST(client *apiclient.Client, path string, payload any) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, readAdminError(resp)
 	}
-	return io.ReadAll(resp.Body)
+	return io.ReadAll(io.LimitReader(resp.Body, maxAdminResponseBytes))
 }
 
 func readAdminError(resp *http.Response) error {

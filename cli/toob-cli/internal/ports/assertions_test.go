@@ -69,6 +69,10 @@ func TestPortFieldCounts(t *testing.T) {
 			reflect.TypeFor[RegistryIntegration](), reflect.TypeFor[registry.IntegrationInfo]()},
 		{"RegistrySoC ↔ registry.SoCInfo",
 			reflect.TypeFor[RegistrySoC](), reflect.TypeFor[registry.SoCInfo]()},
+		{"RegistryCrypto ↔ registry.CryptoInfo",
+			reflect.TypeFor[RegistryCrypto](), reflect.TypeFor[registry.CryptoInfo]()},
+		{"CryptoFootprint ↔ registry.CryptoFootprint",
+			reflect.TypeFor[CryptoFootprint](), reflect.TypeFor[registry.CryptoFootprint]()},
 
 		// Toolchain download (extended registry entry)
 		{"ToolchainDownload ↔ toolchain.RegistryToolchain",
@@ -77,7 +81,14 @@ func TestPortFieldCounts(t *testing.T) {
 		// Manifest
 		{"HardwareFlashRegion ↔ manifest.FlashRegion",
 			reflect.TypeFor[HardwareFlashRegion](), reflect.TypeFor[manifest.FlashRegion]()},
-
+		{"DriverManifest ↔ manifest.DriverManifest",
+			reflect.TypeFor[DriverManifest](), reflect.TypeFor[manifest.DriverManifest]()},
+		{"CryptoFootprint ↔ manifest.CryptoFootprint",
+			reflect.TypeFor[CryptoFootprint](), reflect.TypeFor[manifest.CryptoFootprint]()},
+		{"CryptoManifest ↔ manifest.CryptoManifest",
+			reflect.TypeFor[CryptoManifest](), reflect.TypeFor[manifest.CryptoManifest]()},
+		{"ArchManifest ↔ manifest.ArchManifest",
+			reflect.TypeFor[ArchManifest](), reflect.TypeFor[manifest.ArchManifest]()},
 
 		// Compatibility Matrix
 		{"MatrixDependencies ↔ registry.MatrixDependencies",
@@ -158,10 +169,22 @@ func TestPortFieldTypes(t *testing.T) {
 			reflect.TypeFor[RegistryIntegration](), reflect.TypeFor[registry.IntegrationInfo]()},
 		{"RegistrySoC ↔ registry.SoCInfo",
 			reflect.TypeFor[RegistrySoC](), reflect.TypeFor[registry.SoCInfo]()},
+		{"RegistryCrypto ↔ registry.CryptoInfo",
+			reflect.TypeFor[RegistryCrypto](), reflect.TypeFor[registry.CryptoInfo]()},
+		{"CryptoFootprint ↔ registry.CryptoFootprint",
+			reflect.TypeFor[CryptoFootprint](), reflect.TypeFor[registry.CryptoFootprint]()},
 		{"ToolchainDownload ↔ toolchain.RegistryToolchain",
 			reflect.TypeFor[ToolchainDownload](), reflect.TypeFor[toolchain.RegistryToolchain]()},
 		{"HardwareFlashRegion ↔ manifest.FlashRegion",
 			reflect.TypeFor[HardwareFlashRegion](), reflect.TypeFor[manifest.FlashRegion]()},
+		{"DriverManifest ↔ manifest.DriverManifest",
+			reflect.TypeFor[DriverManifest](), reflect.TypeFor[manifest.DriverManifest]()},
+		{"CryptoFootprint ↔ manifest.CryptoFootprint",
+			reflect.TypeFor[CryptoFootprint](), reflect.TypeFor[manifest.CryptoFootprint]()},
+		{"CryptoManifest ↔ manifest.CryptoManifest",
+			reflect.TypeFor[CryptoManifest](), reflect.TypeFor[manifest.CryptoManifest]()},
+		{"ArchManifest ↔ manifest.ArchManifest",
+			reflect.TypeFor[ArchManifest](), reflect.TypeFor[manifest.ArchManifest]()},
 		{"MatrixDependencies ↔ registry.MatrixDependencies",
 			reflect.TypeFor[MatrixDependencies](), reflect.TypeFor[registry.MatrixDependencies]()},
 		{"MatrixVerifiedCli ↔ registry.MatrixVerifiedCli",
@@ -193,7 +216,10 @@ func TestPortFieldTypes(t *testing.T) {
 					if pf.Type.String() == "*ports.RecoveryCrypto" && rf.Type.String() == "*registry.RecoveryCrypto" {
 						continue
 					}
-					if pf.Type.String() == "*ports.Provenance" && (rf.Type.String() == "*manifest.Provenance" || rf.Type.String() == "*registry.Provenance") {
+					if pf.Type.String() == "*ports.Provenance" && (rf.Type.String() == "*manifest.Provenance" || rf.Type.String() == "*build.Provenance" || rf.Type.String() == "*registry.Provenance") {
+						continue
+					}
+					if pf.Type.String() == "*ports.CryptoFootprint" && (rf.Type.String() == "*manifest.CryptoFootprint" || rf.Type.String() == "*build.CryptoFootprint" || rf.Type.String() == "*registry.CryptoFootprint") {
 						continue
 					}
 					t.Errorf("\n[BREAKING CHANGE] %s: Field %q type changed.\n"+

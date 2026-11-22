@@ -29,7 +29,7 @@ var (
 
 var initCmd = &cobra.Command{
 	Use:   "init [project-name]",
-	Short: "Initialize a new Toob-Loader IoT project (Zero-Bloat Scaffold)",
+	Short: "Initialize a new Toob-Loader project",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		projectName := args[0]

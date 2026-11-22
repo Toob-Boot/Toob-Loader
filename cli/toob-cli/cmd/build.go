@@ -1,42 +1,35 @@
 package cmd
 
 import (
+	"bytes"
+	"cmp"
 	"context"
-	"encoding/json"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"runtime"
-	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
-
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/apiclient"
+	"github.com/toob-boot/toob/internal/archiveutil"
+	"github.com/toob-boot/toob/internal/elfaudit"
 	"github.com/toob-boot/toob/internal/lockfile"
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/paths"
-	"github.com/toob-boot/toob/internal/ports"
 	"github.com/toob-boot/toob/internal/registry"
-	"github.com/toob-boot/toob/internal/cbor"
+	"github.com/toob-boot/toob/internal/resolve"
 	"github.com/toob-boot/toob/internal/toolchain"
 	"github.com/toob-boot/toob/internal/ui"
 )
-
-func resolvePath(localRoot string, fallbackRoot string, relPath string) string {
-	localPath := filepath.Join(localRoot, relPath)
-	if _, err := os.Stat(localPath); err == nil {
-		return localPath
-	}
-	return filepath.Join(fallbackRoot, relPath)
-}
 
 var (
 	flagManifest      string
@@ -45,6 +38,7 @@ var (
 	flagNative        bool
 	flagCloud         bool
 	flagSkipChecks    bool
+	flagLocked        bool
 )
 
 type TimingTracker struct {
@@ -71,18 +65,28 @@ func (t *TimingTracker) Add(name string, duration time.Duration) {
 }
 
 func (t *TimingTracker) Print(total time.Duration) {
-	var entries []ui.TimingEntry
+	t.mu.Lock()
+	entries := make([]ui.TimingEntry, 0, len(t.phases))
 	for _, p := range t.phases {
 		entries = append(entries, ui.TimingEntry{Name: p.Name, Duration: p.Duration})
 	}
+	t.mu.Unlock()
 	ui.TimingSummary(entries, total)
 }
 
 var buildCmd = &cobra.Command{
 	Use:   "build",
 	Short: "Run the full build pipeline (manifest -> cmake -> ninja)",
+	Args:  cobra.NoArgs,
 	RunE:  runBuild,
 }
+
+var (
+	flagDev        bool
+	flagProfile    string
+	flagMock       string
+	flagMockEfuses bool
+)
 
 func init() {
 	buildCmd.Flags().StringVar(&flagManifest, "manifest", "", "Path to device.toml (auto-detected if omitted)")
@@ -91,11 +95,94 @@ func init() {
 	buildCmd.Flags().BoolVar(&flagNative, "native", false, "Force native build (use local toolchains instead of Docker)")
 	buildCmd.Flags().BoolVar(&flagCloud, "cloud", false, "Compile firmware in the cloud (not yet supported)")
 	buildCmd.Flags().BoolVar(&flagSkipChecks, "skip-checks", false, "Skip compatibility checks")
+	buildCmd.Flags().BoolVar(&flagLocked, "locked", false, "Require an existing up-to-date toob.lock without modifying it")
+	buildCmd.Flags().BoolVar(&flagDev, "dev", false, "Development mode: enable local registry and SDK auto-discovery")
+	buildCmd.Flags().StringVar(&flagProfile, "profile", "", "Build profile: 'dev' (default, anti-brick mocks enabled) or 'production' (100% real hardware)")
+	buildCmd.Flags().StringVar(&flagMock, "mock", "", "Comma-separated HAL traits to mock in dev profile (e.g. 'keystore,wdt', 'all', or 'none')")
+	buildCmd.Flags().BoolVar(&flagMockEfuses, "mock-efuses", true, "Deprecated alias for --mock=keystore / --mock=none")
 }
 
-func runBuild(cmd *cobra.Command, args []string) error {
+func isDevEnvEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("TOOB_DEV")))
+	return v == "1" || v == "true"
+}
 
-	// Resolve project root: if --manifest is given, use its parent directory.
+func validateCMakeArgPath(label, p string) error {
+	if strings.ContainsAny(p, ";\x00\r\n") {
+		return fmt.Errorf("refusing unsafe %s path %q: contains CMake list separator ';' or control character", label, p)
+	}
+	return nil
+}
+
+// resolveRegistryOverride classifies device.toml [build] registry into either a
+// validated local/remote override or a registry version pin. Local filesystem and
+// plaintext http:// overrides strictly require --dev (TOOB_DEV=1).
+func resolveRegistryOverride(rawReg, root string, devMode bool) (override string, versionPin string, err error) {
+	trimmed := strings.TrimSpace(rawReg)
+	if trimmed == "" || trimmed == "latest" {
+		return "", "", nil
+	}
+
+	if strings.HasPrefix(trimmed, "https://") {
+		return trimmed, "", nil
+	}
+	if strings.HasPrefix(trimmed, "http://") {
+		if !devMode {
+			return "", "", fmt.Errorf("insecure http:// [build] registry override %q in device.toml requires --dev", trimmed)
+		}
+		return trimmed, "", nil
+	}
+	if strings.HasPrefix(trimmed, "file://") {
+		if !devMode {
+			return "", "", fmt.Errorf("local filesystem [build] registry override %q in device.toml requires --dev", trimmed)
+		}
+		localPath, parseErr := registry.ParseFileURL(trimmed)
+		if parseErr != nil {
+			return "", "", parseErr
+		}
+		if !filepath.IsAbs(localPath) {
+			localPath = filepath.Join(root, localPath)
+		}
+		if _, statErr := os.Stat(filepath.Join(localPath, "registry.json")); statErr != nil {
+			return "", "", fmt.Errorf("local [build] registry %q does not contain registry.json: %w", localPath, statErr)
+		}
+		return localPath, "", nil
+	}
+
+	looksLikePath := trimmed == "." || trimmed == ".." ||
+		strings.ContainsAny(trimmed, `/\`) || filepath.IsAbs(trimmed)
+	candPath := trimmed
+	if !filepath.IsAbs(candPath) {
+		candPath = filepath.Join(root, candPath)
+	}
+	_, localRegErr := os.Stat(filepath.Join(candPath, "registry.json"))
+	if looksLikePath || localRegErr == nil {
+		if !devMode {
+			return "", "", fmt.Errorf("local filesystem [build] registry override %q in device.toml requires --dev", trimmed)
+		}
+		if localRegErr != nil {
+			return "", "", fmt.Errorf("local [build] registry %q does not contain registry.json: %w", candPath, localRegErr)
+		}
+		absCand, absErr := filepath.Abs(candPath)
+		if absErr != nil {
+			return "", "", absErr
+		}
+		return absCand, "", nil
+	}
+
+	if err := manifestpkg.ValidateName("registry version", trimmed); err != nil {
+		return "", "", fmt.Errorf("device.toml [build] registry: %w", err)
+	}
+	return "", trimmed, nil
+}
+
+func runBuild(cmd *cobra.Command, _ []string) error {
+	devMode := flagDev || isDevEnvEnabled()
+	if flagDev {
+		_ = os.Setenv("TOOB_DEV", "1")
+		ui.Info("Mode: Development (--dev) - local registry and SDK auto-discovery enabled")
+	}
+
 	var root string
 	if flagManifest != "" {
 		absManifest, err := filepath.Abs(flagManifest)
@@ -114,30 +201,47 @@ func runBuild(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 1. Enforce lockfile registry version and compatibility
-	lfPath := paths.LockfilePath(root)
-	lf, _ := lockfile.Load(lfPath)
+	manifestPath := flagManifest
+	if manifestPath == "" {
+		manifestPath = filepath.Join(root, "device.toml")
+	}
+	dt, err := manifestpkg.ParseToml(manifestPath)
+	if err != nil {
+		return fmt.Errorf("failed to parse %s: %w", manifestPath, err)
+	}
 
-	cache := registry.NewCache("")
-	if lf != nil {
-		targetVer := lf.Registry.Commit
-		if targetVer == "" {
-			targetVer = lf.Registry.Version
+	regOverride, regVerPin, err := resolveRegistryOverride(dt.Build.Registry, root, devMode)
+	if err != nil {
+		return err
+	}
+
+	lfPath := paths.LockfilePath(root)
+	if flagLocked {
+		if _, statErr := os.Stat(lfPath); errors.Is(statErr, fs.ErrNotExist) {
+			return fmt.Errorf("--locked was specified, but %s does not exist", lfPath)
 		}
-		if targetVer != "" {
-			if err := cache.SelectVersion(targetVer, true); err != nil {
-				return fmt.Errorf("failed to select locked registry version %s: %w", targetVer, err)
-			}
+	}
+	lf, err := lockfile.Load(lfPath)
+	if err != nil {
+		return fmt.Errorf("the lockfile is unreadable; repair or delete it to continue: %w", err)
+	}
+
+	cache := registry.NewCache(regOverride)
+	if targetVer := firstNonEmpty(lf.Registry.Commit, lf.Registry.Version, regVerPin); targetVer != "" {
+		if err := cache.SelectVersion(targetVer, !flagLocked); err != nil {
+			return fmt.Errorf("failed to select locked registry version %s: %w", targetVer, err)
 		}
 	}
 
 	if !cache.IsInitialized() {
+		if flagLocked {
+			return errors.New("registry cache is not initialized and --locked forbids auto-syncing")
+		}
 		ui.Step("Registry not initialized. Auto-syncing...")
 		if err := cache.Sync(false, false); err != nil {
 			return fmt.Errorf("failed to sync registry: %w", err)
 		}
 	}
-
 
 	if flagCloud {
 		return fmt.Errorf("cloud build is not supported yet; remote compilation will be available in a future release")
@@ -147,190 +251,93 @@ func runBuild(cmd *cobra.Command, args []string) error {
 	defer cancel()
 
 	if flagNative {
-		return runNativeBuild(ctx, root, cache)
+		return runNativeBuild(ctx, cmd, root, cache, lf)
 	}
-	return runDockerBuild(ctx, root, cache)
+	return runDockerBuild(ctx, cmd, root, dt, regOverride, cache, lf)
 }
 
-func runDockerBuild(ctx context.Context, root string, cache *registry.Cache) error {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return fmt.Errorf("Docker is not installed or not in PATH.\nPlease install Docker to use the containerized compiler, or run `toob build --native`.")
-	}
-
-	regDir, _ := paths.RegistryDir()
-	lfPath := paths.LockfilePath(root)
-	lf, _ := lockfile.Load(lfPath)
-
-	compilerTag := "latest"
-	if lf != nil && lf.Environment.Compiler != "" {
-		compilerTag = lf.Environment.Compiler
-	}
-
-	// Build the port contract struct — this is the single source of truth
-	// for what we pass to the compiler container.
-	input := ports.DockerBuildInput{
-		Image:       fmt.Sprintf("mannomannx/toob-compiler:%s", compilerTag),
-		Workspace:   root,
-		RegistryDir: regDir,
-		WorkDir:     "/workspace",
-		Command:     "toob build --native",
-		Manifest:    flagManifest,
-		BuildDir:    flagBuildDir,
-		ProxyVars:   make(map[string]string),
-	}
-	for _, envVar := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"} {
-		if val := os.Getenv(envVar); val != "" {
-			input.ProxyVars[envVar] = val
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
 		}
 	}
+	return ""
+}
 
-	// 1. Ensure image is fresh/pulled
-	if compilerTag == "latest" {
-		ui.Step("Pulling latest compiler image...")
-		if err := exec.CommandContext(ctx, "docker", "pull", input.Image).Run(); err != nil {
-			return fmt.Errorf("failed to pull compiler image %s: %w", input.Image, err)
+func resolveCLIMockArgs(cmd *cobra.Command) ([]string, bool) {
+	if cmd != nil && cmd.Flags().Changed("mock") {
+		return []string{flagMock}, true
+	}
+	if cmd != nil && cmd.Flags().Changed("mock-efuses") {
+		if flagMockEfuses {
+			return []string{"keystore"}, true
 		}
-	} else {
-		if err := exec.CommandContext(ctx, "docker", "image", "inspect", input.Image).Run(); err != nil {
-			ui.Step("Compiler image %s not found locally. Pulling...", compilerTag)
-			if err := exec.CommandContext(ctx, "docker", "pull", input.Image).Run(); err != nil {
-				return fmt.Errorf("failed to pull compiler image %s: %w", input.Image, err)
+		return []string{"none"}, true
+	}
+	return nil, false
+}
+
+func logResolvedPackages(plan *resolve.Plan) {
+	ui.Info("Target: %s [%s] | Arch: %s [%s] | Profile: %s",
+		plan.Chip.Name, plan.Chip.Tier, plan.Arch.Name, plan.Arch.Tier, plan.Profile)
+	if plan.Profile == resolve.ProfileProduction {
+		if plan.Chip.Tier == "community" || plan.Chip.Tier == "local" {
+			ui.Warn("Security notice: production build uses %s-tier chip package '%s'.", plan.Chip.Tier, plan.Chip.Name)
+		}
+		if plan.Arch.Tier == "community" || plan.Arch.Tier == "local" {
+			ui.Warn("Security notice: production build uses %s-tier architecture package '%s'.", plan.Arch.Tier, plan.Arch.Name)
+		}
+	}
+	if len(plan.DriverPackages) > 0 {
+		var parts []string
+		for _, dp := range plan.DriverPackages {
+			label := fmt.Sprintf("%s=%s[%s]", dp.Trait, dp.Name, dp.Tier)
+			if dp.Mocked {
+				label += "(MOCK)"
+			}
+			parts = append(parts, label)
+			if plan.Profile == resolve.ProfileProduction && (dp.Tier == "community" || dp.Tier == "local") &&
+				(dp.Trait == "keystore" || dp.Trait == "otp" || dp.Trait == "entropy") {
+				ui.Warn("Security notice: production build binds %s trait '%s' to %s-tier package '%s'.",
+					dp.Trait, dp.Trait, dp.Tier, dp.Name)
 			}
 		}
+		ui.Info("Drivers: %s", strings.Join(parts, ", "))
 	}
-
-	// Protocol Handshake: verify the container image speaks our protocol
-	if err := checkProtocolVersion(input.Image); err != nil {
-		return err
-	}
-
-	// Derive Docker arguments from the port struct
-	args := []string{"run", "--rm", "-i"}
-
-	if stat, _ := os.Stdout.Stat(); (stat.Mode() & os.ModeCharDevice) != 0 {
-		args = append(args, "-t")
-	}
-
-	if runtime.GOOS != "windows" {
-		if u, err := user.Current(); err == nil {
-			args = append(args, "-u", fmt.Sprintf("%s:%s", u.Uid, u.Gid))
+	for _, cs := range plan.Crypto {
+		if cs.Enabled() && plan.Profile == resolve.ProfileProduction && (cs.Tier == "community" || cs.Tier == "local") {
+			ui.Warn("Security notice: production build uses %s-tier crypto package '%s' for slot '%s'.",
+				cs.Tier, cs.Name, cs.Slot)
 		}
 	}
-
-	args = append(args,
-		"-v", fmt.Sprintf("%s:/workspace", input.Workspace),
-		"-v", fmt.Sprintf("%s:/root/.toob/registry", input.RegistryDir),
-	)
-
-	// Version-segmented ccache
-	if home, err := os.UserHomeDir(); err == nil {
-		ccacheDir := filepath.Join(home, ".toob", "ccache", compilerTag)
-		os.MkdirAll(ccacheDir, 0755)
-		args = append(args, "-v", fmt.Sprintf("%s:/ccache", ccacheDir), "-e", "CCACHE_DIR=/ccache")
-	}
-
-	hasProxy := false
-	for k, v := range input.ProxyVars {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
-		hasProxy = true
-	}
-
-	if hasProxy && runtime.GOOS == "linux" {
-		if _, err := os.Stat("/etc/ssl/certs"); err == nil {
-			args = append(args, "-v", "/etc/ssl/certs:/etc/ssl/certs:ro")
-		}
-	}
-
-	args = append(args, "-w", input.WorkDir, input.Image)
-	args = append(args, strings.Fields(input.Command)...)
-
-	if input.Manifest != "" {
-		relManifest, err := filepath.Rel(root, input.Manifest)
-		if err == nil {
-			args = append(args, "--manifest", filepath.ToSlash(filepath.Join("/workspace", relManifest)))
-		}
-	}
-	if input.BuildDir != "" {
-		relBuildDir, err := filepath.Rel(root, input.BuildDir)
-		if err == nil {
-			args = append(args, "--build-dir", filepath.ToSlash(filepath.Join("/workspace", relBuildDir)))
-		}
-	}
-
-	ui.Step("Starting Docker container (toob-compiler:%s)", compilerTag)
-	err := run(ctx, root, "docker", nil, args...)
-	if err == nil {
-		ui.Tip("Run 'toob build --native' for much faster builds (requires local toolchains).")
-		if lf, err := lockfile.Load(lfPath); err == nil {
-			if os.Getenv("TOOB_REGISTRY_DIR") == "" {
-				regVer := filepath.Base(cache.Dir())
-				lf.Registry.Commit = regVer
-				lf.Registry.Version = regVer
-			}
-			lf.Environment.Compiler = compilerTag
-			_ = lf.Save(lfPath)
-		}
-	}
-	return err
 }
 
-// checkProtocolVersion inspects the compiler container image for the
-// toob.protocol_version label and compares it against our embedded version.
-func checkProtocolVersion(image string) error {
-	out, err := exec.Command("docker", "inspect",
-		"--format", "{{index .Config.Labels \"toob.protocol_version\"}}",
-		image,
-	).Output()
-	if err != nil {
-		// Image might not exist yet (first pull). Skip handshake gracefully.
-		ui.Muted("Protocol handshake skipped (image not cached locally).")
-		return nil
+func computeCMakeFingerprint(fields ...string) string {
+	h := sha256.New()
+	for _, f := range fields {
+		_, _ = h.Write([]byte(f))
+		_, _ = h.Write([]byte{0})
 	}
-
-	label := strings.TrimSpace(string(out))
-	if label == "" || label == "<no value>" {
-		// Old image without label — allow but warn
-		ui.Warn("Compiler image has no protocol version label. Consider pulling a newer image.")
-		return nil
-	}
-
-	containerVersion, err := strconv.Atoi(label)
-	if err != nil {
-		return fmt.Errorf("invalid protocol version label on image: %q", label)
-	}
-
-	if containerVersion != ports.ProtocolVersion {
-		if containerVersion > ports.ProtocolVersion {
-			return fmt.Errorf(
-				"Protocol mismatch: Compiler image speaks protocol v%d, but this CLI only supports v%d.\n"+
-					"Your CLI is too old. Run `toob update` to get a compatible version.",
-				containerVersion, ports.ProtocolVersion,
-			)
-		}
-		return fmt.Errorf(
-			"Protocol mismatch: Compiler image speaks protocol v%d, but this CLI requires v%d.\n"+
-				"Your compiler image is outdated. Run `docker pull %s` to update.",
-			containerVersion, ports.ProtocolVersion, image,
-		)
-	}
-
-	return nil
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-func runNativeBuild(ctx context.Context, root string, cache *registry.Cache) error {
+func runNativeBuild(ctx context.Context, cmd *cobra.Command, root string, cache *registry.Cache, lf *lockfile.Lockfile) error {
+	ensureBuildToolsOnPath()
 	buildStartTime := time.Now()
 	timings := &TimingTracker{}
 
-	// Accumulate all setup overhead mathematically perfectly
-	var setupDuration time.Duration
-	lastSetupResume := buildStartTime
-
-	// 1. Resolve device manifest
 	manifest := flagManifest
 	if manifest == "" {
 		manifest = filepath.Join(root, "device.toml")
 	}
-	manifest, _ = filepath.Abs(manifest)
+	manifest, err := filepath.Abs(manifest)
+	if err != nil {
+		return err
+	}
+	if err := validateCMakeArgPath("manifest", manifest); err != nil {
+		return err
+	}
 	if _, err := os.Stat(manifest); err != nil {
 		return fmt.Errorf("device manifest not found: %s", manifest)
 	}
@@ -339,730 +346,215 @@ func runNativeBuild(ctx context.Context, root string, cache *registry.Cache) err
 		return fmt.Errorf("failed to parse %s: %w", manifest, err)
 	}
 
-	lfPath := paths.LockfilePath(root)
-	lf, _ := lockfile.Load(lfPath)
-
-	chip := dt.Device.Chip
-	if chip == "" {
-		return fmt.Errorf("device.toml must define [device] with 'chip'")
-	}
-	ui.Info("Target: %s", chip)
-
 	if flagSkipChecks && !cache.IsInitialized() {
 		ui.Warn("Cannot skip checks because local registry is missing. Auto-syncing...")
 		flagSkipChecks = false
 	}
 
-	// Pre-build compatibility check (async, resolved before compile step)
-	type combinationResult struct {
-		resp *apiclient.CheckCombinationResponse
-		err  error
-	}
-	var combChan chan combinationResult
-
-	if !flagSkipChecks {
-		combChan = make(chan combinationResult, 1)
-	}
-
-
-	// Load Registry Index ONCE
 	idx, err := cache.LoadIndex()
 	if err != nil {
-		ui.Warn("Could not load registry index: %v", err)
+		return fmt.Errorf("failed to load the registry index: %w", err)
+	}
+	mockOverrides, mockSet := resolveCLIMockArgs(cmd)
+	plan, err := resolve.Resolve(resolve.Input{
+		Root:          root,
+		Device:        dt,
+		Lock:          lf,
+		Index:         idx,
+		Registry:      cache,
+		Profile:       flagProfile,
+		MockOverrides: mockOverrides,
+		MockSet:       mockSet,
+	})
+	if err != nil {
+		return err
+	}
+	if err := validateCMakeArgPath("toolchain.cmake", plan.Toolchain.File); err != nil {
+		return err
+	}
+	logResolvedPackages(plan)
+
+	var combination <-chan combinationResult
+	if !flagSkipChecks {
+		combination = startCombinationCheck(plan.Chip)
 	}
 
-	// 3. Resolve hardware.json & chip_manifest.json (HAL Registry Inheritance)
-	var chipDir string
-	var chipDirErr error
-	getChipDir := func() (string, error) {
-		if chipDir == "" && chipDirErr == nil {
-			chipDir, chipDirErr = cache.ChipSourcePath(chip)
-		}
-		return chipDir, chipDirErr
+	compilerLabel := plan.Compiler
+	if dt.Build.Compiler == "" {
+		compilerLabel += " (auto)"
 	}
-
-	hwJSON := filepath.Join(root, "toobloader", "hal", "chips", chip, "hardware.json")
-	if _, err := os.Stat(hwJSON); err != nil {
-		cd, err := getChipDir()
-		if err != nil {
-			return fmt.Errorf("failed to resolve chip '%s' from registry: %w", chip, err)
-		}
-		hwJSON = filepath.Join(cd, "hardware.json")
-	}
-
-	cmPath := filepath.Join(root, "toobloader", "hal", "chips", chip, "chip_manifest.json")
-	if _, err := os.Stat(cmPath); err != nil {
-		cd, err := getChipDir()
-		if err != nil {
-			return fmt.Errorf("failed to resolve chip '%s' from registry: %w", chip, err)
-		}
-		cmPath = filepath.Join(cd, "chip_manifest.json")
-	}
-
-	// Read Chip Manifest FIRST
-	var cm ports.ChipManifest
-	chipVersion := "1.0.0"
-	arch := ""
-	toolchainPrefix := ""
-
-	if data, err := os.ReadFile(cmPath); err == nil {
-		if err := json.Unmarshal(data, &cm); err == nil {
-			if cm.Arch != "" {
-				arch = cm.Arch
-			}
-			if cm.CompilerPrefix != "" {
-				toolchainPrefix = cm.CompilerPrefix
-			}
-			if cm.Version != "" {
-				chipVersion = cm.Version
-			}
-		} else {
-			return fmt.Errorf("failed to parse chip_manifest.json: %w", err)
-		}
-	} else {
-		ui.Step("Chip '%s' not found locally. Resolving from registry...", chip)
-		chipDir, chipErr := cache.ChipSourcePath(chip)
-		if chipErr != nil {
-			return fmt.Errorf("chip '%s' not found locally or in registry: %w", chip, chipErr)
-		}
-		cmPath = filepath.Join(chipDir, "chip_manifest.json")
-		if data, err := os.ReadFile(cmPath); err == nil {
-			if err := json.Unmarshal(data, &cm); err != nil {
-				return fmt.Errorf("failed to parse registry chip_manifest.json: %w", err)
-			}
-			if cm.Arch != "" {
-				arch = cm.Arch
-			}
-			if cm.CompilerPrefix != "" {
-				toolchainPrefix = cm.CompilerPrefix
-			}
-			if cm.Version != "" {
-				chipVersion = cm.Version
-			}
-		} else {
-			return fmt.Errorf("chip_manifest.json not found for chip '%s'", chip)
-		}
-	}
-
-	if arch == "" || toolchainPrefix == "" {
-		ui.ErrorBanner(
-			"Missing Metadata",
-			fmt.Sprintf("chip_manifest.json for '%s' is missing 'arch' or 'compiler_prefix'", chip),
-			"Ensure the registry or local manifest defines these fields.",
-		)
-		return fmt.Errorf("invalid chip manifest")
-	}
-
-	// Fire async combination check now that chip + chipVersion are known
-	if combChan != nil {
-		go func() {
-			client := apiclient.New()
-			client.HTTPClient.Timeout = 3 * time.Second
-			cliVer := Version
-			if !strings.HasPrefix(cliVer, "v") && cliVer != "main" && cliVer != "dev" {
-				cliVer = "v" + cliVer
-			}
-			resp, err := client.CheckCombination(cmd_defaultCtx(), chip, chipVersion, cliVer)
-			combChan <- combinationResult{resp: resp, err: err}
-		}()
-	}
-
-	// 4. Core SDK Version Resolution
-	coreSDKVer := dt.Build.CoreSDK
-	if lf != nil && lf.Environment.CoreSDK != "" {
-		coreSDKVer = lf.Environment.CoreSDK
-	}
-
-	if coreSDKVer == "" || coreSDKVer == "latest" || coreSDKVer == "toob-boot" {
-		ui.Step("Resolving latest Core SDK version...")
-		latestTag, err := getLatestCoreSDKFromRegistry(idx)
-		if err == nil {
-			coreSDKVer = latestTag
-		} else {
-			if cm.MinCoreSDK != "" {
-				coreSDKVer = cm.MinCoreSDK
-			} else {
-				coreSDKVer = "main"
-			}
-		}
-	}
-
-	coreSDKLabel := coreSDKVer
-	if lf != nil && lf.Environment.CoreSDK != "" && lf.Environment.CoreSDK == coreSDKVer {
-		coreSDKLabel = coreSDKVer + " (lockfile-pinned)"
-	} else if coreSDKVer == "main" || coreSDKVer == "dev" {
-		coreSDKLabel = coreSDKVer + " (fallback)"
-	} else {
-		coreSDKLabel = coreSDKVer + " (auto-resolved)"
-	}
-
-	// Validate against MinCoreSDK if present
-	if cm.MinCoreSDK != "" && coreSDKVer != "main" && coreSDKVer != "dev" {
-		vCurrent, errCurrent := parseCoreSDKVersion(coreSDKVer)
-		vMin, errMin := parseCoreSDKVersion(cm.MinCoreSDK)
-		if errCurrent == nil && errMin == nil {
-			if vCurrent.LessThan(vMin) {
-				return fmt.Errorf("FATAL: device.toml specifies Core SDK '%s', but the registry dictates a minimum of '%s' for chip '%s'!", coreSDKVer, cm.MinCoreSDK, chip)
-			}
-		}
-	}
-
-	compilerVer := dt.Build.Compiler
-	compilerLabel := compilerVer
-	if compilerVer == "" {
-		compilerVer = "latest"
-		compilerLabel = "latest (auto)"
-	}
-
 	if envReg := os.Getenv("TOOB_REGISTRY_DIR"); envReg != "" {
-		ui.Info("Environment: Compiler=%s, CoreSDK=%s, Registry=Local Override (%s)", compilerLabel, coreSDKLabel, envReg)
+		ui.Info("Environment: Compiler=%s, CoreSDK=%s, Registry=Local Override (%s)", compilerLabel, plan.CoreSDK.Label(), envReg)
 	} else {
-		ui.Info("Environment: Compiler=%s, CoreSDK=%s, Registry=Local Cache (%s)", compilerLabel, coreSDKLabel, cache.Dir())
+		ui.Info("Environment: Compiler=%s, CoreSDK=%s, Registry=Local Cache (%s)", compilerLabel, plan.CoreSDK.Label(), cache.Dir())
 	}
 
-	// 5. Resolve Core SDK
-	var compilerRoot string
-	var coreDirToDownload string
-	if envDir := os.Getenv("TOOB_COMPILER_DIR"); envDir != "" {
-		compilerRoot = envDir
-	} else {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("cannot determine home directory: %w", err)
-		}
-		coreDir := filepath.Join(homeDir, ".toob", "core", coreSDKVer)
-		if _, err := os.Stat(coreDir); os.IsNotExist(err) {
-			ui.Step("Core SDK '%s' not found locally. Downloading...", coreSDKVer)
-			coreDirToDownload = coreDir
-		}
-		compilerRoot = coreDir
+	compilerRoot, err := ensureCoreSDK(ctx, root, plan.CoreSDK, idx)
+	if err != nil {
+		return err
 	}
-
-	if coreDirToDownload != "" {
-		ui.Step("Downloading Core SDK '%s' from Registry...", coreSDKVer)
-
-		tempDir := coreDirToDownload + ".tmp-" + fmt.Sprintf("%d", time.Now().UnixNano())
-		if err := os.MkdirAll(filepath.Dir(tempDir), 0o755); err != nil {
-			return err
-		}
-
-		client := apiclient.NewWithTimeout(120 * time.Second)
-		body, err := client.DownloadPackage(context.Background(), "toob-boot", coreSDKVer)
-		if err != nil {
-			return fmt.Errorf("failed to fetch Core SDK '%s' from registry: %w", coreSDKVer, err)
-		}
-		defer body.Close()
-
-		if err := registry.ExtractTarball(body, tempDir); err != nil {
-			os.RemoveAll(tempDir)
-			return fmt.Errorf("failed to extract Core SDK: %w", err)
-		}
-
-		if err := os.Rename(tempDir, coreDirToDownload); err != nil {
-			os.RemoveAll(tempDir)
-			if _, statErr := os.Stat(coreDirToDownload); statErr == nil {
-				return nil
-			}
-			return fmt.Errorf("failed to finalize atomic Core SDK download: %w", err)
-		}
-	}
-
-	// 6. Determine build directory
-	buildDir := flagBuildDir
-	if buildDir == "" {
-		buildDir = filepath.Join(root, "builds", "build_"+chip)
-	}
-	generatedDir := filepath.Join(buildDir, "generated")
-	if err := os.MkdirAll(generatedDir, 0o755); err != nil {
+	if err := validateCMakeArgPath("compiler SDK root", compilerRoot); err != nil {
 		return err
 	}
 
-	setupDuration += time.Since(lastSetupResume)
-	timings.Add("Project Setup", setupDuration)
+	buildDir := flagBuildDir
+	if buildDir == "" {
+		buildDir = filepath.Join(root, "builds", "build_"+plan.Chip.Name)
+	} else if !filepath.IsAbs(buildDir) {
+		buildDir, err = filepath.Abs(buildDir)
+		if err != nil {
+			return err
+		}
+	}
+	if err := validateCMakeArgPath("build-dir", buildDir); err != nil {
+		return err
+	}
 
-	// 7. Run manifest compiler (Go Native)
+	generatedDir := filepath.Join(buildDir, "generated")
+	if err := os.MkdirAll(generatedDir, 0o750); err != nil {
+		return err
+	}
+	timings.Add("Project Setup", time.Since(buildStartTime))
+
 	ui.Step("Running manifest compiler (Go Native)")
 	startManifest := time.Now()
-	bootloaderDir := resolvePath(root, compilerRoot, "toobloader")
-
-	// Phase 3 Fix: Inject HAL paths to Manifest Compiler so it finds Registry sources
-	halChipDir := filepath.Join(root, "toobloader", "hal", "chips", chip)
-	if _, err := os.Stat(halChipDir); err != nil {
-		if chipDir, chipErr := cache.ChipSourcePath(chip); chipErr == nil {
-			halChipDir = chipDir
-		}
+	sdk := resolve.LocateSDK(root, compilerRoot)
+	cryptoDirs := plan.CryptoDirs()
+	var sourceDirs []string
+	sourceDirs = appendExistingDir(sourceDirs, sdk.Bootloader)
+	sourceDirs = appendExistingDir(sourceDirs, sdk.Core)
+	sourceDirs = appendExistingDir(sourceDirs, sdk.Stage0)
+	sourceDirs = appendExistingDir(sourceDirs, paths.HALDir(root))
+	sourceDirs = appendExistingDir(sourceDirs, plan.Chip.Dir)
+	sourceDirs = appendExistingDir(sourceDirs, sdk.Recovery)
+	sourceDirs = appendExistingDir(sourceDirs, sdk.LibToob)
+	sourceDirs = appendExistingDir(sourceDirs, plan.Arch.Dir)
+	sourceDirs = appendExistingDir(sourceDirs, plan.SoCDir)
+	for _, drv := range plan.Drivers {
+		sourceDirs = appendExistingDir(sourceDirs, drv)
+	}
+	for _, rdrv := range plan.Recovery.Drivers {
+		sourceDirs = appendExistingDir(sourceDirs, rdrv)
+	}
+	for _, rsrc := range plan.Recovery.Sources {
+		sourceDirs = appendExistingDir(sourceDirs, filepath.Dir(rsrc))
+	}
+	for _, cdir := range cryptoDirs {
+		sourceDirs = appendExistingDir(sourceDirs, cdir)
 	}
 
-	var driverDirs []string
-	var driversCMake strings.Builder
-	var recoveryCMake strings.Builder
-
-	var manifestRecovery *ports.ChipRecovery
-	if idx != nil {
-		if cInfo, ok := idx.Chips[chip]; ok && cInfo.Recovery != nil {
-			manifestRecovery = &ports.ChipRecovery{
-				Console:  cInfo.Recovery.Console,
-				Flash:    cInfo.Recovery.Flash,
-				WDT:      cInfo.Recovery.WDT,
-				Clock:    cInfo.Recovery.Clock,
-				RTC:      cInfo.Recovery.RTC,
-				Sources:  cInfo.Recovery.Sources,
-				Includes: cInfo.Recovery.Includes,
-			}
-			if cInfo.Recovery.Crypto != nil {
-				manifestRecovery.Crypto = &ports.RecoveryCrypto{
-					Backend: cInfo.Recovery.Crypto.Backend,
-					Hash:    cInfo.Recovery.Crypto.Hash,
-				}
-			}
-		}
+	mctx, err := manifestpkg.Load(manifestpkg.Inputs{
+		Device:           dt,
+		HardwarePath:     plan.Chip.HardwarePath,
+		ChipManifestPath: plan.Chip.ManifestPath,
+		CoreDir:          sdk.Core,
+		ArchDir:          plan.Arch.Dir,
+		DriverDirs:       plan.Drivers,
+		CryptoDirs:       cryptoDirs,
+		SourceDirs:       sourceDirs,
+		OutDir:           generatedDir,
+	})
+	if err != nil {
+		return err
 	}
-	if manifestRecovery == nil && cm.Recovery != nil {
-		manifestRecovery = cm.Recovery
-	}
-
-	recCryptoBackend := ""
-	recCryptoHash := ""
-
-	if manifestRecovery != nil && manifestRecovery.Crypto != nil {
-		recCryptoBackend = manifestRecovery.Crypto.Backend
-		recCryptoHash = manifestRecovery.Crypto.Hash
-	}
-
-	if dt.Recovery.Crypto.Backend != "" {
-		recCryptoBackend = dt.Recovery.Crypto.Backend
-	}
-	if dt.Recovery.Crypto.Hash != "" {
-		recCryptoHash = dt.Recovery.Crypto.Hash
-	}
-
-	if recCryptoBackend == "" {
-		if dt.Crypto.Backend != "" {
-			recCryptoBackend = dt.Crypto.Backend
-		} else if cm.Crypto != nil && cm.Crypto.Backend != "" {
-			recCryptoBackend = cm.Crypto.Backend
-		}
-	}
-	if recCryptoHash == "" {
-		if dt.Crypto.Hash != "" {
-			recCryptoHash = dt.Crypto.Hash
-		} else if cm.Crypto != nil && cm.Crypto.Hash != "" {
-			recCryptoHash = cm.Crypto.Hash
-		}
-	}
-
-	fmt.Fprintf(&recoveryCMake, "set(TOOB_RECOVERY_CRYPTO_BACKEND \"%s\")\n", recCryptoBackend)
-	fmt.Fprintf(&recoveryCMake, "set(TOOB_RECOVERY_CRYPTO_HASH \"%s\")\n", recCryptoHash)
-
-	var chipDrivers []string
-	if idx != nil {
-		if cInfo, ok := idx.Chips[chip]; ok && cInfo.Sources != nil {
-			chipDrivers = cInfo.Sources.Drivers
-		}
-	}
-	if len(chipDrivers) == 0 && cm.Sources != nil {
-		chipDrivers = cm.Sources.Drivers
-	}
-
-	for _, drvPath := range chipDrivers {
-		drvRelDir := filepath.Dir(drvPath)
-		drvDir, err := cache.DriverSourcePath(filepath.ToSlash(drvRelDir))
-		if err != nil {
-			ui.Warn("Could not resolve driver '%s': %v", drvRelDir, err)
-			continue
-		}
-		driverDirs = append(driverDirs, drvDir)
-		fmt.Fprintf(&driversCMake, "list(APPEND TOOB_DRIVERS \"%s\")\n", filepath.ToSlash(drvDir))
-	}
-
-	if manifestRecovery != nil {
-		// Use manifest defaults, override with DeviceToml choices if set
-		recConsole := manifestRecovery.Console
-		if dt.Recovery.Console != "" {
-			recConsole = dt.Recovery.Console
-		}
-		recFlash := manifestRecovery.Flash
-		if dt.Recovery.Flash != "" {
-			recFlash = dt.Recovery.Flash
-		}
-		recWDT := manifestRecovery.WDT
-		if dt.Recovery.WDT != "" {
-			recWDT = dt.Recovery.WDT
-		}
-		recClock := manifestRecovery.Clock
-		if dt.Recovery.Clock != "" {
-			recClock = dt.Recovery.Clock
-		}
-		recRTC := manifestRecovery.RTC
-		if dt.Recovery.RTC != "" {
-			recRTC = dt.Recovery.RTC
-		}
-
-		if recConsole == "" {
-			return fmt.Errorf("chip '%s' manifest is missing required recovery 'console' driver mapping", chip)
-		}
-		if recFlash == "" {
-			return fmt.Errorf("chip '%s' manifest is missing required recovery 'flash' driver mapping", chip)
-		}
-		var recDrivers []string
-		for _, drvName := range []string{
-			recConsole,
-			recFlash,
-			recWDT,
-			recClock,
-			recRTC,
-		} {
-			if drvName == "" {
-				continue
-			}
-			drvDir, err := cache.DriverSourcePath(drvName)
-			if err != nil {
-				ui.Warn("Could not resolve recovery driver '%s': %v", drvName, err)
-				continue
-			}
-			recDrivers = append(recDrivers, filepath.ToSlash(drvDir))
-		}
-		if len(recDrivers) > 0 {
-			recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_DRIVERS \"%s\")\n", strings.Join(recDrivers, ";")))
-		}
-		var recSources []string
-		for _, src := range manifestRecovery.Sources {
-			recSources = append(recSources, filepath.ToSlash(filepath.Join(halChipDir, src)))
-		}
-		for _, src := range dt.Recovery.Sources {
-			recSources = append(recSources, filepath.ToSlash(filepath.Join(root, src)))
-		}
-		if len(recSources) > 0 {
-			recoveryCMake.WriteString(fmt.Sprintf("set(TOOB_RECOVERY_SOURCES \"%s\")\n", strings.Join(recSources, ";")))
-		}
-		var recIncludes []string
-		for _, inc := range cm.Includes {
-			if strings.HasPrefix(inc, "soc/") || strings.HasPrefix(inc, "arch/") || strings.HasPrefix(inc, "drivers/") {
-				recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(halChipDir, "..", "..", inc)))
-			} else {
-				recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(halChipDir, inc)))
-			}
-		}
-		for _, inc := range manifestRecovery.Includes {
-			recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(halChipDir, inc)))
-		}
-		for _, inc := range dt.Recovery.Includes {
-			recIncludes = append(recIncludes, filepath.ToSlash(filepath.Join(root, inc)))
-		}
-		if len(recIncludes) > 0 {
-			fmt.Fprintf(&recoveryCMake, "set(TOOB_RECOVERY_INCLUDES \"%s\")\n", strings.Join(recIncludes, ";"))
-		}
-	}
-
-	if socDir, err := cache.SoCSourcePath("soc"); err == nil {
-		driverDirs = append(driverDirs, socDir)
-	}
-
-	if err := manifestpkg.Compile(manifest, hwJSON, generatedDir, bootloaderDir, halChipDir, driverDirs); err != nil {
+	if _, err := manifestpkg.Generate(mctx); err != nil {
 		return err
 	}
 	timings.Add("Manifest Compiler", time.Since(startManifest))
 
-	// 8. Run CBOR code generator
-	startCbor := time.Now()
-	if pyScripts := findPythonScriptsBin(); pyScripts != "" {
-		os.Setenv("PATH", pyScripts+string(os.PathListSeparator)+os.Getenv("PATH"))
-	}
-	if err := cbor.Generate(generatedDir, compilerRoot, root, compilerVer); err != nil {
-		return err
-	}
-	timings.Add("CBOR CodeGen", time.Since(startCbor))
-
 	startEnvValidation := time.Now()
-
-	// 7. CLI Blocker Logic: Check Compatibility Matrix (single-combination check)
-	if !flagSkipChecks {
-		result := <-combChan
-
-		if result.err != nil {
-			errMsg := result.err.Error()
-			if strings.Contains(errMsg, "no such host") || strings.Contains(errMsg, "connect: connection refused") || strings.Contains(errMsg, "context deadline exceeded") {
-				ui.Warn("Could not verify build combination: Registry API is unreachable (offline).")
-			} else if strings.Contains(errMsg, "HTTP ") {
-				parts := strings.SplitN(errMsg, ": ", 2)
-				if len(parts) == 2 && (strings.Contains(parts[1], "<") || len(parts[1]) > 100) {
-					ui.Warn("Could not verify build combination: Registry API returned %s.", parts[0])
-				} else {
-					ui.Warn("Could not verify build combination: %v", result.err)
-				}
-			} else {
-				ui.Warn("Could not verify build combination: %v", result.err)
-			}
-		} else {
-			switch strings.ToUpper(result.resp.Status) {
-			case "FAILED":
-				return fmt.Errorf("FATAL: Chip %s (v%s) is explicitly incompatible with CLI %s according to the Compatibility Matrix. Build aborted", chip, chipVersion, Version)
-			case "UNKNOWN":
-				ui.Warn("The combination of Chip %s (v%s) and CLI %s has not been verified by the CI yet.", chip, chipVersion, Version)
-			case "VERIFIED":
-				// Combination verified — proceed silently
-			}
+	if combination != nil {
+		if err := reportCombination(<-combination, plan.Chip); err != nil {
+			return err
 		}
 	} else {
 		ui.Muted("Skipping compatibility matrix checks (--skip-checks)")
 	}
 
-	// Calculate toolchain.cmake name based on architecture
-	toolchainDirName := strings.TrimSuffix(toolchainPrefix, "-")
-	tcConfigDir, tcErr := cache.ToolchainConfigPath(toolchainDirName)
-	if tcErr != nil {
-		return fmt.Errorf("failed to resolve toolchain config for '%s': %w", toolchainDirName, tcErr)
-	}
-	toolchainFile := filepath.Join(tcConfigDir, "toolchain.cmake")
-	if _, err := os.Stat(toolchainFile); err != nil {
-		return fmt.Errorf("registry toolchain missing: %s", toolchainFile)
-	}
-
-	coreDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "core")))
-	stage0Dir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("toobloader", "stage0")))
-
-	// HALs: halChipDir already resolved above (step 7). Resolve arch.
-	halArchDir := filepath.Join(root, "toobloader", "hal", "arch", arch)
-	if _, err := os.Stat(halArchDir); err != nil {
-		if archDir, archErr := cache.ArchSourcePath(arch); archErr == nil {
-			halArchDir = archDir
-		}
-	}
-
-	halChipDir = filepath.ToSlash(halChipDir)
-	halArchDir = filepath.ToSlash(halArchDir)
-
-	sdkDir := filepath.ToSlash(resolvePath(root, compilerRoot, filepath.Join("sdk")))
-
 	toobCLIPath, err := os.Executable()
 	if err != nil {
-		toobCLIPath = "toob"
+		return fmt.Errorf("cannot determine the toob executable path: %w", err)
 	}
-	toobCLIPath = filepath.ToSlash(toobCLIPath)
-
-	// --- Dynamic Crypto Resolution ---
-	// Priority: device.toml override → chip_manifest.json default → empty (slot unused).
-	cryptoSlots := map[string]string{"backend": "", "hash": "", "pqc": ""}
-	if cm.Crypto != nil {
-		if cm.Crypto.Backend != "" {
-			cryptoSlots["backend"] = cm.Crypto.Backend
-		}
-		if cm.Crypto.Hash != "" {
-			cryptoSlots["hash"] = cm.Crypto.Hash
-		}
-		if cm.Crypto.Pqc != "" {
-			cryptoSlots["pqc"] = cm.Crypto.Pqc
-		}
-	}
-	if dt.Crypto.Backend != "" {
-		cryptoSlots["backend"] = dt.Crypto.Backend
-	}
-	if dt.Crypto.Hash != "" {
-		cryptoSlots["hash"] = dt.Crypto.Hash
-	}
-	if dt.Crypto.Pqc != "" {
-		cryptoSlots["pqc"] = dt.Crypto.Pqc
-	}
-
-	var cryptoCMake strings.Builder
-	resolvedCryptoNames := make(map[string]bool) // deduplication tracker
-	for _, slotName := range []string{"backend", "hash", "pqc"} {
-		pkgName := cryptoSlots[slotName]
-		slotUpper := strings.ToUpper(slotName)
-
-		if pkgName == "" {
-			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
-			continue
-		}
-
-		if idx == nil || idx.Crypto == nil {
-			ui.Warn("Crypto package '%s' (slot: %s) declared but registry has no crypto index. Disabling slot.", pkgName, slotName)
-			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
-			continue
-		}
-		cryptoPkg, ok := idx.Crypto[pkgName]
-		if !ok {
-			ui.Warn("Crypto package '%s' (slot: %s) not found in registry. Disabling slot.", pkgName, slotName)
-			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
-			continue
-		}
-
-		// Validate min_core_sdk
-		if cryptoPkg.MinCoreSdk != "" && coreSDKVer != "main" && coreSDKVer != "dev" {
-			vCurrent, errCur := parseCoreSDKVersion(coreSDKVer)
-			vMin, errMin := parseCoreSDKVersion(cryptoPkg.MinCoreSdk)
-			if errCur == nil && errMin == nil && vCurrent.LessThan(vMin) {
-				return fmt.Errorf("crypto package '%s' requires Core SDK >= %s, but resolved version is %s",
-					pkgName, cryptoPkg.MinCoreSdk, coreSDKVer)
-			}
-		}
-
-		// Validate chip_binding
-		if len(cryptoPkg.ChipBinding) > 0 {
-			bound := slices.Contains(cryptoPkg.ChipBinding, chip)
-			if !bound {
-				return fmt.Errorf("crypto package '%s' is chip-bound to %v, but target chip is '%s'",
-					pkgName, cryptoPkg.ChipBinding, chip)
-			}
-		}
-
-		// Resolve absolute paths and verify existence via API fetch
-		cryptoDir, cryptoErr := cache.CryptoSourcePath(pkgName)
-		if cryptoErr != nil {
-			ui.Warn("Crypto package '%s' (slot: %s) not available: %v. Disabling slot.", pkgName, slotName, cryptoErr)
-			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED OFF)\n", slotUpper))
-			continue
-		}
-		pkgDir := filepath.ToSlash(cryptoDir)
-
-		// Deduplicate: if this package was already emitted for a previous slot, skip sources
-		isDuplicate := resolvedCryptoNames[pkgName]
-		resolvedCryptoNames[pkgName] = true
-
-		cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_ENABLED ON)\n", slotUpper))
-		cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_NAME \"%s\")\n", slotUpper, pkgName))
-		cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_DIR \"%s\")\n", slotUpper, pkgDir))
-
-		if !isDuplicate {
-			// Upstream sources
-			var srcPaths []string
-			for _, src := range cryptoPkg.UpstreamSources {
-				srcPaths = append(srcPaths, filepath.ToSlash(filepath.Join(cryptoDir, src)))
-			}
-			cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_SOURCES \"%s\")\n", slotUpper, strings.Join(srcPaths, ";")))
-
-			// Wrapper
-			if cryptoPkg.Wrapper != nil && *cryptoPkg.Wrapper != "" {
-				wrapperPath := filepath.ToSlash(filepath.Join(cryptoDir, *cryptoPkg.Wrapper))
-				cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_WRAPPER \"%s\")\n", slotUpper, wrapperPath))
-			}
-
-			// Cflags
-			if len(cryptoPkg.Cflags) > 0 {
-				cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_CFLAGS \"%s\")\n", slotUpper, strings.Join(cryptoPkg.Cflags, ";")))
-			}
-
-			// Include directories
-			if len(cryptoPkg.Includes) > 0 {
-				var incPaths []string
-				for _, inc := range cryptoPkg.Includes {
-					incPaths = append(incPaths, filepath.ToSlash(filepath.Join(cryptoDir, inc)))
-				}
-				cryptoCMake.WriteString(fmt.Sprintf("set(TOOB_CRYPTO_%s_INCLUDES \"%s\")\n", slotUpper, strings.Join(incPaths, ";")))
-			}
-		} else {
-			// Duplicate: reference the previously emitted slot
-			cryptoCMake.WriteString(fmt.Sprintf("# %s slot reuses package '%s' (already compiled by another slot)\n", slotUpper, pkgName))
-		}
-	}
-
-	pqcEnabled := cryptoSlots["pqc"] != ""
-
-	configContent := fmt.Sprintf(
-		"set(TOOB_ARCH \"%s\")\nset(TOOB_CHIP \"%s\")\n"+
-			"set(TOOLCHAIN_PREFIX \"%s\")\n"+
-			"set(TOOB_CORE_DIR \"%s\")\n"+
-			"set(TOOB_STAGE0_DIR \"%s\")\n"+
-			"set(TOOB_HAL_CHIP_DIR \"%s\")\n"+
-			"set(TOOB_HAL_ARCH_DIR \"%s\")\n"+
-			"set(TOOB_SDK_DIR \"%s\")\n"+
-			"set(TOOB_CLI_PATH \"%s\")\n"+
-			"set(TOOB_CRYPTO_DIR \"%s\")\n"+
-			"set(TOOB_FEATURE_PQC_HYBRID %s)\n"+
-			"%s\n# --- Dynamic Crypto Configuration ---\n%s\n# --- Dynamic Recovery Configuration ---\n%s",
-		arch, chip, toolchainPrefix,
-		coreDir, stage0Dir, halChipDir, halArchDir, sdkDir, toobCLIPath,
-		filepath.ToSlash(filepath.Join(bootloaderDir, "crypto")),
-		map[bool]string{true: "ON", false: "OFF"}[pqcEnabled],
-		driversCMake.String(), cryptoCMake.String(), recoveryCMake.String(),
-	)
-
-	if err := writeFileIfChanged(filepath.Join(generatedDir, "toob_config.cmake"), []byte(configContent)); err != nil {
+	if err := validateCMakeArgPath("toob executable", toobCLIPath); err != nil {
 		return err
 	}
 
-	// 8. Ensure cross-compiler is in PATH
-	tcPath := flagToolchainPath
-	var expectedVersion string
-	if idx != nil && idx.Toolchains != nil {
-		tcName := strings.TrimSuffix(toolchainPrefix, "-")
-		if tcInfo, ok := idx.Toolchains[tcName]; ok {
-			expectedVersion = tcInfo.Version
-		}
-	} else {
-		expectedVersion = toolchain.GetExpectedVersion(toolchainPrefix, cache.Dir())
+	configPath := filepath.Join(generatedDir, "toob_config.cmake")
+	if err := writeFileIfChanged(configPath, []byte(plan.RenderConfig(sdk, toobCLIPath))); err != nil {
+		return fmt.Errorf("failed to write %s: %w", configPath, err)
 	}
 
-	if lf, err := lockfile.Load(lfPath); err == nil {
-		tcName := strings.TrimSuffix(toolchainPrefix, "-")
-		if entry, ok := lf.Toolchains[tcName]; ok && entry.Version != "" {
-			expectedVersion = entry.Version
+	tcPath, err := provisionToolchain(ctx, plan.Toolchain, plan.Chip.Name, cache.Dir())
+	if err != nil {
+		return err
+	}
+	if tcPath != "" {
+		if err := validateCMakeArgPath("toolchain-path", tcPath); err != nil {
+			return err
 		}
 	}
-
-	if tcPath == "" {
-		tcPath = findToolchainBin(toolchainPrefix, expectedVersion)
-		if tcPath == "" {
-			// Auto-provision via Registry
-			var err error
-
-			tcPath, err = toolchain.EnsureAvailable(toolchainPrefix, expectedVersion, cache.Dir())
-			if err != nil {
-				return fmt.Errorf("failed to auto-provision toolchain: %w\nPlease run 'toob install' to verify your project dependencies or use --toolchain-path.", err)
-			}
-		}
-	} else {
-		compilerExe := filepath.Join(tcPath, toolchainPrefix+"gcc")
-		if runtime.GOOS == "windows" {
-			compilerExe += ".exe"
-		}
-		if _, err := os.Stat(compilerExe); err != nil {
-			return fmt.Errorf("custom toolchain compiler not found at %s", compilerExe)
-		}
-		if expectedVersion != "" {
-			out, err := exec.CommandContext(ctx, compilerExe, "--version").CombinedOutput()
-			if err != nil || !strings.Contains(string(out), expectedVersion) {
-				return fmt.Errorf("FATAL: Custom toolchain version mismatch!\nExpected: %s\nTo prevent tainted lockfiles and non-reproducible builds, please use a matching toolchain or use auto-provisioning.", expectedVersion)
-			}
-		}
-	}
-
 	var customEnv []string
 	if tcPath != "" {
 		customEnv = append(os.Environ(), "PATH="+tcPath+string(os.PathListSeparator)+os.Getenv("PATH"))
 		ui.Info("Toolchain: %s", tcPath)
 	}
-
 	timings.Add("Environment Validation", time.Since(startEnvValidation))
 
-	// 9. CMake configure
 	startCMake := time.Now()
+	mockOpt := "OFF"
+	if plan.MockHW {
+		mockOpt = "ON"
+	}
+	expectedFP := computeCMakeFingerprint(
+		compilerRoot,
+		plan.Toolchain.File,
+		plan.Toolchain.Prefix,
+		manifest,
+		tcPath,
+		plan.Chip.Name,
+		plan.Chip.Arch,
+		plan.Profile,
+		mockOpt,
+		strings.Join(mockOverrides, ","),
+	)
 	ninjaFile := filepath.Join(buildDir, "build.ninja")
-	if _, err := os.Stat(ninjaFile); os.IsNotExist(err) {
+	cacheFile := filepath.Join(buildDir, "CMakeCache.txt")
+	fpFile := filepath.Join(buildDir, ".toob_cmake_fingerprint")
+	needConfigure := false
+	if _, err := os.Stat(ninjaFile); errors.Is(err, fs.ErrNotExist) {
+		needConfigure = true
+	} else if err != nil {
+		return err
+	} else if _, cacheErr := os.Stat(cacheFile); cacheErr != nil {
+		needConfigure = true
+	} else if fpBytes, fpErr := os.ReadFile(fpFile); fpErr != nil || strings.TrimSpace(string(fpBytes)) != expectedFP { // #nosec G304 -- fpFile is inside validated buildDir.
+		needConfigure = true
+	}
+
+	if needConfigure {
 		spinner := ui.NewSpinner("Configuring CMake")
 		spinner.Start()
 
 		cmakeArgs := []string{
 			"-G", "Ninja",
-			"-B", buildDir,
-			"-S", compilerRoot,
-			"-DCMAKE_TOOLCHAIN_FILE=" + toolchainFile,
-			"-DTOOLCHAIN_PREFIX=" + toolchainPrefix,
+			"-B", filepath.ToSlash(buildDir),
+			"-S", filepath.ToSlash(compilerRoot),
+			"-DCMAKE_TOOLCHAIN_FILE=" + filepath.ToSlash(plan.Toolchain.File),
+			"-DTOOLCHAIN_PREFIX=" + plan.Toolchain.Prefix,
 			"-DCMAKE_SYSTEM_NAME=Generic",
 			"-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
-			"-DTOOB_DEVICE_MANIFEST=" + manifest,
-			"-DTOOB_CHIP=" + chip,
-			"-DTOOB_ARCH=" + arch,
+			"-DTOOB_DEVICE_MANIFEST=" + filepath.ToSlash(manifest),
+			"-DTOOB_CHIP=" + plan.Chip.Name,
+			"-DTOOB_ARCH=" + plan.Chip.Arch,
+			"-DTOOB_PROFILE=" + plan.Profile,
+			"-DTOOB_MOCK_HW=" + mockOpt,
+			"-DTOOB_MOCK_EFUSES=" + mockOpt,
 		}
-
 		if tcPath != "" {
 			cmakeArgs = append(cmakeArgs, "-DTOOLCHAIN_BIN_DIR="+filepath.ToSlash(tcPath))
 		}
-
-		// Support ccache if present on the host
 		if _, ccacheErr := exec.LookPath("ccache"); ccacheErr == nil {
-			cmakeArgs = append(cmakeArgs, "-DCMAKE_C_COMPILER_LAUNCHER=ccache")
-			cmakeArgs = append(cmakeArgs, "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache")
+			cmakeArgs = append(cmakeArgs, "-DCMAKE_C_COMPILER_LAUNCHER=ccache", "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache")
 		}
 
 		if err := runWithLiveSpinner(ctx, root, "cmake", customEnv, spinner, cmakeArgs...); err != nil {
@@ -1070,12 +562,14 @@ func runNativeBuild(ctx context.Context, root string, cache *registry.Cache) err
 			return err
 		}
 		spinner.Stop()
+		if err := writeFileIfChanged(fpFile, []byte(expectedFP+"\n")); err != nil {
+			return fmt.Errorf("failed writing CMake fingerprint: %w", err)
+		}
 		timings.Add("CMake Configure", time.Since(startCMake))
 	} else {
-		ui.Info("CMake build files found in %s, skipping configure.", buildDir)
+		ui.Info("CMake build files found in %s (fingerprint matched), skipping configure.", buildDir)
 	}
 
-	// 10. Build
 	spinner := ui.NewSpinner("Building")
 	spinner.Start()
 	startNinja := time.Now()
@@ -1085,33 +579,461 @@ func runNativeBuild(ctx context.Context, root string, cache *registry.Cache) err
 	spinner.Stop()
 	timings.Add("Ninja Build", time.Since(startNinja))
 
-	ui.Success("Build complete.")
+	startGates := time.Now()
+	if err := runPostLinkGates(manifest, buildDir, root, cache, dt, mctx, plan); err != nil {
+		return err
+	}
+	timings.Add("Post-Link Gates", time.Since(startGates))
 
-	// Output Timings (Gap 4.3)
+	ui.Success("Build complete.")
 	timings.Print(time.Since(buildStartTime))
 
-	// 11. Update Lockfile with Toolchain info
-	if lf, err := lockfile.Load(lfPath); err == nil {
-		tcName := strings.TrimSuffix(toolchainPrefix, "-")
-		lf.Toolchains[tcName] = lockfile.ToolchainEntry{
-			Version: expectedVersion,
+	if !flagLocked {
+		recordNativeBuild(root, lf, cache, plan)
+	}
+	return nil
+}
+
+func runPostLinkGates(manifestPath, buildDir, projectRoot string, cache *registry.Cache, dt *manifestpkg.DeviceToml, mctx *manifestpkg.Context, plan *resolve.Plan) error {
+	var reservedRegions []elfaudit.MemoryRegion
+	if mctx != nil && mctx.Hardware != nil {
+		for _, r := range mctx.Hardware.ReservedRamRegions {
+			base, err := parseCLiteralU64(r.Base)
+			if err != nil {
+				return fmt.Errorf("invalid base address %q for reserved RAM region %q: %w", r.Base, r.Name, err)
+			}
+			reservedRegions = append(reservedRegions, elfaudit.MemoryRegion{
+				Name: r.Name,
+				Base: base,
+				Size: uint64(r.Size),
+			})
 		}
-		if os.Getenv("TOOB_REGISTRY_DIR") == "" {
-			regVer := filepath.Base(cache.Dir())
-			lf.Registry.Commit = regVer
-			lf.Registry.Version = regVer
+	}
+
+	isBareMetal := !strings.EqualFold(plan.Chip.Arch, "host")
+
+	// 1. Stage-0 BootROM image packing + packed Stage-0 flash budget check.
+	if isBareMetal && mctx != nil && mctx.Hardware != nil && mctx.Hardware.BootromImage != nil {
+		stage0ELF := filepath.Join(buildDir, "toob_stage0")
+		packedStage0, err := packStage0BootromImage(stage0ELF, projectRoot, cache, mctx.Hardware, plan)
+		if err != nil {
+			return fmt.Errorf("stage-0 BootROM image packing failed: %w", err)
 		}
-		if os.Getenv("TOOB_COMPILER_DIR") == "" {
-			lf.Environment.CoreSDK = coreSDKVer
+		stage0Bin := filepath.Join(buildDir, "toob_stage0.bin")
+		if err := writeFileAtomic(stage0Bin, packedStage0, 0o644); err != nil {
+			return fmt.Errorf("failed writing packed Stage-0 image %s: %w", stage0Bin, err)
 		}
-		_ = lf.Save(lfPath)
+		if _, err := manifestpkg.CheckBudget(manifestPath, stage0Bin, "stage0"); err != nil {
+			return err
+		}
+	}
+
+	// 2. Post-link ELF security audit (mock poison-pill in production, reserved RAM overlap, Flash Filesz budget).
+	type elfTarget struct {
+		name     string
+		required bool
+		maxBytes uint64
+	}
+	elfTargets := []elfTarget{
+		{name: "toob_stage0", required: isBareMetal, maxBytes: uint64(dt.Partitions.Stage0Size)},
+		{name: "toob_stage1", required: isBareMetal, maxBytes: uint64(dt.Partitions.Stage1Size)},
+		{name: "toob_stage1b", required: false, maxBytes: uint64(dt.Partitions.Stage1Size)},
+		{name: "toob_recovery", required: false, maxBytes: uint64(dt.Partitions.RecoverySize)},
+	}
+	for _, tgt := range elfTargets {
+		elfPath := filepath.Join(buildDir, tgt.name)
+		if _, err := os.Stat(elfPath); err != nil {
+			if errors.Is(err, fs.ErrNotExist) && !tgt.required {
+				continue
+			}
+			return fmt.Errorf("expected linked ELF %s not found: %w", elfPath, err)
+		}
+		report, err := elfaudit.AuditELF(elfPath, elfaudit.ELFAuditConfig{
+			Profile:         plan.Profile,
+			ReservedRegions: reservedRegions,
+			Stage1MaxBytes:  tgt.maxBytes,
+		})
+		if err != nil {
+			return fmt.Errorf("post-link ELF audit failed on %s: %w", tgt.name, err)
+		}
+		if !report.Passed {
+			for _, v := range report.Violations {
+				ui.Error("ELF Audit [%s] %s: %s", tgt.name, v.Name, v.Details)
+			}
+			return fmt.Errorf("FATAL [ELF_AUDIT_FAIL]: %s failed post-link security audit", tgt.name)
+		}
+	}
+
+	// 3. Recovery flash partition budget gate when recovery is configured/built.
+	if isBareMetal && dt.Partitions.RecoverySize > 0 {
+		recoveryBin := filepath.Join(buildDir, "toob_recovery.bin")
+		if _, err := os.Stat(recoveryBin); err == nil {
+			if _, bErr := manifestpkg.CheckBudget(manifestPath, recoveryBin, "recovery"); bErr != nil {
+				return bErr
+			}
+		} else if plan.Recovery.Declared {
+			return fmt.Errorf("recovery partition is configured (recovery_size=%d) but %s was not produced",
+				dt.Partitions.RecoverySize, recoveryBin)
+		}
 	}
 
 	return nil
 }
 
-// run executes a command with stdout/stderr forwarded to the terminal.
+func packStage0BootromImage(stage0ELF, projectRoot string, cache *registry.Cache, hw *manifestpkg.HardwareJson, plan *resolve.Plan) ([]byte, error) {
+	if plan.Chip.Local && hw.BootromImage != nil && strings.TrimSpace(hw.BootromImage.Extends) != "" {
+		localExt := filepath.Join(paths.HALDir(projectRoot), filepath.FromSlash(strings.TrimSpace(hw.BootromImage.Extends)))
+		if _, err := os.Stat(localExt); errors.Is(err, fs.ErrNotExist) && cache != nil {
+			return manifestpkg.PackStage0ELFWithPackagesDir(stage0ELF, hw, cache.Dir())
+		}
+	}
+	return manifestpkg.PackStage0FromHardwareJSON(stage0ELF, plan.Chip.HardwarePath)
+}
+
+func recordNativeBuild(root string, lf *lockfile.Lockfile, cache *registry.Cache, plan *resolve.Plan) {
+	lf.Toolchains[plan.Toolchain.Name] = lockfile.ToolchainEntry{Version: plan.Toolchain.ExpectedVersion}
+	if cache != nil && !cache.IsLocalOverride() {
+		if regVer, err := cache.HeadCommit(); err == nil && regVer != "" && regVer != "uninitialized" {
+			lf.Registry.Commit = regVer
+			lf.Registry.Version = regVer
+		}
+	}
+	if os.Getenv("TOOB_COMPILER_DIR") == "" {
+		lf.Environment.CoreSDK = plan.CoreSDK.Version
+	}
+
+	var archVer string
+	if idx, err := cache.LoadIndex(); err == nil && idx != nil {
+		if aInfo, ok := idx.Archs[plan.Chip.Arch]; ok {
+			archVer = aInfo.Version
+		}
+	}
+	var cBackend, cHash, cPqc string
+	if len(plan.Crypto) == 3 {
+		cBackend, cHash, cPqc = plan.Crypto[0].Name, plan.Crypto[1].Name, plan.Crypto[2].Name
+	}
+	entry := lockfile.ChipEntry{
+		Name:             plan.Chip.Name,
+		Version:          plan.Chip.Version,
+		Arch:             plan.Chip.Arch,
+		ArchVersion:      archVer,
+		Toolchain:        plan.Toolchain.Name,
+		ToolchainVersion: plan.Toolchain.ExpectedVersion,
+		CryptoBackend:    cBackend,
+		CryptoHash:       cHash,
+		CryptoPqc:        cPqc,
+		Spawned:          plan.Chip.Local,
+	}
+	updated := false
+	for i := range lf.Chips {
+		if lf.Chips[i].Name == entry.Name {
+			lf.Chips[i] = entry
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		lf.Chips = append(lf.Chips, entry)
+	}
+
+	if err := lf.Save(paths.LockfilePath(root)); err != nil {
+		ui.Warn("Build succeeded, but the lockfile could not be saved: %v", err)
+	}
+}
+
+// ensureCoreSDK returns the Core SDK directory, downloading and verifying it atomically on first use.
+func ensureCoreSDK(ctx context.Context, projectRoot string, coreSDK resolve.CoreSDK, idx *registry.Index) (string, error) {
+	version := coreSDK.Version
+	devMode := isDevEnvEnabled()
+
+	if dir := os.Getenv("TOOB_COMPILER_DIR"); dir != "" {
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			return "", err
+		}
+		if !devMode && version != "" && version != "main" && version != "dev" && version != "latest" {
+			if compRoot, rErr := os.OpenRoot(absDir); rErr == nil {
+				vf, fErr := compRoot.Open(".toob_core_version")
+				if fErr == nil {
+					verBytes, readErr := io.ReadAll(io.LimitReader(vf, 1024))
+					_ = vf.Close()
+					_ = compRoot.Close()
+					if readErr == nil {
+						embedded := strings.TrimSpace(string(verBytes))
+						if embedded != "" && strings.TrimPrefix(embedded, "core/") != strings.TrimPrefix(version, "core/") {
+							return "", fmt.Errorf("TOOB_COMPILER_DIR (%s) contains Core SDK %q, but build requires %q", absDir, embedded, version)
+						}
+					}
+				} else {
+					_ = compRoot.Close()
+				}
+			}
+		}
+		return absDir, nil
+	}
+
+	if devMode {
+		startDir := projectRoot
+		if startDir == "" {
+			if r, err := paths.FindProjectRoot(""); err == nil {
+				startDir = r
+			} else if wd, wdErr := os.Getwd(); wdErr == nil {
+				startDir = wd
+			}
+		}
+		curr := startDir
+		for curr != "" {
+			if st, err := os.Stat(filepath.Join(curr, "toobloader", "core")); err == nil && st.IsDir() {
+				return curr, nil
+			}
+			parent := filepath.Dir(curr)
+			if parent == curr {
+				break
+			}
+			curr = parent
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	coreBase := filepath.Join(home, ".toob", "core")
+	dir, err := archiveutil.SafeJoin(coreBase, version)
+	if err != nil {
+		return "", fmt.Errorf("unsafe Core SDK version %q: %w", version, err)
+	}
+	if st, err := os.Stat(dir); err == nil && st.IsDir() {
+		return dir, nil
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return "", err
+	}
+
+	var expectedSHA string
+	if idx != nil && idx.Ecosystem != nil && idx.Ecosystem.CoreSDKSha256 != nil {
+		expectedSHA = cmp.Or(
+			idx.Ecosystem.CoreSDKSha256[version],
+			idx.Ecosystem.CoreSDKSha256[strings.TrimPrefix(version, "core/")],
+			idx.Ecosystem.CoreSDKSha256["core/"+strings.TrimPrefix(version, "core/")],
+		)
+	}
+	if envSHA := strings.TrimSpace(os.Getenv("TOOB_CORE_SDK_SHA256")); envSHA != "" {
+		expectedSHA = envSHA
+	}
+	expectedSHA = strings.ToLower(strings.TrimSpace(expectedSHA))
+	if expectedSHA != "" {
+		if decoded, hexErr := hex.DecodeString(expectedSHA); hexErr != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("invalid Core SDK SHA-256 digest %q", expectedSHA)
+		}
+	} else if !devMode {
+		return "", fmt.Errorf("refusing unverified download for Core SDK %q: no sha256 digest in registry index (set TOOB_CORE_SDK_SHA256 or pass --dev)", version)
+	}
+
+	ui.Step("Core SDK '%s' not found locally. Downloading from Registry...", version)
+	nonce := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	tempDir := fmt.Sprintf("%s.tmp-%s", dir, nonce)
+	tempTar := fmt.Sprintf("%s.tar-%s.tgz", dir, nonce)
+	if err := os.MkdirAll(filepath.Dir(tempDir), 0o750); err != nil {
+		return "", err
+	}
+	defer func() { _ = os.Remove(tempTar) }()
+
+	// Ensure version has single URL-escaped segment via apiclient.DownloadPackage ("core/vX.Y.Z" -> "core%2FvX.Y.Z").
+	dlVer := version
+	if !strings.HasPrefix(dlVer, "core/") && dlVer != "main" && dlVer != "dev" {
+		dlVer = "core/" + dlVer
+	}
+	body, err := apiclient.NewWithTimeout(120*time.Second).DownloadPackage(ctx, "toob-boot", dlVer)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch Core SDK '%s' from registry: %w", version, err)
+	}
+
+	// #nosec G304 -- tempTar is derived from SafeJoin(coreBase, version) above.
+	tarOut, err := os.OpenFile(tempTar, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		_ = body.Close()
+		return "", err
+	}
+	hasher := sha256.New()
+	written, copyErr := io.Copy(io.MultiWriter(tarOut, hasher), io.LimitReader(body, archiveutil.PackageSizeLimit+1))
+	bodyCloseErr := body.Close()
+	tarCloseErr := tarOut.Close()
+	if copyErr != nil {
+		return "", fmt.Errorf("failed downloading Core SDK '%s': %w", version, copyErr)
+	}
+	if bodyCloseErr != nil {
+		return "", fmt.Errorf("failed closing Core SDK response stream: %w", bodyCloseErr)
+	}
+	if tarCloseErr != nil {
+		return "", fmt.Errorf("failed flushing Core SDK archive: %w", tarCloseErr)
+	}
+	if written > archiveutil.PackageSizeLimit {
+		return "", fmt.Errorf("core SDK '%s' archive exceeds %d byte limit", version, archiveutil.PackageSizeLimit)
+	}
+
+	actualSHA := hex.EncodeToString(hasher.Sum(nil))
+	if expectedSHA != "" && actualSHA != expectedSHA {
+		return "", fmt.Errorf("core SDK '%s' SHA256 mismatch: expected %s, got %s", version, expectedSHA, actualSHA)
+	}
+
+	// #nosec G304 -- tempTar is the verified temporary archive created above.
+	tarIn, err := os.Open(tempTar)
+	if err != nil {
+		return "", err
+	}
+	extractErr := registry.ExtractTarball(tarIn, tempDir)
+	_ = tarIn.Close()
+	if extractErr != nil {
+		_ = os.RemoveAll(tempDir)
+		return "", fmt.Errorf("failed to extract Core SDK: %w", extractErr)
+	}
+
+	if _, err := os.Stat(filepath.Join(tempDir, "CMakeLists.txt")); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return "", fmt.Errorf("extracted Core SDK '%s' is incomplete (missing CMakeLists.txt)", version)
+	}
+
+	if err := os.Rename(tempDir, dir); err != nil {
+		_ = os.RemoveAll(tempDir)
+		if st, statErr := os.Stat(dir); statErr == nil && st.IsDir() {
+			return dir, nil
+		}
+		return "", fmt.Errorf("failed to finalize atomic Core SDK download: %w", err)
+	}
+	return dir, nil
+}
+
+// provisionToolchain returns the directory of the cross-compiler to use, enforcing
+// exact/upstream version alignment and chip min_compiler (REG-009).
+func provisionToolchain(ctx context.Context, tc resolve.Toolchain, chipName, cacheDir string) (string, error) {
+	if flagToolchainPath == "" {
+		if bin := findToolchainBin(tc.Prefix, tc.ExpectedVersion, tc.UpstreamVersion); bin != "" {
+			if err := verifyProbedCompilerVersion(ctx, bin, tc, chipName, false); err != nil {
+				return "", err
+			}
+			return bin, nil
+		}
+		if flagLocked {
+			return "", fmt.Errorf("toolchain %s (%s) is not cached locally and --locked forbids auto-provisioning", tc.Name, tc.ExpectedVersion)
+		}
+		bin, err := toolchain.EnsureAvailable(tc.Prefix, tc.ExpectedVersion, cacheDir)
+		if err != nil {
+			return "", fmt.Errorf("failed to auto-provision toolchain: %w (run 'toob install' or pass --toolchain-path)", err)
+		}
+		if err := verifyProbedCompilerVersion(ctx, bin, tc, chipName, false); err != nil {
+			return "", err
+		}
+		return bin, nil
+	}
+
+	absTCPath, err := filepath.Abs(flagToolchainPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid --toolchain-path %q: %w", flagToolchainPath, err)
+	}
+	if err := verifyProbedCompilerVersion(ctx, absTCPath, tc, chipName, true); err != nil {
+		return "", err
+	}
+	return absTCPath, nil
+}
+
+func verifyProbedCompilerVersion(ctx context.Context, binDir string, tc resolve.Toolchain, chipName string, strictMatch bool) error {
+	compilerExe := filepath.Join(binDir, tc.Prefix+"gcc")
+	if runtime.GOOS == "windows" {
+		compilerExe += ".exe"
+	}
+	if _, err := os.Stat(compilerExe); err != nil {
+		if strictMatch {
+			return fmt.Errorf("custom toolchain compiler not found at %s", compilerExe)
+		}
+		return nil
+	}
+
+	// #nosec G204 -- compilerExe is strictly <binDir>/<validated_prefix>gcc[.exe] with fixed flags.
+	out, err := exec.CommandContext(ctx, compilerExe, "-dumpfullversion", "-dumpversion").Output()
+	if err != nil {
+		return fmt.Errorf("failed probing compiler version from %s: %w", compilerExe, err)
+	}
+	probedRaw := strings.TrimSpace(string(out))
+
+	if tc.MinCompiler != "" {
+		if err := resolve.CheckMinCompiler(fmt.Sprintf("chip '%s'", chipName), probedRaw, tc.MinCompiler); err != nil {
+			return err
+		}
+	}
+
+	if strictMatch && tc.ExpectedVersion != "" {
+		actualSemver, parseErr := resolve.ExtractCompilerSemver(probedRaw)
+		if parseErr != nil {
+			return fmt.Errorf("cannot parse custom compiler version %q from %s: %w", probedRaw, compilerExe, parseErr)
+		}
+		matched := false
+		for _, allowed := range []string{tc.ExpectedVersion, tc.UpstreamVersion} {
+			if allowed == "" {
+				continue
+			}
+			if wantSemver, wErr := resolve.ExtractCompilerSemver(allowed); wErr == nil && actualSemver.Equal(wantSemver) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("FATAL: custom toolchain version mismatch (got GCC %s, expected %s); use a matching toolchain or omit --toolchain-path",
+				actualSemver.String(), tc.ExpectedVersion)
+		}
+	}
+	return nil
+}
+
+type combinationResult struct {
+	resp *apiclient.CheckCombinationResponse
+	err  error
+}
+
+func startCombinationCheck(chip resolve.Chip) <-chan combinationResult {
+	result := make(chan combinationResult, 1)
+	go func() {
+		client := apiclient.New()
+		client.HTTPClient.Timeout = 3 * time.Second
+		cliVer := Version
+		if !strings.HasPrefix(cliVer, "v") && cliVer != "main" && cliVer != "dev" {
+			cliVer = "v" + cliVer
+		}
+		resp, err := client.CheckCombination(cmd_defaultCtx(), chip.Name, chip.Version, cliVer)
+		result <- combinationResult{resp: resp, err: err}
+	}()
+	return result
+}
+
+func reportCombination(result combinationResult, chip resolve.Chip) error {
+	if result.err != nil {
+		errMsg := result.err.Error()
+		switch {
+		case strings.Contains(errMsg, "no such host") || strings.Contains(errMsg, "connect: connection refused") || strings.Contains(errMsg, "context deadline exceeded"):
+			ui.Warn("Could not verify build combination: Registry API is unreachable (offline).")
+		case strings.Contains(errMsg, "HTTP "):
+			parts := strings.SplitN(errMsg, ": ", 2)
+			if len(parts) == 2 && (strings.Contains(parts[1], "<") || len(parts[1]) > 100) {
+				ui.Warn("Could not verify build combination: Registry API returned %s.", parts[0])
+			} else {
+				ui.Warn("Could not verify build combination: %v", result.err)
+			}
+		default:
+			ui.Warn("Could not verify build combination: %v", result.err)
+		}
+		return nil
+	}
+
+	switch strings.ToUpper(result.resp.Status) {
+	case "FAILED":
+		return fmt.Errorf("FATAL: Chip %s (v%s) is explicitly incompatible with CLI %s according to the Compatibility Matrix. Build aborted", chip.Name, chip.Version, Version)
+	case "UNKNOWN":
+		ui.Warn("The combination of Chip %s (v%s) and CLI %s has not been verified by the CI yet.", chip.Name, chip.Version, Version)
+	}
+	return nil
+}
+
 func run(ctx context.Context, dir string, name string, env []string, args ...string) error {
+	// #nosec G204 -- name is a fixed binary ("docker" or "cmake") invoked directly without shell interpolation.
 	c := exec.CommandContext(ctx, name, args...)
 	c.Dir = dir
 	c.Stdin = os.Stdin
@@ -1123,7 +1045,6 @@ func run(ctx context.Context, dir string, name string, env []string, args ...str
 	return c.Run()
 }
 
-// ringBuffer is a bounded, allocation-free buffer for capturing command output.
 type ringBuffer struct {
 	buf  []byte
 	pos  int
@@ -1156,7 +1077,6 @@ func (r *ringBuffer) String() string {
 	return string(res)
 }
 
-// spinnerWriter intercepts compiler stdout and pipes the latest line to the LiveSpinner
 type spinnerWriter struct {
 	spinner *ui.LiveSpinner
 }
@@ -1176,8 +1096,20 @@ func (w *spinnerWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// runWithLiveSpinner executes a command, parsing its output to a lag-free UI spinner instead of stdout.
+func sanitizeTerminalOutput(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == '\n' || c == '\r' || c == '\t' || (c >= 0x20 && c != 0x7f) {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
 func runWithLiveSpinner(ctx context.Context, dir string, name string, env []string, spinner *ui.LiveSpinner, args ...string) error {
+	// #nosec G204 -- name is strictly "cmake" with validated non-shell argv elements.
 	c := exec.CommandContext(ctx, name, args...)
 	c.Dir = dir
 	c.Stdin = os.Stdin
@@ -1185,7 +1117,6 @@ func runWithLiveSpinner(ctx context.Context, dir string, name string, env []stri
 		c.Env = env
 	}
 
-	// Bounded 1MB buffer to prevent OOM on massive outputs
 	ringBuf := newRingBuffer(1 * 1024 * 1024)
 	sw := &spinnerWriter{spinner: spinner}
 	c.Stdout = io.MultiWriter(sw, ringBuf)
@@ -1193,10 +1124,10 @@ func runWithLiveSpinner(ctx context.Context, dir string, name string, env []stri
 
 	err := c.Run()
 	if err != nil {
-		// Stop the spinner so we can print the raw error clearly
 		spinner.Stop()
-		fmt.Fprintf(os.Stderr, "\n%s\n", ringBuf.String())
-		classifyBuildError(ringBuf.String(), dir)
+		captured := sanitizeTerminalOutput(ringBuf.String())
+		_, _ = fmt.Fprintf(os.Stderr, "\n%s\n", captured)
+		classifyBuildError(captured, dir)
 	}
 	return err
 }
@@ -1205,96 +1136,76 @@ func classifyBuildError(output string, projectDir string) {
 	outLower := strings.ToLower(output)
 	projectBase := strings.ToLower(filepath.Base(projectDir))
 
-	if strings.Contains(outLower, "toobloader/hal") {
+	switch {
+	case strings.Contains(outLower, "toobloader/hal"):
 		ui.ErrorBanner("HAL Layer Error",
 			"The compiler found an error in the Hardware Abstraction Layer.",
 			"If you spawned this chip locally, check your modifications. Otherwise, report a bug.")
-	} else if strings.Contains(outLower, "toobloader/core") {
+	case strings.Contains(outLower, "toobloader/core"):
 		ui.ErrorBanner("Core SDK Error",
 			"The error originated in the Toob Core SDK.",
 			"This is usually a bug in the Toob-Loader repository. Please report it.")
-	} else if strings.Contains(outLower, "crypto/") || strings.Contains(outLower, "crypto\\") || strings.Contains(outLower, "crypto_") {
+	case strings.Contains(outLower, "crypto/") || strings.Contains(outLower, "crypto\\") || strings.Contains(outLower, "crypto_"):
 		ui.ErrorBanner("Cryptography Layer Error",
 			"The compiler found an error in a crypto package.",
 			"Check your [crypto] configuration in device.toml and ensure the package is compatible with your Core SDK version.")
-	} else if strings.Contains(outLower, "src/") || strings.Contains(outLower, "app/") || strings.Contains(outLower, "main/") || strings.Contains(outLower, "components/") || strings.Contains(outLower, projectBase+"/") {
+	case strings.Contains(outLower, "src/") || strings.Contains(outLower, "app/") || strings.Contains(outLower, "main/") || strings.Contains(outLower, "components/") || strings.Contains(outLower, projectBase+"/"):
 		ui.ErrorBanner("Application Code Error",
 			"The compiler found an error in your application code.",
 			"Check the files in your project directory.")
-	} else if strings.Contains(outLower, "exec: \"cmake\": executable file not found") || strings.Contains(outLower, "gcc: fatal error: cannot execute") || strings.Contains(outLower, "unrecognized command line option") {
+	case strings.Contains(outLower, "exec: \"cmake\": executable file not found") || strings.Contains(outLower, "gcc: fatal error: cannot execute") || strings.Contains(outLower, "unrecognized command line option"):
 		ui.ErrorBanner("Toolchain / Environment Error",
 			"The compiler executable failed or is missing components.",
 			"Try running 'toob clean --toolchains' and rebuilding.")
-	} else {
+	default:
 		ui.ErrorBanner("Unknown Error Category",
 			"Could not automatically classify the error.",
 			"Please read the raw compiler output above.")
 	}
 }
 
-// findToolchainBin strictly returns the toolchain path from the hermetic Toob cache.
-// It explicitly avoids checking the system PATH to guarantee reproducible, hermetic builds.
-func findToolchainBin(prefix string, expectedVersion string) string {
-	// 1. Check hermetic Toob cache (~/.toob/toolchains)
-	if home, err := os.UserHomeDir(); err == nil && expectedVersion != "" {
-		toobPath := filepath.Join(home, ".toob", "toolchains", strings.TrimSuffix(prefix, "-"), expectedVersion)
-		if bin := toolchain.FindBinDir(toobPath, prefix); bin != "" {
-			return bin
-		}
-	}
-
-	return ""
+func findToolchainBin(prefix, expectedVersion, upstreamVersion string) string {
+	return toolchain.FindCachedBinDir(prefix, expectedVersion, upstreamVersion)
 }
 
-// findPythonScriptsBin finds the Scripts directory of the active python interpreter
-func findPythonScriptsBin() string {
-	cmd := exec.Command("python", "-c", "import sys, os; print(os.path.join(sys.prefix, 'Scripts'))")
-	out, err := cmd.Output()
-	if err == nil {
-		path := strings.TrimSpace(string(out))
-		if _, err := os.Stat(path); err == nil {
-			return path
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".toob-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
 		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
 	}
-	return ""
-}
-
-// parseCoreSDKVersion extracts the raw semver from a tag (e.g., core/v1.2.3 -> v1.2.3)
-func parseCoreSDKVersion(tag string) (*semver.Version, error) {
-	cleanTag := tag
-	if after, ok := strings.CutPrefix(tag, "core/"); ok {
-		cleanTag = after
+	if err := tmp.Chmod(perm); err != nil && runtime.GOOS != "windows" {
+		_ = tmp.Close()
+		return err
 	}
-	if !strings.HasPrefix(cleanTag, "v") {
-		cleanTag = "v" + cleanTag
+	if err := tmp.Close(); err != nil {
+		return err
 	}
-	return semver.NewVersion(cleanTag)
-}
-
-func getLatestCoreSDKFromRegistry(idx *registry.Index) (string, error) {
-	if idx == nil || idx.Ecosystem == nil || len(idx.Ecosystem.CoreSDK) == 0 {
-		return "", fmt.Errorf("no core SDK versions listed in registry")
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
 	}
-	var highest *semver.Version
-	var highestStr string
-	for _, tag := range idx.Ecosystem.CoreSDK {
-		v, err := parseCoreSDKVersion(tag)
-		if err == nil {
-			if highest == nil || v.GreaterThan(highest) {
-				highest = v
-				highestStr = tag
-			}
-		}
-	}
-	if highestStr == "" {
-		return "", fmt.Errorf("no valid semantic versions for core SDK in registry")
-	}
-	return highestStr, nil
+	cleanup = false
+	return nil
 }
 
 func writeFileIfChanged(path string, data []byte) error {
-	if old, err := os.ReadFile(path); err == nil && string(old) == string(data) {
+	// #nosec G304 -- path is an internal build artifact path inside validated buildDir.
+	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
 		return nil
 	}
-	return os.WriteFile(path, data, 0o644)
+	return writeFileAtomic(path, data, 0o644)
 }

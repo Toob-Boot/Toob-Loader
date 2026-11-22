@@ -9,19 +9,15 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/toob-boot/toob/internal/httputil"
 )
 
-// DeviceLogin is a login for a machine with no browser of its own: a server over SSH, a container, a
-// terminal on a box nobody is sitting at. The person completes it on a device that does have one.
-//
-// This replaces the old out-of-band redirect (urn:ietf:wg:oauth:2.0:oob), which is deprecated and
-// which no current provider accepts. The device grant is the flow that was designed for the case.
+// DeviceLogin implements RFC 8628 OAuth 2.0 Device Authorization Grant for headless hosts.
 type DeviceLogin struct {
-	DeviceCode      string `json:"device_code"`
-	UserCode        string `json:"user_code"`
-	VerificationURI string `json:"verification_uri"`
-	// VerificationURIComplete already contains the code, so a person with a browser can follow one
-	// link instead of typing anything. Providers are not required to send it.
+	DeviceCode              string `json:"device_code"`
+	UserCode                string `json:"user_code"`
+	VerificationURI         string `json:"verification_uri"`
 	VerificationURIComplete string `json:"verification_uri_complete"`
 	ExpiresIn               int    `json:"expires_in"`
 	Interval                int    `json:"interval"`
@@ -30,10 +26,13 @@ type DeviceLogin struct {
 	clientID string
 }
 
-// StartDeviceLogin asks the provider for a code the person can enter elsewhere.
+// StartDeviceLogin requests a device code and user verification URI from the provider.
 func StartDeviceLogin(ctx context.Context, provider *Provider, clientID, audience string, scopes []string) (*DeviceLogin, error) {
 	if !provider.SupportsDeviceFlow() {
 		return nil, errors.New("the identity provider does not offer a login for devices without a browser")
+	}
+	if _, err := httputil.ValidateHTTPSOrLoopbackURL(provider.DeviceAuthorizationEndpoint); err != nil {
+		return nil, fmt.Errorf("invalid device_authorization_endpoint: %w", err)
 	}
 
 	form := url.Values{
@@ -51,25 +50,43 @@ func StartDeviceLogin(ctx context.Context, provider *Provider, clientID, audienc
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	client, err := httputil.NewClient(30 * time.Second)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := httputil.ReadBounded(resp.Body, maxOIDCResponseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("reading device code response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("the identity provider answered %d when asked for a device code", resp.StatusCode)
 	}
 
 	var login DeviceLogin
-	if err := json.NewDecoder(resp.Body).Decode(&login); err != nil {
+	if err := json.Unmarshal(raw, &login); err != nil {
 		return nil, fmt.Errorf("the device code response is not readable: %w", err)
 	}
-	if login.DeviceCode == "" || login.UserCode == "" {
+	login.VerificationURI = strings.TrimSpace(login.VerificationURI)
+	login.VerificationURIComplete = strings.TrimSpace(login.VerificationURIComplete)
+	if login.DeviceCode == "" || login.UserCode == "" || login.VerificationURI == "" {
 		return nil, errors.New("the identity provider returned an incomplete device code response")
 	}
+	if _, err := httputil.ValidateHTTPSOrLoopbackURL(login.VerificationURI); err != nil {
+		return nil, fmt.Errorf("invalid verification_uri %q: %w", login.VerificationURI, err)
+	}
+	if login.VerificationURIComplete != "" {
+		if _, err := httputil.ValidateHTTPSOrLoopbackURL(login.VerificationURIComplete); err != nil {
+			return nil, fmt.Errorf("invalid verification_uri_complete %q: %w", login.VerificationURIComplete, err)
+		}
+	}
 	if login.Interval <= 0 {
-		// RFC 8628 says five seconds when the provider names no interval.
 		login.Interval = 5
 	}
 	login.provider = provider
@@ -78,23 +95,26 @@ func StartDeviceLogin(ctx context.Context, provider *Provider, clientID, audienc
 	return &login, nil
 }
 
-// Wait polls until the person approves, refuses, or the code expires.
-//
-// The polling rules are the protocol's, and following them is not politeness: a provider that
-// answers slow_down and is polled at the old rate will start refusing the client outright.
+// Wait polls the token endpoint until approval, denial, or expiry.
 func (d *DeviceLogin) Wait(ctx context.Context) (*Token, error) {
 	interval := time.Duration(d.Interval) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
 
 	deadline := time.Now().Add(time.Duration(d.ExpiresIn) * time.Second)
 	if d.ExpiresIn <= 0 {
 		deadline = time.Now().Add(10 * time.Minute)
 	}
 
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, fmt.Errorf("gave up waiting for the login to be approved: %w", ctx.Err())
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 
 		if time.Now().After(deadline) {
@@ -114,7 +134,6 @@ func (d *DeviceLogin) Wait(ctx context.Context) (*Token, error) {
 		case "":
 			return tokenFrom(resp)
 		case "authorization_pending":
-			// The person has not finished yet. Keep the same interval.
 		case "slow_down":
 			interval += 5 * time.Second
 		case "access_denied":
@@ -124,5 +143,7 @@ func (d *DeviceLogin) Wait(ctx context.Context) (*Token, error) {
 		default:
 			return nil, fmt.Errorf("%s: %s", resp.Error, resp.ErrorDescription)
 		}
+
+		timer.Reset(interval)
 	}
 }

@@ -1,224 +1,197 @@
 // Package apiclient provides a centralized HTTP client for all Toob Registry
-// API interactions. It consolidates the scattered http.Client usage across
-// cache.go, regcheck.go, and chip.go into a single, configurable client.
-//
-// URL resolution priority:
-//  1. TOOB_REGISTRY_URL environment variable
-//  2. TOOB_HUB_URL environment variable (deprecated alias)
-//  3. Hardcoded default: https://registry.the-toob.com
+// and Identity API interactions.
 package apiclient
 
 import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/toob-boot/toob/internal/httputil"
 	"github.com/toob-boot/toob/internal/paths"
 )
 
-var (
-	// DefaultBaseURL is the production API endpoint served via Cloudflare.
-	DefaultBaseURL = "https://registry.the-toob.com"
-)
+// DefaultBaseURL is the production Registry API endpoint served via Cloudflare.
+var DefaultBaseURL = "https://registry.the-toob.com"
 
 const (
-	// defaultTimeout is the standard timeout for read operations (GET, list, etc.).
-	defaultTimeout = 60 * time.Second
+	defaultTimeout      = 60 * time.Second
+	UploadTimeout       = 120 * time.Second
+	maxRetries          = 3
+	maxErrorBodySize    = 4096
+	maxRawResponseBytes = 50 << 20 // 50 MiB
+	maxUploadBodyBytes  = 64 << 20 // 64 MiB
 
-	// UploadTimeout is the extended timeout for write operations (publish, upload).
-	UploadTimeout = 120 * time.Second
-
-	// maxRetries is the number of automatic retries for transient (5xx) errors.
-	maxRetries = 3
-
-	// maxErrorBodySize limits how much of an error response body we read.
-	maxErrorBodySize = 4096
-
-	// TokenEnv carries a TOOB credential for one run, ahead of anything stored: how CI authenticates.
+	// TokenEnv carries a TOOB credential for one run (CI / automation).
 	TokenEnv = "TOOB_TOKEN"
 )
 
-// Client communicates with the Toob Registry API.
+type errorRoundTripper struct {
+	err error
+}
+
+func (e errorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, e.err
+}
+
+// Client communicates with the Toob Registry and Identity APIs.
 type Client struct {
 	BaseURL    string
-	Token      string // Optional API key from ~/.toob/credentials.json
+	Token      string
 	HTTPClient *http.Client
+
+	transportErr     error
+	authMu           sync.Mutex
+	cachedAuthConfig *AuthConfig
+
+	warnMu   sync.Mutex
+	warnings []string
 }
 
-// New creates a Client with the resolved base URL and optional auth token.
-func New() *Client {
-	baseURL := resolveBaseURL()
-	creds := loadCredentials()
-	return &Client{
-		BaseURL: baseURL,
-		Token:   cmp.Or(os.Getenv(TokenEnv), creds.APIKey),
-		HTTPClient: &http.Client{
-			Timeout:   defaultTimeout,
-			Transport: BuildTransport(),
-		},
+// SafeCheckRedirect enforces redirect caps, blocks HTTPS->HTTP scheme downgrades,
+// and strips cross-host Authorization headers.
+func SafeCheckRedirect(req *http.Request, via []*http.Request) error {
+	return httputil.SafeCheckRedirect(req, via)
+}
+
+// BuildTransport returns an http.RoundTripper configured with enterprise proxy and
+// TOOB_CA_CERT roots, surfacing any TOOB_CA_CERT load error on the first request.
+func BuildTransport() http.RoundTripper {
+	tr, err := httputil.BuildTransport()
+	if err != nil {
+		return errorRoundTripper{err: err}
 	}
+	return tr
 }
 
-// BuildTransport creates an http.Transport with proxy support and optional
-// custom CA certificate via TOOB_CA_CERT environment variable.
-// Exported so other packages can build HTTP clients with the same enterprise
-// network configuration (CA roots, proxy) without duplicating this logic.
-func BuildTransport() *http.Transport {
-	transport := &http.Transport{Proxy: http.ProxyFromEnvironment}
+// New creates a Client with the resolved base URL and default timeout.
+func New() *Client {
+	return NewForBaseURL("", defaultTimeout)
+}
 
-	caPath := os.Getenv("TOOB_CA_CERT")
-	if caPath != "" {
-		caCert, err := os.ReadFile(caPath)
-		if err == nil {
-			pool, _ := x509.SystemCertPool()
-			if pool == nil {
-				pool = x509.NewCertPool()
-			}
-			pool.AppendCertsFromPEM(caCert)
-			transport.TLSClientConfig = &tls.Config{RootCAs: pool}
+// NewWithTimeout creates a Client with a custom timeout on the resolved base URL.
+func NewWithTimeout(timeout time.Duration) *Client {
+	return NewForBaseURL("", timeout)
+}
+
+// NewForBaseURL creates a Client targeting baseURL (falling back to environment/default
+// when empty) with trailing slashes stripped and TOOB_CA_CERT validated.
+func NewForBaseURL(baseURL string, timeout time.Duration) *Client {
+	resolvedDefault := resolveBaseURL()
+	cleanBase := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if cleanBase == "" {
+		cleanBase = resolvedDefault
+	}
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+
+	creds := loadCredentials()
+	token := os.Getenv(TokenEnv)
+	if token == "" {
+		baseOrigin, bErr := httputil.CanonicalOrigin(cleanBase)
+		defOrigin, dErr := httputil.CanonicalOrigin(resolvedDefault)
+		if bErr == nil && dErr == nil && baseOrigin == defOrigin {
+			token = creds.APIKey
 		}
 	}
 
-	return transport
-}
+	c := &Client{
+		BaseURL: cleanBase,
+		Token:   token,
+	}
 
-// NewWithTimeout creates a Client with a custom timeout for upload-heavy operations.
-func NewWithTimeout(timeout time.Duration) *Client {
-	c := New()
-	c.HTTPClient.Timeout = timeout
+	tr, err := httputil.BuildTransport()
+	var rt http.RoundTripper = tr
+	if err != nil {
+		c.transportErr = err
+		rt = errorRoundTripper{err: err}
+	}
+
+	c.HTTPClient = &http.Client{
+		Timeout:   timeout,
+		Transport: rt,
+		CheckRedirect: httputil.NewSafeCheckRedirect(func(warning string) {
+			c.recordWarning(warning)
+		}),
+	}
 	return c
 }
 
-// --- URL Resolution ---
+func (c *Client) recordWarning(w string) {
+	c.warnMu.Lock()
+	defer c.warnMu.Unlock()
+	if !slices.Contains(c.warnings, w) {
+		c.warnings = append(c.warnings, w)
+	}
+}
+
+// Warnings returns any X-Toob-Warning headers captured across requests and redirect hops.
+func (c *Client) Warnings() []string {
+	c.warnMu.Lock()
+	defer c.warnMu.Unlock()
+	return slices.Clone(c.warnings)
+}
 
 func resolveBaseURL() string {
-	if url := os.Getenv("TOOB_REGISTRY_URL"); url != "" {
-		return url
-	}
-	// Backward compat: TOOB_HUB_URL was the old env var name.
-	if url := os.Getenv("TOOB_HUB_URL"); url != "" {
-		return url
-	}
-	return DefaultBaseURL
+	raw := cmp.Or(
+		strings.TrimSpace(os.Getenv("TOOB_REGISTRY_URL")),
+		strings.TrimSpace(os.Getenv("TOOB_HUB_URL")),
+		DefaultBaseURL,
+	)
+	return strings.TrimRight(raw, "/")
 }
 
-// --- Credentials Management ---
-
-// Credentials holds the persisted authentication state.
+// Credentials holds the persisted authentication state on disk.
 type Credentials struct {
-	// APIKey is the long-lived credential for machines: CI jobs, scripts, anything that cannot open
-	// a browser. It stays alongside a person's session rather than being replaced by it.
-	APIKey    string `json:"api_key"`
-	Login     string `json:"login,omitempty"`
-	CreatedAt string `json:"created_at,omitempty"`
-
-	// Identity is the person's own session, obtained from the identity provider.
-	Identity *IdentityCredentials `json:"identity,omitempty"`
-}
-
-func credentialsPath() string {
-	home, err := paths.ToobHome()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, "credentials.json")
+	APIKey    string               `json:"api_key"`
+	Login     string               `json:"login,omitempty"`
+	CreatedAt string               `json:"created_at,omitempty"`
+	Identity  *IdentityCredentials `json:"identity,omitempty"`
 }
 
 func loadCredentials() Credentials {
-	path := credentialsPath()
-	if path == "" {
-		return Credentials{}
-	}
-	data, err := os.ReadFile(path)
+	path, err := paths.CredentialsPath()
 	if err != nil {
 		return Credentials{}
 	}
-	var creds Credentials
-	if json.Unmarshal(data, &creds) != nil {
+	creds, err := loadCredentialsStrict(path)
+	if err != nil {
 		return Credentials{}
 	}
 	return creds
 }
 
-// SaveCredentials persists an API key and login to ~/.toob/credentials.json
-// using atomic write (temp file + rename) to prevent corruption from parallel processes.
-func SaveCredentials(apiKey, login string) error {
-	path := credentialsPath()
-	if path == "" {
-		return fmt.Errorf("cannot determine credentials path")
-	}
-
-	creds := Credentials{
-		APIKey:    apiKey,
-		Login:     login,
-		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-	}
-	data, err := json.MarshalIndent(creds, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal credentials: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-
-	// Atomic write: write to temp file, then rename to target
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
-}
-
-// SaveToken is a backward-compatible wrapper around SaveCredentials.
-func SaveToken(apiKey string) error {
-	return SaveCredentials(apiKey, "")
-}
-
-// DeleteCredentials removes the local credentials file.
-func DeleteCredentials() error {
-	path := credentialsPath()
-	if path == "" {
-		return nil
-	}
-	err := os.Remove(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
-
-// HasToken reports whether the client can authenticate: TOOB_TOKEN, a stored API key or a session.
+// HasToken reports whether the client can authenticate via TOOB_TOKEN, API key, or session.
 func (c *Client) HasToken() bool {
-	return c.Token != "" || HasSession()
+	return os.Getenv(TokenEnv) != "" || c.Token != "" || HasSession()
 }
 
-// GetLogin returns the stored login name from credentials, if available.
+// GetLogin returns the stored login username from credentials, if available.
 func GetLogin() string {
 	return loadCredentials().Login
 }
 
-// --- API Error Handling ---
-
-// APIError represents a structured error response from the server.
+// APIError represents a structured HTTP error response from the server.
 type APIError struct {
 	StatusCode int
-	// Code is the platform's error code (shared/errors), such as insufficient_trust_level.
-	Code    string
-	Message string
+	Code       string
+	Message    string
 }
 
 func (e *APIError) Error() string {
@@ -228,20 +201,13 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
-// StepUpRequired is the registry asking for a fresher or stronger authentication before it will
-// perform the operation (RFC 9470).
+// StepUpRequired represents an RFC 9470 step-up authentication challenge.
 //
-// It is its own error type because it is not a failure: the credential was accepted, and what is
-// missing is a ceremony the person can perform right now. A command that receives it signs in again
-// with what the challenge names and retries once — see cmd.withStepUp — instead of reporting a 401
-// the person has no way to act on.
+//nolint:errname // Exported StepUpRequired type name is part of the apiclient contract referenced by cmd/.
 type StepUpRequired struct {
-	// ACRValues is the authentication context the registry asks for, passed through to the
-	// identity provider as acr_values.
 	ACRValues string
-	// MaxAge is how recent the authentication has to be.
-	MaxAge time.Duration
-	Detail string
+	MaxAge    time.Duration
+	Detail    string
 }
 
 func (e *StepUpRequired) Error() string {
@@ -251,12 +217,8 @@ func (e *StepUpRequired) Error() string {
 	return "the registry requires a fresh sign-in for this operation"
 }
 
-// stepUpChallenge is the WWW-Authenticate value the registry sends for a step-up, e.g.
-//
-//	DPoP error="insufficient_user_authentication", acr_values="urn:toob:mfa:webauthn", max_age=300
 var stepUpChallenge = regexp.MustCompile(`error="insufficient_user_authentication"`)
 
-// parseStepUp reads a step-up challenge from a 401, or reports that the response is not one.
 func parseStepUp(resp *http.Response, detail string) (*StepUpRequired, bool) {
 	header := resp.Header.Get("WWW-Authenticate")
 	if resp.StatusCode != http.StatusUnauthorized || !stepUpChallenge.MatchString(header) {
@@ -282,28 +244,19 @@ func parseStepUp(resp *http.Response, detail string) (*StepUpRequired, bool) {
 	return challenge, true
 }
 
-// extractError reads the response body and creates a structured error.
-// This ensures all API methods surface the server's error message to the user.
-//
-// Every service answers RFC 9457 Problem Details, whose text for a person is "detail" and whose
-// name for a program is "code". A body in another shape — an edge proxy's page, a body of no
-// shape at all — is shown as it is when short.
 func extractError(resp *http.Response) error {
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+	body, _ := httputil.ReadBounded(resp.Body, maxErrorBodySize)
 
 	var problem struct {
 		Code   string `json:"code"`
 		Detail string `json:"detail"`
 	}
 	var msg string
-	if json.Unmarshal(body, &problem) == nil {
-		msg = problem.Detail
-		if msg == "" {
-			msg = problem.Code
-		}
+	if len(body) > 0 && json.Unmarshal(body, &problem) == nil {
+		msg = cmp.Or(problem.Detail, problem.Code)
 	}
 	if msg == "" && len(body) > 0 && len(body) < 512 {
-		msg = string(body)
+		msg = strings.TrimSpace(string(body))
 	}
 
 	if challenge, ok := parseStepUp(resp, msg); ok {
@@ -311,8 +264,6 @@ func extractError(resp *http.Response) error {
 	}
 	return &APIError{StatusCode: resp.StatusCode, Code: problem.Code, Message: msg}
 }
-
-// --- API Methods ---
 
 // RevisionResponse is the JSON shape of GET /api/v1/registry/revision.
 type RevisionResponse struct {
@@ -334,7 +285,51 @@ func (c *Client) GetRevision(ctx context.Context) (*RevisionResponse, error) {
 
 // GetIndex downloads the full registry.json index.
 func (c *Client) GetIndex(ctx context.Context) ([]byte, error) {
-	return c.getRaw(ctx, "/api/v1/registry/index")
+	data, _, err := c.GetIndexWithMeta(ctx, "")
+	return data, err
+}
+
+// GetIndexWithMeta downloads registry.json (optionally pinned to revision) and returns
+// its raw bytes together with any X-Registry-Signature header from the server.
+func (c *Client) GetIndexWithMeta(ctx context.Context, revision string) ([]byte, string, error) {
+	path := "/api/v1/registry/index"
+	if revision != "" && revision != "latest" {
+		path += "?revision=" + url.QueryEscape(revision)
+	}
+	req, err := c.newPublicRequest(ctx, http.MethodGet, path)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := c.doWithRetry(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", extractError(resp)
+	}
+	data, err := httputil.ReadBounded(resp.Body, maxRawResponseBytes)
+	if err != nil {
+		return nil, "", fmt.Errorf("reading registry index: %w", err)
+	}
+	return data, strings.TrimSpace(resp.Header.Get("X-Registry-Signature")), nil
+}
+
+func packageAPIPath(name, version, suffix string) (string, error) {
+	if name == "" || version == "" {
+		return "", errors.New("package name and version must not be empty")
+	}
+	var namePart string
+	if strings.HasPrefix(name, "@") {
+		scope, pkg, ok := strings.Cut(name, "/")
+		if !ok || scope == "@" || pkg == "" || strings.Contains(pkg, "/") {
+			return "", fmt.Errorf("invalid scoped package name %q", name)
+		}
+		namePart = url.PathEscape(scope) + "/" + url.PathEscape(pkg)
+	} else {
+		namePart = url.PathEscape(name)
+	}
+	return "/api/v1/package/" + namePart + "/" + url.PathEscape(version) + suffix, nil
 }
 
 // ChipResolveResponse is the shape of GET /api/v1/resolve/chip.
@@ -348,8 +343,7 @@ type ChipResolveResponse struct {
 // ResolveChip queries the API for a specific chip.
 func (c *Client) ResolveChip(ctx context.Context, name string) (*ChipResolveResponse, error) {
 	var resp ChipResolveResponse
-	err := c.getJSON(ctx, fmt.Sprintf("/api/v1/resolve/chip?name=%s", name), &resp)
-	if err != nil {
+	if err := c.getJSON(ctx, "/api/v1/resolve/chip?name="+url.QueryEscape(name), &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -372,8 +366,7 @@ func (c *Client) ListIntegrations(ctx context.Context) ([]IntegrationItem, error
 	return items, nil
 }
 
-// MatrixEntry represents a single verified (or pending) build combination
-// for a chip at a specific version.
+// MatrixEntry represents a single verified or pending build combination.
 type MatrixEntry struct {
 	ID             int64           `json:"id"`
 	Chip           string          `json:"chip"`
@@ -390,25 +383,13 @@ type MatrixEntry struct {
 func (c *Client) GetMatrix(ctx context.Context, chip string) ([]MatrixEntry, error) {
 	path := "/api/v1/resolve/matrix"
 	if chip != "" {
-		path += "?chip=" + chip
+		path += "?chip=" + url.QueryEscape(chip)
 	}
 	var entries []MatrixEntry
 	if err := c.getJSON(ctx, path, &entries); err != nil {
 		return nil, err
 	}
 	return entries, nil
-}
-
-// LoginResponse was the shape of POST /api/v1/auth/github, an endpoint the registry does not serve.
-// Signing in goes to the identity provider now; see internal/oidc and AuthConfig.
-//
-// Kept only for the fields other commands still read from stored credentials.
-type LoginResponse struct {
-	PublisherID string `json:"publisher_id"`
-	Login       string `json:"login"`
-	Role        string `json:"role"`
-	APIKey      string `json:"api_key,omitempty"`
-	HasAPIKey   bool   `json:"has_api_key"`
 }
 
 // CheckCombinationResponse is the shape of GET /api/v1/resolve/combination.
@@ -421,9 +402,9 @@ type CheckCombinationResponse struct {
 // CheckCombination verifies if a specific build combination is verified.
 func (c *Client) CheckCombination(ctx context.Context, chip, chipVersion, cliVersion string) (*CheckCombinationResponse, error) {
 	var resp CheckCombinationResponse
-	path := fmt.Sprintf("/api/v1/resolve/combination?chip=%s&chip_version=%s", chip, chipVersion)
+	path := fmt.Sprintf("/api/v1/resolve/combination?chip=%s&chip_version=%s", url.QueryEscape(chip), url.QueryEscape(chipVersion))
 	if cliVersion != "" {
-		path += "&cli=" + cliVersion
+		path += "&cli=" + url.QueryEscape(cliVersion)
 	}
 	if err := c.getJSON(ctx, path, &resp); err != nil {
 		return nil, err
@@ -443,15 +424,18 @@ type PackageResponse struct {
 
 // GetPackage returns the manifest and metadata for a specific package version.
 func (c *Client) GetPackage(ctx context.Context, name, version string) (*PackageResponse, error) {
+	path, err := packageAPIPath(name, version, "")
+	if err != nil {
+		return nil, err
+	}
 	var resp PackageResponse
-	path := fmt.Sprintf("/api/v1/package/%s/%s", name, version)
 	if err := c.getJSON(ctx, path, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
 }
 
-// MyPackageSummary is the shape of GET /api/v1/packages/mine element.
+// MyPackageSummary is one element of GET /api/v1/packages/mine.
 type MyPackageSummary struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
@@ -470,13 +454,33 @@ type MyPackagesResponse struct {
 	Packages []MyPackageSummary `json:"packages"`
 }
 
-// MyPackages returns all packages owned by the authenticated publisher.
+// MyPackages fetches all pages of packages owned by the authenticated publisher.
 func (c *Client) MyPackages(ctx context.Context) (*MyPackagesResponse, error) {
-	var resp MyPackagesResponse
-	if err := c.getJSON(ctx, "/api/v1/packages/mine", &resp); err != nil {
-		return nil, err
+	const pageLimit = 100
+	var all []MyPackageSummary
+	offset := 0
+
+	for {
+		var page struct {
+			Count    int                `json:"count"`
+			Packages []MyPackageSummary `json:"packages"`
+			HasMore  bool               `json:"has_more"`
+		}
+		path := fmt.Sprintf("/api/v1/packages/mine?limit=%d&offset=%d", pageLimit, offset)
+		if err := c.getJSON(ctx, path, &page); err != nil {
+			return nil, err
+		}
+		all = append(all, page.Packages...)
+		if !page.HasMore || len(page.Packages) == 0 {
+			break
+		}
+		offset += len(page.Packages)
 	}
-	return &resp, nil
+
+	return &MyPackagesResponse{
+		Count:    len(all),
+		Packages: all,
+	}, nil
 }
 
 // PublishResponse is the shape of POST /api/v1/publish.
@@ -492,26 +496,61 @@ type PublishResponse struct {
 	IngestionWarnings []string `json:"ingestion_warnings,omitempty"`
 }
 
-// Publish uploads a new package version.
+func rewindableBody(body io.Reader) (io.Reader, error) {
+	if body == nil {
+		return nil, nil
+	}
+	switch r := body.(type) {
+	case *bytes.Reader:
+		if _, err := r.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return r, nil
+	case *strings.Reader:
+		if _, err := r.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		return r, nil
+	case *bytes.Buffer:
+		return bytes.NewReader(r.Bytes()), nil
+	default:
+		raw, err := httputil.ReadBounded(body, maxUploadBodyBytes)
+		if err != nil {
+			return nil, err
+		}
+		return bytes.NewReader(raw), nil
+	}
+}
+
+// Publish uploads a new package version with an Idempotency-Key and rewindable body.
 func (c *Client) Publish(ctx context.Context, body io.Reader, contentType string) (*PublishResponse, error) {
-	req, err := c.newRequest(ctx, "POST", "/api/v1/publish", body)
+	rewindable, err := rewindableBody(body)
+	if err != nil {
+		return nil, fmt.Errorf("buffering publish payload: %w", err)
+	}
+	req, err := c.newRequest(ctx, http.MethodPost, "/api/v1/publish", rewindable)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Idempotency-Key", rand.Text())
 
 	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("publish request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return nil, extractError(resp)
 	}
 
+	raw, err := httputil.ReadBounded(resp.Body, maxRawResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var result PublishResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -522,42 +561,50 @@ type PromoteResponse struct {
 	Status  string `json:"status"`
 	Name    string `json:"name"`
 	Version string `json:"version"`
-	JobID   string `json:"job_id"`
+	JobID   int64  `json:"job_id"`
 	Message string `json:"message"`
 	Warning string `json:"warning,omitempty"`
 }
 
-// Promote triggers compile validation for a dev-stage package.
+// Promote triggers Firecracker compile validation for a dev-stage package.
 func (c *Client) Promote(ctx context.Context, name, version string) (*PromoteResponse, error) {
-	payload, _ := json.Marshal(map[string]string{
+	payload, err := json.Marshal(map[string]string{
 		"name":    name,
 		"version": version,
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	req, err := c.newRequest(ctx, "POST", "/api/v1/publish/promote", bytes.NewReader(payload))
+	req, err := c.newRequest(ctx, http.MethodPost, "/api/v1/publish/promote", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", rand.Text())
 
 	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("promote request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		return nil, extractError(resp)
 	}
 
+	raw, err := httputil.ReadBounded(resp.Body, maxRawResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var result PromoteResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-// CheckNameAvailableResponse is the shape of GET /api/v1/publish/check-name.
+// CheckNameAvailableResponse is the shape of GET /api/v1/packages/check-name.
 type CheckNameAvailableResponse struct {
 	Available bool   `json:"available"`
 	Message   string `json:"message,omitempty"`
@@ -566,7 +613,7 @@ type CheckNameAvailableResponse struct {
 // CheckNameAvailable checks if a package name is still available for publishing.
 func (c *Client) CheckNameAvailable(ctx context.Context, name string) (*CheckNameAvailableResponse, error) {
 	var resp CheckNameAvailableResponse
-	path := fmt.Sprintf("/api/v1/packages/check-name?name=%s", name)
+	path := "/api/v1/packages/check-name?name=" + url.QueryEscape(name)
 	if err := c.getJSON(ctx, path, &resp); err != nil {
 		return nil, err
 	}
@@ -582,153 +629,248 @@ type UnpublishResponse struct {
 
 // Unpublish removes a package version in the dev stage.
 func (c *Client) Unpublish(ctx context.Context, name, version string) (*UnpublishResponse, error) {
-	path := fmt.Sprintf("/api/v1/package/%s/%s", name, version)
-	req, err := c.newRequest(ctx, "DELETE", path, nil)
+	path, err := packageAPIPath(name, version, "")
 	if err != nil {
 		return nil, err
 	}
+	req, err := c.newSessionRequest(ctx, http.MethodDelete, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Idempotency-Key", rand.Text())
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("unpublish request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, extractError(resp)
 	}
 
+	raw, err := httputil.ReadBounded(resp.Body, maxRawResponseBytes)
+	if err != nil {
+		return nil, err
+	}
 	var result UnpublishResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
 // DownloadPackage follows the /download redirect and returns the tarball body.
-// The caller is responsible for closing the returned ReadCloser.
 func (c *Client) DownloadPackage(ctx context.Context, name, version string) (io.ReadCloser, error) {
-	path := fmt.Sprintf("/api/v1/package/%s/%s/download", name, version)
-	req, err := c.newRequest(ctx, "GET", path, nil)
+	path, err := packageAPIPath(name, version, "/download")
+	if err != nil {
+		return nil, err
+	}
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("download request failed: %w", err)
 	}
-
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
-		return nil, extractError(resp)
+		err = extractError(resp)
+		_ = resp.Body.Close()
+		return nil, err
 	}
-
+	if warn := strings.TrimSpace(resp.Header.Get("X-Toob-Warning")); warn != "" {
+		c.recordWarning(warn)
+	}
 	return resp.Body, nil
 }
 
-// Login with GitHub OAuth.
-func (c *Client) Login(ctx context.Context, code string) (*LoginResponse, error) {
-	payload, _ := json.Marshal(map[string]string{"code": code})
-	req, err := c.newRequest(ctx, "POST", "/api/v1/auth/github", bytes.NewReader(payload))
+// DownloadRelease downloads a public ecosystem release artifact (such as Core SDK or CLI)
+// from GET /api/v1/releases/{component}/{version}/download/{filename}, normalizing tags
+// like "core/v0.0.1" or "v0.7.0" to "0.0.1" / "0.7.0".
+func (c *Client) DownloadRelease(ctx context.Context, component, version, filename string) (io.ReadCloser, error) {
+	component = strings.TrimSpace(component)
+	version = strings.TrimSpace(version)
+	filename = strings.TrimSpace(filename)
+	if component == "" || version == "" || filename == "" {
+		return nil, errors.New("release component, version, and filename must not be empty")
+	}
+
+	version = strings.TrimPrefix(version, component+"/")
+	version = strings.TrimPrefix(version, "core/")
+	version = strings.TrimPrefix(version, "v")
+	if version == "" || strings.Contains(version, "/") || strings.Contains(version, "..") {
+		return nil, fmt.Errorf("invalid release version %q", version)
+	}
+	if strings.Contains(filename, "/") || strings.Contains(filename, `\`) || strings.Contains(filename, "..") {
+		return nil, fmt.Errorf("invalid release filename %q", filename)
+	}
+
+	path := fmt.Sprintf("/api/v1/releases/%s/%s/download/%s",
+		url.PathEscape(component),
+		url.PathEscape(version),
+		url.PathEscape(filename),
+	)
+	req, err := c.newPublicRequest(ctx, http.MethodGet, path)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("release download failed: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, extractError(resp)
-	}
-
-	var result LoginResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		err = extractError(resp)
+		_ = resp.Body.Close()
 		return nil, err
 	}
-	return &result, nil
+	if warn := strings.TrimSpace(resp.Header.Get("X-Toob-Warning")); warn != "" {
+		c.recordWarning(warn)
+	}
+	return resp.Body, nil
 }
-
-// LogoutResponse is the shape of POST /api/v1/auth/logout.
-type LogoutResponse struct {
-	Status string `json:"status"`
-}
-
-// --- Search ---
 
 // SearchResult is one element from GET /api/v1/search.
 type SearchResult struct {
-	Name        string `json:"name"`
-	Version     string `json:"version"`
-	Category    string `json:"category"`
-	Description string `json:"description,omitempty"`
-	Author      string `json:"author,omitempty"`
-	Downloads   int    `json:"downloads,omitempty"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Category      string `json:"category"`
+	Description   string `json:"description,omitempty"`
+	Author        string `json:"author,omitempty"`
+	DownloadCount int64  `json:"download_count,omitempty"`
+	Downloads     int    `json:"downloads,omitempty"`
 }
 
 // SearchResponse is the shape of GET /api/v1/search.
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
-	Count   int            `json:"count"`
+	HasMore bool           `json:"has_more"`
+	Count   int            `json:"count,omitempty"`
 }
 
 // Search queries the registry for packages matching a query string.
 func (c *Client) Search(ctx context.Context, query string) (*SearchResponse, error) {
 	var resp SearchResponse
-	path := fmt.Sprintf("/api/v1/search?q=%s", query)
+	path := "/api/v1/search?q=" + url.QueryEscape(query)
 	if err := c.getJSON(ctx, path, &resp); err != nil {
 		return nil, err
 	}
+	for i := range resp.Results {
+		if resp.Results[i].Downloads == 0 && resp.Results[i].DownloadCount > 0 {
+			if resp.Results[i].DownloadCount > math.MaxInt32 {
+				resp.Results[i].Downloads = math.MaxInt32
+			} else {
+				resp.Results[i].Downloads = int(resp.Results[i].DownloadCount)
+			}
+		}
+	}
+	resp.Count = len(resp.Results)
 	return &resp, nil
 }
 
-// --- HTTP Primitives ---
-
-func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	url := c.BaseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+func (c *Client) newPublicRequest(ctx context.Context, method, path string) (*http.Request, error) {
+	if c.transportErr != nil {
+		return nil, c.transportErr
+	}
+	if _, err := httputil.ValidateHTTPSOrLoopbackURL(c.BaseURL); err != nil {
+		return nil, fmt.Errorf("invalid registry URL %q: %w", c.BaseURL, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Toob-CLI")
-	// Resolved per request rather than captured at construction: a session expires while a process
-	// runs, and the refresh has to happen between two commands as readily as between two runs.
+	return req, nil
+}
+
+func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	if c.transportErr != nil {
+		return nil, c.transportErr
+	}
+	if _, err := httputil.ValidateHTTPSOrLoopbackURL(c.BaseURL); err != nil {
+		return nil, fmt.Errorf("invalid registry URL %q: %w", c.BaseURL, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Toob-CLI")
 	if bearer := c.bearer(ctx); bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	return req, nil
 }
 
-// maxRetryAfter caps how long a Retry-After header may make this client wait.
-//
-// The registry names its windows in seconds and none is longer than a minute, so a value above
-// this is not one the registry sent — and waiting an hour because a proxy said so is not something
-// a command-line tool does silently.
+func (c *Client) newSessionRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	if c.transportErr != nil {
+		return nil, c.transportErr
+	}
+	if _, err := httputil.ValidateHTTPSOrLoopbackURL(c.BaseURL); err != nil {
+		return nil, fmt.Errorf("invalid registry URL %q: %w", c.BaseURL, err)
+	}
+	bearer, err := c.sessionBearer(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Toob-CLI")
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	return req, nil
+}
+
 const maxRetryAfter = 60 * time.Second
 
-// doWithRetry executes a request again after a transient failure: a 5xx, or a 429 that says when
-// to come back.
-//
-// A 429 is retried only when it carries Retry-After, and then after exactly that long. The server
-// computed the wait from the budget it refused; guessing with a backoff of our own would either
-// hammer a limit that has not reset or sit out one that has. A 429 without the header is returned
-// as it is, because there is nothing to act on.
+func isSafeToRetry5xx(req *http.Request) bool {
+	switch req.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return req.Header.Get("Idempotency-Key") != "" && (req.Body == nil || req.GetBody != nil)
+	}
+}
+
+// doWithRetry executes a request again after transient 5xx or Retry-After 429/503 responses,
+// rewinding req.Body via req.GetBody on retries and refusing to retry non-rewindable bodies.
 func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	var lastErr error
 	var wait time.Duration
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
+			if req.Body != nil {
+				if req.GetBody == nil {
+					return nil, lastErr
+				}
+				freshBody, gbErr := req.GetBody()
+				if gbErr != nil {
+					return nil, fmt.Errorf("rewinding request body for retry: %w", gbErr)
+				}
+				req.Body = freshBody
+			}
+
 			if wait == 0 {
 				wait = time.Duration(math.Pow(2, float64(attempt-1))) * 500 * time.Millisecond
+			}
+			if timer == nil {
+				timer = time.NewTimer(wait)
+			} else {
+				timer.Reset(wait)
 			}
 			select {
 			case <-req.Context().Done():
 				return nil, req.Context().Err()
-			case <-time.After(wait):
+			case <-timer.C:
 			}
 			wait = 0
 		}
@@ -736,27 +878,28 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 		resp, err := c.HTTPClient.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("api request failed: %w", err)
+			if req.Body != nil && (req.GetBody == nil || !isSafeToRetry5xx(req)) {
+				return nil, lastErr
+			}
 			continue
 		}
 
-		// A wait the server named is honoured before any backoff of our own: a 429 is the caller's
-		// budget, a 503 with Retry-After is the registry at capacity or its authorization store not
-		// answering (overloaded, authz_unavailable), and in both the header is the whole instruction.
-		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) && attempt < maxRetries {
+		canRewind := req.Body == nil || req.GetBody != nil
+		if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) &&
+			attempt < maxRetries && canRewind &&
+			(resp.StatusCode == http.StatusTooManyRequests || isSafeToRetry5xx(req)) {
 			if retryAfter, ok := retryAfterOf(resp); ok {
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				wait = retryAfter
 				lastErr = fmt.Errorf("server asked to retry after %s (HTTP %d, attempt %d/%d)", retryAfter, resp.StatusCode, attempt+1, maxRetries+1)
 				continue
 			}
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
-			// No wait named: nothing to act on, and a backoff of our own would be a guess about a
-			// budget the server did not describe.
 			return resp, nil
 		}
-		if resp.StatusCode >= 500 && attempt < maxRetries {
-			resp.Body.Close()
+		if resp.StatusCode >= 500 && attempt < maxRetries && isSafeToRetry5xx(req) {
+			_ = resp.Body.Close()
 			lastErr = fmt.Errorf("server returned HTTP %d (attempt %d/%d)", resp.StatusCode, attempt+1, maxRetries+1)
 			continue
 		}
@@ -766,21 +909,17 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	return nil, lastErr
 }
 
-// retryAfterOf reads a Retry-After given in seconds, and reports whether there was one to read.
 func retryAfterOf(resp *http.Response) (time.Duration, bool) {
 	seconds, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
 	if err != nil || seconds < 0 {
 		return 0, false
 	}
-	wait := time.Duration(seconds) * time.Second
-	if wait > maxRetryAfter {
-		wait = maxRetryAfter
-	}
+	wait := min(time.Duration(seconds)*time.Second, maxRetryAfter)
 	return wait, true
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, target any) error {
-	req, err := c.newRequest(ctx, "GET", path, nil)
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return err
 	}
@@ -790,30 +929,15 @@ func (c *Client) getJSON(ctx context.Context, path string, target any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return extractError(resp)
 	}
 
-	return json.NewDecoder(resp.Body).Decode(target)
-}
-
-func (c *Client) getRaw(ctx context.Context, path string) ([]byte, error) {
-	req, err := c.newRequest(ctx, "GET", path, nil)
+	raw, err := httputil.ReadBounded(resp.Body, maxRawResponseBytes)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, extractError(resp)
-	}
-
-	return io.ReadAll(resp.Body)
+	return json.Unmarshal(raw, target)
 }

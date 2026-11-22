@@ -25,7 +25,7 @@ runs:
       run: |
         sudo apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq build-essential libusb-1.0-0 ninja-build cmake python3-pip
-        pip3 install cryptography "cbor2<6.0.0" ecdsa zcbor --break-system-packages
+        pip3 install cryptography ecdsa --break-system-packages
 
     - name: Fetch and Install Toob CLI
       shell: bash

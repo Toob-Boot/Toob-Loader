@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"os"
 	"os/exec"
@@ -73,7 +74,7 @@ Examples:
 		ui.Step("Running HAL Conformance Gate...")
 		confReport, confErr := conformance.AuditPackage(absDir)
 		if confErr != nil || confReport == nil || !confReport.Passed {
-			return fmt.Errorf("FATAL [CONFORMANCE_FAIL]: Package failed HAL conformance audit! Run 'toob conformance %s' for details.", absDir)
+			return fmt.Errorf("FATAL [CONFORMANCE_FAIL]: package failed HAL conformance audit; run 'toob conformance %s' for details", absDir)
 		}
 		jsonPath := filepath.Join(absDir, "conformance_report.json")
 		mdPath := filepath.Join(absDir, "conformance_report.md")
@@ -108,7 +109,9 @@ Examples:
 		if err := registry.CreateTarball(absDir, fw); err != nil {
 			return fmt.Errorf("failed to create tarball: %w", err)
 		}
-		mpw.Close()
+		if err := mpw.Close(); err != nil {
+			return fmt.Errorf("failed to finalize multipart form: %w", err)
+		}
 
 		ui.Success("Tarball created (%d bytes)", buf.Len())
 
@@ -377,8 +380,12 @@ var registryCheckCmd = &cobra.Command{
 
 		// Check 3: No oversized files (> 1 MB warning, > 5 MB error)
 		var oversized []string
-		filepath.Walk(absDir, func(path string, fi os.FileInfo, err error) error {
-			if err != nil || fi.IsDir() {
+		if walkErr := filepath.WalkDir(absDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			fi, infoErr := d.Info()
+			if infoErr != nil {
 				return nil
 			}
 			if fi.Size() > 5<<20 {
@@ -386,8 +393,10 @@ var registryCheckCmd = &cobra.Command{
 				oversized = append(oversized, fmt.Sprintf("%s (%d bytes)", rel, fi.Size()))
 			}
 			return nil
-		})
-		if len(oversized) > 0 {
+		}); walkErr != nil {
+			ui.CheckItem(false, false, "File Sizes", fmt.Sprintf("Failed to walk package directory: %v", walkErr))
+			passed = false
+		} else if len(oversized) > 0 {
 			ui.CheckItem(false, false, "File Sizes", fmt.Sprintf("%d file(s) exceed 5 MB", len(oversized)))
 			for _, f := range oversized {
 				ui.Muted("  %s", f)
@@ -486,16 +495,18 @@ func formatStatus(status, feedback string) string {
 	}
 }
 
+func gitWorktreeDirty(dir string) bool {
+	// #nosec G204 -- fixed "git" executable with "-C" and filepath.Abs-resolved directory; no shell.
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
 // warnIfDirtyGit checks if the directory is a git repo with uncommitted changes.
 func warnIfDirtyGit(dir string) error {
-	gitCmd := exec.Command("git", "-C", dir, "status", "--porcelain")
-	out, err := gitCmd.Output()
-	if err != nil {
-		// Not a git repo or git not available — skip silently
-		return nil
-	}
-
-	if len(strings.TrimSpace(string(out))) > 0 {
+	if gitWorktreeDirty(dir) {
 		ui.Warn("Uncommitted changes detected in %s", dir)
 		confirmed, err := ui.Confirm("Publish anyway?", false)
 		if err != nil || !confirmed {
@@ -505,9 +516,28 @@ func warnIfDirtyGit(dir string) error {
 	return nil
 }
 
+func readRootManifestFile(root *os.Root, name string) ([]byte, error) {
+	const maxManifestBytes = 1 << 20
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
+	closeErr := f.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(data) > maxManifestBytes {
+		return nil, fmt.Errorf("manifest %s exceeds %d bytes", name, maxManifestBytes)
+	}
+	return data, nil
+}
+
 // detectPackageName attempts to read the package name from a manifest file.
 func detectPackageName(dir string) string {
-	// Quick scan for manifest files
 	manifests := []string{
 		"driver_manifest.json",
 		"crypto_manifest.json",
@@ -517,23 +547,22 @@ func detectPackageName(dir string) string {
 		"integration_manifest.json",
 	}
 
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = root.Close() }()
+
 	for _, mf := range manifests {
-		data, err := os.ReadFile(filepath.Join(dir, mf))
+		data, err := readRootManifestFile(root, mf)
 		if err != nil {
 			continue
 		}
-		// Extract name field via simple string scan (avoid full JSON parse overhead)
-		for line := range strings.SplitSeq(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, `"name"`) {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					name := strings.Trim(strings.TrimSpace(parts[1]), `",`)
-					if name != "" {
-						return name
-					}
-				}
-			}
+		var parsed struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(data, &parsed) == nil && strings.TrimSpace(parsed.Name) != "" {
+			return strings.TrimSpace(parsed.Name)
 		}
 	}
 	return ""
@@ -550,16 +579,18 @@ func checkManifestDependencies(ctx context.Context, dir string, client *apiclien
 		"integration_manifest.json",
 	}
 
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("cannot open package directory %s: %w", dir, err)
+	}
+	defer func() { _ = root.Close() }()
+
 	var data []byte
+	var foundManifest string
 	for _, mf := range manifests {
-		baseClean := filepath.Clean(dir)
-		targetClean := filepath.Clean(filepath.Join(baseClean, mf))
-		rel, err := filepath.Rel(baseClean, targetClean)
-		if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-			continue
-		}
-		if d, err := os.ReadFile(targetClean); err == nil {
+		if d, readErr := readRootManifestFile(root, mf); readErr == nil {
 			data = d
+			foundManifest = mf
 			break
 		}
 	}
@@ -572,7 +603,7 @@ func checkManifestDependencies(ctx context.Context, dir string, client *apiclien
 		Dependencies map[string]string `json:"dependencies"`
 	}
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil // skip if invalid JSON, check command handles errors
+		return fmt.Errorf("failed to parse %s: %w", foundManifest, err)
 	}
 
 	if len(m.Dependencies) == 0 {

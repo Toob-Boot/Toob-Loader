@@ -13,7 +13,11 @@
 package ports
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"time"
 )
 
@@ -32,14 +36,17 @@ const ProtocolVersion = 1
 
 // DockerBuildInput defines what the CLI passes to the Compiler Container.
 type DockerBuildInput struct {
-	Image       string            `json:"image"        port:"required"` // toob-compiler:v{cli_version}
-	Workspace   string            `json:"workspace"    port:"required"` // -v {project_root}:/workspace
-	RegistryDir string            `json:"registry_dir" port:"required"` // -v {path}:/root/.toob/registry
-	WorkDir     string            `json:"work_dir"     port:"required"` // -w /workspace
-	Command     string            `json:"command"      port:"required"` // toob build --native
-	Manifest    string            `json:"manifest"     port:"optional"` // --manifest {path}
-	BuildDir    string            `json:"build_dir"    port:"optional"` // --build-dir {path}
-	ProxyVars   map[string]string `json:"proxy_vars"   port:"optional"` // HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+	Image         string            `json:"image"                    port:"required"` // toob-compiler:v{cli_version}
+	Workspace     string            `json:"workspace"                port:"required"` // -v {project_root}:/workspace
+	RegistryDir   string            `json:"registry_dir"             port:"required"` // -v {path}:/home/compiler/.toob/registry
+	WorkDir       string            `json:"work_dir"                 port:"required"` // -w /workspace
+	Command       string            `json:"command"                  port:"required"` // toob build --native
+	CommandArgs   []string          `json:"command_args,omitempty"   port:"optional"` // discrete argv (never split via strings.Fields)
+	ToolchainsDir string            `json:"toolchains_dir,omitempty" port:"optional"` // -v {path}:/home/compiler/.toob/toolchains
+	DevMode       bool              `json:"dev_mode,omitempty"       port:"optional"` // propagate TOOB_DEV=1 only when --dev is set
+	Manifest      string            `json:"manifest"                 port:"optional"` // --manifest {path}
+	BuildDir      string            `json:"build_dir"                port:"optional"` // --build-dir {path}
+	ProxyVars     map[string]string `json:"proxy_vars"               port:"optional"` // HTTP_PROXY, HTTPS_PROXY, NO_PROXY
 }
 
 // DockerBuildOutput defines what the Compiler Container returns to the CLI.
@@ -63,7 +70,6 @@ type RegistryRevisionResponse struct {
 	Signature     string `json:"signature"      port:"optional"`
 	CreatedAt     string `json:"created_at"     port:"required"`
 }
-
 
 // ChipResolveResponse is the JSON body for GET /api/v1/resolve/chip.
 type ChipResolveResponse struct {
@@ -175,7 +181,6 @@ type UnpublishResponse struct {
 // Boundary: CLI → GitHub API
 // =============================================================================
 
-
 // CoreSDKCloneInput defines the git clone parameters for fetching the Core SDK.
 type CoreSDKCloneInput struct {
 	RepoURL string `json:"repo_url" port:"required"` // https://github.com/Toob-Boot/Toob-Loader.git
@@ -190,9 +195,10 @@ type CoreSDKCloneInput struct {
 
 // RegistryEcosystem lists available versions of external tools.
 type RegistryEcosystem struct {
-	CLI      []string `json:"cli"      port:"required"`
-	CoreSDK  []string `json:"core_sdk" port:"required"`
-	Compiler []string `json:"compiler" port:"required"`
+	CLI           []string          `json:"cli"                       port:"required"`
+	CoreSDK       []string          `json:"core_sdk"                  port:"required"`
+	Compiler      []string          `json:"compiler"                  port:"required"`
+	CoreSDKSha256 map[string]string `json:"core_sdk_sha256,omitempty" port:"optional"`
 }
 
 // RegistryIndex is the parsed content of registry.json.
@@ -211,18 +217,23 @@ type RegistryIndex struct {
 
 // RegistryChip is a single chip entry in registry.json.
 type RegistryChip struct {
-	Name             string       `json:"name"              port:"required"`
-	Arch             string       `json:"arch"              port:"required"`
-	CompilerPrefix   string       `json:"compiler_prefix"   port:"required"`
-	Path             string       `json:"path"              port:"required"`
-	Version          string       `json:"version"           port:"required"`
-	CliCompatibility string       `json:"cli_compatibility" port:"optional"`
-	Verified         bool         `json:"verified"          port:"optional"`
-	Description      string       `json:"description"       port:"optional"`
-	Sources          *ChipSources `json:"sources"           port:"optional"`
-	Includes         []string     `json:"includes"          port:"optional"`
-	Crypto           *ChipCrypto   `json:"crypto"            port:"optional"`
-	Recovery         *ChipRecovery `json:"recovery"          port:"optional"`
+	Name             string            `json:"name"                   port:"required"`
+	Author           string            `json:"author,omitempty"       port:"optional"`
+	Tier             string            `json:"tier,omitempty"         port:"optional"`
+	Arch             string            `json:"arch"                   port:"required"`
+	CompilerPrefix   string            `json:"compiler_prefix"        port:"required"`
+	Path             string            `json:"path"                   port:"required"`
+	Version          string            `json:"version"                port:"required"`
+	SHA256           string            `json:"sha256,omitempty"       port:"optional"`
+	TarballSHA       string            `json:"tarball_sha,omitempty"  port:"optional"`
+	CliCompatibility string            `json:"cli_compatibility"      port:"optional"`
+	Verified         bool              `json:"verified"               port:"optional"`
+	Description      string            `json:"description"            port:"optional"`
+	HalBindings      map[string]string `json:"hal_bindings,omitempty" port:"optional"`
+	Sources          *ChipSources      `json:"sources"                port:"optional"`
+	Includes         []string          `json:"includes"               port:"optional"`
+	Crypto           *ChipCrypto       `json:"crypto"                 port:"optional"`
+	Recovery         *ChipRecovery     `json:"recovery"               port:"optional"`
 }
 
 // ChipCrypto defines the default crypto package assignments for a chip.
@@ -234,61 +245,88 @@ type ChipCrypto struct {
 
 // RegistryCrypto is a crypto package entry in registry.json.
 type RegistryCrypto struct {
-	Name            string   `json:"name"             port:"required"`
-	Path            string   `json:"path"             port:"required"`
-	Version         string   `json:"version"          port:"required"`
-	Description     string   `json:"description"      port:"optional"`
-	Category        []string `json:"category"         port:"required"`
-	License         string   `json:"license"          port:"optional"`
-	MinCoreSdk      string   `json:"min_core_sdk"     port:"optional"`
-	Wrapper         *string  `json:"wrapper"          port:"optional"`
-	UpstreamSources []string `json:"upstream_sources" port:"optional"`
-	Cflags          []string `json:"cflags"           port:"optional"`
-	Includes        []string `json:"includes"         port:"optional"`
-	ChipBinding     []string `json:"chip_binding"     port:"optional"`
+	Name              string            `json:"name"                          port:"required"`
+	Author            string            `json:"author,omitempty"              port:"optional"`
+	Tier              string            `json:"tier,omitempty"                port:"optional"`
+	Path              string            `json:"path"                          port:"required"`
+	Version           string            `json:"version"                       port:"required"`
+	SHA256            string            `json:"sha256,omitempty"              port:"optional"`
+	TarballSHA        string            `json:"tarball_sha,omitempty"         port:"optional"`
+	Description       string            `json:"description"                   port:"optional"`
+	AbiVersion        string            `json:"abi_version,omitempty"         port:"optional"`
+	Category          []string          `json:"category"                      port:"required"`
+	License           string            `json:"license"                       port:"optional"`
+	MinCoreSdk        string            `json:"min_core_sdk"                  port:"optional"`
+	Wrapper           *string           `json:"wrapper"                       port:"optional"`
+	UpstreamSources   []string          `json:"upstream_sources"              port:"optional"`
+	Headers           []string          `json:"headers,omitempty"             port:"optional"`
+	Symbols           map[string]string `json:"symbols,omitempty"             port:"optional"`
+	Cflags            []string          `json:"cflags"                        port:"optional"`
+	Includes          []string          `json:"includes"                      port:"optional"`
+	ChipBinding       []string          `json:"chip_binding"                  port:"optional"`
+	HasHwAcceleration bool              `json:"has_hw_acceleration,omitempty" port:"optional"`
+	Footprint         *CryptoFootprint  `json:"footprint,omitempty"           port:"optional"`
 }
 
 // RegistryDriver is a driver entry in registry.json.
 type RegistryDriver struct {
-	Name        string `json:"name"        port:"required"`
-	Path        string `json:"path"        port:"required"`
-	Version     string `json:"version"     port:"required"`
-	Description string `json:"description" port:"optional"`
-	Category    string `json:"category"    port:"optional"`
+	Name        string `json:"name"                  port:"required"`
+	Author      string `json:"author,omitempty"      port:"optional"`
+	Tier        string `json:"tier,omitempty"        port:"optional"`
+	Trait       string `json:"trait,omitempty"       port:"optional"`
+	Path        string `json:"path"                  port:"required"`
+	Version     string `json:"version"               port:"required"`
+	SHA256      string `json:"sha256,omitempty"      port:"optional"`
+	TarballSHA  string `json:"tarball_sha,omitempty" port:"optional"`
+	Description string `json:"description"           port:"optional"`
+	Category    string `json:"category"              port:"optional"`
 }
 
 // Removed RegistryVendor
 
 // RegistryArch is an architecture entry in registry.json.
 type RegistryArch struct {
-	Name        string `json:"name"        port:"required"`
-	Path        string `json:"path"        port:"required"`
-	Version     string `json:"version"     port:"required"`
-	Description string `json:"description" port:"optional"`
+	Name        string `json:"name"                  port:"required"`
+	Author      string `json:"author,omitempty"      port:"optional"`
+	Tier        string `json:"tier,omitempty"        port:"optional"`
+	Path        string `json:"path"                  port:"required"`
+	Version     string `json:"version"               port:"required"`
+	SHA256      string `json:"sha256,omitempty"      port:"optional"`
+	TarballSHA  string `json:"tarball_sha,omitempty" port:"optional"`
+	Description string `json:"description"           port:"optional"`
 }
 
 // RegistryIntegration is an integration entry in registry.json.
 type RegistryIntegration struct {
-	Name        string `json:"name"        port:"required"`
-	Path        string `json:"path"        port:"required"`
-	Version     string `json:"version"     port:"required"`
-	Description string `json:"description" port:"optional"`
+	Name        string `json:"name"                  port:"required"`
+	Author      string `json:"author,omitempty"      port:"optional"`
+	Tier        string `json:"tier,omitempty"        port:"optional"`
+	Path        string `json:"path"                  port:"required"`
+	Version     string `json:"version"               port:"required"`
+	SHA256      string `json:"sha256,omitempty"      port:"optional"`
+	TarballSHA  string `json:"tarball_sha,omitempty" port:"optional"`
+	Description string `json:"description"           port:"optional"`
 }
 
 // RegistrySoC is a SoC entry in registry.json.
 type RegistrySoC struct {
-	Name        string   `json:"name"        port:"required"`
-	Path        string   `json:"path"        port:"required"`
-	Version     string   `json:"version"     port:"required"`
-	Description string   `json:"description" port:"optional"`
-	Chips       []string `json:"chips"       port:"optional"`
+	Name        string   `json:"name"                  port:"required"`
+	Author      string   `json:"author,omitempty"      port:"optional"`
+	Tier        string   `json:"tier,omitempty"        port:"optional"`
+	Path        string   `json:"path"                  port:"required"`
+	Version     string   `json:"version"               port:"required"`
+	SHA256      string   `json:"sha256,omitempty"      port:"optional"`
+	TarballSHA  string   `json:"tarball_sha,omitempty" port:"optional"`
+	Description string   `json:"description"           port:"optional"`
+	Chips       []string `json:"chips"                 port:"optional"`
 }
 
 // RegistryToolchain defines toolchain metadata in registry.json.
 type RegistryToolchain struct {
-	Path            string `json:"path"             port:"optional"`
-	Version         string `json:"version"          port:"required"`
-	UpstreamVersion string `json:"upstream_version" port:"optional"`
+	Path            string `json:"path"                  port:"optional"`
+	Version         string `json:"version"               port:"required"`
+	UpstreamVersion string `json:"upstream_version"      port:"optional"`
+	TarballSHA      string `json:"tarball_sha,omitempty" port:"optional"`
 }
 
 // ToolchainDownload is the extended toolchain entry used by toolchain/manager.go
@@ -307,35 +345,52 @@ type Provenance struct {
 	Verified string `json:"verified" port:"optional"`
 }
 
+// HardwareBootromImage describes optional Mask-ROM Stage 0 image packing rules.
+type HardwareBootromImage struct {
+	Extends    string      `json:"extends,omitempty"    port:"optional"`
+	Layout     string      `json:"layout,omitempty"     port:"optional"`
+	MinSize    int         `json:"min_size,omitempty"   port:"optional"`
+	Provenance *Provenance `json:"provenance,omitempty" port:"optional"`
+}
+
 // HardwareJSON is the parsed content of chips/{chip}/hardware.json.
 type HardwareJSON struct {
-	ChipFamily         string         `json:"chip_family"          port:"required"`
-	Provenance         *Provenance    `json:"provenance"           port:"optional"`
-	Flash              HardwareFlash  `json:"flash"                port:"required"`
-	CryptoCapabilities HardwareCrypto `json:"crypto_capabilities"  port:"required"`
-	Memory             HardwareMemory `json:"memory"               port:"required"`
+	ChipFamily         string                `json:"chip_family"            port:"required"`
+	Provenance         *Provenance           `json:"provenance"             port:"optional"`
+	BootromImage       *HardwareBootromImage `json:"bootrom_image,omitempty" port:"optional"`
+	Flash              HardwareFlash         `json:"flash"                  port:"required"`
+	CryptoCapabilities HardwareCrypto        `json:"crypto_capabilities"    port:"required"`
+	Memory             HardwareMemory        `json:"memory"                 port:"required"`
 }
 
 // HardwareFlash describes the flash geometry of a chip.
 type HardwareFlash struct {
-	Size           uint32                `json:"size"            port:"required"`
-	WriteAlignment uint32                `json:"write_alignment" port:"optional"`
-	AppAlignment   uint32                `json:"app_alignment"   port:"optional"`
-	BaseAddr       string                `json:"base_addr"       port:"optional"`
-	XipBase        string                `json:"xip_base"        port:"optional"`
-	Regions        []HardwareFlashRegion `json:"regions"       port:"required"`
-	Provenance     *Provenance           `json:"provenance"      port:"optional"`
+	Size              uint32                `json:"size"                          port:"required"`
+	WriteAlignment    uint32                `json:"write_alignment"               port:"optional"`
+	AppAlignment      uint32                `json:"app_alignment"                 port:"optional"`
+	Base              uint32                `json:"base,omitempty"                port:"optional"`
+	BaseAddr          string                `json:"base_addr"                     port:"optional"`
+	XipBase           string                `json:"xip_base"                      port:"optional"`
+	VtorAlignment     uint32                `json:"vtor_alignment,omitempty"      port:"optional"`
+	ImageHeaderOffset uint32                `json:"image_header_offset,omitempty" port:"optional"`
+	EraseTimeUsMax    uint32                `json:"erase_time_us_max,omitempty"   port:"optional"`
+	WriteTimeUsPage   uint32                `json:"write_time_us_page,omitempty"  port:"optional"`
+	Stage0ExecMode    string                `json:"stage0_exec_mode,omitempty"    port:"optional"`
+	EntrySymbol       string                `json:"entry_symbol,omitempty"        port:"optional"`
+	Regions           []HardwareFlashRegion `json:"regions"                       port:"required"`
+	Provenance        *Provenance           `json:"provenance"                    port:"optional"`
 }
 
 // HardwareFlashRegion is a single flash region.
 type HardwareFlashRegion struct {
-	Type       string      `json:"type"        port:"required"`
-	Base       uint32      `json:"base"        port:"required"`
-	Size       uint32      `json:"size"        port:"optional"`
-	SectorSize uint32      `json:"sector_size" port:"optional"`
-	Count      uint32      `json:"count"       port:"optional"`
-	Name       string      `json:"name"        port:"optional"`
-	Provenance *Provenance `json:"provenance"  port:"optional"`
+	Type        string      `json:"type"        port:"required"`
+	Base        uint32      `json:"base"        port:"required"`
+	Size        uint32      `json:"size"        port:"optional"`
+	SectorSize  uint32      `json:"sector_size" port:"optional"`
+	Count       uint32      `json:"count"       port:"optional"`
+	Name        string      `json:"name"        port:"optional"`
+	Description string      `json:"description" port:"optional"`
+	Provenance  *Provenance `json:"provenance"  port:"optional"`
 }
 
 // HardwareCrypto defines crypto capabilities.
@@ -346,20 +401,38 @@ type HardwareCrypto struct {
 
 // HardwareMemory defines RAM geometry.
 type HardwareMemory struct {
-	IRAMBase   string      `json:"iram_base" port:"required"`
-	IRAMSize   string      `json:"iram_size" port:"required"`
-	Provenance *Provenance `json:"provenance" port:"optional"`
+	IRAMBase          string      `json:"iram_base"                     port:"required"`
+	IRAMSize          string      `json:"iram_size"                     port:"required"`
+	SRAMBase          string      `json:"sram_base,omitempty"           port:"optional"`
+	SRAMSize          string      `json:"sram_size,omitempty"           port:"optional"`
+	LPRAMBase         string      `json:"lp_ram_base,omitempty"         port:"optional"`
+	LPRAMSize         string      `json:"lp_ram_size,omitempty"         port:"optional"`
+	VtorAlignment     uint32      `json:"vtor_alignment,omitempty"      port:"optional"`
+	ImageHeaderOffset uint32      `json:"image_header_offset,omitempty" port:"optional"`
+	Provenance        *Provenance `json:"provenance"                    port:"optional"`
 }
 
 // DeviceToml is the parsed content of device.toml (user project manifest).
 type DeviceToml struct {
-	Name       string            `json:"name"        port:"required"`
-	Version    string            `json:"version"     port:"optional"`
-	Device     DeviceSection     `json:"device"      port:"required"`
-	Build      BuildSection      `json:"build"       port:"optional"`
-	Crypto     CryptoSection     `json:"crypto"      port:"optional"`
-	Partitions PartitionSection  `json:"partitions"  port:"required"`
-	BootConfig BootConfigSection `json:"boot_config" port:"optional"`
+	Name         string            `json:"name"                    port:"required"`
+	Version      string            `json:"version"                 port:"optional"`
+	Identity     IdentitySection   `json:"identity"                port:"optional"`
+	Device       DeviceSection     `json:"device"                  port:"required"`
+	Build        BuildSection      `json:"build"                   port:"optional"`
+	Drivers      map[string]string `json:"drivers,omitempty"       port:"optional"`
+	Crypto       CryptoSection     `json:"crypto"                  port:"optional"`
+	Recovery     *ChipRecovery     `json:"recovery,omitempty"      port:"optional"`
+	DriverConfig map[string]any    `json:"driver_config,omitempty" port:"optional"`
+	Partitions   PartitionSection  `json:"partitions"              port:"required"`
+	BootConfig   BootConfigSection `json:"boot_config"             port:"optional"`
+	Features     FeaturesSection   `json:"features,omitempty"      port:"optional"`
+}
+
+// IdentitySection defines the device hardware and product identity.
+type IdentitySection struct {
+	VendorID  uint16 `json:"vendor_id"  port:"required"`
+	ProductID uint16 `json:"product_id" port:"required"`
+	HwRev     uint16 `json:"hw_rev"     port:"required"`
 }
 
 // DeviceSection identifies the target chip.
@@ -369,9 +442,11 @@ type DeviceSection struct {
 
 // BuildSection configures the build environment.
 type BuildSection struct {
-	Compiler string `json:"compiler" port:"optional"` // "latest" | specific version
-	CoreSDK  string `json:"core_sdk" port:"optional"` // "main" | tag
-	Registry string `json:"registry" port:"optional"` // "latest" | version
+	Compiler string   `json:"compiler"          port:"optional"` // "latest" | specific version
+	CoreSDK  string   `json:"core_sdk"          port:"optional"` // "main" | tag
+	Registry string   `json:"registry"          port:"optional"` // "latest" | version
+	Profile  string   `json:"profile,omitempty" port:"optional"` // "dev" | "production"
+	Mock     []string `json:"mock,omitempty"    port:"optional"` // traits to mock in dev profile
 }
 
 // CryptoSection allows overriding the chip's default crypto packages.
@@ -396,12 +471,24 @@ type PartitionSection struct {
 
 // BootConfigSection configures bootloader behavior.
 type BootConfigSection struct {
-	MaxRetries         uint32 `json:"max_retries"          port:"optional"`
-	MaxRecoveryRetries uint32 `json:"max_recovery_retries" port:"optional"`
-	EdgeUnattendedMode bool   `json:"edge_unattended_mode" port:"optional"`
-	BackoffBaseS       uint32 `json:"backoff_base_s"       port:"optional"`
-	WDTTimeoutMs       uint32 `json:"wdt_timeout_ms"       port:"optional"`
-	TransportProvider  string `json:"transport_provider"   port:"optional"`
+	MaxRetries         uint32 `json:"max_retries"                 port:"optional"`
+	MaxRecoveryRetries uint32 `json:"max_recovery_retries"        port:"optional"`
+	EdgeUnattendedMode bool   `json:"edge_unattended_mode"        port:"optional"`
+	BackoffBaseS       uint32 `json:"backoff_base_s"              port:"optional"`
+	WDTTimeoutMs       uint32 `json:"wdt_timeout_ms"              port:"optional"`
+	Stage1SVN          uint32 `json:"stage1_svn,omitempty"        port:"optional"`
+	CryptoArenaSize    uint32 `json:"crypto_arena_size,omitempty" port:"optional"`
+	TransportProvider  string `json:"transport_provider"          port:"optional"`
+	BackupMode         string `json:"backup_mode,omitempty"       port:"optional"`
+}
+
+// FeaturesSection configures optional Stage 1 capabilities.
+type FeaturesSection struct {
+	CloudCommands    *bool `json:"cloud_commands,omitempty"    port:"optional"`
+	UartProvisioning *bool `json:"uart_provisioning,omitempty" port:"optional"`
+	MultiImage       *bool `json:"multi_image,omitempty"       port:"optional"`
+	Delta            *bool `json:"delta,omitempty"             port:"optional"`
+	Compression      *bool `json:"compression,omitempty"       port:"optional"`
 }
 
 // =============================================================================
@@ -410,17 +497,17 @@ type BootConfigSection struct {
 
 // CompilerInputFiles defines files the compiler pipeline reads.
 type CompilerInputFiles struct {
-	TelemetryCDDL  string `json:"telemetry_cddl"  port:"required"` // cli/cbor/toob_telemetry.cddl
+	TelemetryCDDL  string `json:"telemetry_cddl"  port:"optional"` // deprecated legacy artifact
 	CMakeLists     string `json:"cmakelists"      port:"required"` // CMakeLists.txt
 	ToolchainCMake string `json:"toolchain_cmake" port:"required"` // cmake/toolchain-{arch}.cmake
 }
 
 // CompilerOutputFiles defines files the compiler pipeline produces.
 type CompilerOutputFiles struct {
-	TelemetryDecodeC string `json:"telemetry_decode_c"  port:"required"` // generated/toob_telemetry_decode.c
-	TelemetryDecodeH string `json:"telemetry_decode_h"  port:"required"` // generated/toob_telemetry_decode.h
-	TelemetryEncodeC string `json:"telemetry_encode_c"  port:"required"` // generated/toob_telemetry_encode.c
-	TelemetryEncodeH string `json:"telemetry_encode_h"  port:"required"` // generated/toob_telemetry_encode.h
+	TelemetryDecodeC string `json:"telemetry_decode_c"  port:"optional"` // deprecated legacy artifact
+	TelemetryDecodeH string `json:"telemetry_decode_h"  port:"optional"` // deprecated legacy artifact
+	TelemetryEncodeC string `json:"telemetry_encode_c"  port:"optional"` // deprecated legacy artifact
+	TelemetryEncodeH string `json:"telemetry_encode_h"  port:"optional"` // deprecated legacy artifact
 	ManifestHeader   string `json:"manifest_header"    port:"required"`  // generated/generated_boot_config.h
 	LinkerScripts    string `json:"linker_scripts"     port:"required"`  // generated/toob_linker_*.ld
 	ConfigCMake      string `json:"config_cmake"       port:"required"`  // generated/toob_config.cmake
@@ -456,7 +543,6 @@ type MatrixChip struct {
 	Versions map[string]MatrixVersion `json:"versions" port:"required"`
 }
 
-
 // =============================================================================
 // Boundary: Chip Manifest (chip_manifest.json)
 // =============================================================================
@@ -479,30 +565,119 @@ type SlotCapabilities struct {
 }
 
 type DriverManifest struct {
-	Name        string            `json:"name"        port:"required"`
-	Author      string            `json:"author"      port:"optional"`
-	Version     string            `json:"version"     port:"optional"`
-	Description string            `json:"description" port:"optional"`
-	Trait       string            `json:"trait"       port:"optional"`
-	AbiVersion  string            `json:"abi_version" port:"optional"`
-	Headers     []string          `json:"headers"     port:"optional"`
-	Symbols     map[string]string `json:"symbols"     port:"optional"`
+	Name           string            `json:"name"                       port:"required"`
+	Author         string            `json:"author"                     port:"optional"`
+	Tier           string            `json:"tier,omitempty"             port:"optional"`
+	Version        string            `json:"version"                    port:"optional"`
+	Description    string            `json:"description"                port:"optional"`
+	Trait          string            `json:"trait"                      port:"optional"`
+	AbiVersion     string            `json:"abi_version"                port:"optional"`
+	ExecModel      string            `json:"exec_model,omitempty"       port:"optional"`
+	IsHardwareTRNG bool              `json:"is_hardware_trng,omitempty" port:"optional"`
+	Headers        []string          `json:"headers"                    port:"optional"`
+	Sources        []string          `json:"sources,omitempty"          port:"optional"`
+	MockSources    []string          `json:"mock_sources,omitempty"     port:"optional"`
+	Symbols        map[string]string `json:"symbols"                    port:"optional"`
+}
+
+type CryptoFootprint struct {
+	FlashBytes uint32 `json:"flash_bytes,omitempty" port:"optional"`
+	RamBytes   uint32 `json:"ram_bytes,omitempty"   port:"optional"`
+}
+
+func (f *CryptoFootprint) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	type wire struct {
+		FlashBytes         *uint32 `json:"flash_bytes"`
+		RamBytes           *uint32 `json:"ram_bytes"`
+		FlashEstimateBytes *uint32 `json:"flash_estimate_bytes"`
+		RamEstimateBytes   *uint32 `json:"ram_estimate_bytes"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	var w wire
+	if err := dec.Decode(&w); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("unexpected trailing data in crypto footprint")
+	}
+	if w.FlashBytes != nil && w.FlashEstimateBytes != nil && *w.FlashBytes != *w.FlashEstimateBytes {
+		return fmt.Errorf("conflicting flash_bytes (%d) and flash_estimate_bytes (%d)", *w.FlashBytes, *w.FlashEstimateBytes)
+	}
+	if w.RamBytes != nil && w.RamEstimateBytes != nil && *w.RamBytes != *w.RamEstimateBytes {
+		return fmt.Errorf("conflicting ram_bytes (%d) and ram_estimate_bytes (%d)", *w.RamBytes, *w.RamEstimateBytes)
+	}
+	var out CryptoFootprint
+	if w.FlashBytes != nil {
+		out.FlashBytes = *w.FlashBytes
+	} else if w.FlashEstimateBytes != nil {
+		out.FlashBytes = *w.FlashEstimateBytes
+	}
+	if w.RamBytes != nil {
+		out.RamBytes = *w.RamBytes
+	} else if w.RamEstimateBytes != nil {
+		out.RamBytes = *w.RamEstimateBytes
+	}
+	*f = out
+	return nil
+}
+
+type CryptoManifest struct {
+	Name              string            `json:"name"                          port:"required"`
+	Author            string            `json:"author,omitempty"              port:"optional"`
+	Tier              string            `json:"tier,omitempty"                port:"optional"`
+	Version           string            `json:"version,omitempty"             port:"optional"`
+	Description       string            `json:"description,omitempty"         port:"optional"`
+	AbiVersion        string            `json:"abi_version,omitempty"         port:"optional"`
+	Category          []string          `json:"category,omitempty"            port:"optional"`
+	License           string            `json:"license,omitempty"             port:"optional"`
+	MinCoreSdk        string            `json:"min_core_sdk,omitempty"        port:"optional"`
+	Wrapper           string            `json:"wrapper,omitempty"             port:"optional"`
+	UpstreamSources   []string          `json:"upstream_sources,omitempty"    port:"optional"`
+	Headers           []string          `json:"headers,omitempty"             port:"optional"`
+	Symbols           map[string]string `json:"symbols,omitempty"             port:"optional"`
+	Cflags            []string          `json:"cflags,omitempty"              port:"optional"`
+	Includes          []string          `json:"includes,omitempty"            port:"optional"`
+	ChipBinding       string            `json:"chip_binding,omitempty"        port:"optional"`
+	HasHwAcceleration bool              `json:"has_hw_acceleration,omitempty" port:"optional"`
+	Footprint         *CryptoFootprint  `json:"footprint,omitempty"           port:"optional"`
+}
+
+type ArchManifest struct {
+	Name           string            `json:"name"                      port:"required"`
+	Author         string            `json:"author,omitempty"          port:"optional"`
+	Tier           string            `json:"tier,omitempty"            port:"optional"`
+	Version        string            `json:"version,omitempty"         port:"optional"`
+	Description    string            `json:"description,omitempty"     port:"optional"`
+	Headers        []string          `json:"headers,omitempty"         port:"optional"`
+	Sources        []string          `json:"sources,omitempty"         port:"optional"`
+	Symbols        map[string]string `json:"symbols,omitempty"         port:"optional"`
+	RequiredMacros []string          `json:"required_macros,omitempty" port:"optional"`
 }
 
 // ChipManifest is the parsed content of chips/{chip}/chip_manifest.json.
 type ChipManifest struct {
-	Name             string            `json:"name"              port:"optional"`
-	Arch             string            `json:"arch"              port:"required"`
-	CompilerPrefix   string            `json:"compiler_prefix"   port:"required"`
-	Version          string            `json:"version"           port:"required"`
-	MinCoreSDK       string            `json:"min_core_sdk"      port:"optional"`
-	MinCompiler      string            `json:"min_compiler"      port:"optional"`
-	SlotCapabilities *SlotCapabilities `json:"slot_capabilities" port:"optional"`
-	HalBindings      map[string]string `json:"hal_bindings"      port:"optional"`
-	Sources          *ChipSources      `json:"sources"           port:"optional"`
-	Includes         []string          `json:"includes"          port:"optional"`
-	Crypto           *ChipCrypto       `json:"crypto"            port:"optional"`
-	Recovery         *ChipRecovery     `json:"recovery"          port:"optional"`
+	Name             string            `json:"name"                      port:"optional"`
+	Author           string            `json:"author,omitempty"          port:"optional"`
+	Tier             string            `json:"tier,omitempty"            port:"optional"`
+	Arch             string            `json:"arch"                      port:"required"`
+	CompilerPrefix   string            `json:"compiler_prefix"           port:"required"`
+	Description      string            `json:"description,omitempty"     port:"optional"`
+	Version          string            `json:"version"                   port:"required"`
+	MinCoreSDK       string            `json:"min_core_sdk"              port:"optional"`
+	MinCompiler      string            `json:"min_compiler"              port:"optional"`
+	Stage0ExecMode   string            `json:"stage0_exec_mode,omitempty" port:"optional"`
+	EntrySymbol      string            `json:"entry_symbol,omitempty"    port:"optional"`
+	SlotCapabilities *SlotCapabilities `json:"slot_capabilities"         port:"optional"`
+	HalBindings      map[string]string `json:"hal_bindings"              port:"optional"`
+	Sources          *ChipSources      `json:"sources"                   port:"optional"`
+	Includes         []string          `json:"includes"                  port:"optional"`
+	Crypto           *ChipCrypto       `json:"crypto"                    port:"optional"`
+	Recovery         *ChipRecovery     `json:"recovery"                  port:"optional"`
 }
 
 type ChipRecovery struct {

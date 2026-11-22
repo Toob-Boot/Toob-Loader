@@ -7,8 +7,8 @@ import (
 	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -22,6 +22,11 @@ import (
 	"github.com/toob-boot/toob/internal/ui"
 	"github.com/toob-boot/toob/internal/updater"
 	"golang.org/x/mod/semver"
+)
+
+const (
+	maxSignatureBytes     = 64 << 10  // 64 KiB
+	maxUpdateArchiveBytes = 256 << 20 // 256 MiB
 )
 
 var (
@@ -42,7 +47,7 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 	if pr.total > 0 {
 		pct := int(float64(pr.current) / float64(pr.total) * 100)
 		if pct != pr.lastPct && pct%5 == 0 {
-			fmt.Fprintf(os.Stderr, "\r  %s Downloading: %d%% (%.2f MB / %.2f MB)",
+			_, _ = fmt.Fprintf(os.Stderr, "\r  %s Downloading: %d%% (%.2f MB / %.2f MB)",
 				ui.Brand("▸"), pct, float64(pr.current)/1024/1024, float64(pr.total)/1024/1024)
 			pr.lastPct = pct
 		}
@@ -50,26 +55,42 @@ func (pr *progressReader) Read(p []byte) (n int, err error) {
 	return
 }
 
-func fetchSignature(url string, insecure bool) (string, error) {
-	transport := apiclient.BuildTransport()
-	if insecure {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+func fetchSignature(sigURL string, insecureTLS bool) (string, error) {
+	if insecureTLS {
+		return "", updater.ErrInsecureTLS
 	}
-	client := &http.Client{Transport: transport}
+	client := &http.Client{
+		Transport:     apiclient.BuildTransport(),
+		CheckRedirect: apiclient.SafeCheckRedirect,
+	}
 
-	resp, err := client.Get(url)
+	resp, err := client.Get(sigURL)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSignatureBytes+1))
 	if err != nil {
 		return "", err
 	}
+	if len(body) > maxSignatureBytes {
+		return "", fmt.Errorf("signature response exceeds %d bytes", maxSignatureBytes)
+	}
 	return string(body), nil
+}
+
+func readBoundedExecutable(r io.Reader) ([]byte, error) {
+	out, err := io.ReadAll(io.LimitReader(r, maxUpdateArchiveBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > maxUpdateArchiveBytes {
+		return nil, fmt.Errorf("extracted update binary exceeds %d bytes", maxUpdateArchiveBytes)
+	}
+	return out, nil
 }
 
 func decompressArchive(archiveBytes []byte, filename string) ([]byte, error) {
@@ -84,8 +105,15 @@ func decompressArchive(archiveBytes []byte, filename string) ([]byte, error) {
 				if err != nil {
 					return nil, err
 				}
-				defer rc.Close()
-				return io.ReadAll(rc)
+				data, readErr := readBoundedExecutable(rc)
+				closeErr := rc.Close()
+				if readErr != nil {
+					return nil, readErr
+				}
+				if closeErr != nil {
+					return nil, closeErr
+				}
+				return data, nil
 			}
 		}
 		return nil, fmt.Errorf("toob executable not found in zip archive")
@@ -94,18 +122,18 @@ func decompressArchive(archiveBytes []byte, filename string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer gr.Close()
+		defer func() { _ = gr.Close() }()
 		tr := tar.NewReader(gr)
 		for {
 			hdr, err := tr.Next()
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			if err != nil {
 				return nil, err
 			}
 			if hdr.Name == "toob" || hdr.Name == "toob.exe" {
-				return io.ReadAll(tr)
+				return readBoundedExecutable(tr)
 			}
 		}
 		return nil, fmt.Errorf("toob executable not found in tar.gz archive")
@@ -116,20 +144,25 @@ func decompressArchive(archiveBytes []byte, filename string) ([]byte, error) {
 var updateCmd = &cobra.Command{
 	Use:   "update",
 	Short: "Update Toob CLI to the latest version",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if insecure {
+			return updater.ErrInsecureTLS
+		}
+
 		var res *updater.CheckResult
 		var err error
 
 		if targetVersion != "" {
 			ui.Step("Fetching specific release: %s", targetVersion)
-			res, err = updater.FetchReleaseByTag(targetVersion, insecure)
+			res, err = updater.FetchReleaseByTag(targetVersion, false)
 		} else {
 			ui.Step("Checking for updates (current: %s)", ui.Bold(Version))
-			res, err = updater.CheckForUpdate(Version, true, insecure)
+			res, err = updater.CheckForUpdate(Version, true, false)
 		}
 
 		if err != nil {
-			if err == updater.ErrUnsupportedArch {
+			if errors.Is(err, updater.ErrUnsupportedArch) {
 				return fmt.Errorf("an update exists on Registry, but no compiled binary was found for your architecture (%s)", err.Error())
 			}
 			return fmt.Errorf("failed to check for updates: %w", err)
@@ -142,57 +175,59 @@ var updateCmd = &cobra.Command{
 
 		ui.Step("Downloading %s ...", ui.Bold(res.Version))
 
-		transport := apiclient.BuildTransport()
-		if insecure {
-			transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+		client := &http.Client{
+			Transport:     apiclient.BuildTransport(),
+			CheckRedirect: apiclient.SafeCheckRedirect,
 		}
-		client := &http.Client{Transport: transport}
 
 		resp, err := client.Get(res.DownloadURL)
 		if err != nil {
 			return fmt.Errorf("failed to download update: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("download failed with HTTP %d", resp.StatusCode)
 		}
 
 		pr := &progressReader{
-			Reader: resp.Body,
+			Reader: io.LimitReader(resp.Body, maxUpdateArchiveBytes+1),
 			total:  resp.ContentLength,
 		}
 
 		var buf bytes.Buffer
 		if _, err := io.Copy(&buf, pr); err != nil {
-			return fmt.Errorf("\nfailed during download: %w", err)
+			return fmt.Errorf("failed during download: %w", err)
 		}
-		fmt.Fprintln(os.Stderr)
+		_, _ = fmt.Fprintln(os.Stderr)
+		if buf.Len() > maxUpdateArchiveBytes {
+			return fmt.Errorf("update archive exceeds %d bytes", maxUpdateArchiveBytes)
+		}
 
 		if res.SigURL != "" {
 			ui.Step("Verifying Ed25519 signature (Supply Chain Security)")
-			sigStr, err := fetchSignature(res.SigURL, insecure)
+			sigStr, err := fetchSignature(res.SigURL, false)
 			if err != nil {
 				return fmt.Errorf("failed to fetch release signature: %w", err)
 			}
 
 			pubKey, err := updater.GetUpdatePublicKey()
 			if err != nil {
-				return fmt.Errorf("FATAL: Hardcoded public key is corrupted: %w", err)
+				return fmt.Errorf("FATAL: hardcoded public key is invalid: %w", err)
 			}
 
 			sigBytes, err := hex.DecodeString(strings.TrimSpace(sigStr))
 			if err != nil {
-				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Signature hex decoding failed: %w", err)
+				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: signature hex decoding failed: %w", err)
 			}
 
 			hash := sha256.Sum256(buf.Bytes())
 			if !ed25519.Verify(pubKey, hash[:], sigBytes) {
-				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Ed25519 signature invalid or binary was tampered with!")
+				return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: Ed25519 signature invalid or binary was tampered with")
 			}
 			ui.Success("Signature OK. Binary is authentic.")
 		} else {
-			return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: No signature found in release. Downgrade attack prevented.")
+			return fmt.Errorf("FATAL [INTEGRITY_COMPROMISED]: no signature found in release; downgrade attack prevented")
 		}
 
 		// Downgrade guard: reject signed-but-older binaries unless user explicitly

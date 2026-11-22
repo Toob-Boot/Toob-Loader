@@ -1,19 +1,22 @@
 // Package regcheck provides a non-blocking registry freshness check.
-//
-// Called once in PersistentPreRun (async) and consumed in PersistentPostRun
-// to show a banner when the locked registry version is outdated.
 package regcheck
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/toob-boot/toob/internal/apiclient"
+	"github.com/toob-boot/toob/internal/httputil"
 	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/paths"
 )
@@ -28,12 +31,16 @@ type Result struct {
 	CurrentVersion string
 	LatestVersion  string
 	Outdated       bool
-	ChipWarnings   []string // Chips in lockfile that are missing in the latest registry
+	ChipWarnings   []string
 }
 
 type cacheData struct {
-	LastCheck     time.Time `json:"last_check"`
-	LatestVersion string    `json:"latest_version"`
+	RegistryURL    string    `json:"registry_url,omitempty"`
+	LastCheck      time.Time `json:"last_check"`
+	LatestRevision string    `json:"latest_revision"`
+	LatestIndexSHA string    `json:"latest_index_sha,omitempty"`
+	CheckedChips   []string  `json:"checked_chips,omitempty"`
+	ChipWarnings   []string  `json:"chip_warnings,omitempty"`
 }
 
 func getCachePath() string {
@@ -65,56 +72,158 @@ func writeCache(c cacheData) {
 	if path == "" {
 		return
 	}
-	data, _ := json.Marshal(c)
-	tmpPath := path + ".tmp"
-	if os.WriteFile(tmpPath, data, 0o644) == nil {
-		os.Rename(tmpPath, path)
+	dir := filepath.Dir(path)
+	if os.MkdirAll(dir, 0o700) != nil {
+		return
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		return
+	}
+	tmp, err := os.CreateTemp(dir, ".toob-regcheck-*.tmp")
+	if err != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if runtime.GOOS != "windows" {
+		_ = tmp.Chmod(0o600)
+	}
+	if tmp.Close() != nil {
+		return
+	}
+	if os.Rename(tmpName, path) == nil {
+		cleanup = false
 	}
 }
 
-// CheckAsync performs a non-blocking registry freshness check.
-// Returns a channel that will receive the result when ready.
-// If there's no lockfile or the cache is still fresh, returns nil.
+func isNumericRevision(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func collectLockedChips(lf *lockfile.Lockfile) []string {
+	seen := make(map[string]string)
+	for i := range lf.Chips {
+		name := lf.Chips[i].Name
+		if name != "" {
+			seen[strings.ToLower(name)] = name
+		}
+	}
+	for k, t := range lf.Targets {
+		name := k
+		if t.Chip != "" && t.Chip != "none" && !strings.HasPrefix(t.Chip, "local:") {
+			if idx := strings.LastIndex(t.Chip, "@"); idx > 0 {
+				name = t.Chip[:idx]
+			} else {
+				name = t.Chip
+			}
+		}
+		if name != "" {
+			seen[strings.ToLower(name)] = name
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for _, v := range seen {
+		out = append(out, v)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func isOutdatedAgainst(lockedRev, lockedIndexSHA, latestRev, latestSHA string) bool {
+	if isNumericRevision(lockedRev) && isNumericRevision(latestRev) {
+		if lockedRev != latestRev {
+			return true
+		}
+		if len(lockedIndexSHA) == 64 && len(latestSHA) == 64 && !strings.EqualFold(lockedIndexSHA, latestSHA) {
+			return true
+		}
+		return false
+	}
+	if len(lockedIndexSHA) == 64 && len(latestSHA) == 64 {
+		return !strings.EqualFold(lockedIndexSHA, latestSHA)
+	}
+	return false
+}
+
+// CheckAsync performs a non-blocking registry freshness check against numeric registry
+// revisions / SHA-256 digests, skipping dev, local-registry, and CI runs cleanly.
 func CheckAsync() <-chan *Result {
 	ch := make(chan *Result, 1)
 
-	// Find lockfile from CWD upward
-	root, err := paths.FindProjectRoot("")
+	if paths.IsDevMode() ||
+		strings.TrimSpace(os.Getenv("TOOB_REGISTRY_DIR")) != "" ||
+		strings.TrimSpace(os.Getenv("CI")) != "" ||
+		strings.TrimSpace(os.Getenv("TOOB_NO_UPDATE_CHECK")) != "" {
+		close(ch)
+		return ch
+	}
+
+	root, err := paths.FindProjectRootStrict("")
 	if err != nil {
 		close(ch)
 		return ch
 	}
 	lf, err := lockfile.Load(paths.LockfilePath(root))
-	if err != nil || lf.Registry.Version == "" {
+	if err != nil {
 		close(ch)
 		return ch
 	}
 
-	lockedVersion := lf.Registry.Version
-	chipNames := make([]string, len(lf.Chips))
-	for i, c := range lf.Chips {
-		chipNames[i] = c.Name
+	// Compare strictly numeric Revision / Commit or 64-hex IndexSHA256 — never semver Version ("v1.2.2") vs integer revision ("42").
+	lockedRev := strings.TrimSpace(cmp.Or(lf.Registry.Revision, lf.Registry.Commit))
+	lockedIndexSHA := strings.TrimSpace(lf.Registry.IndexSHA256)
+	if !isNumericRevision(lockedRev) && len(lockedIndexSHA) != 64 {
+		close(ch)
+		return ch
 	}
 
-	// Check cache first
-	if cached := readCache(); cached != nil {
-		if time.Since(cached.LastCheck) < checkInterval {
-			if cached.LatestVersion != "" && normalizeVersion(cached.LatestVersion) != normalizeVersion(lockedVersion) {
-				ch <- &Result{
-					CurrentVersion: lockedVersion,
-					LatestVersion:  cached.LatestVersion,
-					Outdated:       true,
-				}
-			} else {
-				close(ch)
+	client := apiclient.NewForBaseURL(lf.Registry.URL, 3*time.Second)
+	canonicalOrigin, err := httputil.CanonicalOrigin(client.BaseURL)
+	if err != nil {
+		close(ch)
+		return ch
+	}
+
+	chipNames := collectLockedChips(lf)
+	displayCur := cmp.Or(lockedRev, lockedIndexSHA[:min(len(lockedIndexSHA), 12)])
+
+	if cached := readCache(); cached != nil &&
+		cached.RegistryURL == canonicalOrigin &&
+		time.Since(cached.LastCheck) < checkInterval &&
+		slices.Equal(cached.CheckedChips, chipNames) {
+		if cached.LatestRevision != "" && isOutdatedAgainst(lockedRev, lockedIndexSHA, cached.LatestRevision, cached.LatestIndexSHA) {
+			ch <- &Result{
+				CurrentVersion: displayCur,
+				LatestVersion:  cached.LatestRevision,
+				Outdated:       true,
+				ChipWarnings:   slices.Clone(cached.ChipWarnings),
 			}
-			return ch
 		}
+		close(ch)
+		return ch
 	}
 
 	go func() {
 		defer close(ch)
-		result := fetchRegistryStatus(lockedVersion, chipNames)
+		result := fetchRegistryStatus(client, canonicalOrigin, lockedRev, lockedIndexSHA, displayCur, chipNames)
 		if result != nil {
 			ch <- result
 		}
@@ -123,52 +232,56 @@ func CheckAsync() <-chan *Result {
 	return ch
 }
 
-func fetchRegistryStatus(lockedVersion string, chipNames []string) *Result {
-	client := apiclient.New()
-	client.HTTPClient.Timeout = 3 * time.Second
+func fetchRegistryStatus(client *apiclient.Client, canonicalOrigin, lockedRev, lockedIndexSHA, displayCur string, chipNames []string) *Result {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	revResp, err := client.GetRevision(context.Background())
-	if err != nil || revResp == nil {
+	revResp, err := client.GetRevision(ctx)
+	if err != nil || revResp == nil || revResp.Revision <= 0 {
 		return nil
 	}
-	latestVersion := fmt.Sprintf("%d", revResp.Revision)
+	latestRev := strconv.FormatInt(revResp.Revision, 10)
+	latestSHA := strings.TrimSpace(revResp.CommitSHA)
 
-
+	outdated := isOutdatedAgainst(lockedRev, lockedIndexSHA, latestRev, latestSHA)
+	var warnings []string
+	if outdated && len(chipNames) > 0 {
+		warnings = checkChipCompatibility(ctx, client, chipNames)
+	}
 
 	writeCache(cacheData{
-		LastCheck:     time.Now(),
-		LatestVersion: latestVersion,
+		RegistryURL:    canonicalOrigin,
+		LastCheck:      time.Now(),
+		LatestRevision: latestRev,
+		LatestIndexSHA: latestSHA,
+		CheckedChips:   slices.Clone(chipNames),
+		ChipWarnings:   slices.Clone(warnings),
 	})
 
-	if normalizeVersion(latestVersion) == normalizeVersion(lockedVersion) {
+	if !outdated {
 		return nil
 	}
 
-	result := &Result{
-		CurrentVersion: lockedVersion,
-		LatestVersion:  latestVersion,
+	return &Result{
+		CurrentVersion: displayCur,
+		LatestVersion:  latestRev,
 		Outdated:       true,
+		ChipWarnings:   warnings,
 	}
-
-	result.ChipWarnings = checkChipCompatibility(client, chipNames)
-
-	return result
 }
 
-// checkChipCompatibility queries the API for each locked chip
-// and returns warnings for any that don't exist in the latest registry.
-func checkChipCompatibility(client *apiclient.Client, chipNames []string) []string {
+func checkChipCompatibility(ctx context.Context, client *apiclient.Client, chipNames []string) []string {
 	var warnings []string
 	for _, name := range chipNames {
-		_, err := client.ResolveChip(context.Background(), name)
+		reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, err := client.ResolveChip(reqCtx, name)
+		cancel()
 		if err != nil {
-			warnings = append(warnings, name)
+			var apiErr *apiclient.APIError
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusGone) {
+				warnings = append(warnings, name)
+			}
 		}
 	}
 	return warnings
 }
-
-func normalizeVersion(v string) string {
-	return strings.TrimPrefix(v, "v")
-}
-

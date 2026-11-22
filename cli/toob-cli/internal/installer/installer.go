@@ -376,6 +376,34 @@ func (inst *Installer) Remove(name string) error {
 	return nil
 }
 
+// SpawnDriver copies a single driver package from the registry into
+// toobloader/hal/drivers/... so it can be edited locally by the project.
+func (inst *Installer) SpawnDriver(arg string) error {
+	name := strings.TrimSpace(arg)
+	drvInfo, err := inst.cache.GetDriver(name)
+	if err != nil {
+		return err
+	}
+	driverSrc, err := inst.cache.DriverSourcePath(drvInfo.Name)
+	if err != nil {
+		return err
+	}
+	relPath := filepath.FromSlash(drvInfo.Path)
+	if relPath == "" {
+		traitDir := drvInfo.Trait
+		if traitDir == "" {
+			traitDir = "custom"
+		}
+		relPath = filepath.Join("drivers", traitDir, filepath.FromSlash(drvInfo.Name))
+	}
+	driverDst := filepath.Join(inst.hal, relPath)
+	if err := copyTree(driverSrc, driverDst, false); err != nil {
+		return err
+	}
+	ui.Success("Spawned driver '%s' (v%s) -> %s [locally editable]", drvInfo.Name, drvInfo.Version, driverDst)
+	return nil
+}
+
 func (inst *Installer) installChip(ci *registry.ChipInfo, allowLinks bool) ([]string, error) {
 	src, err := inst.cache.ChipSourcePath(ci.Name)
 	if err != nil {
@@ -407,7 +435,32 @@ func (inst *Installer) installDeps(ci *registry.ChipInfo, allowLinks bool) ([]st
 		ui.Warn("Shared dependency '%s' already exists. Not overwriting to preserve local edits.", archDst)
 	}
 
-	// Drivers layer
+	// HAL trait-bound driver packages (hal_bindings)
+	if len(ci.HalBindings) > 0 {
+		for _, drvRef := range ci.HalBindings {
+			if drvRef == "" {
+				continue
+			}
+			drvInfo, err := inst.cache.GetDriver(drvRef)
+			if err != nil {
+				ui.Warn("Bound driver '%s' not found in registry index: %v", drvRef, err)
+				continue
+			}
+			driverDst := filepath.Join(inst.hal, filepath.FromSlash(drvInfo.Path))
+			if _, err := os.Stat(driverDst); os.IsNotExist(err) {
+				driverSrc, err := inst.cache.DriverSourcePath(drvRef)
+				if err != nil {
+					return created, err
+				}
+				if err := copyTree(driverSrc, driverDst, allowLinks); err != nil {
+					return created, err
+				}
+				created = append(created, driverDst)
+			}
+		}
+	}
+
+	// Legacy sources.drivers layer
 	if ci.Sources != nil {
 		for _, driverFile := range ci.Sources.Drivers {
 			if strings.HasPrefix(driverFile, "drivers/") {

@@ -5,17 +5,25 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/apiclient"
+	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/ui"
 )
+
+var flagDoctorDev bool
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Check system environment and dependencies for Toob",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if flagDoctorDev {
+			_ = os.Setenv("TOOB_DEV", "1")
+		}
+		ensureBuildToolsOnPath()
 		ui.Header("Toob Environment Doctor")
 
 		type doctorCheck struct {
@@ -34,7 +42,6 @@ var doctorCmd = &cobra.Command{
 			{"CMake", "cmake", []string{"--version"}, false, "Install CMake (e.g. via brew, apt, or choco)", "", nil, ""},
 			{"Ninja", "ninja", []string{"--version"}, false, "Install Ninja build system", "", nil, ""},
 			{"Python", "python", []string{"--version"}, false, "Install Python 3", "", nil, ""},
-			{"ZCBOR", "zcbor", []string{"--help"}, false, "Run: pip install zcbor", "python", []string{"-m", "pip", "install", "zcbor", "cbor2<6.0.0"}, "Install zcbor and compatible cbor2 via pip"},
 			{"Docker", "docker", []string{"--version"}, true, "Optional for containerized builds", "", nil, ""},
 		}
 
@@ -82,13 +89,24 @@ var doctorCmd = &cobra.Command{
 		fmt.Fprintln(os.Stderr)
 		ui.Step("Checking registry connectivity...")
 
+		regDir, _ := paths.RegistryDir()
+		hasLocalReg := false
+		if _, err := os.Stat(filepath.Join(regDir, "registry.json")); err == nil {
+			hasLocalReg = true
+			ui.CheckItem(true, false, "Local Registry", fmt.Sprintf("available at %s", regDir))
+		}
+
 		client := apiclient.New()
 
 		// Ping the API
 		_, revErr := client.GetRevision(cmd_defaultCtx())
 		if revErr != nil {
-			ui.CheckItem(false, false, "Registry API", fmt.Sprintf("unreachable: %v", revErr))
-			allPassed = false
+			if hasLocalReg {
+				ui.CheckItem(false, true, "Remote Registry API", fmt.Sprintf("offline (%v) - using local registry", revErr))
+			} else {
+				ui.CheckItem(false, false, "Registry API", fmt.Sprintf("unreachable: %v", revErr))
+				allPassed = false
+			}
 		} else {
 			ui.CheckItem(true, false, "Registry API", client.BaseURL)
 		}
@@ -150,4 +168,8 @@ var doctorCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+func init() {
+	doctorCmd.Flags().BoolVar(&flagDoctorDev, "dev", false, "Development mode: check local registry and SDK auto-discovery")
 }

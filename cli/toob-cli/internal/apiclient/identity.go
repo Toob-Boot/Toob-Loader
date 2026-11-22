@@ -3,43 +3,72 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sync"
+	"time"
 
+	"github.com/toob-boot/toob/internal/filelock"
+	"github.com/toob-boot/toob/internal/httputil"
 	"github.com/toob-boot/toob/internal/oidc"
+	"github.com/toob-boot/toob/internal/paths"
 )
 
-// AuthConfig is what the registry publishes about how to authenticate against it.
-//
-// Read from the registry rather than configured here. An issuer, an audience and a client id are
-// per-deployment facts, and a client carrying its own copy is a client that is right about one
-// environment and quietly wrong about the next.
+// AuthConfig describes how a CLI client authenticates against a Toob Registry deployment.
 type AuthConfig struct {
-	Issuer   string   `json:"issuer"`
-	Audience string   `json:"audience"`
-	ClientID string   `json:"client_id"`
-	Scopes   []string `json:"scopes"`
-	// AccountsURL is where identity-api answers: organizations are managed there, not at the registry.
-	AccountsURL string `json:"accounts_url"`
-	// SettingsURL is where account settings open in a browser.
-	SettingsURL string `json:"settings_url"`
+	Issuer      string   `json:"issuer"`
+	Audience    string   `json:"audience"`
+	ClientID    string   `json:"client_id"`
+	Scopes      []string `json:"scopes"`
+	AccountsURL string   `json:"accounts_url"`
+	SettingsURL string   `json:"settings_url"`
 }
 
-// FetchAuthConfig asks the registry who issues the tokens it accepts.
+func cloneAuthConfig(cfg *AuthConfig) *AuthConfig {
+	if cfg == nil {
+		return nil
+	}
+	cp := *cfg
+	cp.Scopes = slices.Clone(cfg.Scopes)
+	return &cp
+}
+
+// FetchAuthConfig queries the public GET /api/v1/auth/config endpoint without sending
+// stored credentials, validates all advertised URLs, and memoizes the result on Client.
 func (c *Client) FetchAuthConfig(ctx context.Context) (*AuthConfig, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, "/api/v1/auth/config", nil)
+	if c.transportErr != nil {
+		return nil, c.transportErr
+	}
+
+	c.authMu.Lock()
+	if c.cachedAuthConfig != nil {
+		cached := cloneAuthConfig(c.cachedAuthConfig)
+		c.authMu.Unlock()
+		return cached, nil
+	}
+	c.authMu.Unlock()
+
+	if _, err := httputil.ValidateHTTPSOrLoopbackURL(c.BaseURL); err != nil {
+		return nil, fmt.Errorf("invalid registry URL %q: %w", c.BaseURL, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/api/v1/auth/config", nil)
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("User-Agent", "Toob-CLI")
+	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.HTTPClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("asking %s how to authenticate: %w", c.BaseURL, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, fmt.Errorf("%s does not publish an authentication configuration; it is older than this client", c.BaseURL)
@@ -48,13 +77,35 @@ func (c *Client) FetchAuthConfig(ctx context.Context) (*AuthConfig, error) {
 		return nil, fmt.Errorf("%s answered %d when asked how to authenticate", c.BaseURL, resp.StatusCode)
 	}
 
+	raw, err := httputil.ReadBounded(resp.Body, 1<<20)
+	if err != nil {
+		return nil, fmt.Errorf("reading authentication configuration from %s: %w", c.BaseURL, err)
+	}
+
 	var config AuthConfig
-	if err := json.NewDecoder(resp.Body).Decode(&config); err != nil {
+	if err := json.Unmarshal(raw, &config); err != nil {
 		return nil, fmt.Errorf("the registry's authentication configuration is not readable: %w", err)
 	}
 	if config.Issuer == "" || config.ClientID == "" {
 		return nil, fmt.Errorf("%s published an incomplete authentication configuration", c.BaseURL)
 	}
+	if _, err := httputil.ValidateHTTPSOrLoopbackURL(config.Issuer); err != nil {
+		return nil, fmt.Errorf("registry %s published invalid issuer URL %q: %w", c.BaseURL, config.Issuer, err)
+	}
+	if config.AccountsURL != "" {
+		if _, err := httputil.ValidateHTTPSOrLoopbackURL(config.AccountsURL); err != nil {
+			return nil, fmt.Errorf("registry %s published invalid accounts_url %q: %w", c.BaseURL, config.AccountsURL, err)
+		}
+	}
+	if config.SettingsURL != "" {
+		if _, err := httputil.ValidateHTTPSOrLoopbackURL(config.SettingsURL); err != nil {
+			return nil, fmt.Errorf("registry %s published invalid settings_url %q: %w", c.BaseURL, config.SettingsURL, err)
+		}
+	}
+
+	c.authMu.Lock()
+	c.cachedAuthConfig = cloneAuthConfig(&config)
+	c.authMu.Unlock()
 
 	return &config, nil
 }
@@ -72,133 +123,303 @@ type Profile struct {
 }
 
 // Whoami asks the registry who it takes the caller to be.
-//
-// The one call that exercises the whole chain: the token was issued by the expected issuer, for the
-// expected audience, signed by a key the registry could fetch, and the subject resolved to a user.
-// Anything wrong anywhere in that sequence shows up here as a 401, which is why signing in ends with
-// it rather than with a stored file.
 func (c *Client) Whoami(ctx context.Context) (*Profile, error) {
 	var profile Profile
 	if err := c.getJSON(ctx, "/api/v1/me", &profile); err != nil {
 		return nil, err
 	}
-
 	return &profile, nil
 }
 
-// HasSession reports whether a person's session is stored.
+// HasSession reports whether a usable or refreshable interactive OIDC session is stored.
 func HasSession() bool {
 	creds := loadCredentials()
-
-	return creds.Identity != nil && creds.Identity.Token != nil && creds.Identity.Token.RefreshToken != ""
+	if creds.Identity == nil || creds.Identity.Token == nil {
+		return false
+	}
+	return creds.Identity.Token.RefreshToken != "" || creds.Identity.Token.Usable()
 }
 
-// IdentityCredentials is a person's session, as it is kept on disk.
-//
-// The issuer and client id are stored beside the tokens because a refresh needs both, and because
-// they say which deployment this session belongs to: pointing the client at another registry and
-// finding a stored token for a different issuer is a mismatch worth noticing rather than a request
-// worth sending.
+// IdentityCredentials holds a persisted interactive OIDC session bound to its registry origin.
 type IdentityCredentials struct {
-	Issuer   string      `json:"issuer"`
-	ClientID string      `json:"client_id"`
-	Subject  string      `json:"subject,omitempty"`
-	Token    *oidc.Token `json:"token"`
+	RegistryURL string      `json:"registry_url,omitempty"`
+	Issuer      string      `json:"issuer"`
+	ClientID    string      `json:"client_id"`
+	Subject     string      `json:"subject,omitempty"`
+	Token       *oidc.Token `json:"token"`
 }
 
-// refreshMu serialises refreshes within a process. Two commands in one process refreshing the same
-// session would each write the file, and the loser's refresh token is then one the issuer has
-// already rotated away.
 var refreshMu sync.Mutex
 
-// SaveIdentity persists a session, leaving any API key in place.
-//
-// Merged rather than written whole: the API key is a separate credential for non-interactive use,
-// and logging in interactively must not silently revoke a machine's ability to publish.
+// SaveIdentity persists an interactive session (stamping the canonical RegistryURL when unset),
+// leaving any machine API key intact.
 func SaveIdentity(identity *IdentityCredentials, login string) error {
 	refreshMu.Lock()
 	defer refreshMu.Unlock()
 
-	return mergeCredentials(func(creds *Credentials) {
-		creds.Identity = identity
-		if login != "" {
-			creds.Login = login
+	var stamped *IdentityCredentials
+	if identity != nil {
+		cp := *identity
+		if cp.RegistryURL == "" {
+			if canon, err := httputil.CanonicalOrigin(resolveBaseURL()); err == nil {
+				cp.RegistryURL = canon
+			}
 		}
+		stamped = &cp
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	return mergeCredentialsLocked(ctx, func(creds *Credentials) {
+		creds.Identity = stamped
+		creds.Login = login
 	})
 }
 
-// DeleteIdentity removes the stored session and leaves the API key.
+// DeleteIdentity removes the stored interactive session, clears Login and that account's
+// active organization context, and leaves any machine API key intact.
 func DeleteIdentity() error {
+	return deleteIdentityWithContext(context.Background())
+}
+
+func deleteIdentityWithContext(ctx context.Context) error {
 	refreshMu.Lock()
 	defer refreshMu.Unlock()
 
-	return mergeCredentials(func(creds *Credentials) { creds.Identity = nil })
-}
+	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 
-// mergeCredentials reads, changes and atomically rewrites the credentials file.
-func mergeCredentials(change func(*Credentials)) error {
-	path := credentialsPath()
-	if path == "" {
-		return fmt.Errorf("cannot determine credentials path")
+	var prevIssuer, prevSubject string
+	if err := mergeCredentialsLocked(lockCtx, func(creds *Credentials) {
+		if creds.Identity != nil {
+			prevIssuer = creds.Identity.Issuer
+			prevSubject = creds.Identity.Subject
+		}
+		creds.Identity = nil
+		creds.Login = ""
+	}); err != nil {
+		return err
 	}
 
+	return clearOrganizationForAccount(lockCtx, prevIssuer, prevSubject)
+}
+
+// Logout revokes the stored OIDC tokens at the identity provider's RFC 7009 revocation
+// endpoint when available, then deletes the local session and organization context.
+func (c *Client) Logout(ctx context.Context) error {
 	creds := loadCredentials()
+	if creds.Identity != nil && creds.Identity.Issuer != "" && creds.Identity.Token != nil {
+		revokeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if provider, err := oidc.Discover(revokeCtx, creds.Identity.Issuer); err == nil && provider.RevocationEndpoint != "" {
+			if creds.Identity.Token.RefreshToken != "" {
+				_ = oidc.RevokeToken(revokeCtx, provider.RevocationEndpoint, creds.Identity.ClientID, creds.Identity.Token.RefreshToken, "refresh_token")
+			}
+			if creds.Identity.Token.AccessToken != "" {
+				_ = oidc.RevokeToken(revokeCtx, provider.RevocationEndpoint, creds.Identity.ClientID, creds.Identity.Token.AccessToken, "access_token")
+			}
+		}
+		cancel()
+	}
+	return deleteIdentityWithContext(ctx)
+}
+
+func mergeCredentialsLocked(ctx context.Context, change func(*Credentials)) error {
+	path, err := paths.CredentialsPath()
+	if err != nil {
+		return fmt.Errorf("cannot determine credentials path: %w", err)
+	}
+	unlock, err := filelock.Lock(ctx, path+".lock")
+	if err != nil {
+		return fmt.Errorf("locking credentials file: %w", err)
+	}
+	defer func() { _ = unlock() }()
+
+	creds, err := loadCredentialsStrict(path)
+	if err != nil {
+		return err
+	}
 	change(&creds)
 
+	return writeCredentialsAtomic(path, creds)
+}
+
+func loadCredentialsStrict(path string) (Credentials, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return Credentials{}, nil
+	}
+	if err != nil {
+		return Credentials{}, fmt.Errorf("opening credentials %s: %w", path, err)
+	}
+	data, readErr := httputil.ReadBounded(f, 1<<20)
+	closeErr := f.Close()
+	if readErr != nil {
+		return Credentials{}, fmt.Errorf("reading credentials %s: %w", path, readErr)
+	}
+	if closeErr != nil {
+		return Credentials{}, fmt.Errorf("closing credentials %s: %w", path, closeErr)
+	}
+	var creds Credentials
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return Credentials{}, fmt.Errorf("corrupted credentials file %s: %w", path, err)
+	}
+	return creds, nil
+}
+
+func writeCredentialsAtomic(path string, creds Credentials) error {
+	//nolint:gosec // G117: intentionally serializes local user credentials into 0600 file inside 0700 ToobHome.
 	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if mkErr := os.MkdirAll(dir, 0o700); mkErr != nil {
+		return mkErr
+	}
+	tmp, err := os.CreateTemp(dir, ".toob-creds-*.tmp")
+	if err != nil {
 		return err
 	}
-
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
 		return err
 	}
-
-	return os.Rename(tmpPath, path)
+	if runtime.GOOS != "windows" {
+		if err := tmp.Chmod(0o600); err != nil {
+			_ = tmp.Close()
+			return err
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
-// bearer returns the credential to present, refreshing an expired session first.
-//
-// TOOB_TOKEN comes first, since it was set for this run. Otherwise a session is preferred over an
-// API key: the key is the long-lived credential meant for machines, and a person who has just
-// logged in should be acting as themselves.
+func (c *Client) identityMatchesOrigin(id *IdentityCredentials, clientOrigin string) bool {
+	if id == nil {
+		return false
+	}
+	if id.RegistryURL != "" {
+		boundOrigin, err := httputil.CanonicalOrigin(id.RegistryURL)
+		if err != nil || boundOrigin != clientOrigin {
+			return false
+		}
+	} else {
+		defaultOrigin, err := httputil.CanonicalOrigin(resolveBaseURL())
+		if err != nil || defaultOrigin != clientOrigin {
+			return false
+		}
+	}
+
+	c.authMu.Lock()
+	cached := c.cachedAuthConfig
+	c.authMu.Unlock()
+	if cached != nil && id.Issuer != "" && cached.Issuer != id.Issuer {
+		return false
+	}
+	return true
+}
+
+// sessionBearer returns ONLY an origin-bound interactive OIDC session access token,
+// ignoring TOOB_TOKEN and machine API keys (required by identity-api and admin routes).
+func (c *Client) sessionBearer(ctx context.Context) (string, error) {
+	clientOrigin, err := httputil.CanonicalOrigin(c.BaseURL)
+	if err != nil {
+		return "", fmt.Errorf("refusing to send session credentials to insecure URL %q: %w", c.BaseURL, err)
+	}
+	creds := loadCredentials()
+	if creds.Identity == nil || creds.Identity.Token == nil {
+		return "", ErrNoSession
+	}
+	if !c.identityMatchesOrigin(creds.Identity, clientOrigin) {
+		return "", fmt.Errorf("stored login session belongs to a different registry origin than %s; run 'toob login' for this registry", clientOrigin)
+	}
+	if creds.Identity.Token.Usable() {
+		return creds.Identity.Token.AccessToken, nil
+	}
+	if creds.Identity.Token.RefreshToken == "" {
+		return "", ErrNoSession
+	}
+	refreshed, err := refreshSession(ctx, creds.Identity)
+	if err != nil {
+		return "", fmt.Errorf("refreshing login session: %w", err)
+	}
+	return refreshed.AccessToken, nil
+}
+
+// bearer returns the credential to present on Registry API calls, refusing to send
+// credentials to non-HTTPS non-loopback targets or mismatched origins.
 func (c *Client) bearer(ctx context.Context) string {
+	clientOrigin, err := httputil.CanonicalOrigin(c.BaseURL)
+	if err != nil {
+		return ""
+	}
 	if token := os.Getenv(TokenEnv); token != "" {
 		return token
 	}
 	creds := loadCredentials()
-	if creds.Identity == nil || creds.Identity.Token == nil {
+	if creds.Identity != nil && creds.Identity.Token != nil {
+		if !c.identityMatchesOrigin(creds.Identity, clientOrigin) {
+			return ""
+		}
+		if creds.Identity.Token.Usable() {
+			return creds.Identity.Token.AccessToken
+		}
+		if creds.Identity.Token.RefreshToken != "" {
+			if refreshed, refErr := refreshSession(ctx, creds.Identity); refErr == nil {
+				return refreshed.AccessToken
+			}
+		}
+		return ""
+	}
+	if defaultOrigin, defErr := httputil.CanonicalOrigin(resolveBaseURL()); defErr == nil && defaultOrigin == clientOrigin {
 		return c.Token
 	}
-	if creds.Identity.Token.Usable() {
-		return creds.Identity.Token.AccessToken
-	}
-
-	refreshed, err := refreshSession(ctx, creds.Identity)
-	if err != nil {
-		// Deliberately not fatal here. The request goes out with whatever is left and the server
-		// answers 401, which is the same outcome the caller has to handle anyway — and a refresh that
-		// fails because the network is down should not look like a different problem than a request
-		// that fails because the network is down.
-		return creds.Identity.Token.AccessToken
-	}
-
-	return refreshed.AccessToken
+	return ""
 }
 
-// refreshSession trades the stored refresh token for a new one and writes it back.
+// refreshSession trades the stored refresh token for a new one under both in-process
+// and cross-process file locks so parallel CLI invocations never double-rotate a token.
 func refreshSession(ctx context.Context, identity *IdentityCredentials) (*oidc.Token, error) {
 	refreshMu.Lock()
 	defer refreshMu.Unlock()
 
-	// Read again under the lock: another goroutine may have refreshed while this one waited, and
-	// redeeming an already-rotated refresh token invalidates the session for both.
-	if current := loadCredentials().Identity; current != nil && current.Token.Usable() {
-		return current.Token, nil
+	path, err := paths.CredentialsPath()
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := filelock.Lock(ctx, path+".lock")
+	if err != nil {
+		return nil, fmt.Errorf("locking credentials for token refresh: %w", err)
+	}
+	defer func() { _ = unlock() }()
+
+	diskCreds, err := loadCredentialsStrict(path)
+	if err != nil {
+		return nil, err
+	}
+	current := diskCreds.Identity
+	if current != nil && current.Issuer == identity.Issuer && current.Token != nil {
+		if current.Token.Usable() {
+			return current.Token, nil
+		}
+		identity = current
+	}
+	if identity.Token == nil || identity.Token.RefreshToken == "" {
+		return nil, errors.New("no refresh token stored")
 	}
 
 	provider, err := oidc.Discover(ctx, identity.Issuer)
@@ -212,6 +433,9 @@ func refreshSession(ctx context.Context, identity *IdentityCredentials) (*oidc.T
 
 	refreshed := *identity
 	refreshed.Token = token
-
-	return token, mergeCredentials(func(creds *Credentials) { creds.Identity = &refreshed })
+	diskCreds.Identity = &refreshed
+	if err := writeCredentialsAtomic(path, diskCreds); err != nil {
+		return nil, err
+	}
+	return token, nil
 }

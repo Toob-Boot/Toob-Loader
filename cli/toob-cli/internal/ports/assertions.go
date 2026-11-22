@@ -38,7 +38,6 @@ func assertRegistryRevisionResponseFromPort() {
 	}
 }
 
-
 func assertChipResolveResponseToPort() {
 	var r apiclient.ChipResolveResponse
 	_ = ChipResolveResponse{
@@ -190,14 +189,14 @@ func assertPublishResponseFromPort() {
 func assertRegistryEcosystemToPort() {
 	var r registry.EcosystemVersions
 	_ = RegistryEcosystem{
-		CLI: r.CLI, CoreSDK: r.CoreSDK, Compiler: r.Compiler,
+		CLI: r.CLI, CoreSDK: r.CoreSDK, Compiler: r.Compiler, CoreSDKSha256: r.CoreSDKSha256,
 	}
 }
 
 func assertRegistryEcosystemFromPort() {
 	var p RegistryEcosystem
 	_ = registry.EcosystemVersions{
-		CLI: p.CLI, CoreSDK: p.CoreSDK, Compiler: p.Compiler,
+		CLI: p.CLI, CoreSDK: p.CoreSDK, Compiler: p.Compiler, CoreSDKSha256: p.CoreSDKSha256,
 	}
 }
 
@@ -206,7 +205,7 @@ func assertRegistryIndexToPort() {
 	var eco *RegistryEcosystem
 	if r.Ecosystem != nil {
 		eco = &RegistryEcosystem{
-			CLI: r.Ecosystem.CLI, CoreSDK: r.Ecosystem.CoreSDK, Compiler: r.Ecosystem.Compiler,
+			CLI: r.Ecosystem.CLI, CoreSDK: r.Ecosystem.CoreSDK, Compiler: r.Ecosystem.Compiler, CoreSDKSha256: r.Ecosystem.CoreSDKSha256,
 		}
 	}
 	_ = RegistryIndex{
@@ -221,7 +220,7 @@ func assertRegistryIndexFromPort() {
 	var eco *registry.EcosystemVersions
 	if p.Ecosystem != nil {
 		eco = &registry.EcosystemVersions{
-			CLI: p.Ecosystem.CLI, CoreSDK: p.Ecosystem.CoreSDK, Compiler: p.Ecosystem.Compiler,
+			CLI: p.Ecosystem.CLI, CoreSDK: p.Ecosystem.CoreSDK, Compiler: p.Ecosystem.Compiler, CoreSDKSha256: p.Ecosystem.CoreSDKSha256,
 		}
 	}
 	_ = registry.Index{
@@ -244,16 +243,18 @@ func assertChipToPort() {
 		rec = &ChipRecovery{
 			Console: r.Recovery.Console, Flash: r.Recovery.Flash,
 			WDT: r.Recovery.WDT, Clock: r.Recovery.Clock, RTC: r.Recovery.RTC,
-			Crypto: cryp,
+			Crypto:  cryp,
 			Sources: r.Recovery.Sources, Includes: r.Recovery.Includes,
 		}
 	}
 	_ = RegistryChip{
-		Name: r.Name, Arch: r.Arch,
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Arch: r.Arch,
 		CompilerPrefix: r.CompilerPrefix, Path: r.Path,
-		Version: r.Version, CliCompatibility: r.CliCompatibility,
-		Verified: r.Verified, Description: r.Description,
-		Recovery: rec,
+		Version: r.Version, SHA256: r.SHA256, TarballSHA: r.TarballSHA,
+		CliCompatibility: r.CliCompatibility,
+		Verified:         r.Verified, Description: r.Description,
+		HalBindings: r.HalBindings,
+		Recovery:    rec,
 	}
 }
 
@@ -268,16 +269,18 @@ func assertChipFromPort() {
 		rec = &registry.ChipRecovery{
 			Console: p.Recovery.Console, Flash: p.Recovery.Flash,
 			WDT: p.Recovery.WDT, Clock: p.Recovery.Clock, RTC: p.Recovery.RTC,
-			Crypto: cryp,
+			Crypto:  cryp,
 			Sources: p.Recovery.Sources, Includes: p.Recovery.Includes,
 		}
 	}
 	_ = registry.ChipInfo{
-		Name: p.Name, Arch: p.Arch,
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Arch: p.Arch,
 		CompilerPrefix: p.CompilerPrefix, Path: p.Path,
-		Version: p.Version, CliCompatibility: p.CliCompatibility,
-		Verified: p.Verified, Description: p.Description,
-		Recovery: rec,
+		Version: p.Version, SHA256: p.SHA256, TarballSHA: p.TarballSHA,
+		CliCompatibility: p.CliCompatibility,
+		Verified:         p.Verified, Description: p.Description,
+		HalBindings: p.HalBindings,
+		Recovery:    rec,
 	}
 }
 
@@ -292,7 +295,7 @@ func assertChipRecoveryToPort() {
 	_ = ChipRecovery{
 		Console: r.Console, Flash: r.Flash,
 		WDT: r.WDT, Clock: r.Clock, RTC: r.RTC,
-		Crypto: cryp,
+		Crypto:  cryp,
 		Sources: r.Sources, Includes: r.Includes,
 	}
 }
@@ -306,7 +309,7 @@ func assertChipRecoveryFromPort() {
 	_ = registry.ChipRecovery{
 		Console: p.Console, Flash: p.Flash,
 		WDT: p.WDT, Clock: p.Clock, RTC: p.RTC,
-		Crypto: cryp,
+		Crypto:  cryp,
 		Sources: p.Sources, Includes: p.Includes,
 	}
 }
@@ -347,25 +350,39 @@ func assertChipCryptoFromPort() {
 
 func assertCryptoToPort() {
 	var r registry.CryptoInfo
+	var fp *CryptoFootprint
+	if r.Footprint != nil {
+		fp = &CryptoFootprint{FlashBytes: r.Footprint.FlashBytes, RamBytes: r.Footprint.RamBytes}
+	}
 	_ = RegistryCrypto{
-		Name: r.Name, Path: r.Path, Version: r.Version,
-		Description: r.Description, Category: r.Category,
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Path: r.Path, Version: r.Version,
+		SHA256: r.SHA256, TarballSHA: r.TarballSHA,
+		Description: r.Description, AbiVersion: r.AbiVersion, Category: r.Category,
 		License: r.License, MinCoreSdk: r.MinCoreSdk,
 		Wrapper: r.Wrapper, UpstreamSources: r.UpstreamSources,
+		Headers: r.Headers, Symbols: r.Symbols,
 		Cflags: r.Cflags, Includes: r.Includes,
-		ChipBinding: r.ChipBinding,
+		ChipBinding: r.ChipBinding, HasHwAcceleration: r.HasHwAcceleration,
+		Footprint: fp,
 	}
 }
 
 func assertCryptoFromPort() {
 	var p RegistryCrypto
+	var fp *registry.CryptoFootprint
+	if p.Footprint != nil {
+		fp = &registry.CryptoFootprint{FlashBytes: p.Footprint.FlashBytes, RamBytes: p.Footprint.RamBytes}
+	}
 	_ = registry.CryptoInfo{
-		Name: p.Name, Path: p.Path, Version: p.Version,
-		Description: p.Description, Category: p.Category,
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Path: p.Path, Version: p.Version,
+		SHA256: p.SHA256, TarballSHA: p.TarballSHA,
+		Description: p.Description, AbiVersion: p.AbiVersion, Category: p.Category,
 		License: p.License, MinCoreSdk: p.MinCoreSdk,
 		Wrapper: p.Wrapper, UpstreamSources: p.UpstreamSources,
+		Headers: p.Headers, Symbols: p.Symbols,
 		Cflags: p.Cflags, Includes: p.Includes,
-		ChipBinding: p.ChipBinding,
+		ChipBinding: p.ChipBinding, HasHwAcceleration: p.HasHwAcceleration,
+		Footprint: fp,
 	}
 }
 
@@ -374,8 +391,8 @@ func assertCryptoFromPort() {
 func assertDriverToPort() {
 	var r registry.DriverInfo
 	_ = RegistryDriver{
-		Name: r.Name, Path: r.Path,
-		Version: r.Version, Description: r.Description,
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Trait: r.Trait, Path: r.Path,
+		Version: r.Version, SHA256: r.SHA256, TarballSHA: r.TarballSHA, Description: r.Description,
 		Category: r.Category,
 	}
 }
@@ -383,8 +400,8 @@ func assertDriverToPort() {
 func assertDriverFromPort() {
 	var p RegistryDriver
 	_ = registry.DriverInfo{
-		Name: p.Name, Path: p.Path,
-		Version: p.Version, Description: p.Description,
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Trait: p.Trait, Path: p.Path,
+		Version: p.Version, SHA256: p.SHA256, TarballSHA: p.TarballSHA, Description: p.Description,
 		Category: p.Category,
 	}
 }
@@ -396,16 +413,16 @@ func assertDriverFromPort() {
 func assertArchToPort() {
 	var r registry.ArchInfo
 	_ = RegistryArch{
-		Name: r.Name, Path: r.Path,
-		Version: r.Version, Description: r.Description,
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Path: r.Path,
+		Version: r.Version, SHA256: r.SHA256, TarballSHA: r.TarballSHA, Description: r.Description,
 	}
 }
 
 func assertArchFromPort() {
 	var p RegistryArch
 	_ = registry.ArchInfo{
-		Name: p.Name, Path: p.Path,
-		Version: p.Version, Description: p.Description,
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Path: p.Path,
+		Version: p.Version, SHA256: p.SHA256, TarballSHA: p.TarballSHA, Description: p.Description,
 	}
 }
 
@@ -414,8 +431,8 @@ func assertArchFromPort() {
 func assertSoCToPort() {
 	var r registry.SoCInfo
 	_ = RegistrySoC{
-		Name: r.Name, Path: r.Path,
-		Version: r.Version, Description: r.Description,
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Path: r.Path,
+		Version: r.Version, SHA256: r.SHA256, TarballSHA: r.TarballSHA, Description: r.Description,
 		Chips: r.Chips,
 	}
 }
@@ -423,8 +440,8 @@ func assertSoCToPort() {
 func assertSoCFromPort() {
 	var p RegistrySoC
 	_ = registry.SoCInfo{
-		Name: p.Name, Path: p.Path,
-		Version: p.Version, Description: p.Description,
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Path: p.Path,
+		Version: p.Version, SHA256: p.SHA256, TarballSHA: p.TarballSHA, Description: p.Description,
 		Chips: p.Chips,
 	}
 }
@@ -434,16 +451,16 @@ func assertSoCFromPort() {
 func assertIntegrationToPort() {
 	var r registry.IntegrationInfo
 	_ = RegistryIntegration{
-		Name: r.Name, Path: r.Path,
-		Version: r.Version, Description: r.Description,
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Path: r.Path,
+		Version: r.Version, SHA256: r.SHA256, TarballSHA: r.TarballSHA, Description: r.Description,
 	}
 }
 
 func assertIntegrationFromPort() {
 	var p RegistryIntegration
 	_ = registry.IntegrationInfo{
-		Name: p.Name, Path: p.Path,
-		Version: p.Version, Description: p.Description,
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Path: p.Path,
+		Version: p.Version, SHA256: p.SHA256, TarballSHA: p.TarballSHA, Description: p.Description,
 	}
 }
 
@@ -453,7 +470,7 @@ func assertToolchainToPort() {
 	var r registry.ToolchainInfo
 	_ = RegistryToolchain{
 		Path: r.Path, Version: r.Version,
-		UpstreamVersion: r.UpstreamVersion,
+		UpstreamVersion: r.UpstreamVersion, TarballSHA: r.TarballSHA,
 	}
 }
 
@@ -461,7 +478,7 @@ func assertToolchainFromPort() {
 	var p RegistryToolchain
 	_ = registry.ToolchainInfo{
 		Path: p.Path, Version: p.Version,
-		UpstreamVersion: p.UpstreamVersion,
+		UpstreamVersion: p.UpstreamVersion, TarballSHA: p.TarballSHA,
 	}
 }
 
@@ -489,7 +506,7 @@ func assertFlashRegionToPort() {
 	var r manifest.FlashRegion
 	_ = HardwareFlashRegion{
 		Type: r.Type, Base: r.Base, Size: r.Size,
-		SectorSize: r.SectorSize, Count: r.Count, Name: r.Name,
+		SectorSize: r.SectorSize, Count: r.Count, Name: r.Name, Description: r.Description,
 	}
 }
 
@@ -497,11 +514,9 @@ func assertFlashRegionFromPort() {
 	var p HardwareFlashRegion
 	_ = manifest.FlashRegion{
 		Type: p.Type, Base: p.Base, Size: p.Size,
-		SectorSize: p.SectorSize, Count: p.Count, Name: p.Name,
+		SectorSize: p.SectorSize, Count: p.Count, Name: p.Name, Description: p.Description,
 	}
 }
-
-
 
 // --- registry.MatrixDependencies ↔ MatrixDependencies ---
 
@@ -602,16 +617,74 @@ func assertLockToolchainFromPort() {
 func assertDriverManifestToPort() {
 	var r manifest.DriverManifest
 	_ = DriverManifest{
-		Name: r.Name, Author: r.Author, Version: r.Version, Description: r.Description,
-		Trait: r.Trait, AbiVersion: r.AbiVersion, Headers: r.Headers, Symbols: r.Symbols,
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Version: r.Version, Description: r.Description,
+		Trait: r.Trait, AbiVersion: r.AbiVersion, ExecModel: r.ExecModel, IsHardwareTRNG: r.IsHardwareTRNG,
+		Headers: r.Headers, Sources: r.Sources, MockSources: r.MockSources, Symbols: r.Symbols,
 	}
 }
 
 func assertDriverManifestFromPort() {
 	var p DriverManifest
 	_ = manifest.DriverManifest{
-		Name: p.Name, Author: p.Author, Version: p.Version, Description: p.Description,
-		Trait: p.Trait, AbiVersion: p.AbiVersion, Headers: p.Headers, Symbols: p.Symbols,
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Version: p.Version, Description: p.Description,
+		Trait: p.Trait, AbiVersion: p.AbiVersion, ExecModel: p.ExecModel, IsHardwareTRNG: p.IsHardwareTRNG,
+		Headers: p.Headers, Sources: p.Sources, MockSources: p.MockSources, Symbols: p.Symbols,
+	}
+}
+
+func assertCryptoFootprintToPort() {
+	var r manifest.CryptoFootprint
+	_ = CryptoFootprint{FlashBytes: r.FlashBytes, RamBytes: r.RamBytes}
+}
+
+func assertCryptoFootprintFromPort() {
+	var p CryptoFootprint
+	_ = manifest.CryptoFootprint{FlashBytes: p.FlashBytes, RamBytes: p.RamBytes}
+}
+
+func assertCryptoManifestToPort() {
+	var r manifest.CryptoManifest
+	var fp *CryptoFootprint
+	if r.Footprint != nil {
+		fp = &CryptoFootprint{FlashBytes: r.Footprint.FlashBytes, RamBytes: r.Footprint.RamBytes}
+	}
+	_ = CryptoManifest{
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Version: r.Version, Description: r.Description,
+		AbiVersion: r.AbiVersion, Category: r.Category, License: r.License, MinCoreSdk: r.MinCoreSdk,
+		Wrapper: r.Wrapper, UpstreamSources: r.UpstreamSources, Headers: r.Headers, Symbols: r.Symbols,
+		Cflags: r.Cflags, Includes: r.Includes, ChipBinding: r.ChipBinding,
+		HasHwAcceleration: r.HasHwAcceleration, Footprint: fp,
+	}
+}
+
+func assertCryptoManifestFromPort() {
+	var p CryptoManifest
+	var fp *manifest.CryptoFootprint
+	if p.Footprint != nil {
+		fp = &manifest.CryptoFootprint{FlashBytes: p.Footprint.FlashBytes, RamBytes: p.Footprint.RamBytes}
+	}
+	_ = manifest.CryptoManifest{
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Version: p.Version, Description: p.Description,
+		AbiVersion: p.AbiVersion, Category: p.Category, License: p.License, MinCoreSdk: p.MinCoreSdk,
+		Wrapper: p.Wrapper, UpstreamSources: p.UpstreamSources, Headers: p.Headers, Symbols: p.Symbols,
+		Cflags: p.Cflags, Includes: p.Includes, ChipBinding: p.ChipBinding,
+		HasHwAcceleration: p.HasHwAcceleration, Footprint: fp,
+	}
+}
+
+func assertArchManifestToPort() {
+	var r manifest.ArchManifest
+	_ = ArchManifest{
+		Name: r.Name, Author: r.Author, Tier: r.Tier, Version: r.Version, Description: r.Description,
+		Headers: r.Headers, Sources: r.Sources, Symbols: r.Symbols, RequiredMacros: r.RequiredMacros,
+	}
+}
+
+func assertArchManifestFromPort() {
+	var p ArchManifest
+	_ = manifest.ArchManifest{
+		Name: p.Name, Author: p.Author, Tier: p.Tier, Version: p.Version, Description: p.Description,
+		Headers: p.Headers, Sources: p.Sources, Symbols: p.Symbols, RequiredMacros: p.RequiredMacros,
 	}
 }
 
@@ -639,17 +712,35 @@ func assertHardwareJSON() {
 	_ = [2]uint32{r.Flash.Size, p.Flash.Size}
 	_ = [2]uint32{r.Flash.WriteAlignment, p.Flash.WriteAlignment}
 	_ = [2]uint32{r.Flash.AppAlignment, p.Flash.AppAlignment}
+	_ = [2]uint32{uint32(r.Flash.Base), p.Flash.Base}
 	_ = [2]string{r.Flash.BaseAddr, p.Flash.BaseAddr}
 	_ = [2]string{r.Flash.XipBase, p.Flash.XipBase}
+	_ = [2]uint32{r.Flash.VtorAlignment, p.Flash.VtorAlignment}
+	_ = [2]uint32{r.Flash.ImageHeaderOffset, p.Flash.ImageHeaderOffset}
+	_ = [2]uint32{r.Flash.EraseTimeUsMax, p.Flash.EraseTimeUsMax}
+	_ = [2]uint32{r.Flash.WriteTimeUsPage, p.Flash.WriteTimeUsPage}
+	_ = [2]string{r.Flash.Stage0ExecMode, p.Flash.Stage0ExecMode}
+	_ = [2]string{r.Flash.EntrySymbol, p.Flash.EntrySymbol}
 	_ = [2]uint32{r.CryptoCapabilities.ArenaSize, p.CryptoCapabilities.ArenaSize}
 	_ = [2]string{r.Memory.IramBase, p.Memory.IRAMBase}
 	_ = [2]string{r.Memory.IramSize, p.Memory.IRAMSize}
+	_ = [2]string{r.Memory.SramBase, p.Memory.SRAMBase}
+	_ = [2]string{r.Memory.SramSize, p.Memory.SRAMSize}
+	_ = [2]string{r.Memory.LpRamBase, p.Memory.LPRAMBase}
+	_ = [2]string{r.Memory.LpRamSize, p.Memory.LPRAMSize}
+	_ = [2]uint32{r.Memory.VtorAlignment, p.Memory.VtorAlignment}
+	_ = [2]uint32{r.Memory.ImageHeaderOffset, p.Memory.ImageHeaderOffset}
 
 	if r.Provenance != nil {
 		_ = Provenance{Source: r.Provenance.Source, Ref: r.Provenance.Ref, Verified: r.Provenance.Verified}
 	}
 	if p.Provenance != nil {
 		_ = manifest.Provenance{Source: p.Provenance.Source, Ref: p.Provenance.Ref, Verified: p.Provenance.Verified}
+	}
+	if r.BootromImage != nil && p.BootromImage != nil {
+		_ = [2]string{r.BootromImage.Extends, p.BootromImage.Extends}
+		_ = [2]string{r.BootromImage.Layout, p.BootromImage.Layout}
+		_ = [2]int{r.BootromImage.MinSize, p.BootromImage.MinSize}
 	}
 }
 
@@ -661,10 +752,17 @@ func assertDeviceToml() {
 
 	_ = [2]string{r.Name, p.Name}
 	_ = [2]string{r.Version, p.Version}
+	_ = [2]uint16{r.Identity.VendorID, p.Identity.VendorID}
+	_ = [2]uint16{r.Identity.ProductID, p.Identity.ProductID}
+	_ = [2]uint16{r.Identity.HwRev, p.Identity.HwRev}
 	_ = [2]string{r.Device.Chip, p.Device.Chip}
 	_ = [2]string{r.Build.Compiler, p.Build.Compiler}
 	_ = [2]string{r.Build.CoreSDK, p.Build.CoreSDK}
 	_ = [2]string{r.Build.Registry, p.Build.Registry}
+	_ = [2]string{r.Build.Profile, p.Build.Profile}
+	_ = [2][]string{r.Build.Mock, p.Build.Mock}
+	_ = [2]map[string]string{r.Drivers, p.Drivers}
+	_ = [2]map[string]any{r.DriverConfig, p.DriverConfig}
 	_ = [2]uint32{r.Partitions.Stage0Size, p.Partitions.Stage0Size}
 	_ = [2]uint32{r.Partitions.Stage1Size, p.Partitions.Stage1Size}
 	_ = [2]uint32{r.Partitions.AppSize, p.Partitions.AppSize}
@@ -672,14 +770,24 @@ func assertDeviceToml() {
 	_ = [2]uint32{r.Partitions.RecoverySize, p.Partitions.RecoverySize}
 	_ = [2]uint32{r.Partitions.NetcoreSize, p.Partitions.NetcoreSize}
 	_ = [2]uint32{r.Partitions.WalSectors, p.Partitions.WALSectors}
-	_ = [2]uint32{r.Partitions.StagingSlotID, p.Partitions.StagingSlotID}
+	if r.Partitions.StagingSlotID != nil {
+		_ = [2]uint32{*r.Partitions.StagingSlotID, p.Partitions.StagingSlotID}
+	}
 	_ = [2]bool{r.Partitions.EnableDeltas, p.Partitions.EnableDeltas}
 	_ = [2]uint32{r.BootConfig.MaxRetries, p.BootConfig.MaxRetries}
 	_ = [2]uint32{r.BootConfig.MaxRecoveryRetries, p.BootConfig.MaxRecoveryRetries}
 	_ = [2]bool{r.BootConfig.EdgeUnattendedMode, p.BootConfig.EdgeUnattendedMode}
 	_ = [2]uint32{r.BootConfig.BackoffBaseS, p.BootConfig.BackoffBaseS}
 	_ = [2]uint32{r.BootConfig.WdtTimeoutMs, p.BootConfig.WDTTimeoutMs}
+	_ = [2]uint32{r.BootConfig.Stage1Svn, p.BootConfig.Stage1SVN}
+	_ = [2]uint32{r.BootConfig.CryptoArenaSize, p.BootConfig.CryptoArenaSize}
 	_ = [2]string{r.BootConfig.TransportProvider, p.BootConfig.TransportProvider}
+	_ = [2]string{r.BootConfig.BackupMode, p.BootConfig.BackupMode}
+	_ = [2]*bool{r.Features.CloudCommands, p.Features.CloudCommands}
+	_ = [2]*bool{r.Features.UartProvisioning, p.Features.UartProvisioning}
+	_ = [2]*bool{r.Features.MultiImage, p.Features.MultiImage}
+	_ = [2]*bool{r.Features.Delta, p.Features.Delta}
+	_ = [2]*bool{r.Features.Compression, p.Features.Compression}
 	_ = [2]string{r.Crypto.Backend, p.Crypto.Backend}
 	_ = [2]string{r.Crypto.Hash, p.Crypto.Hash}
 	_ = [2]string{r.Crypto.Pqc, p.Crypto.Pqc}
@@ -688,11 +796,17 @@ func assertDeviceToml() {
 func assertChipManifest() {
 	var r manifest.ChipManifest
 	var p ChipManifest
+	_ = [2]string{r.Name, p.Name}
+	_ = [2]string{r.Author, p.Author}
+	_ = [2]string{r.Tier, p.Tier}
 	_ = [2]string{r.Arch, p.Arch}
 	_ = [2]string{r.CompilerPrefix, p.CompilerPrefix}
+	_ = [2]string{r.Description, p.Description}
 	_ = [2]string{r.Version, p.Version}
 	_ = [2]string{r.MinCoreSDK, p.MinCoreSDK}
 	_ = [2]string{r.MinCompiler, p.MinCompiler}
+	_ = [2]string{r.Stage0ExecMode, p.Stage0ExecMode}
+	_ = [2]string{r.EntrySymbol, p.EntrySymbol}
 }
 
 func assertSlotCapabilities() {

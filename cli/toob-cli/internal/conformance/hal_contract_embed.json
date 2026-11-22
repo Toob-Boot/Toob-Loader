@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "platform_struct_type": "boot_platform_t",
+  "platform_init_symbol": "boot_platform_init",
+  "bringup_function": "boot_platform_bringup",
+  "bringup_step_type": "bringup_step_t",
+  "core_headers": [
+    "chip_config.h",
+    "generated_boot_config.h",
+    "boot_hal.h",
+    "boot_panic.h",
+    "boot_platform_bringup.h"
+  ],
+  "arch": {
+    "required_symbols": [
+      "disable_interrupts",
+      "timer_init",
+      "get_tick_ms",
+      "delay_ms"
+    ],
+    "base_required_macros": [
+      "CHIP_CPU_FREQ_HZ"
+    ],
+    "entry_irq_disable_symbol": "disable_interrupts"
+  },
+  "traits": [
+    {
+      "name": "flash",
+      "platform_field": "flash",
+      "binding_mode": "struct",
+      "struct_type": "flash_hal_t",
+      "abi_version": "v2",
+      "abi_constant": "TOOB_HAL_ABI_V2",
+      "optional": false,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["flash"],
+      "methods": [
+        { "field": "init",                  "source": "driver", "key": "init",             "required": true },
+        { "field": "deinit",                "source": "driver", "key": "deinit",           "required": true },
+        { "field": "read",                  "source": "driver", "key": "read",             "required": true },
+        { "field": "write",                 "source": "driver", "key": "write",            "required": true },
+        { "field": "erase_sector",          "source": "driver", "key": "erase_sector",     "required": true },
+        { "field": "get_sector_size",       "source": "driver", "key": "get_sector_size",  "required": true },
+        { "field": "set_otfdec_mode",       "source": "driver", "key": "set_otfdec_mode",  "required": false },
+        { "field": "get_last_vendor_error", "source": "driver", "key": "get_vendor_error", "required": true },
+        { "field": "get_supply_mv",         "source": "driver", "key": "get_supply_mv",    "required": false }
+      ],
+      "properties": [
+        { "field": "max_sector_size",    "source": "macro",                  "expr": "CHIP_FLASH_MAX_SECTOR_SIZE" },
+        { "field": "total_size",         "source": "macro",                  "expr": "CHIP_FLASH_TOTAL_SIZE" },
+        { "field": "max_erase_cycles",   "source": "flash_max_erase_cycles", "default": "100000U" },
+        { "field": "write_align",        "source": "macro",                  "expr": "CHIP_FLASH_WRITE_ALIGNMENT" },
+        { "field": "erased_value",       "source": "macro",                  "expr": "CHIP_FLASH_ERASED_BYTE" },
+        { "field": "erase_time_us_max",  "source": "flash_timing_us",        "hw_key": "erase_time_us_max",  "chip_macro": "CHIP_FLASH_SECTOR_ERASE_TIME_MAX_US", "default": "0U" },
+        { "field": "write_time_us_page", "source": "flash_timing_us",        "hw_key": "write_time_us_page", "chip_macro": "CHIP_FLASH_PAGE_PROG_TIME_MAX_US",    "default": "0U" }
+      ]
+    },
+    {
+      "name": "confirm",
+      "platform_field": "confirm",
+      "binding_mode": "struct",
+      "struct_type": "confirm_hal_t",
+      "abi_version": "v2",
+      "abi_constant": "TOOB_HAL_ABI_V2",
+      "optional": false,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["confirm", "rtc"],
+      "guard": "!defined(TOOB_STAGE0_BUILD) && !defined(TOOB_RECOVERY_BUILD)",
+      "methods": [
+        { "field": "init",     "source": "driver", "key": "init",     "required": true },
+        { "field": "deinit",   "source": "driver", "key": "deinit",   "required": true },
+        { "field": "check_ok", "source": "driver", "key": "check_ok", "required": true },
+        { "field": "clear",    "source": "driver", "key": "clear",    "required": true }
+      ]
+    },
+    {
+      "name": "crypto",
+      "platform_field": "crypto",
+      "binding_mode": "struct",
+      "struct_type": "crypto_hal_t",
+      "abi_version": "v3",
+      "abi_constant": "TOOB_HAL_ABI_V3",
+      "optional": false,
+      "instantiate_when": "always",
+      "methods": [
+        { "field": "init",                  "source": "crypto", "crypto_category": "backend", "key": "init",                  "required": true,  "guard": "!defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)" },
+        { "field": "deinit",                "source": "crypto", "crypto_category": "backend", "key": "deinit",                "required": true,  "guard": "!defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)" },
+        { "field": "hash_init",             "source": "crypto", "crypto_category": "hash",    "key": "hash_init",             "required": true,  "guard": "!defined(TOOB_RECOVERY_HASH_NONE)" },
+        { "field": "hash_update",           "source": "crypto", "crypto_category": "hash",    "key": "hash_update",           "required": true,  "guard": "!defined(TOOB_RECOVERY_HASH_NONE)" },
+        { "field": "hash_finish",           "source": "crypto", "crypto_category": "hash",    "key": "hash_finish",           "required": true,  "guard": "!defined(TOOB_RECOVERY_HASH_NONE)" },
+        { "field": "verify_signature",      "source": "crypto", "crypto_category": "backend", "key": "verify_signature",      "required": true,  "guard": "!defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)" },
+        { "field": "verify_pqc",            "source": "crypto", "crypto_category": "pqc",     "key": "verify_pqc",            "required": true,  "guard": "!defined(TOOB_STAGE0_BUILD) && !defined(TOOB_RECOVERY_BUILD) && !defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)" },
+        { "field": "get_last_vendor_error", "source": "crypto", "crypto_category": "backend", "key": "get_last_vendor_error", "required": false, "guard": "!defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)" },
+        { "field": "get_hash_ctx_size",     "source": "crypto", "crypto_category": "hash",    "key": "get_hash_ctx_size",     "required": true,  "guard": "!defined(TOOB_RECOVERY_HASH_NONE)" },
+        { "field": "is_pqc_enforced",       "source": "crypto", "crypto_category": "pqc",     "key": "is_pqc_enforced",       "required": false, "guard": "!defined(TOOB_STAGE0_BUILD) && !defined(TOOB_RECOVERY_BUILD) && !defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)" },
+        { "field": "verify_signature_ph",   "source": "crypto", "crypto_category": "backend", "key": "verify_signature_ph",   "required": false, "guard": "defined(TOOB_ENABLE_ED25519_PH) && !defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)" }
+      ],
+      "properties": [
+        { "field": "has_hw_acceleration", "source": "crypto_bool", "key": "has_hw_acceleration", "default": "false" }
+      ]
+    },
+    {
+      "name": "clock",
+      "platform_field": "clock",
+      "binding_mode": "struct",
+      "struct_type": "clock_hal_t",
+      "abi_version": "v2",
+      "abi_constant": "TOOB_HAL_ABI_V2",
+      "optional": false,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["clock"],
+      "methods": [
+        { "field": "init",             "source": "arch_timer_init_adapter", "key": "timer_init",       "arg_macro": "CHIP_CPU_FREQ_HZ", "driver_override_key": "init",   "required": true },
+        { "field": "deinit",           "source": "noop_void_adapter",       "driver_override_key": "deinit",                            "required": true },
+        { "field": "get_tick_ms",      "source": "arch",                    "key": "get_tick_ms",                                       "required": true },
+        { "field": "delay_ms",         "source": "arch",                    "key": "delay_ms",                                          "required": true },
+        { "field": "get_reset_reason", "source": "driver",                  "key": "get_reset_reason",                                  "required": true }
+      ]
+    },
+    {
+      "name": "wdt",
+      "platform_field": "wdt",
+      "binding_mode": "struct",
+      "struct_type": "wdt_hal_t",
+      "abi_version": "v2",
+      "abi_constant": "TOOB_HAL_ABI_V2",
+      "optional": false,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["wdt"],
+      "methods": [
+        { "field": "init",                         "source": "driver", "key": "init",    "required": true },
+        { "field": "deinit",                       "source": "driver", "key": "deinit",  "required": true },
+        { "field": "kick",                         "source": "driver", "key": "kick",    "required": true },
+        { "field": "suspend_for_critical_section", "source": "driver", "key": "suspend", "required": true },
+        { "field": "resume",                       "source": "driver", "key": "resume",  "required": true }
+      ]
+    },
+    {
+      "name": "console",
+      "platform_field": "console",
+      "binding_mode": "struct",
+      "struct_type": "console_hal_t",
+      "abi_version": "v2",
+      "abi_constant": "TOOB_HAL_ABI_V2",
+      "optional": true,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["console", "uart"],
+      "methods": [
+        { "field": "init",    "source": "driver", "key": "init",    "required": true },
+        { "field": "deinit",  "source": "driver", "key": "deinit",  "required": true },
+        { "field": "putchar", "source": "driver", "key": "putchar", "required": true },
+        { "field": "getchar", "source": "driver", "key": "getchar", "required": true },
+        { "field": "flush",   "source": "driver", "key": "flush",   "required": true }
+      ]
+    },
+    {
+      "name": "soc",
+      "platform_field": "soc",
+      "binding_mode": "struct",
+      "struct_type": "soc_hal_t",
+      "abi_version": "v2",
+      "abi_constant": "TOOB_HAL_ABI_V2",
+      "optional": true,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["soc"],
+      "require_any_method": true,
+      "guard": "!defined(TOOB_RECOVERY_BUILD)",
+      "methods": [
+        { "field": "init",                         "source": "driver", "key": "init",                         "required": true },
+        { "field": "deinit",                       "source": "driver", "key": "deinit",                       "required": true },
+        { "field": "battery_level_mv",             "source": "driver", "key": "battery_level_mv",             "required": false },
+        { "field": "can_sustain_update",           "source": "driver", "key": "can_sustain_update",           "required": false },
+        { "field": "enter_low_power",              "source": "driver", "key": "enter_low_power",              "required": false },
+        { "field": "assert_secondary_cores_reset", "source": "driver", "key": "assert_secondary_cores_reset", "required": true },
+        { "field": "flush_bus_matrix",             "source": "driver", "key": "flush_bus_matrix",             "required": true },
+        { "field": "invalidate_icache",            "source": "driver", "key": "invalidate_icache",            "required": false },
+        { "field": "disable_interrupts",           "source": "driver", "key": "disable_interrupts",           "required": false },
+        { "field": "get_recovery_pin_state",       "source": "driver", "key": "get_recovery_pin_state",       "required": false },
+        { "field": "read_rtc_backup",              "source": "driver", "key": "read_rtc_backup",              "required": false },
+        { "field": "write_rtc_backup",             "source": "driver", "key": "write_rtc_backup",             "required": false },
+        { "field": "swap_notify",                  "source": "driver", "key": "swap_notify",                  "required": false },
+        { "field": "lockdown_before_handoff",      "source": "driver", "key": "lockdown_before_handoff",      "required": false }
+      ],
+      "properties": [
+        { "field": "min_battery_mv", "source": "hardware_uint", "hw_key": "min_battery_mv", "default": "0U" }
+      ]
+    },
+    {
+      "name": "provisioning",
+      "platform_field": "provisioning",
+      "binding_mode": "struct",
+      "struct_type": "provisioning_hal_t",
+      "abi_version": "v3",
+      "abi_constant": "TOOB_HAL_ABI_V3",
+      "optional": true,
+      "instantiate_when": "any_method_bound",
+      "driver_traits": ["provisioning", "keystore"],
+      "guard": "!defined(TOOB_STAGE0_BUILD) && !defined(TOOB_RECOVERY_BUILD) && (!defined(TOOB_FEATURE_UART_PROVISIONING) || TOOB_FEATURE_UART_PROVISIONING)",
+      "methods": [
+        { "field": "burn_pubkey",             "source": "driver", "key": "burn_pubkey",             "required": false },
+        { "field": "write_dslc",              "source": "driver", "key": "write_dslc",              "required": false },
+        { "field": "set_protection_bits",     "source": "driver", "key": "set_protection_bits",     "required": false },
+        { "field": "enable_secure_boot",      "source": "driver", "key": "enable_secure_boot",      "required": false },
+        { "field": "enable_flash_encryption", "source": "driver", "key": "enable_flash_encryption", "required": false },
+        { "field": "lock_immutable_flash",    "source": "driver", "key": "lock_immutable_flash",    "required": false, "driver_traits": ["provisioning", "flash", "keystore"] }
+      ]
+    },
+    {
+      "name": "slot_caps",
+      "platform_field": "slot_caps",
+      "binding_mode": "symbol_pointer",
+      "abi_version": "v2",
+      "optional": true,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["slot_caps", "slot"],
+      "symbol_key": "slot_caps",
+      "guard": "!defined(TOOB_STAGE0_BUILD) && !defined(TOOB_RECOVERY_BUILD)"
+    },
+    {
+      "name": "entropy",
+      "platform_field": "entropy",
+      "binding_mode": "struct",
+      "struct_type": "entropy_hal_t",
+      "abi_version": "v3",
+      "abi_constant": "TOOB_HAL_ABI_V3",
+      "optional": false,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["entropy"],
+      "guard": "!defined(TOOB_RECOVERY_BUILD)",
+      "methods": [
+        { "field": "init",   "source": "driver", "key": "init",   "required": false },
+        { "field": "deinit", "source": "driver", "key": "deinit", "required": false },
+        { "field": "random", "source": "driver", "key": "random", "required": true }
+      ],
+      "properties": [
+        { "field": "is_hardware_trng", "source": "driver_bool", "key": "is_hardware_trng", "default": "false" }
+      ]
+    },
+    {
+      "name": "keystore",
+      "platform_field": "keystore",
+      "binding_mode": "struct",
+      "struct_type": "keystore_hal_t",
+      "abi_version": "v3",
+      "abi_constant": "TOOB_HAL_ABI_V3",
+      "optional": false,
+      "instantiate_when": "driver_bound",
+      "driver_traits": ["keystore"],
+      "guard": "!defined(TOOB_RECOVERY_BUILD)",
+      "methods": [
+        { "field": "init",                      "source": "driver", "key": "init",                    "required": false },
+        { "field": "deinit",                    "source": "driver", "key": "deinit",                  "required": false },
+        { "field": "read_pubkey",               "source": "driver", "key": "read_pubkey",             "required": true },
+        { "field": "read_chip_uid",             "source": "driver", "key": "read_chip_uid",           "required": false },
+        { "field": "read_dslc",                 "source": "driver", "key": "read_dslc",               "required": true },
+        { "field": "write_dslc",                "source": "driver", "key": "write_dslc",              "required": true,  "guard": "!defined(TOOB_STAGE0_BUILD)" },
+        { "field": "read_monotonic_counter",    "source": "driver", "key": "read_monotonic",          "required": true },
+        { "field": "advance_monotonic_counter", "source": "driver", "key": "advance_monotonic",       "required": true },
+        { "field": "burn_pubkey",               "source": "driver", "key": "burn_pubkey",             "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" },
+        { "field": "set_protection_bits",       "source": "driver", "key": "set_protection_bits",     "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" },
+        { "field": "enable_secure_boot",        "source": "driver", "key": "enable_secure_boot",      "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" },
+        { "field": "enable_flash_encryption",   "source": "driver", "key": "enable_flash_encryption", "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" }
+      ]
+    }
+  ],
+  "bringup_steps": [
+    { "trait": "clock",    "kind_enum": "BOOT_HAL_KIND_CLOCK",    "mandatory": true,  "panic_site": "SITE_BRINGUP_CLOCK",   "condition": "always" },
+    { "trait": "flash",    "kind_enum": "BOOT_HAL_KIND_FLASH",    "mandatory": true,  "panic_site": "SITE_BRINGUP_FLASH",   "condition": "always" },
+    { "trait": "wdt",      "kind_enum": "BOOT_HAL_KIND_WDT",      "mandatory": true,  "panic_site": "SITE_BRINGUP_WDT",     "condition": "always" },
+    { "trait": "keystore", "kind_enum": "BOOT_HAL_KIND_KEYSTORE", "mandatory": true,  "panic_site": "SITE_BRINGUP_CRYPTO",  "condition": "init_bound" },
+    { "trait": "entropy",  "kind_enum": "BOOT_HAL_KIND_ENTROPY",  "mandatory": true,  "panic_site": "SITE_BRINGUP_CRYPTO",  "condition": "init_bound" },
+    { "trait": "crypto",   "kind_enum": "BOOT_HAL_KIND_CRYPTO",   "mandatory": true,  "panic_site": "SITE_BRINGUP_CRYPTO",  "condition": "always" },
+    { "trait": "confirm",  "kind_enum": "BOOT_HAL_KIND_CONFIRM",  "mandatory": true,  "panic_site": "SITE_BRINGUP_CONFIRM", "condition": "trait_bound" },
+    { "trait": "console",  "kind_enum": "BOOT_HAL_KIND_CONSOLE",  "mandatory": false, "panic_site": "0",                    "condition": "trait_bound" },
+    { "trait": "soc",      "kind_enum": "BOOT_HAL_KIND_SOC",      "mandatory": true,  "panic_site": "SITE_BRINGUP_CLOCK",   "condition": "init_bound" }
+  ]
+}
+

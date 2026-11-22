@@ -13,19 +13,19 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/toob-boot/toob/internal/httputil"
 )
 
-// PKCE is the proof a client keeps to itself until it redeems its code.
+// PKCE holds a proof-key verifier and its S256 challenge (RFC 7636).
 type PKCE struct {
 	Verifier  string
 	Challenge string
 }
 
-// NewPKCE generates a verifier and its S256 challenge (RFC 7636).
-//
-// 32 random bytes, base64url without padding: 43 characters, which is the shortest the RFC permits
-// and already 256 bits of entropy.
+// NewPKCE generates a 256-bit verifier and its S256 challenge (RFC 7636).
 func NewPKCE() (PKCE, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -37,24 +37,16 @@ func NewPKCE() (PKCE, error) {
 	return PKCE{Verifier: verifier, Challenge: base64.RawURLEncoding.EncodeToString(sum[:])}, nil
 }
 
-// newState returns an unguessable value tying a callback to the request that started it.
 func newState() (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generating a login state: %w", err)
 	}
-
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-// BrowserLogin is an authorization code exchange with PKCE, answered on the loopback interface.
-//
-// The redirect goes to 127.0.0.1 on a port the operating system picks (RFC 8252). A fixed port would
-// fail whenever something else held it, and — more to the point — a port is not a secret: what makes
-// the callback trustworthy is the state value and the fact that only this process holds the PKCE
-// verifier.
+// BrowserLogin runs an OAuth2 authorization-code exchange with PKCE on a loopback port.
 type BrowserLogin struct {
-	// AuthorizationURL is where the person has to be sent.
 	AuthorizationURL string
 
 	provider *Provider
@@ -63,6 +55,8 @@ type BrowserLogin struct {
 	state    string
 	redirect string
 	listener net.Listener
+	server   *http.Server
+	sendOnce sync.Once
 	results  chan callbackResult
 }
 
@@ -71,23 +65,18 @@ type callbackResult struct {
 	err  error
 }
 
-// StepUp is what a service asked for when it refused an operation with an RFC 9470 challenge: an
-// authentication no older than MaxAge, performed with the context ACRValues names.
+// StepUp specifies RFC 9470 step-up authentication constraints.
 type StepUp struct {
 	ACRValues string
 	MaxAge    time.Duration
 }
 
-// StartBrowserLogin opens the loopback listener and builds the URL to send the person to. The caller
-// opens a browser, prints the URL, or both, and then calls Wait.
+// StartBrowserLogin opens the loopback listener and builds the authorization URL.
 func StartBrowserLogin(provider *Provider, clientID, audience string, scopes []string) (*BrowserLogin, error) {
 	return startBrowserLogin(provider, clientID, audience, scopes, nil)
 }
 
-// StartBrowserStepUp is StartBrowserLogin for a person who is already signed in and has been asked
-// to prove it again. The provider is told to prompt regardless of its session (prompt=login) and
-// what the ceremony has to satisfy, so that a cached session cannot answer a challenge that exists
-// precisely because a cached session is not enough.
+// StartBrowserStepUp starts a browser login forcing re-authentication for step-up challenges.
 func StartBrowserStepUp(provider *Provider, clientID, audience string, scopes []string, stepUp StepUp) (*BrowserLogin, error) {
 	return startBrowserLogin(provider, clientID, audience, scopes, &stepUp)
 }
@@ -95,6 +84,13 @@ func StartBrowserStepUp(provider *Provider, clientID, audience string, scopes []
 func startBrowserLogin(provider *Provider, clientID, audience string, scopes []string, stepUp *StepUp) (*BrowserLogin, error) {
 	if !provider.SupportsS256() {
 		return nil, errors.New("the identity provider does not offer PKCE with S256, and this client will not log in without it")
+	}
+	if strings.TrimSpace(provider.AuthorizationEndpoint) == "" {
+		return nil, errors.New("the identity provider publishes no authorization endpoint")
+	}
+	authURL, err := httputil.ValidateHTTPSOrLoopbackURL(provider.AuthorizationEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid authorization endpoint: %w", err)
 	}
 
 	pkce, err := NewPKCE()
@@ -106,33 +102,38 @@ func startBrowserLogin(provider *Provider, clientID, audience string, scopes []s
 		return nil, err
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	listener, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("opening a local port for the login callback: %w", err)
 	}
+	tcpAddr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = listener.Close()
+		return nil, errors.New("loopback listener did not bind a TCP address")
+	}
+
+	redirect := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(tcpAddr.Port)) + "/callback"
 
 	login := &BrowserLogin{
 		provider: provider,
 		clientID: clientID,
 		pkce:     pkce,
 		state:    state,
-		redirect: fmt.Sprintf("http://127.0.0.1:%d/callback", listener.Addr().(*net.TCPAddr).Port),
+		redirect: redirect,
 		listener: listener,
 		results:  make(chan callbackResult, 1),
 	}
 
-	query := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {clientID},
-		"redirect_uri":          {login.redirect},
-		"scope":                 {strings.Join(scopes, " ")},
-		"state":                 {state},
-		"code_challenge":        {pkce.Challenge},
-		"code_challenge_method": {"S256"},
-	}
+	query := authURL.Query()
+	query.Set("response_type", "code")
+	query.Set("client_id", clientID)
+	query.Set("redirect_uri", login.redirect)
+	query.Set("scope", strings.Join(scopes, " "))
+	query.Set("state", state)
+	query.Set("code_challenge", pkce.Challenge)
+	query.Set("code_challenge_method", "S256")
 	if audience != "" {
-		// Which resource the token is for. Without it an issuer may hand back a token that is valid
-		// for its own userinfo endpoint and for nothing else, and the registry would reject it.
 		query.Set("audience", audience)
 	}
 	if stepUp != nil {
@@ -144,54 +145,79 @@ func startBrowserLogin(provider *Provider, clientID, audience string, scopes []s
 			query.Set("max_age", strconv.Itoa(int(stepUp.MaxAge.Seconds())))
 		}
 	}
-	login.AuthorizationURL = provider.AuthorizationEndpoint + "?" + query.Encode()
+	authURL.RawQuery = query.Encode()
+	login.AuthorizationURL = authURL.String()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", login.handleCallback)
+	login.server = &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       5 * time.Second,
+	}
 
 	go login.serve()
 
 	return login, nil
 }
 
-// Redirect is the address the identity provider will send the person back to.
+// Redirect returns the loopback callback URI.
 func (l *BrowserLogin) Redirect() string { return l.redirect }
 
-// Close releases the loopback listener. Safe to call more than once.
-func (l *BrowserLogin) Close() { _ = l.listener.Close() }
-
-func (l *BrowserLogin) serve() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		query := r.URL.Query()
-
-		// Constant time, because this compares a secret the browser carries against one held here.
-		if subtle.ConstantTimeCompare([]byte(query.Get("state")), []byte(l.state)) != 1 {
-			http.Error(w, "This callback does not belong to a login started here.", http.StatusBadRequest)
-			l.results <- callbackResult{err: errors.New("the login callback carried a state this client did not issue")}
-			return
-		}
-		if failure := query.Get("error"); failure != "" {
-			http.Error(w, "Login failed. You can close this tab.", http.StatusBadRequest)
-			l.results <- callbackResult{err: fmt.Errorf("%s: %s", failure, query.Get("error_description"))}
-			return
-		}
-
-		code := query.Get("code")
-		if code == "" {
-			http.Error(w, "Login failed. You can close this tab.", http.StatusBadRequest)
-			l.results <- callbackResult{err: errors.New("the identity provider returned no authorization code")}
-			return
-		}
-
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		// Deliberately plain, and served from the loopback: nothing here is fetched from a network.
-		_, _ = w.Write([]byte("<!doctype html><title>Signed in</title><p>You are signed in. You can close this tab and return to the terminal.</p>"))
-		l.results <- callbackResult{code: code}
-	})
-
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	_ = server.Serve(l.listener)
+// Close shuts down the loopback HTTP server and listener. Safe to call multiple times.
+func (l *BrowserLogin) Close() {
+	if l.server != nil {
+		_ = l.server.Close()
+	}
+	if l.listener != nil {
+		_ = l.listener.Close()
+	}
 }
 
-// Wait blocks until the person finishes in the browser, then redeems the code.
+func (l *BrowserLogin) deliver(res callbackResult) {
+	l.sendOnce.Do(func() {
+		l.results <- res
+	})
+}
+
+func (l *BrowserLogin) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed.", http.StatusMethodNotAllowed)
+		return
+	}
+
+	query := r.URL.Query()
+	// Reject mismatched state with 400 without aborting the active listener so
+	// unrelated browser prefetches or local probes cannot DoS an in-progress login.
+	if subtle.ConstantTimeCompare([]byte(query.Get("state")), []byte(l.state)) != 1 {
+		http.Error(w, "This callback does not belong to a login started here.", http.StatusBadRequest)
+		return
+	}
+	if failure := query.Get("error"); failure != "" {
+		http.Error(w, "Login failed. You can close this tab.", http.StatusBadRequest)
+		l.deliver(callbackResult{err: fmt.Errorf("%s: %s", failure, query.Get("error_description"))})
+		return
+	}
+
+	code := query.Get("code")
+	if code == "" {
+		http.Error(w, "Login failed. You can close this tab.", http.StatusBadRequest)
+		l.deliver(callbackResult{err: errors.New("the identity provider returned no authorization code")})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte("<!doctype html><title>Signed in</title><p>You are signed in. You can close this tab and return to the terminal.</p>"))
+	l.deliver(callbackResult{code: code})
+}
+
+func (l *BrowserLogin) serve() {
+	_ = l.server.Serve(l.listener)
+}
+
+// Wait blocks until the browser callback delivers a valid authorization code or ctx expires.
 func (l *BrowserLogin) Wait(ctx context.Context) (*Token, error) {
 	defer l.Close()
 

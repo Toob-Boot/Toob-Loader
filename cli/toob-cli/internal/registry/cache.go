@@ -1,208 +1,152 @@
-// Package registry manages the local shallow-clone of the toob-registry.
-//
-// BOUNDARY TYPES: Struct types in this file are mirrored in internal/ports/ports.go.
-// If you add, remove, or modify a struct field here, you MUST update ports.go
-// and the assertions in internal/ports/assertions.go accordingly.
 package registry
 
 import (
+	"cmp"
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/toob-boot/toob/internal/apiclient"
+	"github.com/toob-boot/toob/internal/archiveutil"
+	"github.com/toob-boot/toob/internal/filelock"
+	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/paths"
-	"github.com/toob-boot/toob/internal/ui"
 )
 
-// downloadTimeout is the timeout for tarball downloads, intentionally longer
-// than the API read timeout because tarballs transfer significantly more data.
-const downloadTimeout = 120 * time.Second
+const (
+	downloadTimeout  = 120 * time.Second
+	cacheLockTimeout = 60 * time.Second
+	emptyFileSHA256  = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+)
 
-type ChipSources struct {
-	Startup  string   `json:"startup"`
-	Platform string   `json:"platform"`
-	Config   string   `json:"config"`
-	Linker   string   `json:"linker"`
-	Hardware string   `json:"hardware"`
-	Drivers  []string `json:"drivers,omitempty"`
-	Extra    []string `json:"extra,omitempty"`
+var versionTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+
+func validateVersionToken(label, ver string) error {
+	if ver == "" {
+		return fmt.Errorf("%s must not be empty", label)
+	}
+	if strings.Contains(ver, "..") || !versionTokenPattern.MatchString(ver) {
+		return fmt.Errorf("invalid %s %q", label, ver)
+	}
+	return nil
 }
 
-// ChipInfo holds immutable metadata for a single chip.
-type ChipInfo struct {
-	Name             string       `json:"name"`
-	Arch             string       `json:"arch"`
-	CompilerPrefix   string       `json:"compiler_prefix"`
-	Path             string       `json:"path"`
-	Version          string       `json:"version"`
-	CliCompatibility string       `json:"cli_compatibility"`
-	Description      string       `json:"description,omitempty"`
-	Verified         bool         `json:"verified"`
-	Sources          *ChipSources `json:"sources,omitempty"`
-	Includes         []string     `json:"includes,omitempty"`
-	Crypto           *ChipCrypto   `json:"crypto,omitempty"`
-	Recovery         *ChipRecovery `json:"recovery,omitempty"`
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
-// ChipCrypto defines the default crypto package assignments for a chip.
-type ChipCrypto struct {
-	Backend string `json:"backend,omitempty"`
-	Hash    string `json:"hash,omitempty"`
-	Pqc     string `json:"pqc,omitempty"`
+func validateHexSHA256(label, digest string) (string, error) {
+	clean := strings.ToLower(strings.TrimSpace(digest))
+	if clean == "" {
+		return "", nil
+	}
+	decoded, err := hex.DecodeString(clean)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("invalid sha256 digest %q for %s", digest, label)
+	}
+	if clean == emptyFileSHA256 {
+		return "", fmt.Errorf("refusing placeholder empty-file sha256 digest for %s", label)
+	}
+	return clean, nil
 }
 
-type ChipRecovery struct {
-	Console  string          `json:"console"`
-	Flash    string          `json:"flash"`
-	WDT      string          `json:"wdt,omitempty"`
-	Clock    string          `json:"clock,omitempty"`
-	RTC      string          `json:"rtc,omitempty"`
-	Crypto   *RecoveryCrypto `json:"crypto,omitempty"`
-	Sources  []string        `json:"sources,omitempty"`
-	Includes []string        `json:"includes,omitempty"`
+// ParseFileURL parses a file:// URL into a native host path (handling Windows file:///C:/... cleanly).
+func ParseFileURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid file URL %q: %w", raw, err)
+	}
+	if u.Scheme != "file" {
+		return "", fmt.Errorf("expected file:// scheme in %q", raw)
+	}
+	if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
+		return "", fmt.Errorf("UNC/remote host %q in file URL %q is not supported", u.Host, raw)
+	}
+	p := u.Path
+	if runtime.GOOS == "windows" && len(p) >= 3 && p[0] == '/' &&
+		((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z')) && p[2] == ':' {
+		p = p[1:]
+	}
+	if p == "" {
+		return "", fmt.Errorf("empty path in file URL %q", raw)
+	}
+	return filepath.Clean(filepath.FromSlash(p)), nil
 }
 
-type RecoveryCrypto struct {
-	Backend string `json:"backend,omitempty"`
-	Hash    string `json:"hash,omitempty"`
-}
-
-// Removed VendorInfo
-
-type ArchInfo struct {
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	Version     string `json:"version"`
-	Description string `json:"description"`
-}
-
-type ToolchainInfo struct {
-	Path            string `json:"path"`
-	Version         string `json:"version"`
-	UpstreamVersion string `json:"upstream_version"`
-}
-
-type IntegrationInfo struct {
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	Version     string `json:"version"`
-	Description string `json:"description"`
-}
-
-// CryptoInfo holds metadata for a crypto package from registry.json.
-type CryptoInfo struct {
-	Name            string   `json:"name"`
-	Path            string   `json:"path"`
-	Version         string   `json:"version"`
-	Description     string   `json:"description,omitempty"`
-	Category        []string `json:"category"`
-	License         string   `json:"license,omitempty"`
-	MinCoreSdk      string   `json:"min_core_sdk,omitempty"`
-	Wrapper         *string  `json:"wrapper,omitempty"`
-	UpstreamSources []string `json:"upstream_sources,omitempty"`
-	Cflags          []string `json:"cflags,omitempty"`
-	Includes        []string `json:"includes,omitempty"`
-	ChipBinding     []string `json:"chip_binding,omitempty"`
-}
-
-// DriverInfo holds metadata for a driver from registry.json.
-type DriverInfo struct {
-	Name        string `json:"name"`
-	Path        string `json:"path"`
-	Version     string `json:"version"`
-	Description string `json:"description,omitempty"`
-	Category    string `json:"category,omitempty"`
-}
-
-// EcosystemVersions lists available versions of external tools.
-type EcosystemVersions struct {
-	CLI      []string `json:"cli"`
-	CoreSDK  []string `json:"core_sdk"`
-	Compiler []string `json:"compiler"`
-}
-
-// SoCInfo holds metadata for a SoC package from registry.json.
-type SoCInfo struct {
-	Name        string   `json:"name"`
-	Path        string   `json:"path"`
-	Version     string   `json:"version"`
-	Description string   `json:"description,omitempty"`
-	Chips       []string `json:"chips,omitempty"`
-}
-
-// Index is the parsed content of registry.json.
-type Index struct {
-	FormatVersion   int                        `json:"format_version"`
-	RegistryVersion string                     `json:"registry_version"`
-	Ecosystem       *EcosystemVersions         `json:"ecosystem,omitempty"`
-	Chips           map[string]ChipInfo        `json:"chips"`
-	Archs           map[string]ArchInfo        `json:"archs"`
-	Toolchains      map[string]ToolchainInfo   `json:"toolchains"`
-	Integrations    map[string]IntegrationInfo `json:"integrations"`
-	Drivers         map[string]DriverInfo      `json:"drivers"`
-	Crypto          map[string]CryptoInfo      `json:"crypto"`
-	SoCs            map[string]SoCInfo         `json:"socs,omitempty"`
-}
-
-type MatrixDependencies struct {
-	Toolchain string `json:"toolchain"`
-	Arch      string `json:"arch"`
-	Compiler  string `json:"compiler_container,omitempty"`
-	CoreSDK   string `json:"core_sdk,omitempty"`
-}
-
-type MatrixVerifiedCli struct {
-	Status     string `json:"status"`
-	LastTested string `json:"last_tested"`
-}
-
-type MatrixVersion struct {
-	EnvironmentHash     string                       `json:"environment_hash"`
-	Dependencies        MatrixDependencies           `json:"dependencies"`
-	VerifiedCliVersions map[string]MatrixVerifiedCli `json:"verified_cli_versions"`
-}
-
-type MatrixChip struct {
-	Versions map[string]MatrixVersion `json:"versions"`
-}
-
-type Matrix map[string]MatrixChip
-
-// Cache manages the local registry clone.
+// Cache manages the local package registry cache and remote synchronization.
 type Cache struct {
-	rootDir string // Always ~/.toob/registry/ (never changes)
-	dir     string // Active version directory (e.g. ~/.toob/registry/versions/main/)
+	rootDir string
+	dir     string
 	remote  string
-	index   *Index
+
+	mu    sync.Mutex
+	index *Index
 }
 
-// NewCache creates a cache at the default or given directory.
-// Automatically resolves the active version if one has been synced.
+// NewCache creates a Cache at the configured registry directory and optional remote override.
 func NewCache(remoteOverride string) *Cache {
-	rootDir, _ := paths.RegistryDir()
-	remote := paths.DefaultRegistryURL
-	if remoteOverride != "" {
-		remote = remoteOverride
+	rootDir, err := paths.RegistryDir()
+	if err != nil || rootDir == "" {
+		rootDir = filepath.Join(os.TempDir(), "toob-registry-fallback")
+	}
+
+	remote := ""
+	trimmedOverride := strings.TrimSpace(remoteOverride)
+	if trimmedOverride != "" {
+		clean := trimmedOverride
+		if strings.HasPrefix(trimmedOverride, "file://") {
+			if parsed, parseErr := ParseFileURL(trimmedOverride); parseErr == nil {
+				clean = parsed
+			}
+		}
+		if info, statErr := os.Stat(clean); statErr == nil && info.IsDir() {
+			if _, idxErr := os.Stat(filepath.Join(clean, "registry.json")); idxErr == nil {
+				return &Cache{rootDir: clean, dir: clean, remote: trimmedOverride}
+			}
+		}
+		if strings.HasPrefix(trimmedOverride, "https://") || strings.HasPrefix(trimmedOverride, "http://") {
+			remote = strings.TrimRight(trimmedOverride, "/")
+		}
 	}
 
 	dir := rootDir
+	if _, statErr := os.Stat(filepath.Join(rootDir, "registry.json")); statErr == nil {
+		return &Cache{rootDir: rootDir, dir: rootDir, remote: remote}
+	}
 
-	// Resolve active version from persistent marker
-	if activeVer, err := os.ReadFile(filepath.Join(rootDir, "active_version")); err == nil {
+	if activeVer, readErr := os.ReadFile(filepath.Join(rootDir, "active_version")); readErr == nil {
 		ver := strings.TrimSpace(string(activeVer))
-		if ver != "" {
-			versionedDir := filepath.Join(rootDir, "versions", ver)
-			if _, err := os.Stat(filepath.Join(versionedDir, "registry.json")); err == nil {
-				dir = versionedDir
+		if validateVersionToken("active_version", ver) == nil {
+			versionsRoot := filepath.Join(rootDir, "versions")
+			if versionedDir, joinErr := archiveutil.SafeJoin(versionsRoot, ver); joinErr == nil {
+				if verRoot, rootErr := os.OpenRoot(versionsRoot); rootErr == nil {
+					_, statErr := verRoot.Stat(filepath.Join(ver, "registry.json"))
+					_ = verRoot.Close()
+					if statErr == nil {
+						dir = versionedDir
+					}
+				}
 			}
 		}
 	}
@@ -210,259 +154,112 @@ func NewCache(remoteOverride string) *Cache {
 	return &Cache{rootDir: rootDir, dir: dir, remote: remote}
 }
 
-// Dir returns the cache directory path.
-func (c *Cache) Dir() string { return c.dir }
+// OpenForProject opens and initializes a Cache honoring projectRoot's device.toml
+// registry override, toob.lock pinned revision, and devMode / TOOB_REGISTRY_DIR overrides.
+func OpenForProject(projectRoot string, devMode bool) (*Cache, error) {
+	if devMode || paths.IsDevMode() || strings.TrimSpace(os.Getenv("TOOB_REGISTRY_DIR")) != "" {
+		c := NewCache("")
+		if c.IsLocalOverride() || c.IsInitialized() {
+			return c, nil
+		}
+		if err := c.Sync(true, false); err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
 
-// IsInitialized returns true if the registry has been downloaded.
-func (c *Cache) IsInitialized() bool {
-	_, err := os.Stat(filepath.Join(c.dir, "registry.json"))
+	var remoteOverride string
+	var pinnedRev string
+
+	if strings.TrimSpace(projectRoot) != "" {
+		lf, err := lockfile.Load(paths.LockfilePath(projectRoot))
+		if err != nil {
+			return nil, err
+		}
+		remoteOverride = lf.Registry.URL
+		pinnedRev = cmp.Or(lf.Registry.Revision, lf.Registry.Commit, lf.Registry.Version)
+
+		if remoteOverride == "" {
+			var dt struct {
+				Build struct {
+					Registry string `toml:"registry"`
+				} `toml:"build"`
+			}
+			if raw, readErr := os.ReadFile(filepath.Join(projectRoot, "device.toml")); readErr == nil {
+				if _, decErr := toml.Decode(string(raw), &dt); decErr == nil && strings.TrimSpace(dt.Build.Registry) != "" {
+					remoteOverride = strings.TrimSpace(dt.Build.Registry)
+				}
+			}
+		}
+	}
+
+	c := NewCache(remoteOverride)
+	if c.IsLocalOverride() {
+		return c, nil
+	}
+	if pinnedRev != "" {
+		if err := c.SelectVersion(pinnedRev, true); err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
+	if !c.IsInitialized() {
+		if err := c.Sync(false, false); err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
+// Dir returns the active cache directory path.
+func (c *Cache) Dir() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dir
+}
+
+// Remote returns any explicit remote URL configured on this Cache.
+func (c *Cache) Remote() string {
+	return c.remote
+}
+
+// IsLocalOverride reports whether this Cache points at a direct local registry directory
+// rather than the managed ~/.toob/registry/versions/<ver> cache.
+func (c *Cache) IsLocalOverride() bool {
+	if strings.TrimSpace(os.Getenv("TOOB_REGISTRY_DIR")) != "" {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(c.rootDir, "registry.json"))
 	return err == nil
 }
 
-func (c *Cache) lock() (func(), error) {
-	if err := os.MkdirAll(filepath.Dir(c.rootDir), 0o755); err != nil {
-		return nil, err
-	}
-	lockDir := filepath.Join(filepath.Dir(c.rootDir), "registry.lock")
-	for i := range 100 { // wait up to 10 seconds
-		if err := os.Mkdir(lockDir, 0o755); err == nil {
-			// Write PID file for stale-lock detection
-			pidFile := filepath.Join(lockDir, "pid")
-			_ = os.WriteFile(pidFile, fmt.Appendf(nil, "%d", os.Getpid()), 0o644)
-			return func() { os.RemoveAll(lockDir) }, nil
-		}
-
-		// Check if the locking process is still alive
-		if i%10 == 9 { // every ~1 second
-			if c.tryCleanStaleLock(lockDir) {
-				continue // Retry immediately after cleaning stale lock
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return nil, fmt.Errorf("timeout waiting for registry lock. Is another toob process running? (If not, delete %s)", lockDir)
+// IsInitialized returns true if registry.json exists in the active cache directory.
+func (c *Cache) IsInitialized() bool {
+	_, err := os.Stat(filepath.Join(c.Dir(), "registry.json"))
+	return err == nil
 }
 
-// tryCleanStaleLock reads the PID from the lock directory and checks if the process is alive.
-// Returns true if a stale lock was cleaned up.
-func (c *Cache) tryCleanStaleLock(lockDir string) bool {
-	pidBytes, err := os.ReadFile(filepath.Join(lockDir, "pid"))
-	if err != nil {
-		return false
-	}
-	pid := 0
-	if _, err := fmt.Sscanf(string(pidBytes), "%d", &pid); err != nil || pid == 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		// Process doesn't exist — stale lock
-		ui.Muted("Cleaning stale registry lock (PID %d no longer running)", pid)
-		os.RemoveAll(lockDir)
-		return true
-	}
-	// On Unix, FindProcess always succeeds. Send signal 0 to probe liveness.
-	// On Windows, FindProcess fails for dead processes, so reaching here means alive.
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		ui.Muted("Cleaning stale registry lock (PID %d no longer running)", pid)
-		os.RemoveAll(lockDir)
-		return true
-	}
-	return false
+func (c *Cache) apiClient(timeout time.Duration) *apiclient.Client {
+	return apiclient.NewForBaseURL(c.remote, timeout)
 }
 
-// Sync updates the registry. If useDev is true, it syncs the bleeding-edge 'main' branch.
-// Otherwise, it discovers the latest stable revision from the API and syncs that.
-// If force is true, the local cache is bypassed and the version is re-downloaded.
-func (c *Cache) Sync(useDev bool, force bool) error {
-	client := apiclient.New()
-
-	ui.Step("Fetching registry revision from API...")
-	revResp, err := client.GetRevision(context.Background())
-	if err != nil {
-		if c.IsInitialized() {
-			ui.Warn("Could not check for updates (%v). Using cached registry.", err)
-			return nil
-		}
-		return fmt.Errorf("cannot discover registry version (offline?): %w", err)
-	}
-
-	latestVer := fmt.Sprintf("%d", revResp.Revision)
-	ui.Step("Discovered latest stable registry revision: %s", ui.Cyan(latestVer))
-
-	return c.checkoutAPI(latestVer, force)
+func (c *Cache) lock(ctx context.Context) (func() error, error) {
+	lockPath := filepath.Join(filepath.Dir(c.rootDir), "registry.lock")
+	return filelock.Lock(ctx, lockPath)
 }
 
-// checkoutAPI downloads and activates a specific registry revision using the API.
-func (c *Cache) checkoutAPI(version string, force bool) error {
-	targetDir := filepath.Join(c.rootDir, "versions", version)
-
-	if force {
-		os.RemoveAll(targetDir)
-	}
-
-	previousVer, _ := c.HeadCommit()
-
-	// Cache hit
-	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil && !force {
-		c.dir = targetDir
-		c.persistActive(version)
-		if previousVer == version {
-			ui.Success("Registry is up to date (rev %s)", version)
-		} else {
-			ui.Info("Registry Source: Local Cache (rev %s)", version)
-		}
-		return nil
-	}
-
-	unlock, err := c.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
-		c.dir = targetDir
-		c.persistActive(version)
-		return nil
-	}
-
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return err
-	}
-
-	ui.Step("Downloading Registry Index from API...")
-	client := apiclient.New()
-	indexData, err := client.GetIndex(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to download registry index: %w", err)
-	}
-
-	tmpIndex := filepath.Join(targetDir, "registry.json.tmp")
-	if err := os.WriteFile(tmpIndex, indexData, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpIndex, filepath.Join(targetDir, "registry.json")); err != nil {
-		return err
-	}
-
-	// Fetch matrix to cache it
-	ui.Step("Downloading Compatibility Matrix...")
-	matrixData, err := client.GetMatrix(context.Background(), "")
-	if err == nil {
-		if raw, err := json.Marshal(matrixData); err == nil {
-			tmpMatrix := filepath.Join(targetDir, "compatibility_matrix.json.tmp")
-			if err := os.WriteFile(tmpMatrix, raw, 0o644); err == nil {
-				os.Rename(tmpMatrix, filepath.Join(targetDir, "compatibility_matrix.json"))
-			}
-		}
-	}
-
-	c.dir = targetDir
-	c.index = nil
-	c.persistActive(version)
-
-	return nil
-}
-
-// resolveCanonicalVersion reads registry_version from the downloaded registry.json.
-func resolveCanonicalVersion(dir, fallback string) string {
-	data, err := os.ReadFile(filepath.Join(dir, "registry.json"))
-	if err != nil {
-		return fallback
-	}
-	var idx struct {
-		RegistryVersion string `json:"registry_version"`
-	}
-	if json.Unmarshal(data, &idx) != nil || idx.RegistryVersion == "" {
-		return fallback
-	}
-	return idx.RegistryVersion
-}
-
-func (c *Cache) persistActive(ver string) {
-	_ = os.WriteFile(filepath.Join(c.rootDir, "active_version"), []byte(ver), 0o644)
-}
-
-// SwitchVersion activates a specific registry version (used by chip add/spawn).
-func (c *Cache) SwitchVersion(version string) error {
-	return c.checkoutAPI(version, false)
-}
-
-// SelectVersion sets the active directory for this Cache instance.
-// If the version is not cached and downloadIfMissing is true, it downloads it.
-// Bypasses global active_version persistence.
-func (c *Cache) SelectVersion(version string, downloadIfMissing bool) error {
-	targetDir := filepath.Join(c.rootDir, "versions", version)
-
-	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
-		c.dir = targetDir
-		c.index = nil // clear cached index
-		return nil
-	}
-
-	if !downloadIfMissing {
-		return fmt.Errorf("registry version %s is not cached", version)
-	}
-
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
-		return err
-	}
-
-	unlock, err := c.lock()
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
-	// Double-check inside lock
-	if _, err := os.Stat(filepath.Join(targetDir, "registry.json")); err == nil {
-		c.dir = targetDir
-		c.index = nil
-		return nil
-	}
-
-	ui.Step("Downloading Registry Index from API...")
-	client := apiclient.New()
-	indexData, err := client.GetIndex(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to download registry index: %w", err)
-	}
-
-	tmpIndex := filepath.Join(targetDir, "registry.json.tmp")
-	if err := os.WriteFile(tmpIndex, indexData, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpIndex, filepath.Join(targetDir, "registry.json")); err != nil {
-		return err
-	}
-
-	// Fetch matrix to cache it
-	ui.Step("Downloading Compatibility Matrix...")
-	matrixData, err := client.GetMatrix(context.Background(), "")
-	if err == nil {
-		if raw, err := json.Marshal(matrixData); err == nil {
-			tmpMatrix := filepath.Join(targetDir, "compatibility_matrix.json.tmp")
-			if err := os.WriteFile(tmpMatrix, raw, 0o644); err == nil {
-				os.Rename(tmpMatrix, filepath.Join(targetDir, "compatibility_matrix.json"))
-			}
-		}
-	}
-
-	c.dir = targetDir
-	c.index = nil
-	return nil
-}
-
-// LoadIndex parses registry.json and returns a typed index.
+// LoadIndex parses and memoizes registry.json from the active cache directory.
 func (c *Cache) LoadIndex() (*Index, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.index != nil {
 		return c.index, nil
 	}
 	indexPath := filepath.Join(c.dir, "registry.json")
 	data, err := os.ReadFile(indexPath)
 	if err != nil {
-		return nil, fmt.Errorf("registry not initialized. Run `toob registry sync` first")
+		return nil, errors.New("registry not initialized. Run `toob registry sync` first")
 	}
 	var idx Index
 	if err := json.Unmarshal(data, &idx); err != nil {
@@ -470,390 +267,4 @@ func (c *Cache) LoadIndex() (*Index, error) {
 	}
 	c.index = &idx
 	return &idx, nil
-}
-
-// ResolveChipLive queries the registry API for a chip and returns its version.
-func (c *Cache) ResolveChipLive(name string) (string, error) {
-	client := apiclient.New()
-	client.HTTPClient.Timeout = 2 * time.Second
-
-	resp, err := client.ResolveChip(context.Background(), name)
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve chip via API: %w", err)
-	}
-	return resp.Version, nil
-}
-
-// FetchLiveIntegrations fetches available integrations from the API.
-// Falls back to the local cached registry index if the API is offline.
-func (c *Cache) FetchLiveIntegrations() ([]string, error) {
-	client := apiclient.New()
-	client.HTTPClient.Timeout = 3 * time.Second
-
-	items, err := client.ListIntegrations(context.Background())
-	if err == nil {
-		var result []string
-		for _, i := range items {
-			result = append(result, i.Name)
-		}
-		return result, nil
-	}
-
-	// Fallback to local
-	idx, idxErr := c.LoadIndex()
-	if idxErr != nil {
-		return nil, fmt.Errorf("api and local fallback both failed: %w", idxErr)
-	}
-
-	var result []string
-	for k := range idx.Integrations {
-		result = append(result, k)
-	}
-	return result, nil
-}
-
-// FetchLiveMatrix downloads the compatibility matrix from the API.
-// Falls back to local cached copy if the API is offline.
-func (c *Cache) FetchLiveMatrix() (*Matrix, error) {
-	client := apiclient.New()
-	client.HTTPClient.Timeout = 5 * time.Second
-
-	// Tier 1: Registry API (DB-backed, authoritative)
-	entries, err := client.GetMatrix(context.Background(), "")
-	if err == nil {
-		matrix := convertFlatMatrixToMap(entries)
-		return &matrix, nil
-	}
-
-	// Tier 2: Local cached file
-	localPath := filepath.Join(c.dir, "compatibility_matrix.json")
-	localData, err := os.ReadFile(localPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch matrix (api and local both failed): %w", err)
-	}
-
-	matrix, err := parseMatrixData(localData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse matrix: %w", err)
-	}
-
-	return &matrix, nil
-}
-
-// convertFlatMatrixToMap converts a slice of flat MatrixEntry items into the nested Map format.
-func convertFlatMatrixToMap(entries []apiclient.MatrixEntry) Matrix {
-	matrix := make(Matrix)
-	for _, entry := range entries {
-		parts := strings.Split(entry.CombinationKey, "::")
-		var cliVal string
-		for _, p := range parts {
-			if strings.HasPrefix(p, "cli=") {
-				cliVal = strings.TrimPrefix(p, "cli=")
-			}
-		}
-		if cliVal == "" {
-			continue
-		}
-
-		chip := entry.Chip
-		chipVer := entry.ChipVersion
-
-		chipEntry, exists := matrix[chip]
-		if !exists {
-			chipEntry = MatrixChip{Versions: make(map[string]MatrixVersion)}
-			matrix[chip] = chipEntry
-		}
-
-		verEntry, exists := chipEntry.Versions[chipVer]
-		if !exists {
-			var deps MatrixDependencies
-			if len(entry.Dependencies) > 0 {
-				_ = json.Unmarshal(entry.Dependencies, &deps)
-			}
-			verEntry = MatrixVersion{
-				EnvironmentHash:     entry.EnvHash,
-				Dependencies:        deps,
-				VerifiedCliVersions: make(map[string]MatrixVerifiedCli),
-			}
-			chipEntry.Versions[chipVer] = verEntry
-		}
-
-		var lastTested string
-		if entry.TestedAt != nil {
-			lastTested = entry.TestedAt.Format(time.RFC3339)
-		}
-
-		verEntry.VerifiedCliVersions[cliVal] = MatrixVerifiedCli{
-			Status:     entry.Status,
-			LastTested: lastTested,
-		}
-	}
-	return matrix
-}
-
-// parseMatrixData parses matrix data dynamically to support both flat list and nested map formats.
-func parseMatrixData(data []byte) (Matrix, error) {
-	var entries []apiclient.MatrixEntry
-	if err := json.Unmarshal(data, &entries); err == nil && len(entries) > 0 {
-		return convertFlatMatrixToMap(entries), nil
-	}
-
-	var matrix Matrix
-	if err := json.Unmarshal(data, &matrix); err == nil {
-		return matrix, nil
-	}
-
-	return nil, fmt.Errorf("unknown compatibility matrix format")
-}
-
-// GetChip looks up a single chip by name.
-func (c *Cache) GetChip(name string) (*ChipInfo, error) {
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return nil, err
-	}
-	ci, ok := idx.Chips[name]
-	if !ok {
-		names := make([]string, 0, len(idx.Chips))
-		for n := range idx.Chips {
-			names = append(names, n)
-		}
-		return nil, fmt.Errorf("chip '%s' not found in registry. Available: %s",
-			name, strings.Join(names, ", "))
-	}
-	return &ci, nil
-}
-
-// fetchPackage downloads the tarball for a package and extracts it if it doesn't exist.
-func (c *Cache) fetchPackage(name, version, path string) error {
-	destPath := filepath.Join(c.dir, path)
-	if _, err := os.Stat(destPath); err == nil {
-		return nil // already fetched
-	}
-
-	ui.Step("Downloading package %s@%s...", name, version)
-
-	// Create temp directory for atomic extraction
-	tempDestPath := destPath + ".tmp-" + fmt.Sprintf("%d", time.Now().UnixNano())
-	if err := os.MkdirAll(filepath.Dir(tempDestPath), 0o755); err != nil {
-		return err
-	}
-
-	client := apiclient.NewWithTimeout(downloadTimeout)
-	body, err := client.DownloadPackage(context.Background(), name, version)
-	if err != nil {
-		return fmt.Errorf("failed to fetch package %s: %w", name, err)
-	}
-	defer body.Close()
-
-	if err := ExtractTarball(body, tempDestPath); err != nil {
-		os.RemoveAll(tempDestPath)
-		return fmt.Errorf("failed to extract package %s: %w", name, err)
-	}
-
-	if err := os.Rename(tempDestPath, destPath); err != nil {
-		os.RemoveAll(tempDestPath)
-		if _, statErr := os.Stat(destPath); statErr == nil {
-			return nil // Already completed by another process
-		}
-		return fmt.Errorf("failed to finalize atomic package extraction: %w", err)
-	}
-
-	return nil
-}
-
-// ChipSourcePath returns the absolute path to a chip's source in the cache.
-func (c *Cache) ChipSourcePath(name string) (string, error) {
-	ci, err := c.GetChip(name)
-	if err != nil {
-		return "", err
-	}
-	if err := c.fetchPackage(ci.Name, ci.Version, ci.Path); err != nil {
-		return "", err
-	}
-	return filepath.Join(c.dir, ci.Path), nil
-}
-
-// GetCrypto looks up a single crypto package by name.
-func (c *Cache) GetCrypto(name string) (*CryptoInfo, error) {
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return nil, err
-	}
-	ci, ok := idx.Crypto[name]
-	if !ok {
-		names := make([]string, 0, len(idx.Crypto))
-		for n := range idx.Crypto {
-			names = append(names, n)
-		}
-		return nil, fmt.Errorf("crypto package '%s' not found in registry. Available: %s",
-			name, strings.Join(names, ", "))
-	}
-	return &ci, nil
-}
-
-// ArchSourcePath returns the absolute path to an architecture's source in the cache.
-func (c *Cache) ArchSourcePath(arch string) (string, error) {
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return "", err
-	}
-	info, ok := idx.Archs[arch]
-	if !ok || info.Path == "" {
-		return "", fmt.Errorf("architecture '%s' not found in registry index", arch)
-	}
-	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
-		return "", err
-	}
-	return filepath.Join(c.dir, info.Path), nil
-}
-
-// DriverSourcePath returns the absolute path to a driver directory in the cache.
-func (c *Cache) DriverSourcePath(driverDir string) (string, error) {
-	destPath := filepath.Join(c.dir, filepath.FromSlash(driverDir))
-	if _, err := os.Stat(destPath); err == nil {
-		return destPath, nil
-	}
-
-	pkgName := filepath.Base(driverDir)
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return "", err
-	}
-
-	info, ok := idx.Drivers[pkgName]
-	if !ok {
-		return "", fmt.Errorf("driver '%s' not found in registry index", pkgName)
-	}
-	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
-		return "", err
-	}
-	return filepath.Join(c.dir, filepath.FromSlash(info.Path)), nil
-}
-
-// CryptoSourcePath returns the absolute path to a crypto package in the cache.
-func (c *Cache) CryptoSourcePath(name string) (string, error) {
-	ci, err := c.GetCrypto(name)
-	if err != nil {
-		return "", err
-	}
-	if err := c.fetchPackage(ci.Name, ci.Version, ci.Path); err != nil {
-		return "", err
-	}
-	return filepath.Join(c.dir, ci.Path), nil
-}
-
-// ToolchainConfigPath returns the absolute path to a toolchain's config directory
-// (containing toolchain.cmake) in the cache.
-func (c *Cache) ToolchainConfigPath(toolchainName string) (string, error) {
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return "", err
-	}
-	info, ok := idx.Toolchains[toolchainName]
-	if !ok || info.Path == "" {
-		return "", fmt.Errorf("toolchain '%s' not found in registry index", toolchainName)
-	}
-	if err := c.fetchPackage(toolchainName, info.Version, info.Path); err != nil {
-		return "", err
-	}
-	return filepath.Join(c.dir, info.Path), nil
-}
-
-// SoCSourcePath returns the absolute path to a SoC package directory in the cache.
-func (c *Cache) SoCSourcePath(socDir string) (string, error) {
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return "", err
-	}
-
-	pkgName := filepath.Base(socDir)
-	if idx.SoCs == nil {
-		return "", fmt.Errorf("SoC package '%s' not found in registry index (no SoC section)", pkgName)
-	}
-	info, ok := idx.SoCs[pkgName]
-	if !ok {
-		return "", fmt.Errorf("SoC package '%s' not found in registry index", pkgName)
-	}
-	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
-		return "", err
-	}
-	return filepath.Join(c.dir, filepath.FromSlash(info.Path)), nil
-}
-
-// IntegrationSourcePath returns the absolute path to an integration framework
-// directory in the cache.
-func (c *Cache) IntegrationSourcePath(framework string) (string, error) {
-	idx, err := c.LoadIndex()
-	if err != nil {
-		return "", err
-	}
-	info, ok := idx.Integrations[framework]
-	if !ok || info.Path == "" {
-		return "", fmt.Errorf("integration '%s' not found in registry index", framework)
-	}
-	if err := c.fetchPackage(info.Name, info.Version, info.Path); err != nil {
-		return "", err
-	}
-	return filepath.Join(c.dir, info.Path), nil
-}
-
-// Removed VendorSourcePath
-
-// HeadCommit returns the version of the currently checked out registry.
-func (c *Cache) HeadCommit() (string, error) {
-	if !c.IsInitialized() {
-		return "uninitialized", nil
-	}
-	ver := resolveCanonicalVersion(c.dir, "")
-	if ver != "" {
-		return ver, nil
-	}
-	return filepath.Base(c.dir), nil
-}
-
-// VerifyHead validates the cryptographic signature of the current registry revision.
-func (c *Cache) VerifyHead() error {
-	client := apiclient.New()
-
-	revResp, err := client.GetRevision(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to get registry revision for verification: %w", err)
-	}
-
-	if revResp.Signature == "" {
-		return fmt.Errorf("registry server did not provide a signature")
-	}
-
-	// Read public key from environment (for dev/testing) or use hardcoded official key
-	pubKeyHex := os.Getenv("TOOB_REGISTRY_PUBKEY")
-	if pubKeyHex == "" {
-		// Example official public key (placeholder)
-		pubKeyHex = "0000000000000000000000000000000000000000000000000000000000000000"
-		ui.Warn("Using placeholder Ed25519 public key. Set TOOB_REGISTRY_PUBKEY for real verification.")
-	}
-
-	pubKeyBytes, err := hex.DecodeString(pubKeyHex)
-	if err != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
-		return fmt.Errorf("invalid registry public key format")
-	}
-
-	sigBytes, err := hex.DecodeString(revResp.Signature)
-	if err != nil || len(sigBytes) != ed25519.SignatureSize {
-		return fmt.Errorf("invalid registry signature format")
-	}
-
-	hashBytes, err := hex.DecodeString(revResp.CommitSHA)
-	if err != nil {
-		hash := sha256.Sum256([]byte(revResp.CommitSHA))
-		hashBytes = hash[:]
-	}
-
-	valid := ed25519.Verify(pubKeyBytes, hashBytes, sigBytes)
-	if !valid {
-		return fmt.Errorf("CRITICAL SECURITY ALERT: Registry signature verification failed! The registry data may have been tampered with")
-	}
-
-	ui.Success("Registry signature verified successfully (rev %d)", revResp.Revision)
-	return nil
 }

@@ -1,50 +1,151 @@
 // BOUNDARY TYPES: RegistryToolchain is mirrored in internal/ports/ports.go.
-// If you modify these structs, you MUST update ports.go and assertions.go.
 package toolchain
 
 import (
 	"archive/tar"
 	"archive/zip"
+	"cmp"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
+	"math"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/ulikunitz/xz"
+
 	"github.com/toob-boot/toob/internal/archiveutil"
+	"github.com/toob-boot/toob/internal/filelock"
+	"github.com/toob-boot/toob/internal/httputil"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/ui"
-	"github.com/ulikunitz/xz"
 )
 
-// RegistryToolchain defines the toolchain URLs from registry.json
+const (
+	maxToolchainArchiveBytes int64 = 2 << 30 // 2 GiB compressed archive download cap
+	emptyFileSHA256                = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	lockWaitTimeout                = 30 * time.Minute
+)
+
+var (
+	tcSingleTokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
+	tcSlugPattern        = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._+-]*$`)
+	tcScopedRefPattern   = regexp.MustCompile(`^@[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9._+-]*$`)
+)
+
+func validateToken(label, val string) error {
+	if val == "" {
+		return fmt.Errorf("%s must not be empty", label)
+	}
+	if strings.Contains(val, "..") || !tcSingleTokenPattern.MatchString(val) {
+		return fmt.Errorf("unsafe %s %q", label, val)
+	}
+	return nil
+}
+
+func validateToolchainSlug(val string) error {
+	if val == "" || strings.Contains(val, "..") || !tcSlugPattern.MatchString(val) {
+		return fmt.Errorf("unsafe toolchain slug %q", val)
+	}
+	return nil
+}
+
+func validateToolchainRef(label, val string) error {
+	if val == "" {
+		return fmt.Errorf("%s must not be empty", label)
+	}
+	if strings.Contains(val, "..") {
+		return fmt.Errorf("unsafe %s %q", label, val)
+	}
+	if strings.HasPrefix(val, "@") {
+		if !tcScopedRefPattern.MatchString(val) {
+			return fmt.Errorf("unsafe scoped %s %q", label, val)
+		}
+		return nil
+	}
+	return validateToken(label, val)
+}
+
+// ToolchainSlug converts an unscoped or @scope/name toolchain package identifier
+// into a collision-free single-segment filesystem directory name.
+func ToolchainSlug(tcRef string) (string, error) {
+	if err := validateToolchainRef("toolchain name", tcRef); err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(tcRef, "@") {
+		scope, pkg, _ := strings.Cut(tcRef[1:], "/")
+		return "_" + scope + "__" + pkg, nil
+	}
+	return tcRef, nil
+}
+
+// ToolchainDir resolves <toobHome>/toolchains/<goos>_<goarch>/<tcSlug>/<version>.
+func ToolchainDir(toobHome, goos, goarch, tcRef, version string) (string, error) {
+	if err := validateToken("host OS", goos); err != nil {
+		return "", err
+	}
+	if err := validateToken("host arch", goarch); err != nil {
+		return "", err
+	}
+	slug, err := ToolchainSlug(tcRef)
+	if err != nil {
+		return "", err
+	}
+	if err := validateToken("toolchain version", version); err != nil {
+		return "", err
+	}
+	base := filepath.Join(toobHome, "toolchains")
+	rel := filepath.ToSlash(filepath.Join(goos+"_"+goarch, slug, version))
+	return archiveutil.SafeJoin(base, rel)
+}
+
+// RegistryToolchain defines the toolchain metadata and download URLs in registry.json.
 type RegistryToolchain struct {
 	Version         string            `json:"version"`
 	UpstreamVersion string            `json:"upstream_version"`
+	CompilerBinary  string            `json:"compiler_binary,omitempty"`
 	URLs            map[string]string `json:"urls"`
 	Sha256          map[string]string `json:"sha256"`
 }
 
-// RegistryConfig represents the root of registry.json
+// RegistryConfig represents the toolchains section of registry.json.
 type RegistryConfig struct {
 	FormatVersion int                          `json:"format_version"`
 	Toolchains    map[string]RegistryToolchain `json:"toolchains"`
 }
 
-// GetExpectedVersion returns the version specified in registry.json for a toolchain.
-// Reads and parses registry.json from disk. Prefer GetExpectedVersionFromIndex when
-// the Index is already loaded.
-func GetExpectedVersion(prefix string, regDir string) string {
-	tcName := strings.TrimSuffix(prefix, "-")
+func resolveToolchainEntry(refOrPrefix string, reg *RegistryConfig) (string, RegistryToolchain, bool) {
+	if reg == nil || len(reg.Toolchains) == 0 {
+		return "", RegistryToolchain{}, false
+	}
+	if info, ok := reg.Toolchains[refOrPrefix]; ok {
+		return refOrPrefix, info, true
+	}
+	trimmed := strings.TrimSuffix(refOrPrefix, "-")
+	if trimmed != "" {
+		if info, ok := reg.Toolchains[trimmed]; ok {
+			return trimmed, info, true
+		}
+	}
+	return "", RegistryToolchain{}, false
+}
+
+// GetExpectedVersion returns the version specified in registry.json for a toolchain name or prefix.
+func GetExpectedVersion(prefixOrRef, regDir string) string {
 	data, err := os.ReadFile(filepath.Join(regDir, "registry.json"))
 	if err != nil {
 		return ""
@@ -53,38 +154,78 @@ func GetExpectedVersion(prefix string, regDir string) string {
 	if err := json.Unmarshal(data, &reg); err != nil {
 		return ""
 	}
-	if tcInfo, ok := reg.Toolchains[tcName]; ok {
+	if _, tcInfo, ok := resolveToolchainEntry(prefixOrRef, &reg); ok {
 		return tcInfo.Version
 	}
 	return ""
 }
 
-// GetExpectedVersionFromConfig returns the expected version from an already-parsed config.
-// Avoids redundant disk reads when the config is already loaded.
-func GetExpectedVersionFromConfig(prefix string, reg *RegistryConfig) string {
-	tcName := strings.TrimSuffix(prefix, "-")
-	if tcInfo, ok := reg.Toolchains[tcName]; ok {
-		return tcInfo.Version
+// FindCachedBinDir locates a cached toolchain's /bin directory for the current host OS/arch.
+func FindCachedBinDir(prefixOrRef, expectedVersion, upstreamVersion string) string {
+	tcName := strings.TrimSuffix(prefixOrRef, "-")
+	if strings.HasPrefix(prefixOrRef, "@") {
+		tcName = prefixOrRef
+	}
+	prefix := prefixOrRef
+	if strings.HasPrefix(prefixOrRef, "@") {
+		prefix = ""
+	}
+	return FindCachedToolchainBinDir(tcName, prefix, "", expectedVersion, upstreamVersion)
+}
+
+// FindCachedToolchainBinDir locates a cached toolchain's /bin directory under
+// <ToobHome>/toolchains/<goos>_<goarch>/<tcSlug>/<version>.
+func FindCachedToolchainBinDir(tcName, prefix, compilerBinary, expectedVersion, upstreamVersion string) string {
+	if tcName == "" {
+		tcName = strings.TrimSuffix(prefix, "-")
+	}
+	if validateToolchainRef("toolchain name", tcName) != nil {
+		return ""
+	}
+	homeDir, err := paths.ToobHome()
+	if err != nil {
+		return ""
+	}
+
+	for _, cand := range []string{expectedVersion, upstreamVersion} {
+		if cand == "" {
+			continue
+		}
+		tcRoot, dirErr := ToolchainDir(homeDir, runtime.GOOS, runtime.GOARCH, tcName, cand)
+		if dirErr != nil {
+			continue
+		}
+		if bin := FindBinDirWithBinary(tcRoot, prefix, compilerBinary); bin != "" {
+			return bin
+		}
 	}
 	return ""
 }
 
-// GetExpectedSha256FromConfig returns the expected sha256 from an already-parsed config.
-func GetExpectedSha256FromConfig(prefix string, reg *RegistryConfig) string {
-	tcName := strings.TrimSuffix(prefix, "-")
-	if tcInfo, ok := reg.Toolchains[tcName]; ok {
-		osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
-		return tcInfo.Sha256[osArch]
+// EnsureAvailable provisions the toolchain identified by prefixOrRef on demand.
+func EnsureAvailable(prefixOrRef, expectedVersion, regDir string) (string, error) {
+	tcName := strings.TrimSuffix(prefixOrRef, "-")
+	prefix := prefixOrRef
+	if strings.HasPrefix(prefixOrRef, "@") {
+		tcName = prefixOrRef
+		prefix = ""
 	}
-	return ""
+	return EnsureToolchain(context.Background(), tcName, prefix, "", expectedVersion, regDir)
 }
 
-// EnsureAvailable checks if the toolchain exists, and if not, downloads and extracts it.
-// Returns the absolute path to the toolchain's /bin directory.
-func EnsureAvailable(prefix string, expectedVersion string, regDir string) (string, error) {
-	tcName := strings.TrimSuffix(prefix, "-")
+// EnsureToolchain checks if the toolchain exists under <ToobHome>/toolchains/<goos>_<goarch>/<tcSlug>/<version>,
+// downloading, verifying, and extracting it under an advisory file lock if missing.
+func EnsureToolchain(ctx context.Context, tcName, prefix, compilerBinary, expectedVersion, regDir string) (string, error) {
+	lookupKey := cmp.Or(strings.TrimSpace(tcName), strings.TrimSuffix(strings.TrimSpace(prefix), "-"))
+	if err := validateToolchainRef("toolchain name", lookupKey); err != nil {
+		return "", err
+	}
+	if expectedVersion != "" {
+		if err := validateToken("expected toolchain version", expectedVersion); err != nil {
+			return "", err
+		}
+	}
 
-	// Read registry immediately to get UpstreamVersion for cache paths
 	regJSON := filepath.Join(regDir, "registry.json")
 	data, err := os.ReadFile(regJSON)
 	if err != nil {
@@ -92,104 +233,136 @@ func EnsureAvailable(prefix string, expectedVersion string, regDir string) (stri
 	}
 
 	var reg RegistryConfig
-	if err := json.Unmarshal(data, &reg); err != nil {
+	if err = json.Unmarshal(data, &reg); err != nil {
 		return "", fmt.Errorf("failed to parse registry.json: %w", err)
 	}
 
-	tcInfo, ok := reg.Toolchains[tcName]
+	resolvedName, tcInfo, ok := resolveToolchainEntry(lookupKey, &reg)
+	if !ok && prefix != "" {
+		resolvedName, tcInfo, ok = resolveToolchainEntry(prefix, &reg)
+	}
 	if !ok {
-		return "", fmt.Errorf("toolchain '%s' is not defined in the registry. Auto-provisioning failed", tcName)
+		return "", fmt.Errorf("toolchain '%s' is not defined in the registry. Auto-provisioning failed", lookupKey)
+	}
+
+	if tcInfo.Version != "" {
+		if verErr := validateToken("registry toolchain version", tcInfo.Version); verErr != nil {
+			return "", verErr
+		}
+	}
+	if tcInfo.UpstreamVersion != "" {
+		if upErr := validateToken("registry toolchain upstream_version", tcInfo.UpstreamVersion); upErr != nil {
+			return "", upErr
+		}
+	}
+
+	if expectedVersion != "" && expectedVersion != tcInfo.Version && expectedVersion != tcInfo.UpstreamVersion {
+		return "", fmt.Errorf("locked toolchain '%s' version %q does not match registry version %q (upstream %q)",
+			resolvedName, expectedVersion, tcInfo.Version, tcInfo.UpstreamVersion)
+	}
+
+	probeBin := cmp.Or(strings.TrimSpace(compilerBinary), strings.TrimSpace(tcInfo.CompilerBinary))
+	effectivePrefix := prefix
+	if strings.HasPrefix(prefix, "@") || prefix == resolvedName {
+		if probeBin != "" {
+			effectivePrefix = ""
+		}
 	}
 
 	homeDir, err := paths.ToobHome()
 	if err != nil {
 		return "", err
 	}
-	localDir := filepath.Join(homeDir, "toolchains")
 
-	cacheVer := tcInfo.UpstreamVersion
+	cacheVer := cmp.Or(expectedVersion, tcInfo.Version, tcInfo.UpstreamVersion)
 	if cacheVer == "" {
-		cacheVer = expectedVersion
+		return "", fmt.Errorf("registry toolchain '%s' declares no version", resolvedName)
 	}
-	if cacheVer == "" {
-		cacheVer = "latest"
+	tcRoot, err := ToolchainDir(homeDir, runtime.GOOS, runtime.GOARCH, resolvedName, cacheVer)
+	if err != nil {
+		return "", err
 	}
-	tcRoot := filepath.Join(localDir, tcName, cacheVer)
-	lockDir := tcRoot + ".lock.d"
 
-	// 1. Cache Check (Gap 1.1 Versioning)
-	if tcPath := FindBinDir(tcRoot, prefix); tcPath != "" {
+	if tcPath := FindBinDirWithBinary(tcRoot, effectivePrefix, probeBin); tcPath != "" {
 		return tcPath, nil
 	}
-
-	// Acquire global provisioning lock
-	if err := os.MkdirAll(filepath.Dir(lockDir), 0755); err != nil {
-		return "", fmt.Errorf("failed to create toolchain directory: %w", err)
-	}
-
-	for {
-		err := os.Mkdir(lockDir, 0755)
-		if err == nil {
-			defer os.RemoveAll(lockDir)
-			break
-		}
-
-		if stat, err := os.Stat(lockDir); err == nil {
-			if time.Since(stat.ModTime()) > 15*time.Minute {
-				ui.Warn("Toolchain lock for %s is older than 15 minutes. Assuming stale and removing...", tcName)
-				os.RemoveAll(lockDir)
-				continue
+	if expectedVersion == tcInfo.Version && tcInfo.UpstreamVersion != "" && tcInfo.UpstreamVersion != cacheVer {
+		if altRoot, altErr := ToolchainDir(homeDir, runtime.GOOS, runtime.GOARCH, resolvedName, tcInfo.UpstreamVersion); altErr == nil {
+			if tcPath := FindBinDirWithBinary(altRoot, effectivePrefix, probeBin); tcPath != "" {
+				return tcPath, nil
 			}
 		}
-
-		ui.Warn("Waiting for another process to finish provisioning %s...", tcName)
-		time.Sleep(3 * time.Second)
 	}
 
-	// Double-check after acquiring the lock
-	if tcPath := FindBinDir(tcRoot, prefix); tcPath != "" {
+	lockCtx, cancel := context.WithTimeout(ctx, lockWaitTimeout)
+	defer cancel()
+
+	unlock, err := filelock.Lock(lockCtx, tcRoot+".lock")
+	if err != nil {
+		return "", fmt.Errorf("acquiring toolchain provisioning lock for %s: %w", resolvedName, err)
+	}
+	defer func() { _ = unlock() }()
+
+	if tcPath := FindBinDirWithBinary(tcRoot, effectivePrefix, probeBin); tcPath != "" {
 		return tcPath, nil
 	}
 
-	// Ensure a clean slate for extraction if it's corrupted.
 	_ = RetryWindowsLocks(func() error { return os.RemoveAll(tcRoot) })
 
-	// 2. Not found or corrupted, we must auto-provision it.
-	ui.Muted("Toolchain '%s' (v%s) not found locally.", tcName, cacheVer)
+	ui.Muted("Toolchain '%s' (v%s) not found locally.", resolvedName, cacheVer)
 	ui.Step("Looking up auto-provisioning URL in registry...")
 
-	osArch := fmt.Sprintf("%s_%s", runtime.GOOS, runtime.GOARCH)
+	osArch := runtime.GOOS + "_" + runtime.GOARCH
 	downloadURL, ok := tcInfo.URLs[osArch]
-	if !ok {
-		return "", fmt.Errorf("no download URL provided for OS/Arch: %s", osArch)
+	if !ok || strings.TrimSpace(downloadURL) == "" {
+		return "", fmt.Errorf("no download URL provided for toolchain '%s' on OS/Arch: %s", resolvedName, osArch)
 	}
 
-	ui.Info("Found toolchain v%s for %s", tcInfo.Version, osArch)
+	ui.Info("Found toolchain v%s for %s", cmp.Or(tcInfo.Version, cacheVer), osArch)
 
-	// A missing entry used to yield an empty string, and the download then skipped verification
-	// entirely. The registry is the only thing standing between a compromised mirror and a compiler
-	// that runs on the developer's machine, so a gap in it is a hard error and not a silent
-	// downgrade.
 	expectedSha256, ok := tcInfo.Sha256[osArch]
-	if !ok || strings.TrimSpace(expectedSha256) == "" {
-		return "", fmt.Errorf("registry has no sha256 for toolchain '%s' on %s: refusing to install it unverified", tcName, osArch)
+	cleanSha, shaErr := validateToolchainSHA256(resolvedName, osArch, expectedSha256)
+	if !ok || shaErr != nil {
+		if shaErr != nil {
+			return "", shaErr
+		}
+		return "", fmt.Errorf("registry has no sha256 for toolchain '%s' on %s: refusing to install it unverified", resolvedName, osArch)
 	}
 
-	if err := downloadAndExtract(downloadURL, tcRoot, expectedSha256, expectedVersion); err != nil {
+	tcSlug, err := ToolchainSlug(resolvedName)
+	if err != nil {
+		return "", err
+	}
+	if err := downloadAndExtract(lockCtx, downloadURL, tcRoot, tcSlug, cleanSha, cacheVer); err != nil {
 		return "", fmt.Errorf("failed to download and extract toolchain: %w", err)
 	}
 
-	// 3. Find the actual /bin directory recursively
-	tcPath := FindBinDir(tcRoot, prefix)
+	tcPath := FindBinDirWithBinary(tcRoot, effectivePrefix, probeBin)
 	if tcPath == "" {
-		return "", fmt.Errorf("auto-provisioning completed but /bin directory with executables prefixed '%s' not found inside %s", prefix, tcRoot)
+		return "", fmt.Errorf("auto-provisioning completed but /bin directory with compiler (prefix=%q, binary=%q) was not found inside %s",
+			effectivePrefix, probeBin, tcRoot)
 	}
 
 	ui.Success("Successfully installed toolchain to %s", tcPath)
 	return tcPath, nil
 }
 
-// RetryWindowsLocks wraps an operation with exponential backoff to bypass temporary NTFS locks (e.g. from Defender)
+func validateToolchainSHA256(tcName, osArch, raw string) (string, error) {
+	clean := strings.ToLower(strings.TrimSpace(raw))
+	if clean == "" {
+		return "", fmt.Errorf("registry has no sha256 for toolchain '%s' on %s: refusing to install it unverified", tcName, osArch)
+	}
+	decoded, err := hex.DecodeString(clean)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", fmt.Errorf("registry has invalid sha256 %q for toolchain '%s' on %s", raw, tcName, osArch)
+	}
+	if clean == emptyFileSHA256 {
+		return "", fmt.Errorf("registry sha256 for toolchain '%s' on %s is the empty-file placeholder digest; refusing download", tcName, osArch)
+	}
+	return clean, nil
+}
+
+// RetryWindowsLocks wraps an operation with exponential backoff to bypass temporary NTFS locks.
 func RetryWindowsLocks(op func() error) error {
 	var err error
 	delays := []time.Duration{
@@ -213,275 +386,418 @@ func RetryWindowsLocks(op func() error) error {
 	return err
 }
 
-// downloadClient fetches toolchain archives.
-//
-// It deliberately has no overall timeout — a toolchain is hundreds of megabytes and a slow link is
-// not an error — but it bounds every phase that can hang without transferring anything, and it
-// refuses to be redirected off HTTPS. http.DefaultClient, which this used before, has none of that.
-var downloadClient = &http.Client{
-	Transport: &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
-		TLSHandshakeTimeout:   15 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second,
-		Proxy:                 http.ProxyFromEnvironment,
-	},
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return fmt.Errorf("stopped after 10 redirects")
-		}
-		if req.URL.Scheme != "https" {
-			return fmt.Errorf("refusing redirect to non-HTTPS URL %s", req.URL.Redacted())
-		}
-		return nil
-	},
+func newDownloadClient() (*http.Client, error) {
+	tr, err := httputil.BuildTransport()
+	if err != nil {
+		return nil, err
+	}
+	tr.ResponseHeaderTimeout = 30 * time.Second
+	return &http.Client{
+		Transport:     tr,
+		CheckRedirect: httputil.SafeCheckRedirect,
+	}, nil
 }
 
-func downloadAndExtract(url, destDir, expectedSha256, expectedVersion string) error {
-	// The archive is executed as a compiler on the developer's machine, so neither of these is
-	// optional. The checksum was skipped whenever the registry had no entry for this platform.
-	if !strings.HasPrefix(url, "https://") {
-		return fmt.Errorf("refusing to download a toolchain over a non-HTTPS URL: %s", url)
+func clampProgressInt(v int64) int {
+	if v < 0 {
+		return 0
 	}
-	if expectedSha256 == "" {
-		return fmt.Errorf("refusing to install a toolchain without an expected SHA256 checksum")
+	if v > int64(math.MaxInt32) {
+		return math.MaxInt32
 	}
+	return int(v)
+}
 
-	// Setup download cache directory
-	homeDir, _ := paths.ToobHome()
-	cacheDir := filepath.Join(homeDir, "cache", "downloads")
-	os.MkdirAll(cacheDir, 0755)
-
-	tcName := filepath.Base(filepath.Dir(destDir))
-	archivePath := filepath.Join(cacheDir, fmt.Sprintf("%s-%s.archive", tcName, expectedVersion))
-
-	var startBytes int64 = 0
-	if stat, err := os.Stat(archivePath); err == nil {
-		startBytes = stat.Size()
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return err
-	}
-
-	if startBytes > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", startBytes))
-		ui.Step("Resuming download %s from byte %d...", url, startBytes)
-	} else {
-		ui.Step("Downloading %s", url)
-	}
-
-	resp, err := downloadClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case 416:
-		// Requested Range Not Satisfiable - we probably downloaded the whole file already!
-		ui.Muted("Download already complete.")
-	case 206, 200:
-		var out *os.File
-		if resp.StatusCode == 206 {
-			// Resuming
-			out, err = os.OpenFile(archivePath, os.O_WRONLY|os.O_APPEND, 0644)
-		} else {
-			// Server didn't support range or we started from 0
-			out, err = os.Create(archivePath)
-			startBytes = 0 // Reset
+func downloadToPartFile(ctx context.Context, client *http.Client, rawURL, partPath, expectedSha256 string) error {
+	for resetAttempt := range 2 {
+		var startBytes int64
+		if stat, statErr := os.Stat(partPath); statErr == nil {
+			startBytes = stat.Size()
 		}
+		if startBytes >= maxToolchainArchiveBytes {
+			_ = os.Remove(partPath)
+			startBytes = 0
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return err
+		}
+		if startBytes > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", startBytes))
+			ui.Step("Resuming download %s from byte %d...", rawURL, startBytes)
+		} else {
+			ui.Step("Downloading %s", rawURL)
+		}
+
+		resp, err := client.Do(req)
 		if err != nil {
 			return err
 		}
 
-		spinner := ui.NewSpinner("Downloading Toolchain")
-		spinner.SetProgress(int(startBytes), int(resp.ContentLength+startBytes))
-		spinner.Start()
+		status := resp.StatusCode
+		if status == http.StatusRequestedRangeNotSatisfiable {
+			_ = resp.Body.Close()
+			if actual, hErr := hashFile(partPath); hErr == nil && strings.EqualFold(actual, expectedSha256) {
+				return nil
+			}
+			_ = os.Remove(partPath)
+			if resetAttempt == 0 {
+				continue
+			}
+			return errors.New("server returned HTTP 416 and cached partial archive checksum did not match")
+		}
 
-		if _, err := io.Copy(io.MultiWriter(out, spinner), resp.Body); err != nil {
-			out.Close()
-			spinner.Stop()
+		if status != http.StatusPartialContent && status != http.StatusOK {
+			_ = resp.Body.Close()
+			if status >= 400 && status < 500 && status != http.StatusTooManyRequests {
+				_ = os.Remove(partPath)
+			}
+			return fmt.Errorf("server returned HTTP %d", status)
+		}
+
+		var out *os.File
+		if status == http.StatusPartialContent && startBytes > 0 {
+			out, err = os.OpenFile(partPath, os.O_WRONLY|os.O_APPEND, 0o600)
+		} else {
+			out, err = os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+			startBytes = 0
+		}
+		if err != nil {
+			_ = resp.Body.Close()
 			return err
 		}
+
+		totalHint := startBytes
+		if resp.ContentLength > 0 {
+			totalHint += resp.ContentLength
+		}
+		spinner := ui.NewSpinner("Downloading Toolchain")
+		spinner.SetProgress(clampProgressInt(startBytes), clampProgressInt(totalHint))
+		spinner.Start()
+
+		remaining := maxToolchainArchiveBytes - startBytes
+		written, copyErr := io.Copy(io.MultiWriter(out, spinner), io.LimitReader(resp.Body, remaining+1))
 		spinner.Stop()
-		out.Close()
-	default:
-		return fmt.Errorf("server returned %d", resp.StatusCode)
+		_ = resp.Body.Close()
+		closeErr := out.Close()
+
+		if copyErr != nil {
+			// Keep valid partial bytes on transient stream interruption so next invocation can resume.
+			return copyErr
+		}
+		if closeErr != nil {
+			_ = os.Remove(partPath)
+			return fmt.Errorf("failed flushing downloaded toolchain archive: %w", closeErr)
+		}
+		if written > remaining {
+			_ = os.Remove(partPath)
+			return fmt.Errorf("toolchain archive exceeds maximum allowed download size (%d bytes)", maxToolchainArchiveBytes)
+		}
+
+		actualSha256, err := hashFile(partPath)
+		if err != nil {
+			_ = os.Remove(partPath)
+			return fmt.Errorf("failed hashing the downloaded archive: %w", err)
+		}
+		if !strings.EqualFold(actualSha256, expectedSha256) {
+			_ = os.Remove(partPath)
+			if startBytes > 0 && resetAttempt == 0 {
+				ui.Warn("Resumed toolchain archive checksum mismatched; retrying full download from byte 0...")
+				continue
+			}
+			return fmt.Errorf("SHA256 mismatch!\nExpected: %s\nGot:      %s", expectedSha256, actualSha256)
+		}
+		return nil
 	}
 
-	// Verify SHA256 of the FULL file before anything is unpacked.
-	actualSha256, err := hashFile(archivePath)
-	if err != nil {
-		os.Remove(archivePath)
-		return fmt.Errorf("failed hashing the downloaded archive: %w", err)
+	return errors.New("toolchain download failed after retry")
+}
+
+func downloadAndExtract(ctx context.Context, rawURL, destDir, tcSlug, expectedSha256, cacheVer string) error {
+	if _, err := httputil.ValidateHTTPSOrLoopbackURL(rawURL); err != nil {
+		return fmt.Errorf("refusing to download toolchain from unsafe URL %q: %w", rawURL, err)
 	}
-	if actualSha256 != expectedSha256 {
-		// Corrupt! Delete it and fail.
-		os.Remove(archivePath)
-		return fmt.Errorf("SHA256 mismatch!\nExpected: %s\nGot:      %s", expectedSha256, actualSha256)
+	if len(expectedSha256) < 12 {
+		return errors.New("refusing to install a toolchain without a valid SHA256 checksum")
+	}
+	if err := validateToolchainSlug(tcSlug); err != nil {
+		return err
+	}
+	if err := validateToken("toolchain cache version", cacheVer); err != nil {
+		return err
+	}
+
+	client, err := newDownloadClient()
+	if err != nil {
+		return err
+	}
+
+	homeDir, err := paths.ToobHome()
+	if err != nil {
+		return err
+	}
+	cacheDir := filepath.Join(homeDir, "cache", "downloads")
+	if err = os.MkdirAll(cacheDir, 0o700); err != nil {
+		return fmt.Errorf("failed creating download cache directory: %w", err)
+	}
+
+	partName := fmt.Sprintf("%s-%s-%s.part", tcSlug, cacheVer, expectedSha256[:12])
+	partPath, err := archiveutil.SafeJoin(cacheDir, partName)
+	if err != nil {
+		return err
+	}
+
+	if err := downloadToPartFile(ctx, client, rawURL, partPath, expectedSha256); err != nil {
+		return err
 	}
 	ui.Success("Checksum verified.")
 
 	tmpDestDir := fmt.Sprintf("%s.tmp.%d", destDir, os.Getpid())
 	_ = RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
-	if err := os.MkdirAll(tmpDestDir, 0755); err != nil {
+	if err := os.MkdirAll(tmpDestDir, 0o750); err != nil {
+		_ = os.Remove(partPath)
 		return err
 	}
 
-	// Extraction runs in-process. It used to shell out to tar and unzip first and fall back to
-	// these only when the external tool failed, which meant the path guards below applied to the
-	// exceptional case and the normal case relied on the defaults of two programs that are not
-	// installed everywhere, differ between platforms and are not covered by any test here.
-	extractErr := extractArchive(url, archivePath, tmpDestDir)
-
-	if extractErr != nil {
-		os.Remove(archivePath) // Gap 4: Wipe broken archive from cache to avoid endless loops
-		RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
+	if extractErr := extractArchive(rawURL, partPath, tmpDestDir); extractErr != nil {
+		_ = os.Remove(partPath)
+		_ = RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
 		return extractErr
 	}
 
-	// Post-process extracted files to push them into CAS (Bypass in Docker)
-	if _, err := os.Stat("/.dockerenv"); os.IsNotExist(err) && os.Getenv("TOOB_DISABLE_CAS") == "" {
+	if _, err := os.Stat("/.dockerenv"); errors.Is(err, fs.ErrNotExist) && os.Getenv("TOOB_DISABLE_CAS") == "" {
 		if err := postProcessCAS(tmpDestDir); err != nil {
-			RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
+			_ = os.Remove(partPath)
+			_ = RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
 			return fmt.Errorf("CAS processing failed: %w", err)
 		}
 	} else {
 		ui.Muted("Bypassing CAS deduplication (Docker Environment / Disabled).")
 	}
 
-	// Atomic commit
 	_ = RetryWindowsLocks(func() error { return os.RemoveAll(destDir) })
+	if err := os.MkdirAll(filepath.Dir(destDir), 0o750); err != nil {
+		_ = os.Remove(partPath)
+		_ = RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
+		return err
+	}
 	if err := RetryWindowsLocks(func() error { return os.Rename(tmpDestDir, destDir) }); err != nil {
-		if strings.Contains(err.Error(), "cross-device link") {
-			// Fallback to recursive copy for cross-volume mounts (e.g. Docker/Windows)
-			if copyErr := copyTree(tmpDestDir, destDir); copyErr != nil {
-				return fmt.Errorf("failed to finalize installation (cross-device fallback failed): %w", copyErr)
-			}
-			RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
-		} else {
+		if !strings.Contains(err.Error(), "cross-device link") {
+			_ = os.Remove(partPath)
 			return fmt.Errorf("failed to finalize installation: %w", err)
 		}
+		if copyErr := copyTree(tmpDestDir, destDir); copyErr != nil {
+			_ = os.Remove(partPath)
+			return fmt.Errorf("failed to finalize installation (cross-device fallback failed): %w", copyErr)
+		}
+		_ = RetryWindowsLocks(func() error { return os.RemoveAll(tmpDestDir) })
 	}
 
-	os.Remove(archivePath) // Gap 3: Free up disk space after successful installation
+	_ = os.Remove(partPath)
 	return nil
 }
 
 func postProcessCAS(extractedDir string) error {
-	homeDir, _ := paths.ToobHome()
+	homeDir, err := paths.ToobHome()
+	if err != nil {
+		return err
+	}
 	casDir := filepath.Join(homeDir, "store", "cas")
-	os.MkdirAll(casDir, 0755)
+	if err = os.MkdirAll(casDir, 0o700); err != nil {
+		return fmt.Errorf("failed creating CAS directory: %w", err)
+	}
 
-	return filepath.WalkDir(extractedDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	extRoot, err := os.OpenRoot(extractedDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = extRoot.Close() }()
+
+	casRoot, err := os.OpenRoot(casDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = casRoot.Close() }()
+
+	return filepath.WalkDir(extractedDir, func(walkPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
 
-		// Hash file
-		f, err := os.Open(path)
+		rel, err := filepath.Rel(extractedDir, walkPath)
+		if err != nil {
+			return err
+		}
+
+		origStat, err := extRoot.Lstat(rel)
+		if err != nil {
+			return err
+		}
+		if !origStat.Mode().IsRegular() {
+			return nil
+		}
+		origMode := origStat.Mode()
+		origSize := origStat.Size()
+
+		f, err := extRoot.Open(rel)
 		if err != nil {
 			return err
 		}
 		hasher := sha256.New()
-		io.Copy(hasher, f)
-		f.Close()
+		hashedBytes, copyErr := io.Copy(hasher, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if hashedBytes != origSize {
+			return fmt.Errorf("concurrent modification detected while hashing %s", rel)
+		}
 
 		hashStr := hex.EncodeToString(hasher.Sum(nil))
 		casPath := filepath.Join(casDir, hashStr)
 
-		origStat, err := os.Stat(path)
-		if err != nil {
+		casStat, statErr := casRoot.Stat(hashStr)
+		if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+			return statErr
+		}
+
+		if errors.Is(statErr, fs.ErrNotExist) || casStat.Size() != origSize {
+			if statErr == nil && casStat.Size() != origSize {
+				_ = casRoot.Chmod(hashStr, 0o600)
+				_ = casRoot.Remove(hashStr)
+			}
+			tmpName := fmt.Sprintf("%s.tmp.%d", hashStr, os.Getpid())
+			tmpCasPath := filepath.Join(casDir, tmpName)
+
+			if err := streamCopyInRoots(extRoot, rel, casRoot, tmpName, origMode, origSize); err != nil {
+				_ = casRoot.Remove(tmpName)
+				return err
+			}
+
+			var roMode fs.FileMode = 0o444
+			if origMode&0o111 != 0 {
+				roMode = 0o555
+			}
+			if err := casRoot.Chmod(tmpName, roMode); err != nil && runtime.GOOS != "windows" {
+				_ = casRoot.Remove(tmpName)
+				return err
+			}
+
+			if err := RetryWindowsLocks(func() error { return os.Rename(tmpCasPath, casPath) }); err != nil {
+				_ = casRoot.Remove(tmpName)
+				if verifyStat, vErr := casRoot.Stat(hashStr); vErr != nil || verifyStat.Size() != origSize {
+					return fmt.Errorf("failed committing %s to CAS: %w", hashStr, err)
+				}
+			}
+		}
+
+		if err := extRoot.Remove(rel); err != nil {
 			return err
 		}
-		origMode := origStat.Mode()
 
-		// Check if it's already in CAS
-		if _, err := os.Stat(casPath); os.IsNotExist(err) {
-			// Move into CAS
-			tmpCas := fmt.Sprintf("%s.tmp.%d", casPath, os.Getpid())
-			if err := RetryWindowsLocks(func() error { return os.Rename(path, tmpCas) }); err != nil {
-				// If rename fails (e.g. cross volume), copy it using O(1) memory streaming to prevent OOM
-				srcFile, _ := os.Open(path)
-				dstFile, _ := os.OpenFile(tmpCas, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, origMode)
-				io.Copy(dstFile, srcFile)
-				srcFile.Close()
-				dstFile.Close()
-				os.Remove(path) // Remove original
+		targetPath := filepath.Join(extractedDir, rel)
+		if err := os.Link(casPath, targetPath); err != nil {
+			if err := streamCopyInRoots(casRoot, hashStr, extRoot, rel, origMode, origSize); err != nil {
+				return err
 			}
-
-			// Gap 1: Protect CAS store from accidental user modifications
-			var roMode fs.FileMode = 0444
-			if origMode&0111 != 0 {
-				roMode = 0555 // Preserve executable bit for read-only
-			}
-			os.Chmod(tmpCas, roMode)
-			if err := RetryWindowsLocks(func() error { return os.Rename(tmpCas, casPath) }); err != nil {
-				// We lost the race condition (another process created casPath in the exact same millisecond).
-				// Since the file is mathematically identical (SHA256), we just drop our temp file and use theirs!
-				os.Remove(tmpCas)
-			}
-		} else {
-			// Already in CAS, just remove the extracted file so we can hardlink it
-			os.Remove(path)
 		}
-
-		// Now create a hardlink from CAS to the original path
-		if err := os.Link(casPath, path); err != nil {
-			// If hardlink fails (e.g. cross-device), copy from CAS using O(1) memory streaming to prevent OOM
-			srcFile, _ := os.Open(casPath)
-			dstFile, _ := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, origMode)
-			io.Copy(dstFile, srcFile)
-			srcFile.Close()
-			dstFile.Close()
-		}
-
 		return nil
 	})
 }
 
-// hashFile returns the hex SHA-256 of a file. The read error is not discarded: a truncated read
-// would produce the hash of a prefix, and while that still fails the comparison, it would fail it
-// with a misleading "checksum mismatch" instead of the actual I/O problem.
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
+func streamCopyInRoots(srcRoot *os.Root, srcRel string, dstRoot *os.Root, dstRel string, mode fs.FileMode, expectedSize int64) error {
+	srcFile, err := srcRoot.Open(srcRel)
+	if err != nil {
+		return err
+	}
+	dstFile, err := dstRoot.OpenFile(dstRel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, archiveutil.EntryMode(mode))
+	if err != nil {
+		_ = srcFile.Close()
+		return err
+	}
+	written, copyErr := io.Copy(dstFile, srcFile)
+	srcCloseErr := srcFile.Close()
+	dstCloseErr := dstFile.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if srcCloseErr != nil {
+		return srcCloseErr
+	}
+	if dstCloseErr != nil {
+		return dstCloseErr
+	}
+	if expectedSize >= 0 && written != expectedSize {
+		return fmt.Errorf("short copy for %s: wrote %d of %d bytes", dstRel, written, expectedSize)
+	}
+	return nil
+}
+
+func hashFile(filePath string) (string, error) {
+	f, err := os.Open(filePath)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, f); err != nil {
-		return "", err
+	_, copyErr := io.Copy(hasher, f)
+	closeErr := f.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-// extractArchive unpacks an archive according to the extension of the URL it came from.
-func extractArchive(url, archivePath, destDir string) error {
+func archivePathSuffix(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return strings.ToLower(rawURL)
+	}
+	return strings.ToLower(u.Path)
+}
+
+func extractArchive(rawURL, archivePath, destDir string) error {
+	urlPath := archivePathSuffix(rawURL)
 	switch {
-	case strings.HasSuffix(url, ".zip"):
+	case strings.HasSuffix(urlPath, ".zip"):
 		return extractZip(archivePath, destDir)
 
-	case strings.HasSuffix(url, ".tar.gz"), strings.HasSuffix(url, ".tar.xz"):
+	case strings.HasSuffix(urlPath, ".tar.gz"), strings.HasSuffix(urlPath, ".tgz"), strings.HasSuffix(urlPath, ".tar.xz"):
 		f, err := os.Open(archivePath)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-
-		if strings.HasSuffix(url, ".tar.gz") {
-			return extractTarGz(f, destDir)
+		var extractErr error
+		if strings.HasSuffix(urlPath, ".tar.xz") {
+			extractErr = extractTarXz(f, destDir)
+		} else {
+			extractErr = extractTarGz(f, destDir)
 		}
-		return extractTarXz(f, destDir)
+		closeErr := f.Close()
+		if extractErr != nil {
+			return extractErr
+		}
+		return closeErr
 
 	default:
-		return fmt.Errorf("unsupported archive format for url: %s", url)
+		return fmt.Errorf("unsupported archive format for URL path %q", urlPath)
 	}
+}
+
+type pendingSymlink struct {
+	relOS      string
+	fullTarget string
+	entryName  string
+	linkname   string
 }
 
 func extractZip(zipPath, destDir string) error {
@@ -489,58 +805,127 @@ func extractZip(zipPath, destDir string) error {
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
+
+	if mkdirErr := os.MkdirAll(destDir, 0o750); mkdirErr != nil {
+		return mkdirErr
+	}
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
 
 	spinner := ui.NewSpinner("Unzipping Toolchain")
 	spinner.SetProgress(0, len(r.File))
 	spinner.Start()
 	defer spinner.Stop()
 
-	budget := archiveutil.NewBudget(archiveutil.DefaultSizeLimit)
+	budget := archiveutil.NewBudgetWithEntries(archiveutil.DefaultSizeLimit, archiveutil.ToolchainMaxEntries)
+	tracker := archiveutil.NewPathTracker()
+	linkMap := make(map[string]string)
+	var symlinks []pendingSymlink
 
 	for _, f := range r.File {
 		spinner.AddProgress(1)
+		if takeErr := budget.TakeEntry(); takeErr != nil {
+			return takeErr
+		}
 
-		fpath, err := archiveutil.SafeJoin(destDir, f.Name)
+		fpath, relOS, err := archiveutil.SafeRelPath(destDir, f.Name)
+		if err != nil {
+			return err
+		}
+		if relOS == "." {
+			continue
+		}
+		if recErr := tracker.Record(relOS); recErr != nil {
+			return recErr
+		}
+
+		if f.Mode()&fs.ModeSymlink != 0 {
+			linkname, lErr := readZipSymlinkTarget(f, budget)
+			if lErr != nil {
+				return lErr
+			}
+			if linkErr := archiveutil.ValidateLinkSyntax(fpath, linkname); linkErr != nil {
+				return linkErr
+			}
+			linkMap[archiveutil.CanonicalLinkKey(relOS)] = linkname
+			symlinks = append(symlinks, pendingSymlink{
+				relOS:      relOS,
+				fullTarget: fpath,
+				entryName:  f.Name,
+				linkname:   linkname,
+			})
+			continue
+		}
+
+		resolvedRelOS, err := archiveutil.ResolveArchiveRelPath(destDir, relOS, linkMap)
 		if err != nil {
 			return err
 		}
 
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(fpath, archiveutil.DirMode); err != nil {
+			if err := archiveutil.RootMkdirAll(root, resolvedRelOS); err != nil {
 				return err
 			}
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(fpath), archiveutil.DirMode); err != nil {
+		if err := archiveutil.RootMkdirAll(root, filepath.Dir(resolvedRelOS)); err != nil {
 			return err
 		}
-
-		if err := writeZipEntry(f, fpath, budget); err != nil {
+		if err := writeZipEntryRoot(root, f, resolvedRelOS, budget); err != nil {
 			return fmt.Errorf("failed extracting %q: %w", f.Name, err)
 		}
 	}
-	return nil
+
+	if err := archiveutil.ValidateSymlinkGraph(destDir, linkMap); err != nil {
+		return err
+	}
+	return materializeSymlinksTopologically(root, destDir, symlinks, linkMap)
 }
 
-func writeZipEntry(f *zip.File, fpath string, budget *archiveutil.Budget) error {
+func readZipSymlinkTarget(f *zip.File, budget *archiveutil.Budget) (string, error) {
+	rc, err := f.Open()
+	if err != nil {
+		return "", err
+	}
+	var sb strings.Builder
+	_, copyErr := budget.Copy(&sb, io.LimitReader(rc, 4096))
+	closeErr := rc.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return sb.String(), nil
+}
+
+func writeZipEntryRoot(root *os.Root, f *zip.File, relOS string, budget *archiveutil.Budget) error {
 	rc, err := f.Open()
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
 
-	outFile, err := os.OpenFile(fpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, archiveutil.EntryMode(f.Mode()))
+	outFile, err := root.OpenFile(relOS, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, archiveutil.EntryMode(f.Mode()))
 	if err != nil {
+		_ = rc.Close()
 		return err
 	}
 
-	if _, err := budget.Copy(outFile, rc); err != nil {
-		outFile.Close()
-		return err
+	_, copyErr := budget.Copy(outFile, rc)
+	rcCloseErr := rc.Close()
+	outCloseErr := outFile.Close()
+	if copyErr != nil {
+		return copyErr
 	}
-	return outFile.Close()
+	if rcCloseErr != nil {
+		return rcCloseErr
+	}
+	return outCloseErr
 }
 
 func extractTarGz(r io.Reader, destDir string) error {
@@ -548,10 +933,17 @@ func extractTarGz(r io.Reader, destDir string) error {
 	if err != nil {
 		return err
 	}
-	defer gzr.Close()
 
 	tr := tar.NewReader(gzr)
-	return extractTar(tr, destDir)
+	if err := extractTar(tr, destDir); err != nil {
+		_ = gzr.Close()
+		return err
+	}
+	if err := archiveutil.DrainStreamTrailer(gzr, 1<<20); err != nil {
+		_ = gzr.Close()
+		return fmt.Errorf("gzip trailer integrity failure: %w", err)
+	}
+	return gzr.Close()
 }
 
 func extractTarXz(r io.Reader, destDir string) error {
@@ -561,182 +953,610 @@ func extractTarXz(r io.Reader, destDir string) error {
 	}
 
 	tr := tar.NewReader(xzr)
-	return extractTar(tr, destDir)
+	if err := extractTar(tr, destDir); err != nil {
+		return err
+	}
+	if err := archiveutil.DrainStreamTrailer(xzr, 1<<20); err != nil {
+		return fmt.Errorf("xz trailer integrity failure: %w", err)
+	}
+	return nil
 }
 
 func extractTar(tr *tar.Reader, destDir string) error {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
 	spinner := ui.NewSpinner("Unpacking Toolchain")
-	// Since TAR length is unknown beforehand, we just use it as a spinner without progress bar
 	spinner.Start()
 	defer spinner.Stop()
 
-	budget := archiveutil.NewBudget(archiveutil.DefaultSizeLimit)
+	budget := archiveutil.NewBudgetWithEntries(archiveutil.DefaultSizeLimit, archiveutil.ToolchainMaxEntries)
+	tracker := archiveutil.NewPathTracker()
+	linkMap := make(map[string]string)
+	var symlinks []pendingSymlink
 
 	for {
 		header, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return err
 		}
 
-		// Extended headers carry metadata for the following entry and are consumed by the reader.
 		if header.Typeflag == tar.TypeXGlobalHeader || header.Typeflag == tar.TypeXHeader {
 			continue
 		}
 
-		target, err := archiveutil.SafeJoin(destDir, header.Name)
+		if takeErr := budget.TakeEntry(); takeErr != nil {
+			return takeErr
+		}
+
+		cleanName := strings.TrimPrefix(filepath.ToSlash(header.Name), "./")
+		cleanName = strings.TrimSuffix(cleanName, "/")
+		if cleanName == "" || cleanName == "." {
+			if header.Typeflag == tar.TypeDir {
+				continue
+			}
+			return fmt.Errorf("%w: invalid root entry %q", archiveutil.ErrUnsafePath, header.Name)
+		}
+
+		target, relOS, err := archiveutil.SafeRelPath(destDir, cleanName)
 		if err != nil {
+			return err
+		}
+		if relOS == "." {
+			if header.Typeflag == tar.TypeDir {
+				continue
+			}
+			return fmt.Errorf("%w: entry %q resolves to destination root", archiveutil.ErrUnsafePath, header.Name)
+		}
+		if err := tracker.Record(relOS); err != nil {
 			return err
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, archiveutil.DirMode); err != nil {
+			resolvedRelOS, rErr := archiveutil.ResolveArchiveRelPath(destDir, relOS, linkMap)
+			if rErr != nil {
+				return rErr
+			}
+			if err := archiveutil.RootMkdirAll(root, resolvedRelOS); err != nil {
 				return err
 			}
 
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), archiveutil.DirMode); err != nil {
+		case tar.TypeReg, '\x00':
+			resolvedRelOS, rErr := archiveutil.ResolveArchiveRelPath(destDir, relOS, linkMap)
+			if rErr != nil {
+				return rErr
+			}
+			if err := archiveutil.RootMkdirAll(root, filepath.Dir(resolvedRelOS)); err != nil {
 				return err
 			}
-			if err := writeTarFile(tr, target, header, budget); err != nil {
+			if err := writeTarFileRoot(root, tr, resolvedRelOS, header, budget); err != nil {
 				return fmt.Errorf("failed extracting %q: %w", header.Name, err)
 			}
 
 		case tar.TypeSymlink:
-			if err := writeSymlink(destDir, target, header); err != nil {
+			if err := archiveutil.ValidateLinkSyntax(target, header.Linkname); err != nil {
 				return err
 			}
+			linkMap[archiveutil.CanonicalLinkKey(relOS)] = header.Linkname
+			symlinks = append(symlinks, pendingSymlink{
+				relOS:      relOS,
+				fullTarget: target,
+				entryName:  header.Name,
+				linkname:   header.Linkname,
+			})
 
 		case tar.TypeLink:
-			// A hard link names another entry of the same archive, so its source is resolved and
-			// checked exactly like an entry path.
-			source, err := archiveutil.SafeJoin(destDir, header.Linkname)
-			if err != nil {
-				return fmt.Errorf("hard link %q: %w", header.Name, err)
+			_, srcRelOS, err := archiveutil.SafeRelPath(destDir, header.Linkname)
+			if err != nil || srcRelOS == "." {
+				return fmt.Errorf("hard link %q: %w", header.Name, archiveutil.ErrUnsafePath)
 			}
-			if err := os.MkdirAll(filepath.Dir(target), archiveutil.DirMode); err != nil {
+			if _, isSym := linkMap[archiveutil.CanonicalLinkKey(srcRelOS)]; isSym {
+				return fmt.Errorf("hard link %q targets symlink %q: %w", header.Name, header.Linkname, archiveutil.ErrUnsafePath)
+			}
+			resolvedSrcRelOS, sErr := archiveutil.ResolveArchiveRelPath(destDir, srcRelOS, linkMap)
+			if sErr != nil {
+				return sErr
+			}
+			resolvedDstRelOS, dErr := archiveutil.ResolveArchiveRelPath(destDir, relOS, linkMap)
+			if dErr != nil {
+				return dErr
+			}
+			srcInfo, statErr := root.Lstat(resolvedSrcRelOS)
+			if statErr != nil {
+				return fmt.Errorf("hard link %q target %q missing: %w", header.Name, header.Linkname, archiveutil.ErrUnsafePath)
+			}
+			if srcInfo.Mode()&fs.ModeSymlink != 0 || !srcInfo.Mode().IsRegular() {
+				return fmt.Errorf("hard link %q targets non-regular file %q: %w", header.Name, header.Linkname, archiveutil.ErrUnsafePath)
+			}
+			if err := archiveutil.RootMkdirAll(root, filepath.Dir(resolvedDstRelOS)); err != nil {
 				return err
 			}
-			_ = os.Remove(target)
-			if err := os.Link(source, target); err != nil {
+			_ = root.Remove(resolvedDstRelOS)
+			sourceHost := filepath.Join(destDir, resolvedSrcRelOS)
+			dstHost := filepath.Join(destDir, resolvedDstRelOS)
+			if err := os.Link(sourceHost, dstHost); err != nil {
 				return fmt.Errorf("failed linking %q -> %q: %w", header.Name, header.Linkname, err)
 			}
 
 		default:
-			// Character devices, block devices and FIFOs have no place in a toolchain archive.
-			// Skipping them silently used to leave an installation that looked complete.
 			return fmt.Errorf("unsupported archive entry type %q for %q", string(header.Typeflag), header.Name)
 		}
 	}
-	return nil
+
+	if err := archiveutil.ValidateSymlinkGraph(destDir, linkMap); err != nil {
+		return err
+	}
+	return materializeSymlinksTopologically(root, destDir, symlinks, linkMap)
 }
 
-func writeTarFile(tr *tar.Reader, target string, header *tar.Header, budget *archiveutil.Budget) error {
-	// O_TRUNC matters when extracting over an existing tree: without it a shorter file leaves the
-	// tail of its predecessor in place. The zip path always had it, this one did not.
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, archiveutil.EntryMode(header.FileInfo().Mode()))
+func writeTarFileRoot(root *os.Root, tr *tar.Reader, relOS string, header *tar.Header, budget *archiveutil.Budget) error {
+	f, err := root.OpenFile(relOS, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, archiveutil.EntryMode(header.FileInfo().Mode()))
 	if err != nil {
 		return err
 	}
 	if _, err := budget.Copy(f, tr); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	return f.Close()
 }
 
-// writeSymlink creates a link only after checking where it points.
-//
-// The path check on the entry itself is lexical and cannot see through links: an archive that first
-// creates "evil -> /etc" and then writes "evil/passwd" passes it twice and still lands outside the
-// destination, because the operating system resolves the link on the second write.
-func writeSymlink(destDir, target string, header *tar.Header) error {
-	if err := archiveutil.SafeLinkTarget(destDir, target, header.Linkname); err != nil {
-		return err
+func materializeSymlinksTopologically(root *os.Root, destDir string, symlinks []pendingSymlink, linkMap map[string]string) error {
+	if len(symlinks) == 0 {
+		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(target), archiveutil.DirMode); err != nil {
-		return err
-	}
-	_ = os.Remove(target)
 
-	if err := os.Symlink(header.Linkname, target); err != nil {
-		// Windows only creates symlinks with Developer Mode or elevation. That is an environment
-		// limitation rather than a broken archive, so it is reported and skipped instead of
-		// aborting a provisioning run that would otherwise succeed. Everywhere else a failure here
-		// means the installation is incomplete, and a toolchain missing "gcc -> gcc-13" fails much
-		// later with a far more confusing message.
-		if runtime.GOOS == "windows" {
-			ui.Warn("Skipping symlink %s -> %s (Windows requires Developer Mode): %v", header.Name, header.Linkname, err)
+	byKey := make(map[string]pendingSymlink, len(symlinks))
+	orderKeys := make([]string, 0, len(symlinks))
+	for _, s := range symlinks {
+		k := archiveutil.CanonicalLinkKey(s.relOS)
+		if _, exists := byKey[k]; !exists {
+			orderKeys = append(orderKeys, k)
+		}
+		byKey[k] = s
+	}
+
+	state := make(map[string]uint8, len(byKey)) // 0 = pending, 1 = visiting, 2 = materialized
+
+	var materializeKey func(k string) error
+	materializeKey = func(k string) error {
+		switch state[k] {
+		case 2:
+			return nil
+		case 1:
+			return fmt.Errorf("%w: symlink cycle at %q", archiveutil.ErrUnsafePath, k)
+		}
+		s, ok := byKey[k]
+		if !ok {
 			return nil
 		}
-		return fmt.Errorf("failed creating symlink %q -> %q: %w", header.Name, header.Linkname, err)
+		state[k] = 1
+
+		// Ensure any symlink components along the parent directory or target path are materialized first.
+		parentSlash := path.Dir(filepath.ToSlash(s.relOS))
+		for _, dep := range referencedSymlinkKeys(parentSlash, s.linkname, linkMap) {
+			if dep != k {
+				if err := materializeKey(dep); err != nil {
+					return err
+				}
+			}
+		}
+
+		resolvedRelOS, err := archiveutil.ResolveArchiveRelPath(destDir, s.relOS, nil)
+		if err != nil {
+			resolvedRelOS = s.relOS
+		}
+		if err := archiveutil.RootMkdirAll(root, filepath.Dir(resolvedRelOS)); err != nil {
+			return err
+		}
+		fullTarget := filepath.Join(destDir, resolvedRelOS)
+		if err := createSymlinkOrWindowsCopy(root, destDir, resolvedRelOS, fullTarget, s.entryName, s.linkname); err != nil {
+			return err
+		}
+
+		state[k] = 2
+		return nil
+	}
+
+	for _, k := range orderKeys {
+		if err := materializeKey(k); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// FindBinDir recursively searches for a directory named "bin" containing any executables starting with the given prefix.
-// This is completely compiler-agnostic (it doesn't care if it's gcc, clang, ld, etc.)
-func FindBinDir(root string, prefix string) string {
-	var binDir string
+func referencedSymlinkKeys(parentSlash, linkname string, linkMap map[string]string) []string {
+	var deps []string
+	cur := "."
+	if parentSlash != "" && parentSlash != "." {
+		for _, seg := range strings.Split(parentSlash, "/") {
+			if seg == "" || seg == "." {
+				continue
+			}
+			if cur == "." {
+				cur = seg
+			} else {
+				cur = cur + "/" + seg
+			}
+			key := strings.ToLower(cur)
+			if _, ok := linkMap[key]; ok {
+				deps = append(deps, key)
+			}
+		}
+	}
 
-	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	norm := strings.ReplaceAll(linkname, `\`, "/")
+	for _, seg := range strings.Split(norm, "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		if seg == ".." {
+			cur = path.Dir(cur)
+			if cur == "" {
+				cur = "."
+			}
+			continue
+		}
+		if cur == "." {
+			cur = seg
+		} else {
+			cur = cur + "/" + seg
+		}
+		key := strings.ToLower(cur)
+		if _, ok := linkMap[key]; ok {
+			deps = append(deps, key)
+		}
+	}
+	return deps
+}
+
+func createSymlinkOrWindowsCopy(root *os.Root, destDir, relOS, fullTarget, entryName, linkname string) error {
+	_ = root.Remove(relOS)
+	if err := os.Symlink(linkname, fullTarget); err != nil {
+		if runtime.GOOS == "windows" {
+			candHost := filepath.Clean(filepath.Join(filepath.Dir(fullTarget), filepath.FromSlash(linkname)))
+			candRel, relErr := filepath.Rel(filepath.Clean(destDir), candHost)
+			if relErr != nil || candRel == ".." || strings.HasPrefix(candRel, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("%w: symlink %q -> %q escapes destination", archiveutil.ErrUnsafePath, entryName, linkname)
+			}
+			st, statErr := root.Stat(candRel)
+			if statErr != nil {
+				return fmt.Errorf("failed materializing Windows symlink %q -> %q (enable Windows Developer Mode or verify archive target): %w",
+					entryName, linkname, statErr)
+			}
+			if st.Mode().IsRegular() {
+				return streamCopyInRoots(root, candRel, root, relOS, st.Mode(), st.Size())
+			}
+			if st.IsDir() {
+				return copySubtreeInRoot(root, destDir, candRel, relOS)
+			}
+			return fmt.Errorf("unsupported symlink target mode for %q -> %q on Windows", entryName, linkname)
+		}
+		return fmt.Errorf("failed creating symlink %q -> %q: %w", entryName, linkname, err)
+	}
+	return nil
+}
+
+func copySubtreeInRoot(root *os.Root, destDir, srcRel, dstRel string) error {
+	srcAbs := filepath.Join(destDir, srcRel)
+	return filepath.WalkDir(srcAbs, func(walkPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		sub, err := filepath.Rel(srcAbs, walkPath)
 		if err != nil {
+			return err
+		}
+		targetRel := dstRel
+		if sub != "." {
+			targetRel = filepath.Join(dstRel, sub)
+		}
+		if d.IsDir() {
+			return archiveutil.RootMkdirAll(root, targetRel)
+		}
+		srcEntryRel := srcRel
+		if sub != "." {
+			srcEntryRel = filepath.Join(srcRel, sub)
+		}
+		st, err := root.Stat(srcEntryRel)
+		if err != nil {
+			return err
+		}
+		if !st.Mode().IsRegular() {
 			return nil
 		}
-		if binDir != "" {
-			return filepath.SkipDir // Abort further traversal once found
+		if err := archiveutil.RootMkdirAll(root, filepath.Dir(targetRel)); err != nil {
+			return err
 		}
-		if info.IsDir() && info.Name() == "bin" {
-			// Check if this bin directory contains any files starting with the prefix
-			entries, err := os.ReadDir(path)
-			if err == nil {
-				for _, e := range entries {
-					if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
-						binDir = path
-						return filepath.SkipDir // Found it!
-					}
+		return streamCopyInRoots(root, srcEntryRel, root, targetRel, st.Mode(), st.Size())
+	})
+}
+
+func isRegularFileFollowingSymlink(filePath string) bool {
+	st, err := os.Stat(filePath)
+	return err == nil && st.Mode().IsRegular()
+}
+
+func binaryCandidates(base string) []string {
+	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(base), ".exe") {
+		return []string{base + ".exe", base}
+	}
+	return []string{base}
+}
+
+func binDirContainsCompiler(binDir, prefix, compilerBinary string) bool {
+	if compilerBinary != "" {
+		for _, cand := range binaryCandidates(compilerBinary) {
+			if isRegularFileFollowingSymlink(filepath.Join(binDir, cand)) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if prefix != "" {
+		for _, tool := range []string{prefix + "gcc", prefix + "clang", prefix + "cc"} {
+			for _, cand := range binaryCandidates(tool) {
+				if isRegularFileFollowingSymlink(filepath.Join(binDir, cand)) {
+					return true
 				}
 			}
-			return filepath.SkipDir // Skip traversing inside bin if it didn't match
+		}
+		entries, err := os.ReadDir(binDir)
+		if err != nil {
+			return false
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasPrefix(e.Name(), prefix) {
+				if isRegularFileFollowingSymlink(filepath.Join(binDir, e.Name())) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Prefix-less toolchains (such as Clang/LLVM).
+	for _, tool := range []string{"clang", "clang++", "gcc", "cc"} {
+		for _, cand := range binaryCandidates(tool) {
+			if isRegularFileFollowingSymlink(filepath.Join(binDir, cand)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// FindBinDir recursively searches root for a "bin" directory containing executables matching prefix.
+func FindBinDir(root, prefix string) string {
+	return FindBinDirWithBinary(root, prefix, "")
+}
+
+// FindBinDirWithBinary searches root for the shallowest "bin" directory containing a valid
+// regular compiler executable (resolved via os.Stat so dangling symlinks never match).
+func FindBinDirWithBinary(root, prefix, compilerBinary string) string {
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	if st, err := os.Stat(root); err != nil || !st.IsDir() {
+		return ""
+	}
+
+	type binCandidate struct {
+		path  string
+		depth int
+	}
+	var candidates []binCandidate
+
+	_ = filepath.WalkDir(root, func(walkPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if d != nil && d.IsDir() && walkPath != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() && d.Name() == "bin" {
+			rel, relErr := filepath.Rel(root, walkPath)
+			depth := 1
+			if relErr == nil {
+				depth = strings.Count(filepath.ToSlash(rel), "/") + 1
+			}
+			candidates = append(candidates, binCandidate{path: walkPath, depth: depth})
+			return filepath.SkipDir
 		}
 		return nil
 	})
-	return binDir
+
+	slices.SortStableFunc(candidates, func(a, b binCandidate) int {
+		if c := cmp.Compare(a.depth, b.depth); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.path, b.path)
+	})
+
+	for _, c := range candidates {
+		if binDirContainsCompiler(c.path, prefix, compilerBinary) {
+			return c.path
+		}
+	}
+	return ""
 }
 
-// copyTree recursively copies src to dst. Used as fallback for EXDEV errors.
-// Uses hard-links where possible for instant, zero-disk-cost copies.
+// CleanToolchainsAndCAS removes <ToobHome>/toolchains, <ToobHome>/store/cas (clearing
+// read-only 0o444/0o555 blob permissions first), <ToobHome>/cache/downloads, and
+// <ToobHome>/.trash, returning the total physical bytes reclaimed.
+func CleanToolchainsAndCAS() (int64, error) {
+	homeDir, err := paths.ToobHome()
+	if err != nil {
+		return 0, err
+	}
+
+	targets := []string{
+		filepath.Join(homeDir, "toolchains"),
+		filepath.Join(homeDir, "store", "cas"),
+		filepath.Join(homeDir, "cache", "downloads"),
+		filepath.Join(homeDir, ".trash"),
+	}
+
+	var seenFiles []fs.FileInfo
+	var reclaimed int64
+
+	for _, dir := range targets {
+		unlockDirForRemoval(dir, &seenFiles, &reclaimed)
+	}
+
+	for _, dir := range targets {
+		if _, statErr := os.Lstat(dir); errors.Is(statErr, fs.ErrNotExist) {
+			continue
+		}
+		if err := RetryWindowsLocks(func() error { return os.RemoveAll(dir) }); err != nil {
+			return reclaimed, fmt.Errorf("failed removing %s: %w", dir, err)
+		}
+	}
+
+	return reclaimed, nil
+}
+
+func unlockDirForRemoval(dir string, seenFiles *[]fs.FileInfo, reclaimed *int64) {
+	rootInfo, err := os.Lstat(dir)
+	if err != nil || !rootInfo.IsDir() {
+		return
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return
+	}
+	defer func() { _ = root.Close() }()
+	unlockRootEntries(root, seenFiles, reclaimed)
+}
+
+func unlockRootEntries(root *os.Root, seenFiles *[]fs.FileInfo, reclaimed *int64) {
+	_ = root.Chmod(".", 0o700)
+	dirFile, err := root.Open(".")
+	if err != nil {
+		return
+	}
+	entries, readErr := dirFile.ReadDir(-1)
+	_ = dirFile.Close()
+	if readErr != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		info, statErr := root.Lstat(name)
+		if statErr != nil || info.Mode()&fs.ModeSymlink != 0 {
+			continue
+		}
+		if info.IsDir() {
+			_ = root.Chmod(name, 0o700)
+			subRoot, subErr := root.OpenRoot(name)
+			if subErr != nil {
+				continue
+			}
+			unlockRootEntries(subRoot, seenFiles, reclaimed)
+			_ = subRoot.Close()
+			continue
+		}
+		if info.Mode().IsRegular() {
+			alreadyCounted := false
+			for _, prev := range *seenFiles {
+				if os.SameFile(prev, info) {
+					alreadyCounted = true
+					break
+				}
+			}
+			if !alreadyCounted {
+				*seenFiles = append(*seenFiles, info)
+				*reclaimed += info.Size()
+			}
+			_ = root.Chmod(name, 0o600)
+		}
+	}
+}
+
 func copyTree(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+	if err := os.MkdirAll(dst, 0o750); err != nil {
+		return err
+	}
+	srcRoot, err := os.OpenRoot(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = srcRoot.Close() }()
+
+	dstRoot, err := os.OpenRoot(dst)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dstRoot.Close() }()
+
+	var symlinks []pendingSymlink
+	linkMap := make(map[string]string)
+
+	if err := filepath.WalkDir(src, func(walkPath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, walkPath)
 		if err != nil {
 			return err
 		}
-		rel, _ := filepath.Rel(src, path)
-		target := filepath.Join(dst, rel)
-
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-
-		// Hard-link first (instant, shares inode), byte-copy fallback
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		if err := os.Link(path, target); err == nil {
+		if rel == "." {
 			return nil
 		}
 
-		sInfo, err := d.Info()
+		if d.Type()&fs.ModeSymlink != 0 {
+			linkTarget, rlErr := os.Readlink(walkPath)
+			if rlErr != nil {
+				return rlErr
+			}
+			fullDst := filepath.Join(dst, rel)
+			if linkErr := archiveutil.ValidateLinkSyntax(fullDst, linkTarget); linkErr != nil {
+				return linkErr
+			}
+			linkMap[archiveutil.CanonicalLinkKey(rel)] = linkTarget
+			symlinks = append(symlinks, pendingSymlink{
+				relOS:      rel,
+				fullTarget: fullDst,
+				entryName:  rel,
+				linkname:   linkTarget,
+			})
+			return nil
+		}
+
+		if d.IsDir() {
+			return archiveutil.RootMkdirAll(dstRoot, rel)
+		}
+
+		if mkdirErr := archiveutil.RootMkdirAll(dstRoot, filepath.Dir(rel)); mkdirErr != nil {
+			return mkdirErr
+		}
+		sInfo, err := srcRoot.Lstat(rel)
 		if err != nil {
 			return err
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
+		if !sInfo.Mode().IsRegular() {
+			return fmt.Errorf("unsupported non-regular file %q in toolchain tree", rel)
 		}
-		return os.WriteFile(target, data, sInfo.Mode())
-	})
+		return streamCopyInRoots(srcRoot, rel, dstRoot, rel, sInfo.Mode(), sInfo.Size())
+	}); err != nil {
+		return err
+	}
+
+	if err := archiveutil.ValidateSymlinkGraph(dst, linkMap); err != nil {
+		return err
+	}
+	return materializeSymlinksTopologically(dstRoot, dst, symlinks, linkMap)
 }

@@ -11,17 +11,19 @@ require (
 	golang.org/x/mod v0.35.0
 )
 
-require (
-	aead.dev/minisign v0.3.0 // indirect
-	golang.org/x/sync v0.22.0
-)
+require aead.dev/minisign v0.3.0 // indirect
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
+	github.com/spf13/pflag v1.0.9
 	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
 )
 
-replace golang.org/x/crypto v0.45.0 => golang.org/x/crypto v0.45.0-aikido.2
+replace (
+	golang.org/x/crypto v0.45.0 => golang.org/x/crypto v0.45.0-aikido.2
+	github.com/Toob-Boot/Toob-Loader/toob-go-lib => ../../toob-go-lib
+)
+
+require github.com/Toob-Boot/Toob-Loader/toob-go-lib v0.0.0-unpublished

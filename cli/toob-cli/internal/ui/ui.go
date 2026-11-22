@@ -2,187 +2,223 @@ package ui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
 
-// parseMarkdown applies lightweight formatting, e.g. turning `text` into Cyan text.
-func parseMarkdown(s string) string {
-	parts := strings.Split(s, "`")
-	// Every odd index is inside backticks (if properly paired)
-	for i := 1; i < len(parts); i += 2 {
-		parts[i] = Cyan(parts[i])
+func formatMsg(msg string, args ...any) string {
+	if len(args) == 0 {
+		return msg
 	}
-	return strings.Join(parts, "")
+	return fmt.Sprintf(msg, args...)
 }
 
-// --- Semantic Output Primitives ---
-// Inspired by Turborepo's task-scoped logging and Docker's clean progress output.
+// parseMarkdown highlights paired `code` spans in Cyan while optionally re-applying outerCode
+// after each closing backtick so nested color wrappers (such as Gray in Tip) never drop midway.
+func parseMarkdownWithOuter(s, outerCode string) string {
+	parts := strings.Split(s, "`")
+	if len(parts) < 3 {
+		if outerCode != "" {
+			return Color(outerCode, s)
+		}
+		return s
+	}
+
+	if !ColorEnabled() {
+		var plain strings.Builder
+		for i, p := range parts {
+			if i%2 == 1 && i == len(parts)-1 {
+				plain.WriteByte('`')
+			}
+			plain.WriteString(p)
+		}
+		return plain.String()
+	}
+
+	var b strings.Builder
+	if outerCode != "" {
+		b.WriteString(outerCode)
+	}
+	for i := range parts {
+		if i%2 == 1 {
+			if i == len(parts)-1 {
+				// Unmatched trailing backtick: preserve literal text.
+				b.WriteByte('`')
+				b.WriteString(parts[i])
+			} else {
+				b.WriteString("\033[36m")
+				b.WriteString(parts[i])
+				b.WriteString("\033[0m")
+				if outerCode != "" {
+					b.WriteString(outerCode)
+				}
+			}
+		} else {
+			b.WriteString(parts[i])
+		}
+	}
+	if outerCode != "" {
+		b.WriteString("\033[0m")
+	}
+	return b.String()
+}
 
 // Step prints a primary action being performed.
-//
-//	▸ Configuring CMake ...
 func Step(msg string, args ...any) {
-	fmt.Fprintf(os.Stderr, "  %s %s\n", Brand("▸"), fmt.Sprintf(msg, args...))
+	_, _ = fmt.Fprintf(Output(), "  %s %s\n", Brand("▸"), formatMsg(msg, args...))
 }
 
 // Success prints a completed action.
-//
-//	✓ Build complete
 func Success(msg string, args ...any) {
-	fmt.Fprintf(os.Stderr, "  %s %s\n", Green("✓"), fmt.Sprintf(msg, args...))
+	_, _ = fmt.Fprintf(Output(), "  %s %s\n", Green("✓"), formatMsg(msg, args...))
 }
 
 // Warn prints a non-fatal warning.
-//
-//	⚠ Registry index could not be loaded
 func Warn(msg string, args ...any) {
-	fmt.Fprintf(os.Stderr, "  %s %s\n", Yellow("⚠"), fmt.Sprintf(msg, args...))
+	_, _ = fmt.Fprintf(Output(), "  %s %s\n", Yellow("⚠"), formatMsg(msg, args...))
 }
 
 // Error prints a fatal error or failure.
-//
-//	✗ Manifest not found
 func Error(msg string, args ...any) {
-	formatted := parseMarkdown(fmt.Sprintf(msg, args...))
-	fmt.Fprintf(os.Stderr, "  %s %s\n", Red("✗"), formatted)
+	formatted := parseMarkdownWithOuter(formatMsg(msg, args...), "")
+	_, _ = fmt.Fprintf(Output(), "  %s %s\n", Red("✗"), formatted)
 }
 
 // Info prints a secondary detail line.
-//
-//   - Target: espressif/esp32c6
 func Info(msg string, args ...any) {
-	fmt.Fprintf(os.Stderr, "  %s %s\n", Brand("•"), fmt.Sprintf(msg, args...))
+	_, _ = fmt.Fprintf(Output(), "  %s %s\n", Brand("•"), formatMsg(msg, args...))
 }
 
-// Muted prints a de-emphasized, informational line.
-//
-//	(skipped — already up to date)
+// Muted prints a de-emphasized informational line.
 func Muted(msg string, args ...any) {
-	fmt.Fprintf(os.Stderr, "    %s\n", Gray(fmt.Sprintf(msg, args...)))
+	_, _ = fmt.Fprintf(Output(), "    %s\n", Gray(formatMsg(msg, args...)))
 }
 
-// Tip prints a helpful suggestion after a completed operation.
-//
-//	💡 Run 'toob build --native' for faster builds.
+// Tip prints a helpful suggestion after a completed operation, preserving Gray outside `code` spans.
 func Tip(msg string, args ...any) {
-	formatted := parseMarkdown(fmt.Sprintf(msg, args...))
-	fmt.Fprintf(os.Stderr, "  %s %s\n", Brand("›"), Gray(formatted))
+	formatted := parseMarkdownWithOuter(formatMsg(msg, args...), "\033[90m")
+	_, _ = fmt.Fprintf(Output(), "  %s %s\n", Brand("›"), formatted)
 }
 
-// --- Structured Components ---
-
-// Header prints a prominent section title with a brand-colored underline.
-//
-//	TOOB BUILD
-//	──────────
+// Header prints a prominent section title with a brand-colored underline matching visual width.
 func Header(title string) {
 	upper := strings.ToUpper(title)
-	fmt.Fprintf(os.Stderr, "\n  %s\n", BoldBrand(upper))
-	fmt.Fprintf(os.Stderr, "  %s\n", Brand(strings.Repeat("─", len(upper))))
+	out := Output()
+	_, _ = fmt.Fprintf(out, "\n  %s\n", BoldBrand(upper))
+	_, _ = fmt.Fprintf(out, "  %s\n", Brand(strings.Repeat("─", max(VisualWidth(upper), 1))))
 }
 
 // Divider prints a subtle horizontal separator.
 func Divider() {
-	fmt.Fprintln(os.Stderr)
+	_, _ = fmt.Fprintln(Output())
 }
 
-// KeyValue prints a label-value pair with consistent alignment.
-//
-//	Vendor:         espressif
-func KeyValue(key, val string) {
-	gap := max(16-len(key), 1)
-	fmt.Fprintf(os.Stderr, "  %s%s%s\n", Gray(key+":"), strings.Repeat(" ", gap), val)
+// KeyValue prints a label-value pair with consistent visual column alignment.
+func KeyValue(key string, val any) {
+	var valStr string
+	if s, ok := val.(string); ok {
+		valStr = s
+	} else {
+		valStr = fmt.Sprint(val)
+	}
+	gap := max(16-VisualWidth(key), 1)
+	_, _ = fmt.Fprintf(Output(), "  %s%s%s\n", Gray(key+":"), strings.Repeat(" ", gap), valStr)
 }
 
-// UpdateBanner prints a prominent update notification, styled like Turborepo
-// but with the Toob toggle-switch logo integrated into the border.
+// UpdateBanner prints a prominent CLI update notification with exact East-Asian-aware border alignment.
 func UpdateBanner(current, latest string) {
-	width := 50
-
-	// Logo in the border: " TツOB "
 	logoText := " TツOB "
-	logoVisualLen := 7 // " TツOB " has 7 visual characters
-	leftDash := (width - 2 - logoVisualLen) / 2
-	rightDash := width - 2 - logoVisualLen - leftDash
+	line1 := fmt.Sprintf("Update available %s %s %s", Gray(current), Gray("→"), BoldBrand(latest))
+	line2 := fmt.Sprintf("Run %s to update", Cyan("toob update"))
+
+	visualLen1 := VisualWidth(line1)
+	visualLen2 := VisualWidth(line2)
+	logoVisualLen := VisualWidth(logoText)
+
+	width := max(50, visualLen1+6, visualLen2+6, logoVisualLen+6)
+	innerWidth := width - 2
+
+	leftDash := (innerWidth - logoVisualLen) / 2
+	rightDash := innerWidth - logoVisualLen - leftDash
 
 	topBorder := Brand("╭"+strings.Repeat("─", leftDash)) + BoldBrand(logoText) + Brand(strings.Repeat("─", rightDash)+"╮")
-	bottomBorder := Brand("╰" + strings.Repeat("─", width-2) + "╯")
-	emptyLine := Brand("│") + strings.Repeat(" ", width-2) + Brand("│")
+	bottomBorder := Brand("╰" + strings.Repeat("─", innerWidth) + "╯")
+	emptyLine := Brand("│") + strings.Repeat(" ", innerWidth) + Brand("│")
 
-	// Visual length of "Update available " + current + " → " + latest
-	line1 := fmt.Sprintf("Update available %s %s %s", Gray(current), Gray("→"), BoldBrand(latest))
-	visualLen1 := 17 + len(current) + 3 + len(latest) // "Update available " (17) + current + " → " (3) + latest
-	pad1 := max(width-2-visualLen1, 0)
+	pad1 := max(innerWidth-visualLen1, 0)
 	left1 := pad1 / 2
 	right1 := pad1 - left1
 
-	// Visual length of "Run toob update to update"
-	line2 := fmt.Sprintf("Run %s to update", Cyan("toob update"))
-	visualLen2 := 25 // "Run " (4) + "toob update" (11) + " to update" (10)
-	pad2 := max(width-2-visualLen2, 0)
+	pad2 := max(innerWidth-visualLen2, 0)
 	left2 := pad2 / 2
 	right2 := pad2 - left2
 
-	fmt.Fprintf(os.Stderr, "\n  %s\n", topBorder)
-	fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
-	fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Brand("│"), strings.Repeat(" ", left1), line1, strings.Repeat(" ", right1), Brand("│"))
-	fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Brand("│"), strings.Repeat(" ", left2), line2, strings.Repeat(" ", right2), Brand("│"))
-	fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
-	fmt.Fprintf(os.Stderr, "  %s\n\n", bottomBorder)
+	out := Output()
+	_, _ = fmt.Fprintf(out, "\n  %s\n", topBorder)
+	_, _ = fmt.Fprintf(out, "  %s\n", emptyLine)
+	_, _ = fmt.Fprintf(out, "  %s%s%s%s%s\n", Brand("│"), strings.Repeat(" ", left1), line1, strings.Repeat(" ", right1), Brand("│"))
+	_, _ = fmt.Fprintf(out, "  %s%s%s%s%s\n", Brand("│"), strings.Repeat(" ", left2), line2, strings.Repeat(" ", right2), Brand("│"))
+	_, _ = fmt.Fprintf(out, "  %s\n", emptyLine)
+	_, _ = fmt.Fprintf(out, "  %s\n\n", bottomBorder)
 }
 
-// RegistryBanner prints a notification when the locked registry is outdated.
+// RegistryBanner prints a notification when the locked registry revision is outdated.
 func RegistryBanner(current, latest string, chipWarnings []string) {
-	width := 50
-
 	logoText := " TツOB "
-	logoVisualLen := 7
-	leftDash := (width - 2 - logoVisualLen) / 2
-	rightDash := width - 2 - logoVisualLen - leftDash
+	line1 := fmt.Sprintf("Registry %s %s %s", Gray(current), Gray("→"), BoldCyan(latest))
+	line2 := fmt.Sprintf("Run %s to update", Cyan("toob registry sync"))
+
+	visualLen1 := VisualWidth(line1)
+	visualLen2 := VisualWidth(line2)
+	logoVisualLen := VisualWidth(logoText)
+
+	var warnLine string
+	warnVisual := 0
+	if len(chipWarnings) > 0 {
+		warnLine = fmt.Sprintf("%s Chips not found: %s", Yellow("⚠"), Yellow(strings.Join(chipWarnings, ", ")))
+		warnVisual = VisualWidth(warnLine)
+	}
+
+	width := max(50, visualLen1+6, visualLen2+6, warnVisual+6, logoVisualLen+6)
+	innerWidth := width - 2
+
+	leftDash := (innerWidth - logoVisualLen) / 2
+	rightDash := innerWidth - logoVisualLen - leftDash
 
 	topBorder := Cyan("╭"+strings.Repeat("─", leftDash)) + BoldCyan(logoText) + Cyan(strings.Repeat("─", rightDash)+"╮")
-	bottomBorder := Cyan("╰" + strings.Repeat("─", width-2) + "╯")
-	emptyLine := Cyan("│") + strings.Repeat(" ", width-2) + Cyan("│")
+	bottomBorder := Cyan("╰" + strings.Repeat("─", innerWidth) + "╯")
+	emptyLine := Cyan("│") + strings.Repeat(" ", innerWidth) + Cyan("│")
 
-	// Line 1: "Registry v1.0.10 → v1.2.0"
-	line1 := fmt.Sprintf("Registry %s %s %s", Gray(current), Gray("→"), BoldCyan(latest))
-	visualLen1 := 9 + len(current) + 3 + len(latest) // "Registry " (9) + current + " → " (3) + latest
-	pad1 := max(width-2-visualLen1, 0)
+	pad1 := max(innerWidth-visualLen1, 0)
 	left1 := pad1 / 2
 	right1 := pad1 - left1
 
-	// Line 2: "Run toob registry sync to update"
-	line2 := fmt.Sprintf("Run %s to update", Cyan("toob registry sync"))
-	visualLen2 := 32 // "Run " (4) + "toob registry sync" (18) + " to update" (10)
-	pad2 := max(width-2-visualLen2, 0)
+	pad2 := max(innerWidth-visualLen2, 0)
 	left2 := pad2 / 2
 	right2 := pad2 - left2
 
-	fmt.Fprintf(os.Stderr, "\n  %s\n", topBorder)
-	fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
-	fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", left1), line1, strings.Repeat(" ", right1), Cyan("│"))
-	fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", left2), line2, strings.Repeat(" ", right2), Cyan("│"))
+	out := Output()
+	_, _ = fmt.Fprintf(out, "\n  %s\n", topBorder)
+	_, _ = fmt.Fprintf(out, "  %s\n", emptyLine)
+	_, _ = fmt.Fprintf(out, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", left1), line1, strings.Repeat(" ", right1), Cyan("│"))
+	_, _ = fmt.Fprintf(out, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", left2), line2, strings.Repeat(" ", right2), Cyan("│"))
 
-	if len(chipWarnings) > 0 {
-		fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
-		warnLine := fmt.Sprintf("%s Chips not found: %s", Yellow("⚠"), Yellow(strings.Join(chipWarnings, ", ")))
-		warnVisual := 18 + len(strings.Join(chipWarnings, ", ")) // "⚠ Chips not found: " = 20 visually but ⚠ is 1 char
-		warnPad := max(width-2-warnVisual, 0)
+	if warnLine != "" {
+		_, _ = fmt.Fprintf(out, "  %s\n", emptyLine)
+		warnPad := max(innerWidth-warnVisual, 0)
 		wLeft := warnPad / 2
 		wRight := warnPad - wLeft
-		fmt.Fprintf(os.Stderr, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", wLeft), warnLine, strings.Repeat(" ", wRight), Cyan("│"))
+		_, _ = fmt.Fprintf(out, "  %s%s%s%s%s\n", Cyan("│"), strings.Repeat(" ", wLeft), warnLine, strings.Repeat(" ", wRight), Cyan("│"))
 	}
 
-	fmt.Fprintf(os.Stderr, "  %s\n", emptyLine)
-	fmt.Fprintf(os.Stderr, "  %s\n\n", bottomBorder)
+	_, _ = fmt.Fprintf(out, "  %s\n", emptyLine)
+	_, _ = fmt.Fprintf(out, "  %s\n\n", bottomBorder)
 }
 
 // TableOptions defines configurable settings for Table rendering.
 type TableOptions struct {
-	ColumnPadding   int   // Number of spaces between columns (default 2)
-	MinColumnWidths []int // Minimum width for specific columns, matched by index
+	ColumnPadding   int
+	MinColumnWidths []int
 }
 
 // Table prints a formatted table with default settings (2 spaces padding).
@@ -190,8 +226,7 @@ func Table(headers []string, rows [][]string) {
 	TableWithOptions(headers, rows, TableOptions{ColumnPadding: 2})
 }
 
-// TableWithOptions prints a formatted table with configurable settings.
-// Automatically calculates column widths, ignoring ANSI colors for alignment.
+// TableWithOptions prints a formatted table using visual display widths for column alignment.
 func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 	if opts.ColumnPadding <= 0 {
 		opts.ColumnPadding = 2
@@ -200,7 +235,7 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 
 	colWidths := make([]int, len(headers))
 	for i, h := range headers {
-		w := len(Strip(h))
+		w := VisualWidth(h)
 		if i < len(opts.MinColumnWidths) && opts.MinColumnWidths[i] > w {
 			w = opts.MinColumnWidths[i]
 		}
@@ -210,30 +245,27 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 	for _, row := range rows {
 		for i, cell := range row {
 			if i < len(colWidths) {
-				w := len(Strip(cell))
-				if w > colWidths[i] {
+				if w := VisualWidth(cell); w > colWidths[i] {
 					colWidths[i] = w
 				}
 			}
 		}
 	}
 
-	// Header row
 	var hdr strings.Builder
 	for i, h := range headers {
 		if i > 0 {
 			hdr.WriteString(padStr)
 		}
-
-		visualLen := len(Strip(h))
-		padding := max(colWidths[i]-visualLen, 0)
+		padding := max(colWidths[i]-VisualWidth(h), 0)
 		hdr.WriteString(h)
 		hdr.WriteString(strings.Repeat(" ", padding))
 	}
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintf(os.Stderr, "  %s\n", Bold(hdr.String()))
 
-	// Separator (directly below column headers, no gap)
+	out := Output()
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "  %s\n", Bold(hdr.String()))
+
 	var sep strings.Builder
 	for i, w := range colWidths {
 		if i > 0 {
@@ -241,9 +273,8 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 		}
 		sep.WriteString(strings.Repeat("─", w))
 	}
-	fmt.Fprintf(os.Stderr, "  %s\n", Gray(sep.String()))
+	_, _ = fmt.Fprintf(out, "  %s\n", Gray(sep.String()))
 
-	// Data rows
 	for _, row := range rows {
 		var line strings.Builder
 		for i, cell := range row {
@@ -254,14 +285,11 @@ func TableWithOptions(headers []string, rows [][]string, opts TableOptions) {
 			if i < len(colWidths) {
 				w = colWidths[i]
 			}
-
-			visualLen := len(Strip(cell))
-			padding := max(w-visualLen, 0)
-
+			padding := max(w-VisualWidth(cell), 0)
 			line.WriteString(cell)
 			line.WriteString(strings.Repeat(" ", padding))
 		}
-		fmt.Fprintf(os.Stderr, "  %s\n", line.String())
+		_, _ = fmt.Fprintf(out, "  %s\n", line.String())
 	}
 }
 
@@ -272,51 +300,46 @@ type TimingEntry struct {
 }
 
 // TimingSummary prints a Turborepo-style timing breakdown.
-//
-//	TIMINGS
-//	───────
-//	Manifest Compiler ······· 12ms
-//	CMake Configure ········· 340ms
-//	Ninja Build ············· 1.2s
-//	─────────────────────────────
-//	Total ··················· 1.56s
 func TimingSummary(phases []TimingEntry, total time.Duration) {
 	Header("Timings")
-	padWidth := 28
+	const padWidth = 28
+	out := Output()
 	for _, p := range phases {
-		fmt.Fprintf(os.Stderr, "  %s %s\n",
+		_, _ = fmt.Fprintf(out, "  %s %s\n",
 			Pad(p.Name, padWidth),
 			Bold(p.Duration.Round(time.Millisecond).String()))
 	}
-	fmt.Fprintf(os.Stderr, "  %s\n", Gray(strings.Repeat("─", padWidth+15)))
-	fmt.Fprintf(os.Stderr, "  %s %s\n\n",
+	_, _ = fmt.Fprintf(out, "  %s\n", Gray(strings.Repeat("─", padWidth+15)))
+	_, _ = fmt.Fprintf(out, "  %s %s\n\n",
 		Pad(BoldBrand("Total"), padWidth),
 		Bold(total.Round(time.Millisecond).String()))
 }
 
 // ErrorBanner prints a prominent error classification block.
-// Replaces the raw ANSI "BUILD ERROR CLASSIFIER" banner.
 func ErrorBanner(category, detail, hint string) {
-	width := 72
+	const width = 72
 	bar := strings.Repeat("━", width)
+	out := Output()
 
-	fmt.Fprintf(os.Stderr, "\n  %s\n", Red(bar))
-	fmt.Fprintf(os.Stderr, "  %s  %s\n", Red("✗"), BoldRed(category))
-	fmt.Fprintf(os.Stderr, "  %s\n", Red(bar))
-	fmt.Fprintf(os.Stderr, "  %s\n", detail)
+	_, _ = fmt.Fprintf(out, "\n  %s\n", Red(bar))
+	_, _ = fmt.Fprintf(out, "  %s  %s\n", Red("✗"), BoldRed(category))
+	_, _ = fmt.Fprintf(out, "  %s\n", Red(bar))
+	_, _ = fmt.Fprintf(out, "  %s\n", detail)
 	if hint != "" {
-		fmt.Fprintf(os.Stderr, "  %s %s\n", Brand("›"), Gray(hint))
+		_, _ = fmt.Fprintf(out, "  %s %s\n", Brand("›"), Gray(hint))
 	}
-	fmt.Fprintf(os.Stderr, "  %s\n\n", Red(bar))
+	_, _ = fmt.Fprintf(out, "  %s\n\n", Red(bar))
 }
 
 // CheckItem prints a doctor-style check result.
-func CheckItem(ok bool, optional bool, name, detail string) {
-	if ok {
-		fmt.Fprintf(os.Stderr, "  %s %s  %s\n", Green("✓"), Bold(name), Gray(detail))
-	} else if optional {
-		fmt.Fprintf(os.Stderr, "  %s %s  %s\n", Gray("○"), name, Gray(detail))
-	} else {
-		fmt.Fprintf(os.Stderr, "  %s %s  %s\n", Red("✗"), Bold(name), detail)
+func CheckItem(ok, optional bool, name, detail string) {
+	out := Output()
+	switch {
+	case ok:
+		_, _ = fmt.Fprintf(out, "  %s %s  %s\n", Green("✓"), Bold(name), Gray(detail))
+	case optional:
+		_, _ = fmt.Fprintf(out, "  %s %s  %s\n", Gray("○"), name, Gray(detail))
+	default:
+		_, _ = fmt.Fprintf(out, "  %s %s  %s\n", Red("✗"), Bold(name), detail)
 	}
 }

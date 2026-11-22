@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/toob-boot/toob/internal/elfaudit"
@@ -47,16 +46,12 @@ var elfauditCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("invalid hardware.json path: %w", err)
 			}
-			data, err := os.ReadFile(absHW)
+			hj, err := manifest.ParseHardwareJSON(absHW)
 			if err != nil {
-				return fmt.Errorf("failed to read hardware.json: %w", err)
-			}
-			var hj manifest.HardwareJson
-			if err := json.Unmarshal(data, &hj); err != nil {
 				return fmt.Errorf("failed to parse hardware.json: %w", err)
 			}
 			for _, r := range hj.ReservedRamRegions {
-				base, err := strconv.ParseUint(strings.TrimPrefix(r.Base, "0x"), 16, 64)
+				base, err := parseCLiteralU64(r.Base)
 				if err != nil {
 					return fmt.Errorf("invalid base address '%s' for reserved region '%s': %w", r.Base, r.Name, err)
 				}
@@ -97,10 +92,28 @@ var elfauditCmd = &cobra.Command{
 	},
 }
 
+func parseCLiteralU64(raw string) (uint64, error) {
+	trimmed := raw
+	for len(trimmed) > 0 {
+		last := trimmed[len(trimmed)-1]
+		if last == 'u' || last == 'U' || last == 'l' || last == 'L' {
+			trimmed = trimmed[:len(trimmed)-1]
+		} else {
+			break
+		}
+	}
+	digits, base := trimmed, 10
+	if len(trimmed) > 2 && (trimmed[:2] == "0x" || trimmed[:2] == "0X") {
+		digits, base = trimmed[2:], 16
+	} else if len(trimmed) > 1 && trimmed[0] == '0' {
+		return 0, fmt.Errorf("literal %q has a leading zero (octal ambiguity)", raw)
+	}
+	return strconv.ParseUint(digits, base, 64)
+}
+
 func init() {
 	elfauditCmd.Flags().StringVar(&elfauditProfile, "profile", "production", "Build profile (production|sandbox)")
 	elfauditCmd.Flags().StringVar(&elfauditHardware, "hardware", "", "Path to hardware.json for reserved region checks")
 	elfauditCmd.Flags().Uint64Var(&elfauditBudget, "budget", 0, "Stage1 size budget in bytes (0 = skip budget check)")
 	rootCmd.AddCommand(elfauditCmd)
 }
-
