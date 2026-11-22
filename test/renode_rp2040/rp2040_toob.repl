@@ -1,0 +1,60 @@
+cpu0: CPU.CortexM @ sysbus
+    cpuType: "cortex-m0+"
+    nvic: nvic0
+    cpuId: 0
+
+cpu1: CPU.CortexM @ sysbus
+    cpuType: "cortex-m0+"
+    nvic: nvic1
+    cpuId: 1
+
+nvic0: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration {
+        address: 0xE000E000;
+        cpu: cpu0
+    }
+    systickFrequency: 125000000
+    -> cpu0@0
+    SystemResetRequest -> vregChipReset@0
+
+nvic1: IRQControllers.NVIC @ sysbus new Bus.BusPointRegistration {
+        address: 0xE000E000;
+        cpu: cpu1
+    }
+    systickFrequency: 125000000
+    -> cpu1@0
+
+rom: Memory.MappedMemory @ sysbus 0x00000000
+    size: 0x4000
+
+xipFlash: Memory.MappedMemory @ sysbus 0x10000000
+    size: 0x200000
+
+sram: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x42000
+
+xipCtrl: Miscellaneous.Rp2040XipCtrl @ sysbus 0x14000000
+
+ssi: Miscellaneous.Rp2040SsiNor @ sysbus 0x18000000
+    xipFlash: xipFlash
+    xipCtrl: xipCtrl
+
+psm: Miscellaneous.Rp2040Psm @ sysbus 0x40010000
+    cpu1: cpu1
+
+uart0: UART.PL011 @ sysbus 0x40034000
+    -> nvic0@20
+
+timer: Miscellaneous.Rp2040Timer @ sysbus 0x40054000
+
+watchdog: Miscellaneous.Rp2040Watchdog @ sysbus 0x40058000
+
+rosc: Miscellaneous.Rp2040Rosc @ sysbus 0x40060000
+
+vregChipReset: Miscellaneous.Rp2040VregChipReset @ sysbus 0x40064000
+    rom: rom
+    watchdog: watchdog
+    ssi: ssi
+    nvic0: nvic0
+
+sio: Miscellaneous.Rp2040Sio @ sysbus 0xD0000000
+    cpu1: cpu1

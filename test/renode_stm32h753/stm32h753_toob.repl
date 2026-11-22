@@ -1,0 +1,42 @@
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    priorityMask: 0xF0
+    systickFrequency: 64000000
+    -> cpu@0
+    SystemResetRequest -> rcc@0
+
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m7"
+    numberOfMPURegions: 16
+    nvic: nvic
+
+flash: Memory.MappedMemory @ sysbus 0x08000000
+    size: 0x300000
+
+dtcm: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x20000
+
+sram: Memory.MappedMemory @ sysbus 0x24000000
+    size: 0x80000
+
+otp: Miscellaneous.Stm32H753OtpUid @ sysbus 0x1FF1E000
+
+usart1: UART.STM32F7_USART @ sysbus 0x40011000
+    frequency: 64000000
+    IRQ -> nvic@37
+
+rng: Miscellaneous.Stm32H753Rng @ sysbus 0x48021800
+
+flashCtrl: Miscellaneous.Stm32H753FlashController @ sysbus 0x52002000
+    flash: flash
+    otp: otp
+    nvic: nvic
+
+rtc: Miscellaneous.Stm32H753RtcBkp @ sysbus 0x58004000
+    pwr: pwr
+
+iwdg1: Miscellaneous.Stm32H753Iwdg @ sysbus 0x58004800
+    rcc: rcc
+
+rcc: Miscellaneous.Stm32H753Rcc @ sysbus 0x58024400
+
+pwr: Miscellaneous.Stm32H753Pwr @ sysbus 0x58024800

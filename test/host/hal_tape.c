@@ -27,6 +27,8 @@ static const boot_platform_t *g_base = NULL;
 static boot_platform_t g_shim_platform;
 static flash_hal_t g_shim_flash;
 static crypto_hal_t g_shim_crypto;
+static entropy_hal_t g_shim_entropy;
+static keystore_hal_t g_shim_keystore;
 static clock_hal_t g_shim_clock;
 
 /* --- Flash Intercepts --- */
@@ -119,12 +121,12 @@ static uint32_t shim_flash_get_last_vendor_error(void) {
 /* --- Crypto Intercepts --- */
 
 static boot_status_t shim_crypto_init(void) {
-    if (g_mode == TAPE_MODE_REPLAY) return BOOT_OK;
+    if (g_mode == TAPE_MODE_REPLAY || !g_base->crypto->init) return BOOT_OK;
     return g_base->crypto->init();
 }
 
 static void shim_crypto_deinit(void) {
-    if (g_mode == TAPE_MODE_REPLAY) return;
+    if (g_mode == TAPE_MODE_REPLAY || !g_base->crypto->deinit) return;
     g_base->crypto->deinit();
 }
 
@@ -140,17 +142,45 @@ static boot_status_t shim_crypto_hash_finish(void *ctx, uint8_t *digest, size_t 
     return g_base->crypto->hash_finish(ctx, digest, digest_len);
 }
 
-static boot_status_t shim_crypto_verify_ed25519(const uint8_t *message, size_t msg_len, const uint8_t *sig, const uint8_t *pubkey) {
-    return g_base->crypto->verify_ed25519(message, msg_len, sig, pubkey);
+static boot_status_t shim_crypto_verify_signature(const uint8_t *message, size_t msg_len, const uint8_t *sig, const uint8_t *pubkey) {
+    return g_base->crypto->verify_signature(message, msg_len, sig, pubkey);
+}
+
+static boot_status_t shim_crypto_verify_signature_ph(const uint8_t *msg_digest, const uint8_t *sig, const uint8_t *pubkey) {
+    return g_base->crypto->verify_signature_ph(msg_digest, sig, pubkey);
 }
 
 static boot_status_t shim_crypto_verify_pqc(const uint8_t *message, size_t msg_len, const uint8_t *sig, size_t sig_len, const uint8_t *pubkey, size_t pubkey_len) {
     return g_base->crypto->verify_pqc(message, msg_len, sig, sig_len, pubkey, pubkey_len);
 }
 
-static boot_status_t shim_crypto_random(uint8_t *buf, size_t len) {
+static uint32_t shim_crypto_get_last_vendor_error(void) {
+    return g_base->crypto->get_last_vendor_error();
+}
+
+static size_t shim_crypto_get_hash_ctx_size(void) {
+    return g_base->crypto->get_hash_ctx_size();
+}
+
+static bool shim_crypto_is_pqc_enforced(void) {
+    return g_base->crypto->is_pqc_enforced();
+}
+
+/* --- Entropy Intercepts --- */
+
+static boot_status_t shim_entropy_init(void) {
+    if (g_mode == TAPE_MODE_REPLAY || !g_base->entropy->init) return BOOT_OK;
+    return g_base->entropy->init();
+}
+
+static void shim_entropy_deinit(void) {
+    if (g_mode == TAPE_MODE_REPLAY || !g_base->entropy->deinit) return;
+    g_base->entropy->deinit();
+}
+
+static boot_status_t shim_entropy_random(uint8_t *buf, size_t len) {
     if (g_mode == TAPE_MODE_RECORD) {
-        boot_status_t ret = g_base->crypto->random(buf, len);
+        boot_status_t ret = g_base->entropy->random(buf, len);
         tape_hdr_t hdr = { .op = OP_CRYPTO_RANDOM, .arg1 = (uint32_t)len, .arg2 = 0, .ret_val = (uint32_t)ret };
         fwrite(&hdr, sizeof(hdr), 1, g_tape_file);
         if (ret == BOOT_OK) {
@@ -170,32 +200,40 @@ static boot_status_t shim_crypto_random(uint8_t *buf, size_t len) {
         }
         return (boot_status_t)hdr.ret_val;
     }
-    return g_base->crypto->random(buf, len);
+    return g_base->entropy->random(buf, len);
 }
 
-static uint32_t shim_crypto_get_last_vendor_error(void) {
-    return g_base->crypto->get_last_vendor_error();
+/* --- Keystore Intercepts --- */
+
+static boot_status_t shim_keystore_init(void) {
+    if (g_mode == TAPE_MODE_REPLAY || !g_base->keystore->init) return BOOT_OK;
+    return g_base->keystore->init();
 }
 
-static boot_status_t shim_crypto_read_pubkey(uint8_t *key, size_t key_len, uint8_t key_index) {
-    return g_base->crypto->read_pubkey(key, key_len, key_index);
+static void shim_keystore_deinit(void) {
+    if (g_mode == TAPE_MODE_REPLAY || !g_base->keystore->deinit) return;
+    g_base->keystore->deinit();
 }
 
-static boot_status_t shim_crypto_read_chip_uid(uint8_t *buf, size_t max_len, size_t *out_len) {
-    return g_base->crypto->read_chip_uid(buf, max_len, out_len);
+static boot_status_t shim_keystore_read_pubkey(uint8_t *key, size_t key_len, uint8_t key_index) {
+    return g_base->keystore->read_pubkey(key, key_len, key_index);
 }
 
-static boot_status_t shim_crypto_read_dslc(uint8_t *buffer, size_t *len) {
-    return g_base->crypto->read_dslc(buffer, len);
+static boot_status_t shim_keystore_read_chip_uid(uint8_t *buf, size_t max_len, size_t *out_len) {
+    return g_base->keystore->read_chip_uid(buf, max_len, out_len);
 }
 
-static boot_status_t shim_crypto_write_dslc(const uint8_t *value, size_t len) {
-    return g_base->crypto->write_dslc(value, len);
+static boot_status_t shim_keystore_read_dslc(uint8_t *buffer, size_t *len) {
+    return g_base->keystore->read_dslc(buffer, len);
 }
 
-static boot_status_t shim_crypto_read_monotonic_counter(uint32_t *ctr) {
+static boot_status_t shim_keystore_write_dslc(const uint8_t *value, size_t len) {
+    return g_base->keystore->write_dslc(value, len);
+}
+
+static boot_status_t shim_keystore_read_monotonic_counter(uint32_t *ctr) {
     if (g_mode == TAPE_MODE_RECORD) {
-        boot_status_t ret = g_base->crypto->read_monotonic_counter(ctr);
+        boot_status_t ret = g_base->keystore->read_monotonic_counter(ctr);
         tape_hdr_t hdr = { .op = OP_CRYPTO_MONOTONIC, .arg1 = 0, .arg2 = 0, .ret_val = (uint32_t)ret };
         fwrite(&hdr, sizeof(hdr), 1, g_tape_file);
         if (ret == BOOT_OK) {
@@ -215,19 +253,11 @@ static boot_status_t shim_crypto_read_monotonic_counter(uint32_t *ctr) {
         }
         return (boot_status_t)hdr.ret_val;
     }
-    return g_base->crypto->read_monotonic_counter(ctr);
+    return g_base->keystore->read_monotonic_counter(ctr);
 }
 
-static boot_status_t shim_crypto_advance_monotonic_counter(void) {
-    return g_base->crypto->advance_monotonic_counter();
-}
-
-static size_t shim_crypto_get_hash_ctx_size(void) {
-    return g_base->crypto->get_hash_ctx_size();
-}
-
-static bool shim_crypto_is_pqc_enforced(void) {
-    return g_base->crypto->is_pqc_enforced();
+static boot_status_t shim_keystore_advance_monotonic_counter(void) {
+    return g_base->keystore->advance_monotonic_counter();
 }
 
 /* --- Clock Intercepts --- */
@@ -307,23 +337,36 @@ const boot_platform_t *hal_tape_init(const char *tape_path, hal_tape_mode_t mode
     g_shim_flash.get_last_vendor_error = shim_flash_get_last_vendor_error;
 
     memcpy(&g_shim_crypto, g_base->crypto, sizeof(crypto_hal_t));
-    g_shim_crypto.init = shim_crypto_init;
-    g_shim_crypto.deinit = shim_crypto_deinit;
-    g_shim_crypto.hash_init = shim_crypto_hash_init;
-    g_shim_crypto.hash_update = shim_crypto_hash_update;
-    g_shim_crypto.hash_finish = shim_crypto_hash_finish;
-    g_shim_crypto.verify_ed25519 = shim_crypto_verify_ed25519;
-    g_shim_crypto.verify_pqc = shim_crypto_verify_pqc;
-    g_shim_crypto.random = shim_crypto_random;
-    g_shim_crypto.get_last_vendor_error = shim_crypto_get_last_vendor_error;
-    g_shim_crypto.read_pubkey = shim_crypto_read_pubkey;
-    g_shim_crypto.read_chip_uid = shim_crypto_read_chip_uid;
-    g_shim_crypto.read_dslc = shim_crypto_read_dslc;
-    g_shim_crypto.write_dslc = shim_crypto_write_dslc;
-    g_shim_crypto.read_monotonic_counter = shim_crypto_read_monotonic_counter;
-    g_shim_crypto.advance_monotonic_counter = shim_crypto_advance_monotonic_counter;
-    g_shim_crypto.get_hash_ctx_size = shim_crypto_get_hash_ctx_size;
-    g_shim_crypto.is_pqc_enforced = shim_crypto_is_pqc_enforced;
+    if (g_base->crypto->init) g_shim_crypto.init = shim_crypto_init;
+    if (g_base->crypto->deinit) g_shim_crypto.deinit = shim_crypto_deinit;
+    if (g_base->crypto->hash_init) g_shim_crypto.hash_init = shim_crypto_hash_init;
+    if (g_base->crypto->hash_update) g_shim_crypto.hash_update = shim_crypto_hash_update;
+    if (g_base->crypto->hash_finish) g_shim_crypto.hash_finish = shim_crypto_hash_finish;
+    if (g_base->crypto->verify_signature) g_shim_crypto.verify_signature = shim_crypto_verify_signature;
+    if (g_base->crypto->verify_signature_ph) g_shim_crypto.verify_signature_ph = shim_crypto_verify_signature_ph;
+    if (g_base->crypto->verify_pqc) g_shim_crypto.verify_pqc = shim_crypto_verify_pqc;
+    if (g_base->crypto->get_last_vendor_error) g_shim_crypto.get_last_vendor_error = shim_crypto_get_last_vendor_error;
+    if (g_base->crypto->get_hash_ctx_size) g_shim_crypto.get_hash_ctx_size = shim_crypto_get_hash_ctx_size;
+    if (g_base->crypto->is_pqc_enforced) g_shim_crypto.is_pqc_enforced = shim_crypto_is_pqc_enforced;
+
+    if (g_base->entropy) {
+        memcpy(&g_shim_entropy, g_base->entropy, sizeof(entropy_hal_t));
+        if (g_base->entropy->init) g_shim_entropy.init = shim_entropy_init;
+        if (g_base->entropy->deinit) g_shim_entropy.deinit = shim_entropy_deinit;
+        if (g_base->entropy->random) g_shim_entropy.random = shim_entropy_random;
+    }
+
+    if (g_base->keystore) {
+        memcpy(&g_shim_keystore, g_base->keystore, sizeof(keystore_hal_t));
+        if (g_base->keystore->init) g_shim_keystore.init = shim_keystore_init;
+        if (g_base->keystore->deinit) g_shim_keystore.deinit = shim_keystore_deinit;
+        if (g_base->keystore->read_pubkey) g_shim_keystore.read_pubkey = shim_keystore_read_pubkey;
+        if (g_base->keystore->read_chip_uid) g_shim_keystore.read_chip_uid = shim_keystore_read_chip_uid;
+        if (g_base->keystore->read_dslc) g_shim_keystore.read_dslc = shim_keystore_read_dslc;
+        if (g_base->keystore->write_dslc) g_shim_keystore.write_dslc = shim_keystore_write_dslc;
+        if (g_base->keystore->read_monotonic_counter) g_shim_keystore.read_monotonic_counter = shim_keystore_read_monotonic_counter;
+        if (g_base->keystore->advance_monotonic_counter) g_shim_keystore.advance_monotonic_counter = shim_keystore_advance_monotonic_counter;
+    }
 
     memcpy(&g_shim_clock, g_base->clock, sizeof(clock_hal_t));
     g_shim_clock.init = shim_clock_init;
@@ -340,6 +383,9 @@ const boot_platform_t *hal_tape_init(const char *tape_path, hal_tape_mode_t mode
     g_shim_platform.console = g_base->console;
     g_shim_platform.soc = g_base->soc;
     g_shim_platform.provisioning = g_base->provisioning;
+    g_shim_platform.slot_caps = g_base->slot_caps;
+    g_shim_platform.entropy = g_base->entropy ? &g_shim_entropy : NULL;
+    g_shim_platform.keystore = g_base->keystore ? &g_shim_keystore : NULL;
 
     return &g_shim_platform;
 }

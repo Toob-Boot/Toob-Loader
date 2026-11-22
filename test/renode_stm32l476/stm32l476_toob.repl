@@ -1,0 +1,49 @@
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    priorityMask: 0xF0
+    systickFrequency: 16000000
+    -> cpu@0
+    SystemResetRequest -> rcc@0
+
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m4"
+    nvic: nvic
+    numberOfMPURegions: 8
+
+flash: Memory.MappedMemory @ sysbus 0x08000000
+    size: 0x100000
+
+sram: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x20000
+
+sram2Alias: Memory.MappedMemory @ sysbus 0x10000000
+    size: 0x8000
+
+syscfg: Miscellaneous.Stm32L476Syscfg @ sysbus 0x40010000
+
+bootAlias: Miscellaneous.Stm32L476BootAlias @ sysbus 0x00000000
+    flash: flash
+    syscfg: syscfg
+
+otp: Miscellaneous.Stm32L476OtpUid @ sysbus 0x1FFF7000
+
+pwr: Miscellaneous.Stm32L476Pwr @ sysbus 0x40007000
+
+rtc: Miscellaneous.Stm32L476RtcBkp @ sysbus 0x40002800
+    pwr: pwr
+
+rcc: Miscellaneous.Stm32L476Rcc @ sysbus 0x40021000
+
+iwdg: Miscellaneous.Stm32L476Iwdg @ sysbus 0x40003000
+    rcc: rcc
+
+usart1: UART.STM32F7_USART @ sysbus 0x40013800
+    frequency: 16000000
+    IRQ -> nvic@37
+
+rng: Miscellaneous.Stm32L476Rng @ sysbus 0x50060800
+
+flashCtrl: Miscellaneous.Stm32L476FlashController @ sysbus 0x40022000
+    flash: flash
+    otp: otp
+    syscfg: syscfg
+

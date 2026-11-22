@@ -1,0 +1,47 @@
+name = "Stm32F072RenodeE2E"
+version = "v1.0.0"
+
+[identity]
+vendor_id = 0x0483
+product_id = 0x0072
+hw_rev = 1
+
+[device]
+chip = "stm32f072"
+
+[build]
+compiler = "arm-none-eabi"
+core_sdk = "core/v0.1.0"
+registry = "https://github.com/toob-boot/toob-registry"
+
+[driver_config]
+uart_baudrate = 115200
+
+[partitions]
+stage0_size = 28672
+stage1_size = 73728
+app_size = 14336
+scratch_size = 14336
+recovery_size = 20480
+enable_deltas = true
+wal_sectors = 4
+
+[boot_config]
+transport_provider = "swapmove"
+max_retries = 2
+max_recovery_retries = 5
+edge_unattended_mode = true
+backoff_base_s = 1
+wdt_timeout_ms = 2000
+
+[recovery]
+console = "stm32f0_usart"
+flash = "stm32f0_flash"
+wdt = "stm32f0_iwdg"
+clock = "stm32f0_rcc_csr"
+rtc = "stm32f0_rtc_bkp"
+
+[recovery.crypto]
+backend = "none"
+hash = "sha256_sw"
+justification = "Recovery OS integrity verified via Stage 1 SHA-256 + boot_proof HMAC; rescue TBM1 bundle Ed25519-verified by Stage 1 on reboot."

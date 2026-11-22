@@ -1,0 +1,45 @@
+name = "QemuEsp32S3"
+version = "v1.0.0"
+
+[identity]
+vendor_id = 0x0001
+product_id = 0x0053
+hw_rev = 1
+
+[device]
+chip = "esp32s3"
+
+[build]
+compiler = "xtensa-esp32s3-elf"
+core_sdk = "core/v0.1.0"
+registry = "https://github.com/toob-boot/toob-registry"
+
+[driver_config]
+uart_baudrate = 115200
+
+[partitions]
+stage0_size = 32768
+stage1_size = 131072
+app_size = 393216
+recovery_size = 65536
+enable_deltas = true
+wal_sectors = 4
+
+[boot_config]
+max_retries = 2
+max_recovery_retries = 5
+edge_unattended_mode = true
+backoff_base_s = 1
+wdt_timeout_ms = 2000
+
+[recovery]
+console = "esp_uart_v1"
+flash = "esp_rom_spi"
+wdt = "esp_rwdt_with_swd"
+clock = "esp_systimer"
+rtc = "esp_rtc_mem"
+
+[recovery.crypto]
+backend = "none"
+hash = "sha256_sw"
+justification = "Recovery OS integrity verified via Stage 1 SHA-256 + boot_proof HMAC; incoming rescue TBM1 bundle Ed25519-verified by Stage 1 on reboot."

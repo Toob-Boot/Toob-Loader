@@ -1,0 +1,49 @@
+flash: Memory.MappedMemory @ sysbus 0x08000000
+    size: 0x40000
+
+sram: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x4000
+
+syscfg: Miscellaneous.Stm32F072Syscfg @ sysbus 0x40010000
+
+bootAlias: Miscellaneous.Stm32F072BootAlias @ sysbus 0x00000000
+    flash: flash
+    sram: sram
+    syscfg: syscfg
+
+rcc: Miscellaneous.Stm32F072Rcc @ sysbus 0x40021000
+    syscfg: syscfg
+
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    priorityMask: 0xC0
+    systickFrequency: 48000000
+    IRQ -> cpu@0
+    SystemResetRequest -> rcc@0
+
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m0"
+    nvic: nvic
+
+otp: Miscellaneous.Stm32F072OtpOptBlock @ sysbus 0x1FFFF000
+
+pwr: Miscellaneous.Stm32F072Pwr @ sysbus 0x40007000
+
+rtc: Miscellaneous.Stm32F072RtcBkp @ sysbus 0x40002800
+    pwr: pwr
+
+iwdg: Miscellaneous.Stm32F072Iwdg @ sysbus 0x40003000
+    rcc: rcc
+
+usart1: UART.STM32F7_USART @ sysbus 0x40013800
+    frequency: 48000000
+    IRQ -> nvic@27
+
+adc: Miscellaneous.Stm32F072AdcEntropy @ sysbus 0x40012400
+
+flashCtrl: Miscellaneous.Stm32F072FlashController @ sysbus 0x40022000
+    flash: flash
+    otp: otp
+
+syscfg:
+    Nvic: nvic
+

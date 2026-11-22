@@ -1,0 +1,38 @@
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    -> cpu@0
+    SystemResetRequest -> powerBprot@0
+
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m4f"
+    nvic: nvic
+
+flash: Memory.MappedMemory @ sysbus 0x00000000
+    size: 0x100000
+
+ram: Memory.MappedMemory @ { sysbus 0x00800000; sysbus 0x20000000 }
+    size: 0x40000
+
+ficr: Miscellaneous.Nrf52840Ficr @ sysbus 0x10000000
+
+uicr: Miscellaneous.Nrf52840Uicr @ sysbus 0x10001000
+
+clock: Miscellaneous.NRF_CLOCK @ sysbus <0x40000000, +0x400>
+    -> nvic@0
+
+wdt: Timers.NRF52840_Watchdog @ sysbus 0x40010000
+    -> nvic@16
+
+powerBprot: Miscellaneous.Nrf52840PowerBprot @ sysbus 0x40000400
+    wdt: wdt
+
+uart0: UART.NRF52840_UART @ sysbus 0x40002000
+    easyDMA: false
+    -> nvic@2
+
+rng: Miscellaneous.NRF52840_RNG @ sysbus 0x4000D000
+    -> nvic@13
+
+nvmc: Miscellaneous.Nrf52840Nvmc @ sysbus 0x4001E000
+    flash: flash
+    uicr: uicr
+    powerBprot: powerBprot

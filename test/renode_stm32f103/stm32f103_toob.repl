@@ -1,0 +1,46 @@
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    priorityMask: 0xF0
+    systickFrequency: 72000000
+    -> cpu@0
+    SystemResetRequest -> rcc@0
+
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m3"
+    nvic: nvic
+    numberOfMPURegions: 8
+
+flash: Memory.MappedMemory @ sysbus 0x08000000
+    size: 0x80000
+
+sram: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x10000
+
+bootAlias: Miscellaneous.Stm32f103BootAlias @ sysbus 0x00000000
+    flash: flash
+
+dwt: Miscellaneous.Stm32f103Dwt @ sysbus 0xE0001000
+
+otp: Miscellaneous.Stm32f103OtpOptBlock @ sysbus 0x1FFFF000
+
+rcc: Miscellaneous.Stm32f103Rcc @ sysbus 0x40021000
+
+pwr: Miscellaneous.Stm32f103Pwr @ sysbus 0x40007000
+    rcc: rcc
+
+bkp: Miscellaneous.Stm32f103Bkp @ sysbus 0x40006C00
+    pwr: pwr
+    rcc: rcc
+
+iwdg: Miscellaneous.Stm32f103Iwdg @ sysbus 0x40003000
+    rcc: rcc
+
+gpioa: Miscellaneous.Stm32f103GpioA @ sysbus 0x40010800
+
+adc1: Miscellaneous.Stm32f103Adc1 @ sysbus 0x40012400
+
+usart1: UART.STM32_UART @ sysbus <0x40013800, +0x400>
+    -> nvic@37
+
+flashCtrl: Miscellaneous.Stm32f103FlashController @ sysbus 0x40022000
+    flash: flash
+    otp: otp

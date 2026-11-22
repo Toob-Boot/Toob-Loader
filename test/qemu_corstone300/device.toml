@@ -1,0 +1,46 @@
+name = "Corstone300QemuTrustZoneE2E"
+version = "v1.0.0"
+
+[identity]
+vendor_id = 0x043B
+product_id = 0x0547
+hw_rev = 1
+
+[device]
+chip = "corstone300"
+
+[build]
+compiler = "arm-none-eabi"
+core_sdk = "core/v0.1.0"
+registry = "https://github.com/toob-boot/toob-registry"
+
+[driver_config]
+uart_baudrate = 115200
+
+[partitions]
+stage0_size = 65536
+stage1_size = 131072
+app_size = 196608
+recovery_size = 131072
+scratch_size = 196608
+enable_deltas = true
+wal_sectors = 5
+
+[boot_config]
+max_retries = 2
+max_recovery_retries = 5
+edge_unattended_mode = true
+backoff_base_s = 1
+wdt_timeout_ms = 1500
+
+[recovery]
+console = "corstone300_cmsdk_uart"
+flash = "corstone300_qspi_flash"
+wdt = "corstone300_s32k_wdt"
+clock = "corstone300_sysctrl_clk"
+rtc = "corstone300_retention"
+
+[recovery.crypto]
+backend = "none"
+hash = "sha256_sw"
+justification = "Recovery OS executes inside Secure state verified by Stage 1 SHA-256 + boot_proof; XMODEM rescue TBM1 bundle is Ed25519-verified by Secure Stage 1 on reboot."

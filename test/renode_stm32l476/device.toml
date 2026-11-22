@@ -1,0 +1,46 @@
+name = "Stm32L476RenodeE2E"
+version = "v1.0.0"
+
+[identity]
+vendor_id = 0x0483
+product_id = 0x0476
+hw_rev = 1
+
+[device]
+chip = "stm32l476"
+
+[build]
+compiler = "arm-none-eabi"
+core_sdk = "core/v0.1.0"
+registry = "https://github.com/toob-boot/toob-registry"
+
+[driver_config]
+uart_baudrate = 115200
+
+[partitions]
+stage0_size = 32768
+stage1_size = 98304
+app_size = 131072
+recovery_size = 65536
+scratch_size = 131072
+enable_deltas = true
+wal_sectors = 5
+
+[boot_config]
+max_retries = 2
+max_recovery_retries = 5
+edge_unattended_mode = true
+backoff_base_s = 1
+wdt_timeout_ms = 2000
+
+[recovery]
+console = "stm32l4_usart"
+flash = "stm32l4_flash"
+wdt = "stm32l4_iwdg"
+clock = "stm32l4_rcc_csr"
+rtc = "stm32l4_rtc_bkp"
+
+[recovery.crypto]
+backend = "none"
+hash = "sha256_sw"
+justification = "Recovery OS integrity verified via Stage 1 SHA-256 + boot_proof HMAC; rescue TBM1 bundle Ed25519-verified by Stage 1 on reboot."

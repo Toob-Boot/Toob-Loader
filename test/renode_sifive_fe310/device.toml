@@ -1,0 +1,48 @@
+name = "RenodeSiFiveFE310"
+version = "v1.0.0"
+
+[identity]
+vendor_id = 0x051F
+product_id = 0x0310
+hw_rev = 2
+
+[device]
+chip = "sifive_fe310"
+
+[build]
+compiler = "riscv32-esp-elf"
+core_sdk = "core/v0.1.0"
+registry = "https://github.com/toob-boot/toob-registry"
+
+[driver_config]
+uart_baudrate = 115200
+
+[partitions]
+stage0_size = 65536
+stage1_size = 131072
+app_size = 524288
+recovery_size = 131072
+scratch_size = 524288
+enable_deltas = true
+wal_sectors = 4
+
+[boot_config]
+max_retries = 2
+max_recovery_retries = 5
+edge_unattended_mode = true
+backoff_base_s = 1
+wdt_timeout_ms = 500
+transport_provider = "oneway"
+backup_mode = "full"
+
+[recovery]
+console = "sifive_uart"
+flash = "sifive_spi_xip"
+wdt = "sifive_aon_wdt"
+clock = "sifive_aon_clint"
+rtc = "sifive_aon_backup"
+
+[recovery.crypto]
+backend = "none"
+hash = "sha256_sw"
+justification = "Recovery OS integrity verified via Stage 1 SHA-256 + boot_proof HMAC; incoming rescue TBM1 bundle Ed25519-verified by Stage 1 on reboot."

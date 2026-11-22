@@ -1,0 +1,15 @@
+[package]
+name = "guest_app_rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libtoob = { path = "../../../sdk/rust/libtoob" }
+
+[profile.release]
+opt-level = "s"
+lto = false
+codegen-units = 1
+panic = "abort"
+strip = false

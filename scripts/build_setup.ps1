@@ -1,0 +1,1 @@
+cmake -DCMAKE_TOOLCHAIN_FILE="cmake/toolchain-riscv32.cmake" -DTOOLCHAIN_PREFIX="C:/Espressif/tools/riscv32-esp-elf/esp-14.2.0_20251107/riscv32-esp-elf/bin/riscv32-esp-elf-" -DTOOB_CHIP="esp32c6" -DTOOB_DEVICE_MANIFEST="cli/examples/manifests/device.toml" -B builds/build_c6_ninja -G Ninja

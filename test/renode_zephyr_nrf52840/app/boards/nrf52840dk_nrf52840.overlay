@@ -1,0 +1,57 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Board peripheral adjustments for Headless Renode 1.17.0 nRF52840 E2E:
+ *   1. Remove 'gpio-as-nreset' from &uicr so Nordic MDK SystemInit() does not
+ *      program UICR->PSELRESET and issue an extra NVIC_SystemReset() on first boot.
+ *   2. Bind &uart0 to non-EasyDMA 'nordic,nrf-uart' matching Stage 0, Stage 1,
+ *      and Renode's UART.NRF52840_UART (easyDMA: false).
+ *   3. Disable unused nRF52840-DK external peripherals (QSPI MX25R64, USB, 802.15.4).
+ */
+
+&uicr {
+    /delete-property/ gpio-as-nreset;
+};
+
+&uart0 {
+    compatible = "nordic,nrf-uart";
+    status = "okay";
+    current-speed = <115200>;
+    /delete-property/ hw-flow-control;
+};
+
+&adc {
+    status = "disabled";
+};
+
+&i2c0 {
+    status = "disabled";
+};
+
+&pwm0 {
+    status = "disabled";
+};
+
+&spi1 {
+    status = "disabled";
+};
+
+&spi3 {
+    status = "disabled";
+};
+
+&qspi {
+    status = "disabled";
+};
+
+&mx25r64 {
+    status = "disabled";
+};
+
+&ieee802154 {
+    status = "disabled";
+};
+
+&usbd {
+    status = "disabled";
+};

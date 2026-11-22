@@ -1,0 +1,48 @@
+name = "RenodeRp2040"
+version = "v1.0.0"
+
+[identity]
+vendor_id = 0x2E8A
+product_id = 0x2040
+hw_rev = 1
+
+[device]
+chip = "rp2040"
+
+[build]
+compiler = "15.2.1-1.1"
+core_sdk = "core/v0.1.0"
+registry = "https://github.com/toob-boot/toob-registry"
+
+[driver_config]
+uart_baudrate = 115200
+
+[partitions]
+stage0_size = 32768
+stage1_size = 98304
+app_size = 196608
+scratch_size = 196608
+recovery_size = 65536
+enable_deltas = true
+wal_sectors = 4
+
+[boot_config]
+max_retries = 2
+max_recovery_retries = 5
+edge_unattended_mode = true
+backoff_base_s = 1
+wdt_timeout_ms = 2000
+transport_provider = "swapmove"
+
+[recovery]
+console = "rp2040_uart"
+flash = "rp2040_qspi_xip"
+wdt = "rp2040_watchdog"
+clock = "rp2040_timer_reset"
+rtc = "rp2040_scratch"
+
+[recovery.crypto]
+backend = "none"
+hash = "sha256_sw"
+justification = "Recovery OS integrity verified via Stage 1 SHA-256 + boot_proof seal; incoming rescue TBM1 bundle Ed25519-verified by Stage 1 on reboot."
+

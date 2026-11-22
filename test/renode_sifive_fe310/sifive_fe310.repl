@@ -1,0 +1,199 @@
+// SiFive FE310-G002 Full-System Renode 1.17.0 Platform Description for Toob-Boot
+// Models RV32IMAC + Zicsr + Zifencei + Hardware PMP, MROM, OTP aperture + OTP MMIO
+// fuse sequencer, CLINT (32.768 kHz), PLIC, 64 KB DTIM, 4 MB QSPI0 XIP NOR flash
+// (HiFive_SPI + ISSI_IS25WP), UART0, PRCI HFROSC + hardware TRNG, and AON WDT/PMU/Backup.
+
+mrom: Memory.MappedMemory @ sysbus 0x00001000
+    size: 0x1000
+
+otpMem: Memory.MappedMemory @ sysbus 0x00020000
+    size: 0x2000
+
+clint: IRQControllers.CoreLevelInterruptor @ sysbus 0x02000000
+    frequency: 32768
+    numberOfTargets: 1
+    [0, 1] -> cpu@[3, 7]
+
+plic: IRQControllers.PlatformLevelInterruptController @ sysbus 0x0C000000
+    0 -> cpu@11
+    numberOfSources: 52
+    numberOfContexts: 1
+    prioritiesEnabled: true
+
+dtim: Memory.MappedMemory @ sysbus 0x80000000
+    size: 0x10000
+
+qspi0Xip: Memory.MappedMemory @ sysbus 0x20000000
+    size: 0x400000
+
+qspi0: SPI.HiFive_SPI @ sysbus 0x10014000
+    isFlashEnabled: true
+    numberOfSupportedSlaves: 1
+
+spiFlash: SPI.ISSI_IS25WP @ qspi0 0
+    underlyingMemory: qspi0Xip
+
+uart0: UART.SiFive_UART @ sysbus 0x10013000
+    -> plic@3
+
+cpu: CPU.RiscV32 @ sysbus
+    cpuType: "rv32imac_zicsr_zifencei"
+    privilegedArchitecture: PrivilegedArchitecture.Priv1_10
+    timeProvider: clint
+    hartId: 0
+
+aon: Python.PythonPeripheral @ sysbus 0x10000000
+    size: 0x1000
+    initable: true
+    script: '''
+if request.IsInit:
+    if 'aon_st' not in locals():
+        aon_st = {'pmucause': 0x0000, 'bkp': [0] * 16, 'timer': None}
+    wdog_st = {'cfg': 0, 'cmp0': 0xFFFF, 'key': False}
+    if aon_st['timer'] is not None:
+        aon_st['timer'].Enabled = False
+elif request.IsRead:
+    off = request.Offset
+    if off == 0x00:
+        request.Value = wdog_st['cfg']
+    elif off == 0x08:
+        request.Value = int(aon_st['timer'].Value) if aon_st['timer'] is not None else 0
+    elif off == 0x20:
+        request.Value = wdog_st['cmp0']
+    elif 0x80 <= off < 0xC0:
+        request.Value = aon_st['bkp'][(off - 0x80) >> 2]
+    elif off == 0x144:
+        request.Value = aon_st['pmucause']
+    else:
+        request.Value = 0
+elif request.IsWrite:
+    off = request.Offset
+    val = request.Value & 0xFFFFFFFF
+    mach = self.GetMachine()
+    if aon_st['timer'] is None:
+        from Antmicro.Renode.Peripherals.Timers import LimitTimer
+        from Antmicro.Renode.Time import Direction, WorkMode
+        def on_wdog_fire():
+            if (wdog_st['cfg'] & 0x100) != 0:
+                aon_st['pmucause'] = 0x0200
+                aon_st['timer'].Enabled = False
+                mach.RequestReset()
+        t = LimitTimer(mach.ClockSource, 32768, self, "wdog", 0xFFFF, Direction.Ascending, False, WorkMode.OneShot, True, True)
+        t.LimitReached += on_wdog_fire
+        aon_st['timer'] = t
+    if off == 0x1C:
+        wdog_st['key'] = (val == 0x0051F15E)
+    elif off == 0x20 and wdog_st['key']:
+        wdog_st['key'] = False
+        wdog_st['cmp0'] = max(1, val & 0xFFFF)
+    elif off == 0x08 and wdog_st['key']:
+        wdog_st['key'] = False
+        if aon_st['timer'] is not None:
+            aon_st['timer'].Value = val & 0x7FFFFFFF
+    elif off == 0x00 and wdog_st['key']:
+        wdog_st['key'] = False
+        wdog_st['cfg'] = val
+        t = aon_st['timer']
+        t.Enabled = False
+        if (val & 0x1000) != 0:
+            scale = val & 0xF
+            t.Divider = 1 << scale
+            t.Limit = max(1, wdog_st['cmp0'])
+            t.Value = 0
+            t.Enabled = True
+    elif off == 0x18 and wdog_st['key']:
+        wdog_st['key'] = False
+        if val == 0x0D99F07E and aon_st['timer'] is not None:
+            aon_st['timer'].Value = 0
+    elif 0x80 <= off < 0xC0:
+        aon_st['bkp'][(off - 0x80) >> 2] = val
+    elif off == 0x144:
+        aon_st['pmucause'] = val
+    elif off == 0x150 and val == 0x55AAAA55:
+        aon_st['pmucause'] = 0x0300
+        if aon_st['timer'] is not None:
+            aon_st['timer'].Enabled = False
+        mach.RequestReset()
+'''
+
+prci: Python.PythonPeripheral @ sysbus 0x10008000
+    size: 0x1000
+    initable: true
+    script: '''
+if request.IsInit:
+    from System import Guid
+    prci_st = {
+        'hfrosc': 0xC0000004,
+        'trng_ctrl': 1,
+        'guid': Guid,
+    }
+elif request.IsRead:
+    off = request.Offset
+    if off == 0x00:
+        request.Value = prci_st['hfrosc']
+    elif off == 0x40:
+        request.Value = prci_st['trng_ctrl']
+    elif off == 0x44:
+        request.Value = 1 if (prci_st['trng_ctrl'] & 1) != 0 else 0
+    elif off == 0x48:
+        b = prci_st['guid'].NewGuid().ToByteArray()
+        w = int(b[0]) | (int(b[1]) << 8) | (int(b[2]) << 16) | (int(b[3]) << 24)
+        if w == 0 or w == 0xFFFFFFFF:
+            w = 0xA5C35A3C
+        request.Value = w
+    else:
+        request.Value = 0
+elif request.IsWrite:
+    off = request.Offset
+    val = request.Value & 0xFFFFFFFF
+    if off == 0x00:
+        if (val & 0x40000000) != 0:
+            val |= 0x80000000
+        prci_st['hfrosc'] = val
+    elif off == 0x40:
+        prci_st['trng_ctrl'] = val
+'''
+
+otpCtrl: Python.PythonPeripheral @ sysbus 0x10010000
+    size: 0x1000
+    initable: true
+    script: '''
+if request.IsInit:
+    otp_st = {'lock': 0, 'oe': 0, 'sel': 0, 'we': 0, 'vppen': 0, 'adr': 0, 'din': 0}
+elif request.IsRead:
+    off = request.Offset
+    if off == 0x00:
+        request.Value = otp_st['lock']
+    elif off == 0x28:
+        request.Value = otp_st['adr']
+    elif off == 0x2C:
+        request.Value = otp_st['din']
+    elif off == 0x30:
+        paddr = 0x00020000 + ((otp_st['adr'] & 0x7FF) << 2)
+        request.Value = int(self.GetMachine().SystemBus.ReadDoubleWord(paddr))
+    else:
+        request.Value = 0
+elif request.IsWrite:
+    off = request.Offset
+    val = request.Value & 0xFFFFFFFF
+    if off == 0x00:
+        otp_st['lock'] = 1 if val != 0 else 0
+    elif off == 0x08:
+        otp_st['oe'] = val & 1
+    elif off == 0x0C:
+        otp_st['sel'] = val & 1
+    elif off == 0x10:
+        prev_we = otp_st['we']
+        otp_st['we'] = val & 1
+        if prev_we == 0 and otp_st['we'] == 1 and otp_st['sel'] == 1 and otp_st['vppen'] == 1:
+            paddr = 0x00020000 + ((otp_st['adr'] & 0x7FF) << 2)
+            bus = self.GetMachine().SystemBus
+            cur = int(bus.ReadDoubleWord(paddr))
+            bus.WriteDoubleWord(paddr, (cur | otp_st['din']) & 0xFFFFFFFF)
+    elif off == 0x20:
+        otp_st['vppen'] = val & 1
+    elif off == 0x28:
+        otp_st['adr'] = val & 0x7FF
+    elif off == 0x2C:
+        otp_st['din'] = val
+'''

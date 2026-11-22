@@ -20,12 +20,14 @@
 
 /* Activate HW-compat checks for vector 10 */
 #define TOOB_DEVICE_PRODUCT_ID  0x0042U
+#define TOOB_DEVICE_VENDOR_ID   0x0001U
 #define TOOB_DEVICE_HW_REV     1U
 #define TOOB_DEVICE_KEY_SLOTS   6U
 
 /* Pull in the validation module + CRC (source-level inclusion for host test) */
 #include "../../toobloader/core/boot_tbm1.c"
 #include "../../toobloader/core/utils/boot_crc32.c"
+#include "../../toobloader/core/utils/boot_secure_zeroize_host.c"
 
 /* ========================================================================
  * Helpers
@@ -106,7 +108,7 @@ static void fixup_crc(uint8_t *buf) {
 /** Test wrapper: calls tbm1_validate with a stack-local out_off array. */
 static tbm1_reject_t validate_buf(const uint8_t *buf, size_t cap) {
   uint32_t out_off[TBM1_MAX_IMAGES];
-  return tbm1_validate(buf, cap, cap, out_off);
+  return tbm1_validate(buf, cap, 65536, out_off);
 }
 
 /* ========================================================================
@@ -246,7 +248,14 @@ static void test_bad_hw_compat(void) {
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
-  h->product_id = 0xBEEF;  /* Mismatch vs TOOB_DEVICE_PRODUCT_ID (0x0042) */
+  h->product_id = 0xBEEF;  /* Mismatch vs TOOB_DEVICE_PRODUCT_ID (0x00042) */
+  fixup_crc(buf);
+
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_HW_COMPAT);
+
+  /* Also test vendor_id mismatch */
+  make_valid_header(buf, sizeof(buf));
+  h->vendor_id = 0xDEAD;  /* Mismatch vs TOOB_DEVICE_VENDOR_ID (0x0001) */
   fixup_crc(buf);
 
   assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_HW_COMPAT);
@@ -341,7 +350,7 @@ static void test_bad_region_alignment(void) {
 }
 
 /* ========================================================================
- * V2 — Encoder Interop: off-by-one chunk-hash length
+ * V2 — Encoder Interop: off-by-one chunk-hash length & TrailerLayout
  * ======================================================================== */
 
 static void test_chunkhash_off_by_one(void) {
@@ -355,6 +364,75 @@ static void test_chunkhash_off_by_one(void) {
 
   assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_CHUNKHASH_LEN);
   printf("  [PASS] V2-interop: Off-by-one chunk-hash caught\n");
+}
+
+static void test_bad_payload_layout(void) {
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  make_valid_header(buf, sizeof(buf));
+
+  tbm1_header_t *h = (tbm1_header_t *)buf;
+  h->image_count = 2;
+  h->regions[0].len = 64; /* 2 images * 32 */
+
+  h->images[0].data_off = 1024;
+  h->images[0].stored_size = 4096;
+  h->images[0].installed_size = 4096;
+  h->images[0].chunk_size = 4096;
+  h->images[0].num_chunks = 1;
+
+  /* Overlapping payload: data_off starts before previous ends */
+  h->images[1].data_off = 2048; /* < 1024 + 4096 */
+  h->images[1].stored_size = 4096;
+  h->images[1].installed_size = 4096;
+  h->images[1].chunk_size = 4096;
+  h->images[1].num_chunks = 1;
+
+  fixup_crc(buf);
+
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_PAYLOAD_LAYOUT);
+  printf("  [PASS] V17 BAD_PAYLOAD_LAYOUT\n");
+}
+
+static void test_bad_rdelta(void) {
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  make_valid_header(buf, sizeof(buf));
+
+  tbm1_header_t *h = (tbm1_header_t *)buf;
+  /* Region 1: Reverse Delta */
+  h->regions[1].region_id = TBM1_REGION_REVERSE_DELTA;
+  h->regions[1]._rsvd = 0;
+  h->regions[1].off = 544; /* after chunk hashes (512 + 32) */
+  h->regions[1].len = 30;  /* Not a multiple of sizeof(tbm1_rdelta_desc_t) (48) */
+
+  fixup_crc(buf);
+
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_RDELTA);
+  printf("  [PASS] V18 BAD_RDELTA\n");
+}
+
+static void test_trailer_layout(void) {
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  make_valid_header(buf, sizeof(buf));
+
+  tbm1_header_t *h = (tbm1_header_t *)buf;
+  h->flags_critical = TBM1_CRIT_TRAILER_LAYOUT;
+  h->images[0].data_off = 0;
+  fixup_crc(buf);
+
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_OK);
+
+  /* Raw primary image with non-zero data_off MUST be rejected in TrailerLayout */
+  h->images[0].data_off = 4096;
+  fixup_crc(buf);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_BAD_PAYLOAD_LAYOUT);
+
+  /* Delta/Compressed primary image with data_off >= installed_size MUST pass
+   * in TrailerLayout (scratch-less Zero-Copy POINTER slot layout) */
+  h->images[0].delta_alg = TBM1_DELTA_TDS1;
+  h->images[0].stored_size = 512;
+  fixup_crc(buf);
+  assert(validate_buf(buf, sizeof(buf)) == TBM1_OK);
+  printf("  [PASS] V19 TRAILER_LAYOUT (Raw data_off==0 enforced + Delta data_off>=installed allowed)\n");
 }
 
 /* ========================================================================
@@ -385,12 +463,15 @@ int main(void) {
   test_bad_region_dup();
   test_bad_chunkhash_len();
   test_bad_region_alignment();
+  test_bad_payload_layout();
+  test_bad_rdelta();
+  test_trailer_layout();
 
   printf("\n[V2] Encoder Interop Vectors:\n");
   test_chunkhash_off_by_one();
 
   printf("\n==================================================\n");
-  printf("   ALL %d VECTORS PASSED\n", 19);
+  printf("   ALL %d VECTORS PASSED\n", 22);
   printf("==================================================\n");
 
   return 0;
