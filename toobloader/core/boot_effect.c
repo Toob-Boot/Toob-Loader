@@ -1,20 +1,65 @@
 #include "boot_effect.h"
 #include "boot_crc32.h"
 #include "boot_ct_utils.h"
-#include "boot_swap.h"
 #include "boot_fih.h"
-#include "generated_boot_config.h"
+#include "boot_flash_guard.h"
 #include "boot_secure_zeroize.h"
 #include "boot_slot_caps.h"
+#include "boot_swap.h"
+#include "generated_boot_config.h"
+#include <string.h>
 
-static boot_status_t stream_copy(const boot_platform_t *platform, uint32_t src,
-                                 uint32_t dest, size_t len,
-                                 uint8_t *arena, size_t arena_len) {
-  size_t offset = 0;
+static boot_status_t effect_write_skip_erased(const flash_hal_t *flash, uint32_t dst,
+                                              const uint8_t *buf, uint32_t len) {
+  uint32_t align = (flash->write_align > 0U) ? flash->write_align : 1U;
+  if ((dst % align) != 0U || (len % align) != 0U) {
+    return boot_flash_write_guarded(flash, dst, buf, len);
+  }
+
+  uint8_t erased = flash->erased_value;
+  uint32_t pos = 0U;
+  while (pos < len) {
+    while (pos < len && is_fully_erased_constant_time(buf + pos, align, erased)) {
+      pos += align;
+    }
+    if (pos >= len) {
+      break;
+    }
+    uint32_t run_start = pos;
+    pos += align;
+    while (pos < len && !is_fully_erased_constant_time(buf + pos, align, erased)) {
+      pos += align;
+    }
+    boot_status_t st =
+        boot_flash_write_guarded(flash, dst + run_start, buf + run_start, pos - run_start);
+    if (st != BOOT_OK) {
+      return st;
+    }
+  }
+  return BOOT_OK;
+}
+
+static boot_status_t stream_copy(const boot_platform_t *platform, uint32_t src, uint32_t dest,
+                                 size_t len, uint8_t *arena, size_t arena_len) {
+  if (!platform || !platform->flash || !platform->flash->read || !platform->flash->write ||
+      !arena) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  uint32_t align = (platform->flash->write_align > 0U) ? platform->flash->write_align : 1U;
+  size_t chunk_limit = arena_len;
+  if (align > 1U) {
+    chunk_limit = chunk_limit - (chunk_limit % align);
+  }
+  if (chunk_limit == 0U) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  size_t offset = 0U;
   while (offset < len) {
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
-    size_t step = (len - offset > arena_len) ? arena_len : (len - offset);
+    }
+    size_t step = (len - offset > chunk_limit) ? chunk_limit : (len - offset);
 
     boot_status_t st = platform->flash->read(src + (uint32_t)offset, arena, (uint32_t)step);
     if (st != BOOT_OK) {
@@ -22,7 +67,21 @@ static boot_status_t stream_copy(const boot_platform_t *platform, uint32_t src,
       return st;
     }
 
-    st = platform->flash->write(dest + (uint32_t)offset, arena, (uint32_t)step);
+    size_t write_step = step;
+    if (align > 1U && (step % align) != 0U) {
+      size_t pad = (size_t)align - (step % align);
+      if (step + pad > chunk_limit || (platform->flash->total_size > 0U &&
+                                       (uint64_t)dest + (uint64_t)offset + (uint64_t)(step + pad) >
+                                           (uint64_t)platform->flash->total_size)) {
+        boot_secure_zeroize(arena, arena_len);
+        return BOOT_ERR_FLASH_BOUNDS;
+      }
+      memset(&arena[step], platform->flash->erased_value, pad);
+      write_step = step + pad;
+    }
+
+    st = effect_write_skip_erased(platform->flash, dest + (uint32_t)offset, arena,
+                                  (uint32_t)write_step);
     if (st != BOOT_OK) {
       boot_secure_zeroize(arena, arena_len);
       return st;
@@ -34,9 +93,8 @@ static boot_status_t stream_copy(const boot_platform_t *platform, uint32_t src,
   return BOOT_OK;
 }
 
-boot_status_t boot_effect_execute(const boot_platform_t *platform,
-                                  const flash_effect_t *fx, size_t n,
-                                  const boot_allowed_region_t *whitelist, size_t wl_n,
+boot_status_t boot_effect_execute(const boot_platform_t *platform, const flash_effect_t *fx,
+                                  size_t n, const boot_allowed_region_t *whitelist, size_t wl_n,
                                   uint8_t *arena, size_t arena_len) {
   for (size_t i = 0; i < n; i++) {
     if (platform->wdt && platform->wdt->kick) {
@@ -44,10 +102,14 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform,
     }
 
     /* 1. Whitelist Check (Double Defense) */
+    if (fx[i].op != EFF_FLIP && boot_flash_range_hits_immutable_boot(fx[i].dst, fx[i].len)) {
+      return BOOT_ERR_FLASH_BOUNDS;
+    }
     bool allowed = false;
     for (size_t w = 0; w < wl_n; w++) {
       if (is_buffer_within((const uint8_t *)(uintptr_t)fx[i].dst, fx[i].len,
-                           (const uint8_t *)(uintptr_t)whitelist[w].base_addr, whitelist[w].max_size)) {
+                           (const uint8_t *)(uintptr_t)whitelist[w].base_addr,
+                           whitelist[w].max_size)) {
         allowed = true;
         break;
       }
@@ -56,7 +118,8 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform,
 
     /* 2. Idempotenz-Check: Ist der Soll-Zustand bereits erreicht? */
     uint32_t cur_crc = 0;
-    boot_status_t crc_stat = boot_crc32_flash_stream(platform, fx[i].dst, fx[i].len, &cur_crc, arena, arena_len);
+    boot_status_t crc_stat =
+        boot_crc32_flash_stream(platform, fx[i].dst, fx[i].len, &cur_crc, arena, arena_len);
     if (crc_stat == BOOT_OK && cur_crc == fx[i].post_crc) {
       continue; /* Bereits im Sollzustand (Zero-Wear Skip) */
     }
@@ -77,12 +140,28 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform,
       }
 
       if (caps->exec_model == SLOT_EXEC_BANK_SWAP) {
-        if (!caps->ops.bank_swap.bank_flip) return BOOT_ERR_NOT_SUPPORTED;
+        if (!caps->ops.bank_swap.bank_flip) {
+          return BOOT_ERR_NOT_SUPPORTED;
+        }
         op_stat = caps->ops.bank_swap.bank_flip(fx[i].dst);
       } else if (caps->exec_model == SLOT_EXEC_XIP_REMAP) {
-        if (!caps->ops.xip_remap.xip_remap_commit) return BOOT_ERR_NOT_SUPPORTED;
+        if (!caps->ops.xip_remap.xip_remap_commit) {
+          return BOOT_ERR_NOT_SUPPORTED;
+        }
         op_stat = caps->ops.xip_remap.xip_remap_commit(fx[i].src);
       } else if (caps->exec_model == SLOT_EXEC_RELOCATABLE) {
+        if (caps->ops.relocatable.image_link_check && fx[i].len > 0u) {
+          op_stat = caps->ops.relocatable.image_link_check(fx[i].src, (uint32_t)fx[i].len);
+        }
+        if (op_stat == BOOT_OK && caps->ops.relocatable.exec_addr_select) {
+          op_stat = caps->ops.relocatable.exec_addr_select(fx[i].src);
+        }
+      } else {
+        op_stat = BOOT_ERR_NOT_SUPPORTED;
+      }
+
+      if (op_stat == BOOT_OK && (caps->exec_model == SLOT_EXEC_RELOCATABLE ||
+                                 caps->commit_persistence == SLOT_COMMIT_VOLATILE)) {
 #ifdef TOOB_TMR_HAS_ACTIVE_APP_SLOT
         wal_tmr_payload_t tmr __attribute__((aligned(8)));
         boot_secure_zeroize(&tmr, sizeof(tmr));
@@ -95,8 +174,6 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform,
 #else
         op_stat = BOOT_ERR_NOT_SUPPORTED;
 #endif
-      } else {
-        op_stat = BOOT_ERR_NOT_SUPPORTED;
       }
 
       if (op_stat == BOOT_OK && caps->get_active_slot) {
@@ -106,15 +183,22 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform,
           BOOT_SECURE_REQUIRE(active == fx[i].dst, { return BOOT_ERR_VERIFY; });
         }
       }
-      if (op_stat != BOOT_OK) return op_stat;
+      if (op_stat != BOOT_OK) {
+        return op_stat;
+      }
       continue; /* Skip standard flash read-back CRC check */
     }
-    if (op_stat != BOOT_OK) return op_stat;
+    if (op_stat != BOOT_OK) {
+      return op_stat;
+    }
 
     /* 4. Read-Back & Verification */
     uint32_t verify_crc = 0;
-    crc_stat = boot_crc32_flash_stream(platform, fx[i].dst, fx[i].len, &verify_crc, arena, arena_len);
-    if (crc_stat != BOOT_OK) return crc_stat;
+    crc_stat =
+        boot_crc32_flash_stream(platform, fx[i].dst, fx[i].len, &verify_crc, arena, arena_len);
+    if (crc_stat != BOOT_OK) {
+      return crc_stat;
+    }
     BOOT_SECURE_REQUIRE(verify_crc == fx[i].post_crc, { return BOOT_ERR_FLASH_HW; });
   }
   return BOOT_OK;
@@ -138,10 +222,8 @@ static inline bool supply_sufficient(uint32_t mv, uint64_t worst_us, uint32_t ma
 }
 
 boot_status_t boot_effect_admit_or_defer(const boot_platform_t *platform,
-                                         const wal_tmr_payload_t *tmr,
-                                         uint32_t image_size,
-                                         const boot_component_t *components,
-                                         size_t num_components,
+                                         const wal_tmr_payload_t *tmr, uint32_t image_size,
+                                         const boot_component_t *components, size_t num_components,
                                          bool requires_swap) {
   uint32_t sector_size = platform->flash->max_sector_size;
   if (sector_size == 0) {
@@ -153,43 +235,91 @@ boot_status_t boot_effect_admit_or_defer(const boot_platform_t *platform,
   uint32_t scratch_erases = 0;
   uint64_t total_write_bytes = 0;
 
-  if (requires_swap) {
-    uint32_t num_sectors = (image_size + sector_size - 1) / sector_size;
-    app_erases += num_sectors;
-    staging_erases += num_sectors;
-    scratch_erases += num_sectors;
-    total_write_bytes += (uint64_t)image_size * 3;
+  if (requires_swap && image_size > 0U) {
+    uint32_t num_sectors = ((image_size - 1U) / sector_size) + 1U;
+    const slot_caps_t *caps = platform->slot_caps;
+    if (caps && caps->exec_model != SLOT_EXEC_FIXED) {
+      /* Tier 0/1 (POINTER): only Scratch->Target copy if image_size > 0 */
+      app_erases = num_sectors;
+      total_write_bytes += (uint64_t)image_size;
+    } else if (caps && !caps->has_scratch) {
+      /* Scratch-less ONEWAY / SWAPMOVE */
+      app_erases = num_sectors;
+      staging_erases = num_sectors;
+      total_write_bytes += (uint64_t)image_size * 2ULL;
+    } else {
+      /* Classic 3-way SWAPSCRATCH */
+      app_erases = num_sectors;
+      staging_erases = num_sectors;
+      scratch_erases = num_sectors;
+      total_write_bytes += (uint64_t)image_size * 3ULL;
+    }
   }
 
-  for (size_t i = 0; i < num_components; i++) {
-    uint32_t num_sectors = (components[i].image_size + sector_size - 1) / sector_size;
+  for (size_t i = 0U; i < num_components; i++) {
+    uint32_t num_sectors = (components[i].image_size > 0U)
+                               ? (((components[i].image_size - 1U) / sector_size) + 1U)
+                               : 0U;
     if (components[i].target_addr >= CHIP_APP_SLOT_ABS_ADDR &&
         components[i].target_addr < CHIP_APP_SLOT_ABS_ADDR + CHIP_APP_SLOT_SIZE) {
-      app_erases += num_sectors;
+      app_erases =
+          (UINT32_MAX - app_erases < num_sectors) ? UINT32_MAX : (app_erases + num_sectors);
     } else if (components[i].target_addr >= CHIP_STAGING_SLOT_ABS_ADDR &&
                components[i].target_addr < CHIP_STAGING_SLOT_ABS_ADDR + CHIP_STAGING_SLOT_SIZE) {
-      staging_erases += num_sectors;
+      staging_erases =
+          (UINT32_MAX - staging_erases < num_sectors) ? UINT32_MAX : (staging_erases + num_sectors);
     }
-    total_write_bytes += components[i].image_size;
+    total_write_bytes = (UINT64_MAX - total_write_bytes < (uint64_t)components[i].image_size)
+                            ? UINT64_MAX
+                            : (total_write_bytes + (uint64_t)components[i].image_size);
   }
 
-  /* 1. Wear-Leveling Erase-Budgetprüfung */
-  if (platform->flash->max_erase_cycles > 0) {
-    if (tmr->app_slot_erase_counter + app_erases >= platform->flash->max_erase_cycles ||
-        tmr->staging_slot_erase_counter + staging_erases >= platform->flash->max_erase_cycles ||
-        tmr->swap_buffer_erase_counter + scratch_erases >= platform->flash->max_erase_cycles) {
+  /* 1. Wear-Leveling Erase-Budget check (overflow-safe) */
+  if (platform->flash->max_erase_cycles > 0U) {
+    const uint32_t max_cycles = platform->flash->max_erase_cycles;
+    if (app_erases >= max_cycles || tmr->app_slot_erase_counter >= (max_cycles - app_erases) ||
+        staging_erases >= max_cycles ||
+        tmr->staging_slot_erase_counter >= (max_cycles - staging_erases) ||
+        scratch_erases >= max_cycles ||
+        tmr->swap_buffer_erase_counter >= (max_cycles - scratch_erases)) {
       return BOOT_ERR_COUNTER_EXHAUSTED;
     }
   }
 
-  /* 2. Worst-Case-Zeit berechnen */
-  uint64_t worst_us = 0;
-  if (platform->flash->erase_time_us_max > 0) {
-    uint32_t total_erases = app_erases + staging_erases + scratch_erases;
-    worst_us += (uint64_t)total_erases * platform->flash->erase_time_us_max;
+  /* 2. Worst-case duration (without 64-bit software division __udivmoddi4) */
+  uint64_t worst_us = 0ULL;
+  if (platform->flash->erase_time_us_max > 0U) {
+    uint64_t total_erases =
+        (uint64_t)app_erases + (uint64_t)staging_erases + (uint64_t)scratch_erases;
+    worst_us = total_erases * (uint64_t)platform->flash->erase_time_us_max;
   }
-  if (platform->flash->write_time_us_page > 0 && platform->flash->write_align > 0) {
-    uint64_t num_pages = (total_write_bytes + platform->flash->write_align - 1) / platform->flash->write_align;
+  if (platform->flash->write_time_us_page > 0 && platform->flash->write_align > 0 &&
+      total_write_bytes > 0ULL) {
+    const uint32_t align = platform->flash->write_align;
+    const uint64_t pad = (uint64_t)(align - 1U);
+    const uint64_t padded =
+        (UINT64_MAX - total_write_bytes < pad) ? UINT64_MAX : (total_write_bytes + pad);
+    uint64_t num_pages = 0ULL;
+    if ((align & (align - 1U)) == 0U) {
+      uint32_t shift = 0U;
+      uint32_t tmp = align;
+      while (tmp > 1U) {
+        tmp >>= 1U;
+        shift++;
+      }
+      num_pages = padded >> shift;
+    } else if (padded <= (uint64_t)UINT32_MAX) {
+      num_pages = (uint64_t)((uint32_t)padded / align);
+    } else {
+      uint64_t rem = 0ULL;
+      for (int bit = 63; bit >= 0; bit--) {
+        rem = (rem << 1U) | ((padded >> (uint32_t)bit) & 1ULL);
+        if (rem >= (uint64_t)align) {
+          rem -= (uint64_t)align;
+          num_pages |= (1ULL << (uint32_t)bit);
+        }
+      }
+    }
     worst_us += num_pages * platform->flash->write_time_us_page;
   }
 

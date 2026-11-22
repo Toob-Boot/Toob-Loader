@@ -15,7 +15,9 @@ typedef enum {
 
 /* Toob-Loader P10 Glitch Guards */
 #if defined(__GNUC__) || defined(__clang__)
+  #ifndef BOOT_GLITCH_DELAY
   #define BOOT_GLITCH_DELAY() __asm__ volatile("nop; nop; nop;")
+  #endif
 #elif defined(__ICCARM__)
   #define BOOT_GLITCH_DELAY() __asm volatile("nop"); __asm volatile("nop"); __asm volatile("nop")
 #elif defined(__CC_ARM)

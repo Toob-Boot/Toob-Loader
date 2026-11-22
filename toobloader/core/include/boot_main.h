@@ -3,6 +3,10 @@
 
 #include "boot_hal.h"
 #include "boot_state.h"
+#include "libtoob_types.h"
+
+extern uint8_t crypto_arena[];
+extern TOOB_NOINIT_VAR(toob_handoff_state) toob_handoff_t toob_handoff_state;
 
 /**
  * @brief Bootloader Main Orchestrator
@@ -15,6 +19,7 @@
  * @return BOOT_OK wenn erfolgeich. Das Vendor-spezifische Startup-Skript (Assembly/C) 
  *         wertet target_out aus und triggert den physischen PC-Jump.
  */
-boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *target_out, const uint32_t seal_key[4]);
+boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *target_out,
+                        const uint32_t seal_key[4]);
 
 #endif /* BOOT_MAIN_H */

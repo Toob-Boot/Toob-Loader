@@ -15,6 +15,6 @@
  * @param ptr Pointer to the SRAM material to be destroyed
  * @param len Number of bytes to zero
  */
-void boot_secure_zeroize(void* ptr, size_t len);
+void boot_secure_zeroize(void *ptr, size_t len);
 
 #endif /* TOOB_BOOT_SECURE_ZEROIZE_H */

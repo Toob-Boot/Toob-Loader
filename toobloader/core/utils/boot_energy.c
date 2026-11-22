@@ -24,27 +24,25 @@
  * mathematisch gegen Instruction-Skips durch Fault-Injection-Angriffe.
  */
 
-
 #include "boot_energy.h"
-#include "boot_fih.h"
 #include "boot_ct_utils.h"
 #include "boot_delay.h"
+#include "boot_fih.h"
 #include "boot_hal.h"
 #include "boot_panic.h"
 #include "boot_types.h"
 #include <stdbool.h>
 #include <stdint.h>
 
-
 /* Mathematisches Glitch-Resistenz-Gating */
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein!");
 
 /* P10 CFI Token Slots (Randomized per boot via TRNG) */
-#define ENERGY_CFI_SLOT_INIT     0
-#define ENERGY_CFI_SLOT_NO_HAL   1
-#define ENERGY_CFI_SLOT_PMIC     2
-#define ENERGY_CFI_SLOT_ADC      3
+#define ENERGY_CFI_SLOT_INIT 0
+#define ENERGY_CFI_SLOT_NO_HAL 1
+#define ENERGY_CFI_SLOT_PMIC 2
+#define ENERGY_CFI_SLOT_ADC 3
 
 /**
  * @brief Branchless O(1) 3-Sample Median Filter
@@ -80,8 +78,8 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
   }
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
-  uint32_t energy_cfi_seed = 0;
-  boot_random_safe(platform, (uint8_t *)&energy_cfi_seed, sizeof(energy_cfi_seed));
+  uint32_t energy_cfi_seed = 0U;
+  (void)boot_random_safe(platform, (uint8_t *)&energy_cfi_seed, sizeof(energy_cfi_seed));
   boot_cfi_ctx_t energy_cfi_ctx;
   boot_cfi_init(energy_cfi_ctx, energy_cfi_seed);
 
@@ -113,17 +111,20 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
    * der Vendor diese Logik in der HAL ausprogrammiert hat.
    */
   if (platform->soc->can_sustain_update) {
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
 
     bool result = platform->soc->can_sustain_update();
 
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
 
     /* Direkter Ausschluss, wenn der PMIC Veto einlegt */
-    if (!result)
+    if (!result) {
       pmic_sustain_ok = false;
+    }
   }
 
   boot_cfi_step(energy_cfi_ctx, ENERGY_CFI_SLOT_PMIC);
@@ -134,18 +135,21 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
    * Evaluierung der Rohspannung gegen den spezifizierten Min-Wert.
    */
   if (platform->soc->battery_level_mv && platform->soc->min_battery_mv > 0) {
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
     uint32_t sample_1 = platform->soc->battery_level_mv();
-    boot_delay_with_wdt(platform, 2);
+    (void)boot_delay_with_wdt(platform, 2U);
 
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
     uint32_t sample_2 = platform->soc->battery_level_mv();
-    boot_delay_with_wdt(platform, 2);
+    (void)boot_delay_with_wdt(platform, 2U);
 
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
     uint32_t sample_3 = platform->soc->battery_level_mv();
 
     uint32_t stable_mv = branchless_median_3(sample_1, sample_2, sample_3);
@@ -191,9 +195,7 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
   });
 
   /* Logik-Akkumulator: Darf das Update geflasht werden? */
-  BOOT_SECURE_REQUIRE(pmic_sustain_ok && adc_voltage_ok, {
-    goto brownout_trap;
-  });
+  BOOT_SECURE_REQUIRE(pmic_sustain_ok && adc_voltage_ok, { goto brownout_trap; });
   return BOOT_OK;
 
 brownout_trap:

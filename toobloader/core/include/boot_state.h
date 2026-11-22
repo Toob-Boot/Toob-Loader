@@ -9,8 +9,8 @@
 #define BOOT_STATE_H
 
 #include "boot_hal.h"
-#include "boot_types.h"
 #include "boot_proof.h"
+#include "boot_types.h"
 
 /**
  * @brief The resolved target configuration for boot_main to execute.
@@ -18,13 +18,16 @@
  * zuvor in boot_main() sauber gerufen werden kann.
  */
 typedef struct {
-    boot_proof_t proof;           /**< Sealed boot proof carrying address, size, entry, and svn */
-    uint32_t net_search_accum_ms; /**< Extrahierter Netzwerk-Suchzeit Akkumulator */
-    uint32_t resume_offset;       /**< Extrahierter Delta-Resume-Checkpoint */
-    uint64_t generated_nonce;     /**< Dem OS bereitzustellende Anti-Replay Nonce */
-    bool boot_recovery_os;        /**< Wahr, wenn das Recovery-OS (Fallback) gebootet wird */
-    bool is_tentative_boot;       /**< Exported True if the boot is a trial (TXN_COMMIT) and unconfirmed */
-    bool wipe_requested;          /**< Cloud-Command WIPE: OS soll Factory-Reset ausführen */
+  boot_proof_t proof;              /**< Sealed boot proof carrying address, size, entry, and svn */
+  uint32_t net_search_accum_ms;    /**< Extrahierter Netzwerk-Suchzeit Akkumulator */
+  uint32_t resume_offset;          /**< Extrahierter Delta-Resume-Checkpoint */
+  uint32_t observed_failure_count; /**< Pre-heal crash/failure counter observed on this boot */
+  uint64_t generated_nonce;        /**< Dem OS bereitzustellende Anti-Replay Nonce */
+  bool boot_recovery_os;           /**< Wahr, wenn das Recovery-OS (Fallback) gebootet wird */
+  bool rollback_occurred; /**< True when a tentative update reverted to baseline this boot */
+  bool is_tentative_boot; /**< Exported True if the boot is a trial (TXN_COMMIT) and unconfirmed */
+  bool wipe_requested;    /**< Cloud-Command WIPE: OS soll Factory-Reset ausführen */
+  uint8_t active_slot;    /**< 0 = Slot A / Primary, 1 = Slot B / Secondary */
 } boot_target_config_t;
 
 /**
@@ -36,10 +39,8 @@ typedef struct {
  * @param seal_key The random key used to seal the target proof handle.
  * @return BOOT_OK on stable resolution, BOOT_ERR_* otherwise (which triggers panic/rescue).
  */
-boot_status_t boot_state_run(const boot_platform_t *platform,
-                             boot_target_config_t *target_out,
-                             const uint32_t seal_key[4],
-                             uint8_t *arena, size_t arena_len);
+boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config_t *target_out,
+                             const uint32_t seal_key[4], uint8_t *arena, size_t arena_len);
 
 /*
  * ==============================================================================

@@ -61,7 +61,8 @@ typedef struct {
     uint32_t crc32_trailer;      /**< CRC-32 over [0 .. offsetof(crc32_trailer)) */
 } toob_wal_entry_payload_t;
 
-#define TOOB_WAL_HAS_TRANSPORT_ID 1
+#define TOOB_WAL_HAS_TRANSPORT_ID  1
+#define TOOB_WAL_TXN_FLAG_TEMP_SRC 0x01U
 
 typedef union {
     toob_wal_entry_payload_t data;

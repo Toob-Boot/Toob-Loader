@@ -1,8 +1,8 @@
 #ifndef TOOB_BOOT_IDENTITY_H
 #define TOOB_BOOT_IDENTITY_H
 
-#include "boot_types.h"
 #include "boot_hal.h"
+#include "boot_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,8 +35,7 @@ boot_status_t boot_derive_device_id(const boot_platform_t *platform, uint8_t out
  * @param out_key  16-byte output buffer for the journal key.
  * @return         BOOT_OK on success, otherwise error.
  */
-boot_status_t boot_derive_journal_key(const boot_platform_t *platform,
-                                      uint8_t out_key[16]);
+boot_status_t boot_derive_journal_key(const boot_platform_t *platform, uint8_t out_key[16]);
 
 #ifdef __cplusplus
 }

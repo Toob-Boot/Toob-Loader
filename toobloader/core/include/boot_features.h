@@ -1,0 +1,26 @@
+#ifndef BOOT_FEATURES_H
+#define BOOT_FEATURES_H
+
+#include "generated_boot_config.h"
+
+#ifndef TOOB_FEATURE_CLOUD_COMMANDS
+#define TOOB_FEATURE_CLOUD_COMMANDS 1
+#endif
+
+#ifndef TOOB_FEATURE_UART_PROVISIONING
+#define TOOB_FEATURE_UART_PROVISIONING 1
+#endif
+
+#ifndef TOOB_FEATURE_MULTIIMAGE
+#define TOOB_FEATURE_MULTIIMAGE 1
+#endif
+
+#ifndef TOOB_FEATURE_DELTA
+#define TOOB_FEATURE_DELTA 1
+#endif
+
+#ifndef TOOB_FEATURE_DECOMP
+#define TOOB_FEATURE_DECOMP 1
+#endif
+
+#endif /* BOOT_FEATURES_H */

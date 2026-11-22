@@ -23,7 +23,7 @@
 /* P10 Contract: Maximale Stack-Allokation für Krypto-Hashes.
  * HAL Hersteller MÜSSEN garantieren, dass ihre hash_init Contexts hier hineinpassen 
  * (z.B. SHA-256 benötigt typisch <120 Bytes). */
-#define BOOT_MERKLE_MAX_CTX_SIZE 256 
+#define BOOT_MERKLE_MAX_CTX_SIZE 256
 
 /**
  * @brief Führt eine chunk-weise Verifikation eines OS-Images durch.
@@ -39,14 +39,10 @@
  * @param arena_size        SRAM Budget (MUSS >= chunk_size sein)
  * @return BOOT_OK wenn Hash-Liste komplett valide, BOOT_ERR_VERIFY bei Bit-Rot / Manipulation.
  */
-boot_status_t boot_merkle_verify_stream(const boot_platform_t* platform,
-                                        uint32_t image_flash_addr,
-                                        uint32_t image_size,
-                                        uint32_t chunk_size,
-                                        const uint8_t* chunk_hashes,
-                                        uint32_t chunk_hashes_len,
-                                        uint32_t num_chunks,
-                                        uint8_t* crypto_arena,
+boot_status_t boot_merkle_verify_stream(const boot_platform_t *platform, uint32_t image_flash_addr,
+                                        uint32_t image_size, uint32_t chunk_size,
+                                        const uint8_t *chunk_hashes, uint32_t chunk_hashes_len,
+                                        uint32_t num_chunks, uint8_t *crypto_arena,
                                         size_t arena_size);
 
 #endif /* TOOB_BOOT_MERKLE_H */

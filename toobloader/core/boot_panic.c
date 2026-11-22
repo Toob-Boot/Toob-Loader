@@ -25,28 +25,27 @@
  */
 
 #include "boot_panic.h"
-#include "boot_fih.h"
 #include "boot_cloud_cmd.h"
 #include "boot_cobs.h"
-#include "boot_ct_utils.h"
 #include "boot_crc32.h"
+#include "boot_ct_utils.h"
 #include "boot_delay.h"
+#include "boot_fih.h"
+#include "boot_flash_guard.h"
+#include "boot_journal.h"
 #include "boot_secure_zeroize.h"
 #include "generated_boot_config.h"
 #include <stddef.h>
 #include <string.h>
-
 
 /* P5 Exception: _Noreturn terminal state — arena grab is safe.
  * boot_terminal_halt never returns, so no subsequent arena user can be affected.
  * Keeping extern avoids cascading signature changes through 13+ call sites. */
 extern uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE];
 
-_Static_assert(
-    BOOT_CRYPTO_ARENA_SIZE >= 2048,
-    "Crypto Arena muss mindestens 2KB aufweisen für Serial Rescue Puffer");
-_Static_assert(BOOT_OK == 0x55AA55AA,
-               "BOOT_OK must be high-hamming distance for Glitch-Shielding");
+_Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 2048,
+               "Crypto Arena muss mindestens 2KB aufweisen für Serial Rescue Puffer");
+_Static_assert(BOOT_OK == 0x55AA55AA, "BOOT_OK must be high-hamming distance for Glitch-Shielding");
 
 /* ============================================================================
  * P10 Memory Arena Boundaries (100% Zero Allocation & Stack-Bloat Prevention)
@@ -55,16 +54,14 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 #define PANIC_CHALLENGE_MAX_SIZE 128
 #define PANIC_RX_MAX_SIZE 128
 #define PANIC_VERIFY_MAX_SIZE 80 /* 8-Byte Aligned (Spec requires 76) */
-#define PANIC_CHUNK_MAX_SIZE                                                   \
-  (BOOT_CRYPTO_ARENA_SIZE - PANIC_CHALLENGE_MAX_SIZE - PANIC_RX_MAX_SIZE -     \
-   PANIC_VERIFY_MAX_SIZE)
+#define PANIC_CHUNK_MAX_SIZE                                                                       \
+  (BOOT_CRYPTO_ARENA_SIZE - PANIC_CHALLENGE_MAX_SIZE - PANIC_RX_MAX_SIZE - PANIC_VERIFY_MAX_SIZE)
 
 /* Mathematischer Beweis zur Compile-Zeit, dass die Partitionen den RAM nicht
  * sprengen */
-_Static_assert(
-    (PANIC_CHALLENGE_MAX_SIZE + PANIC_RX_MAX_SIZE + PANIC_VERIFY_MAX_SIZE +
-     PANIC_CHUNK_MAX_SIZE) == BOOT_CRYPTO_ARENA_SIZE,
-    "FATAL: Arena Partitioning exceeds total BOOT_CRYPTO_ARENA_SIZE!");
+_Static_assert((PANIC_CHALLENGE_MAX_SIZE + PANIC_RX_MAX_SIZE + PANIC_VERIFY_MAX_SIZE +
+                PANIC_CHUNK_MAX_SIZE) == BOOT_CRYPTO_ARENA_SIZE,
+               "FATAL: Arena Partitioning exceeds total BOOT_CRYPTO_ARENA_SIZE!");
 
 /* P10 CFI Token Slots (Randomized per boot via TRNG) */
 #define PANIC_CFI_SLOT_INIT 0
@@ -75,16 +72,18 @@ _Static_assert(
 
 _Noreturn static void enter_sos_loop(const boot_platform_t *platform) {
   while (1) {
-    if (platform && platform->wdt && platform->wdt->kick)
+    BOOT_GLITCH_DELAY();
+    if (platform && platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
-    if (platform && platform->clock && platform->clock->delay_ms)
-      boot_delay_with_wdt(platform, 500);
+    }
+    if (platform && platform->clock && platform->clock->delay_ms) {
+      (void)boot_delay_with_wdt(platform, 500U);
+    }
   }
 }
 
-
-_Noreturn void boot_terminal_halt(const boot_platform_t *platform,
-                                  boot_status_t reason, uint16_t site_id) {
+_Noreturn void boot_terminal_halt(const boot_platform_t *platform, boot_status_t reason,
+                                  uint16_t site_id) {
   /* Zero-initialize local forensic record */
   boot_forensic_record_t record;
   boot_secure_zeroize(&record, sizeof(record));
@@ -94,13 +93,15 @@ _Noreturn void boot_terminal_halt(const boot_platform_t *platform,
   record.site_id = (uint32_t)site_id;
 
   uint32_t current_monotonic = 0;
-  if (platform && platform->crypto && platform->crypto->read_monotonic_counter) {
-    (void)platform->crypto->read_monotonic_counter(&current_monotonic);
+  if (platform && platform->keystore && platform->keystore->read_monotonic_counter) {
+    (void)platform->keystore->read_monotonic_counter(&current_monotonic);
   }
   record.monotonic_counter = current_monotonic;
 
   /* CRC of fields before crc32 field (4 * 4 = 16 bytes) */
   record.crc32 = compute_boot_crc32((const uint8_t *)&record, 16);
+
+  boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
   /* Writes-then-freezes: write never gates the security decision; if it fails, still freeze. */
   if (platform) {
@@ -124,9 +125,19 @@ _Noreturn void boot_terminal_halt(const boot_platform_t *platform,
 
     /* Fallback on flash Forensic Slot if RTC not written/available */
     if (!written && platform->flash && platform->flash->write && platform->flash->erase_sector) {
-      /* Erase first, then write */
-      if (platform->flash->erase_sector(CHIP_FORENSIC_SLOT_ABS_ADDR) == BOOT_OK) {
-        (void)platform->flash->write(CHIP_FORENSIC_SLOT_ABS_ADDR, &record, sizeof(record));
+      if (boot_flash_erase_sector_guarded(platform->flash, CHIP_FORENSIC_SLOT_ABS_ADDR) ==
+          BOOT_OK) {
+        uint8_t aligned_buf[32] __attribute__((aligned(8)));
+        memset(aligned_buf, platform->flash->erased_value, sizeof(aligned_buf));
+        memcpy(aligned_buf, &record, sizeof(record));
+        size_t write_len = sizeof(record);
+        uint32_t w_align = (platform->flash->write_align > 0U) ? platform->flash->write_align : 1U;
+        if (w_align <= sizeof(aligned_buf) && (write_len % w_align) != 0U) {
+          write_len += (size_t)w_align - (write_len % w_align);
+        }
+        (void)boot_flash_write_guarded(platform->flash, CHIP_FORENSIC_SLOT_ABS_ADDR, aligned_buf,
+                                       write_len);
+        boot_secure_zeroize(aligned_buf, sizeof(aligned_buf));
       }
     }
 
@@ -136,6 +147,12 @@ _Noreturn void boot_terminal_halt(const boot_platform_t *platform,
     }
     if (platform->crypto && platform->crypto->deinit) {
       platform->crypto->deinit();
+    }
+    if (platform->entropy && platform->entropy->deinit) {
+      platform->entropy->deinit();
+    }
+    if (platform->keystore && platform->keystore->deinit) {
+      platform->keystore->deinit();
     }
     if (platform->confirm && platform->confirm->deinit) {
       platform->confirm->deinit();
@@ -161,16 +178,17 @@ _Noreturn void boot_terminal_halt(const boot_platform_t *platform,
   }
 }
 
-_Noreturn void boot_panic(const boot_platform_t *platform,
-                          boot_status_t reason) {
+_Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
   /* Hard-Fault Exit, wenn der Platform-Pointer defekt ist */
   if (!platform || !platform->wdt) {
     while (1) { /* Nichts tun, Hardware WDT Reset abwarten */
+      BOOT_GLITCH_DELAY();
     }
   }
 
-  if (!platform->console || !platform->console->putchar || !platform->crypto ||
-      !platform->crypto->random || !platform->flash || !platform->flash->read ||
+  if (!platform->console || !platform->console->putchar || !platform->console->getchar ||
+      !platform->crypto || !platform->entropy || !platform->entropy->random ||
+      !platform->keystore || !platform->flash || !platform->flash->read ||
       !platform->flash->write || !platform->flash->erase_sector ||
       !platform->flash->get_sector_size) {
     boot_terminal_halt(platform, reason, SITE_COBS_SHIELD_FAIL);
@@ -182,20 +200,24 @@ _Noreturn void boot_panic(const boot_platform_t *platform,
    * RTC-Backup Registern, die über Brownout/Software-Reset hinweg überleben.
    * Falls kein RTC verfügbar: Deterministischer 5s Boot-Delay als Fallback. */
   if (platform->soc && platform->soc->read_rtc_backup) {
-    platform->soc->read_rtc_backup(RTC_SLOT_AUTH_ATTEMPTS,
-                                   &failed_auth_attempts);
+    if (platform->soc->read_rtc_backup(RTC_SLOT_AUTH_ATTEMPTS, &failed_auth_attempts) != BOOT_OK ||
+        failed_auth_attempts == 0xFFFFFFFFU) {
+      failed_auth_attempts = 0U;
+      (void)boot_delay_with_wdt(platform, 5000U);
+    }
   } else {
-    boot_delay_with_wdt(platform, 5000);
+    (void)boot_delay_with_wdt(platform, 5000U);
   }
 
 session_reset:
   if (platform->console->putchar) {
     /* Initialisierungs-UART Flush */
-    platform->console->putchar('P');
-    platform->console->putchar('N');
-    platform->console->putchar('C');
-    if (platform->console->flush)
-      platform->console->flush();
+    (void)platform->console->putchar('P');
+    (void)platform->console->putchar('N');
+    (void)platform->console->putchar('C');
+    if (platform->console->flush) {
+      (void)platform->console->flush();
+    }
   }
 
   /* ============================================================================
@@ -212,8 +234,8 @@ session_reset:
   uint8_t *chunk_buf = verify_msg + PANIC_VERIFY_MAX_SIZE;
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
-  uint32_t panic_cfi_seed = 0;
-  boot_random_safe(platform, (uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed));
+  uint32_t panic_cfi_seed = 0U;
+  (void)boot_random_safe(platform, (uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed));
   boot_cfi_ctx_t panic_cfi_ctx;
   boot_cfi_init(panic_cfi_ctx, panic_cfi_seed);
   boot_cfi_add_expected(panic_cfi_ctx, PANIC_CFI_SLOT_AUTH);
@@ -234,11 +256,12 @@ session_reset:
   uint8_t *temp_dslc = chunk_buf;
   size_t dslc_len = 64;
 
-  if (platform->crypto->read_dslc) {
-    boot_status_t d_status = platform->crypto->read_dslc(temp_dslc, &dslc_len);
+  if (platform->keystore->read_dslc) {
+    boot_status_t d_status = platform->keystore->read_dslc(temp_dslc, &dslc_len);
     if (d_status == BOOT_OK && dslc_len > 0) {
-      if (dslc_len > 64)
+      if (dslc_len > 64) {
         dslc_len = 64; /* Hardware Clamp Protection */
+      }
       memcpy(challenge_buf + 32, temp_dslc, dslc_len);
     } else {
       dslc_len = 32; /* Fallback Zero-Padding */
@@ -252,12 +275,11 @@ session_reset:
   challenge_len += dslc_len;
 
   /* Monotonic Timer zur Erleichterung für das Host-Tooling anfügen */
-  uint32_t current_monotonic = 0;
-  boot_read_monotonic_counter_safe(platform, &current_monotonic);
+  uint32_t current_monotonic = 0U;
+  (void)boot_read_monotonic_counter_safe(platform, &current_monotonic);
 
   /* Exakte Speicher-Mappings (Vermeidet Cast-UBs) */
-  memcpy(challenge_buf + challenge_len, &current_monotonic,
-         sizeof(current_monotonic));
+  memcpy(challenge_buf + challenge_len, &current_monotonic, sizeof(current_monotonic));
   challenge_len += sizeof(current_monotonic);
 
   memcpy(challenge_buf + challenge_len, &reason, sizeof(reason));
@@ -278,12 +300,12 @@ session_reset:
    * ============================================================================
    */
   while (1) {
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
 
     size_t rx_len = 0;
-    if (boot_cobs_recv_frame(platform, rx_buf, PANIC_RX_MAX_SIZE, &rx_len) !=
-        BOOT_OK) {
+    if (boot_cobs_recv_frame(platform, rx_buf, PANIC_RX_MAX_SIZE, &rx_len) != BOOT_OK) {
       continue;
     }
 
@@ -299,24 +321,19 @@ session_reset:
         uint32_t safe_slot_id = 0;
         uint32_t safe_sequence_id = 0;
 
-        memcpy(&safe_slot_id,
-               rx_buf + offsetof(stage15_auth_payload_t, slot_id),
-               sizeof(uint32_t));
-        memcpy(&safe_sequence_id,
-               rx_buf + offsetof(stage15_auth_payload_t, sequence_id),
+        memcpy(&safe_slot_id, rx_buf + offsetof(stage15_auth_payload_t, slot_id), sizeof(uint32_t));
+        memcpy(&safe_sequence_id, rx_buf + offsetof(stage15_auth_payload_t, sequence_id),
                sizeof(uint32_t));
 
-        const uint8_t *auth_nonce =
-            rx_buf + offsetof(stage15_auth_payload_t, nonce);
-        const uint8_t *auth_sig =
-            rx_buf + offsetof(stage15_auth_payload_t, sig);
+        const uint8_t *auth_nonce = rx_buf + offsetof(stage15_auth_payload_t, nonce);
+        const uint8_t *auth_sig = rx_buf + offsetof(stage15_auth_payload_t, sig);
 
         /* P10 FIX: Verhindert Replay-Attacks durch Offline-Tokens!
          * Das Token MUSS exakt + 1 zum Hardware-Counter sein. */
-        bool time_ok = (safe_sequence_id == current_monotonic + 1);
+        bool time_ok =
+            (current_monotonic < UINT32_MAX) && (safe_sequence_id == (current_monotonic + 1U));
         bool slot_ok = (safe_slot_id == CHIP_STAGING_SLOT_ID);
-        boot_status_t nonce_stat =
-            constant_time_memcmp_glitch_safe(auth_nonce, challenge_buf, 32);
+        boot_status_t nonce_stat = constant_time_memcmp_glitch_safe(auth_nonce, challenge_buf, 32);
 
         bool auth_failed = false;
         BOOT_SECURE_REQUIRE(time_ok && slot_ok && nonce_stat == BOOT_OK, { auth_failed = true; });
@@ -326,8 +343,7 @@ session_reset:
            * [Nonce(32)] | [Padded DSLC(32)] | [Slot ID(4)] | [Sequence ID(4)]
            */
           boot_secure_zeroize(verify_msg, PANIC_VERIFY_MAX_SIZE);
-          memcpy(verify_msg, challenge_buf,
-                 64); /* Zieht saubere Nonce & DSLC Base */
+          memcpy(verify_msg, challenge_buf, 64); /* Zieht saubere Nonce & DSLC Base */
           memcpy(verify_msg + 64, &safe_slot_id, sizeof(uint32_t));
           memcpy(verify_msg + 68, &safe_sequence_id, sizeof(uint32_t));
 
@@ -336,22 +352,24 @@ session_reset:
           uint8_t *root_pubkey = chunk_buf;
           boot_secure_zeroize(root_pubkey, 32);
 
-          if (platform->crypto->read_pubkey &&
-              platform->crypto->read_pubkey(root_pubkey, 32, 0) == BOOT_OK) {
+          if (platform->keystore->read_pubkey &&
+              platform->keystore->read_pubkey(root_pubkey, 32, 0) == BOOT_OK) {
 
-            if (platform->wdt && platform->wdt->kick)
+            if (platform->wdt && platform->wdt->kick) {
               platform->wdt->kick();
-            boot_status_t sig_stat = platform->crypto->verify_signature(
-                verify_msg, 72, auth_sig, root_pubkey);
-            if (platform->wdt && platform->wdt->kick)
+            }
+            boot_status_t sig_stat =
+                platform->crypto->verify_signature(verify_msg, 72, auth_sig, root_pubkey);
+            if (platform->wdt && platform->wdt->kick) {
               platform->wdt->kick();
+            }
 
             if (boot_secure_confirm(sig_stat) == BOOT_OK) {
               auth_eval = BOOT_OK;
 
               /* OTP Burn: Nach erfolgreicher Autorisierung Token entwerten */
-              if (platform->crypto->advance_monotonic_counter) {
-                platform->crypto->advance_monotonic_counter();
+              if (platform->keystore->advance_monotonic_counter) {
+                platform->keystore->advance_monotonic_counter();
                 current_monotonic = safe_sequence_id;
               }
               boot_cfi_step(panic_cfi_ctx, PANIC_CFI_SLOT_AUTH);
@@ -368,19 +386,20 @@ session_reset:
     if (auth_eval == BOOT_OK) {
       break; /* Success! Aus Auth-Schleife ausbrechen */
     } else {
-      failed_auth_attempts++;
+      if (failed_auth_attempts < UINT32_MAX) {
+        failed_auth_attempts++;
+      }
 
       /* Persistiere Zähler ins RTC-Backup Register gegen Power-Cycle-Bypass */
       if (platform->soc && platform->soc->write_rtc_backup) {
-        platform->soc->write_rtc_backup(RTC_SLOT_AUTH_ATTEMPTS,
-                                        failed_auth_attempts);
+        platform->soc->write_rtc_backup(RTC_SLOT_AUTH_ATTEMPTS, failed_auth_attempts);
       }
 
       /* GAP-C06: Serial Rescue DoS Penalty */
-      uint32_t shifts = (failed_auth_attempts > 10) ? 10 : failed_auth_attempts;
+      uint32_t shifts = (failed_auth_attempts > 10U) ? 10U : failed_auth_attempts;
       uint32_t penalty_ms = (1U << shifts) * 100U;
 
-      boot_delay_with_wdt(platform, penalty_ms);
+      (void)boot_delay_with_wdt(platform, penalty_ms);
       continue;
     }
   }
@@ -414,17 +433,19 @@ session_reset:
       bool chunk_received = false;
 
       while (!chunk_received) {
-        if (platform->wdt && platform->wdt->kick)
+        if (platform->wdt && platform->wdt->kick) {
           platform->wdt->kick();
+        }
 
-        uint8_t c;
-        if (platform->console->getchar &&
-            platform->console->getchar(&c, 500) != BOOT_OK)
+        uint8_t c = 0;
+        if (platform->console->getchar(&c, 500) != BOOT_OK) {
           break;
+        }
 
         if (c == COBS_MARKER_END) {
-          if (chunk_len > 0)
+          if (chunk_len > 0) {
             chunk_received = true;
+          }
         } else {
           if (chunk_len < PANIC_CHUNK_MAX_SIZE) {
             chunk_buf[chunk_len++] = c;
@@ -435,36 +456,53 @@ session_reset:
         }
       }
 
-      if (!chunk_received)
+      if (!chunk_received) {
         continue;
+      }
 
       size_t payload_len = 0;
-      if (boot_cobs_decode_in_place(chunk_buf, chunk_len, &payload_len) ==
-              BOOT_OK &&
+      if (boot_cobs_decode_in_place(chunk_buf, chunk_len, &payload_len) == BOOT_OK &&
           payload_len > 0) {
 
+        /* Disjoint work zone (challenge_buf + rx_buf = 256B, unused in Block 3A) */
+        uint8_t *cmd_work_zone = challenge_buf;
+        boot_secure_zeroize(cmd_work_zone, 256U);
+
         toob_cloud_cmd_t cmd_intent = TOOB_CMD_NOP;
-        boot_status_t eval_stat = boot_cloud_cmd_evaluate_buffer(
-            platform, chunk_buf, payload_len, crypto_arena, &cmd_intent);
+        boot_status_t eval_stat = boot_cloud_cmd_evaluate_buffer(platform, chunk_buf, payload_len,
+                                                                 cmd_work_zone, &cmd_intent);
+        boot_secure_zeroize(cmd_work_zone, 256U);
 
         if (eval_stat == BOOT_OK && cmd_intent == TOOB_CMD_UNLOCK) {
+          /* Persist WAL_INTENT_NONE so the soft-lock is lifted on next boot */
+          boot_status_t unlock_persist = boot_journal_init(platform);
+          if (unlock_persist == BOOT_OK) {
+            wal_entry_payload_t unlock_txn;
+            boot_secure_zeroize(&unlock_txn, sizeof(unlock_txn));
+            unlock_txn.intent = WAL_INTENT_NONE;
+            unlock_persist = boot_journal_append(platform, &unlock_txn);
+            boot_secure_zeroize(&unlock_txn, sizeof(unlock_txn));
+          }
+          if (unlock_persist != BOOT_OK) {
+            boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
+            goto session_reset;
+          }
+
           /* SUCCESS: Device Unlocked! */
           boot_cobs_send_frame(platform, (const uint8_t *)"ULK", 3);
           boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
-          /* Kaltstart erzwingen */
-          if (platform->console && platform->console->flush)
+          /* Kaltstart via Hardware-WDT erzwingen (C17 UB-frei) */
+          if (platform->console && platform->console->flush) {
             platform->console->flush();
-          if (platform->clock && platform->clock->deinit)
-            platform->clock->deinit();
-
-          uint32_t hang_timeout = 10000000;
-          while (hang_timeout > 0) {
-            BOOT_GLITCH_DELAY();
-            hang_timeout--;
           }
-          void (*trap)(void) = NULL;
-          trap();
+          if (platform->clock && platform->clock->deinit) {
+            platform->clock->deinit();
+          }
+
+          while (1) {
+            BOOT_GLITCH_DELAY();
+          }
         } else {
           /* Falscher Befehl oder Signatur ungültig */
           boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
@@ -494,17 +532,19 @@ session_reset:
     bool chunk_received = false;
 
     while (!chunk_received) {
-      if (platform->wdt && platform->wdt->kick)
+      if (platform->wdt && platform->wdt->kick) {
         platform->wdt->kick();
+      }
 
-      uint8_t c;
-      if (platform->console->getchar &&
-          platform->console->getchar(&c, 500) != BOOT_OK)
+      uint8_t c = 0;
+      if (platform->console->getchar(&c, 500) != BOOT_OK) {
         break;
+      }
 
       if (c == COBS_MARKER_END) {
-        if (chunk_len > 0)
+        if (chunk_len > 0) {
           chunk_received = true;
+        }
       } else {
         /* Dynamischer P10 Bounds Check via Macro */
         if (chunk_len < PANIC_CHUNK_MAX_SIZE) {
@@ -516,55 +556,51 @@ session_reset:
       }
     }
 
-    if (!chunk_received)
+    if (!chunk_received) {
       continue;
+    }
 
     size_t payload_len = 0;
-    if (boot_cobs_decode_in_place(chunk_buf, chunk_len, &payload_len) ==
-            BOOT_OK &&
+    if (boot_cobs_decode_in_place(chunk_buf, chunk_len, &payload_len) == BOOT_OK &&
         payload_len > 0) {
 
-      bool is_eof = (payload_len == 3 && memcmp(chunk_buf, "EOF", 3) == 0);
+      static const uint8_t k_eof_tag[3] = {'E', 'O', 'F'};
+      bool is_eof = (payload_len == 3U &&
+                     constant_time_memcmp_glitch_safe(chunk_buf, k_eof_tag, 3U) == BOOT_OK);
       if (is_eof) {
-        BOOT_SECURE_REQUIRE(payload_len == 3 && memcmp(chunk_buf, "EOF", 3) == 0, {
-          boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_COBS_SHIELD_FAIL);
-        });
+        BOOT_SECURE_REQUIRE(
+            payload_len == 3U &&
+                constant_time_memcmp_glitch_safe(chunk_buf, k_eof_tag, 3U) == BOOT_OK,
+            { boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_COBS_SHIELD_FAIL); });
         boot_cobs_send_frame(platform, (const uint8_t *)"ACK", 3);
         boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
 
         /* P10 HANDOFF FIX: Hardware-Reset erzwingen durch absichtliches
-         * Verweigern des WDT-Kicks. Das friert die CPU sicher ein, bis der
-         * Timer abläuft! */
-        if (platform->console && platform->console->flush)
+         * Verweigern des WDT-Kicks (C17 UB-frei). */
+        if (platform->console && platform->console->flush) {
           platform->console->flush();
-        if (platform->clock && platform->clock->deinit)
+        }
+        if (platform->clock && platform->clock->deinit) {
           platform->clock->deinit();
-
-        /* Fallback Trap: Wenn der HW-WDT nach dem Deinit nicht beißt,
-         * erzwingen wir einen HardFault (CPU Exception Trap), der über den
-         * Vendor-NVIC zum Reset führt! */
-        uint32_t hang_timeout = 10000000;
-        while (hang_timeout > 0) {
-          BOOT_GLITCH_DELAY();
-          hang_timeout--;
         }
 
-        void (*trap)(void) = NULL;
-        trap();
+        while (1) {
+          BOOT_GLITCH_DELAY();
+        }
       }
 
       /* Padding Alignment Guard for the final Chunk. */
       uint8_t align = platform->flash->write_align;
-      if (align == 0)
+      if (align == 0) {
         align = 1;
+      }
 
       size_t aligned_len = payload_len;
       uint8_t align_mod = (uint8_t)(payload_len % align);
       if (align_mod != 0) {
         size_t padding = align - align_mod;
         /* Wrap & Buffer Overflow Defense */
-        if (UINT32_MAX - aligned_len < padding ||
-            aligned_len + padding > PANIC_CHUNK_MAX_SIZE) {
+        if (UINT32_MAX - aligned_len < padding || aligned_len + padding > PANIC_CHUNK_MAX_SIZE) {
           boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
           goto session_reset;
         }
@@ -572,14 +608,13 @@ session_reset:
         aligned_len += padding;
       }
 
-      BOOT_SECURE_REQUIRE(
-          (aligned_len <= CHIP_APP_SLOT_SIZE) &&
-          (flash_offset <= (CHIP_APP_SLOT_SIZE - aligned_len)) &&
-          (CHIP_STAGING_SLOT_ABS_ADDR <= (UINT32_MAX - CHIP_APP_SLOT_SIZE)),
-      {
-        boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
-        goto session_reset;
-      });
+      BOOT_SECURE_REQUIRE((aligned_len <= CHIP_STAGING_SLOT_SIZE) &&
+                              (flash_offset <= (CHIP_STAGING_SLOT_SIZE - aligned_len)) &&
+                              (CHIP_STAGING_SLOT_ABS_ADDR <= (UINT32_MAX - CHIP_STAGING_SLOT_SIZE)),
+                          {
+                            boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
+                            goto session_reset;
+                          });
 
       uint32_t addr = CHIP_STAGING_SLOT_ABS_ADDR + flash_offset;
       size_t write_end = addr + aligned_len;
@@ -593,34 +628,18 @@ session_reset:
         size_t s_size = 0;
         uint32_t erase_target = !staging_erased ? addr : current_sector_end;
 
-        if (platform->flash->get_sector_size(erase_target, &s_size) ==
-            BOOT_OK) {
+        if (platform->flash->get_sector_size(erase_target, &s_size) == BOOT_OK) {
 
-          /* Smart-Erase Pre-Check: Ist der Sektor ohnehin schon 0xFF?
-           * Zero-Allocation Nutzung des freien verify_msg Buffers! */
-          bool needs_erase = false;
-          uint32_t chk_off = 0;
-          uint8_t e_val = platform->flash->erased_value;
-          uint8_t *e_buf = verify_msg;
-          size_t e_buf_size = PANIC_VERIFY_MAX_SIZE;
-
-          while (chk_off < s_size) {
-            uint32_t read_len = (s_size - chk_off > e_buf_size)
-                                    ? (uint32_t)e_buf_size
-                                    : (uint32_t)(s_size - chk_off);
-            if (platform->flash->read(erase_target + chk_off, e_buf,
-                                      read_len) != BOOT_OK) {
-              needs_erase = true;
-            }
-            /* P10 Timing-Oracle Defense: Full-scan accumulator, no early exit
-             */
-            if (!is_fully_erased_constant_time(e_buf, read_len, e_val)) {
-              needs_erase = true;
-            }
-            chk_off += read_len;
-            if (platform->wdt && platform->wdt->kick)
-              platform->wdt->kick();
+          if (boot_flash_range_hits_immutable_boot(erase_target, s_size)) {
+            boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
+            goto session_reset;
           }
+
+          /* Smart-Erase Pre-Check via fast word-wise boot_flash_is_erased */
+          bool sec_erased = false;
+          bool needs_erase =
+              (boot_flash_is_erased(platform, erase_target, s_size, &sec_erased) != BOOT_OK) ||
+              !sec_erased;
 
           if (needs_erase) {
             if (platform->wdt && platform->wdt->suspend_for_critical_section) {
@@ -629,7 +648,7 @@ session_reset:
               platform->wdt->kick();
             }
 
-            if (platform->flash->erase_sector(erase_target) != BOOT_OK) {
+            if (boot_flash_erase_sector_guarded(platform->flash, erase_target) != BOOT_OK) {
               boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
               goto session_reset;
             }
@@ -652,7 +671,7 @@ session_reset:
         }
       }
 
-      if (platform->flash->write(addr, chunk_buf, aligned_len) == BOOT_OK) {
+      if (boot_flash_write_guarded(platform->flash, addr, chunk_buf, aligned_len) == BOOT_OK) {
 
         /* P10 ECC Read-Back: Verhindert Bit-Rot / Tearing auf dem UART-Puffer!
          * Zero-Allocation Nutzung des freien verify_msg Buffers! */
@@ -662,26 +681,24 @@ session_reset:
         bool write_ok = true;
 
         while (check_off < aligned_len) {
-          if (platform->wdt && platform->wdt->kick)
+          if (platform->wdt && platform->wdt->kick) {
             platform->wdt->kick();
-          size_t step = (aligned_len - check_off > rb_buf_size)
-                            ? rb_buf_size
-                            : (aligned_len - check_off);
+          }
+          size_t step =
+              (aligned_len - check_off > rb_buf_size) ? rb_buf_size : (aligned_len - check_off);
 
-          if (platform->flash->read(addr + check_off, rb_buf, step) !=
-              BOOT_OK) {
+          if (platform->flash->read(addr + check_off, rb_buf, step) != BOOT_OK) {
             write_ok = false;
             break;
           }
 
           /* Glitch-Resistant Constant-Time Chunk Comparison */
           BOOT_SECURE_REQUIRE(
-              constant_time_memcmp_glitch_safe(rb_buf, chunk_buf + check_off,
-                                              step) == BOOT_OK,
-              {
-                write_ok = false;
-                break;
-              });
+              constant_time_memcmp_glitch_safe(rb_buf, chunk_buf + check_off, step) == BOOT_OK,
+              { write_ok = false; });
+          if (!write_ok) {
+            break;
+          }
 
           check_off += (uint32_t)step;
         }
@@ -722,25 +739,26 @@ void __attribute__((section(".iram1.text"))) toob_ecc_trap(void) {
    */
   while (1) {
     /* Warten auf den Watchdog-Biss. Keine Kicks erlaubt. */
-    __asm__ volatile("nop");
+    BOOT_GLITCH_DELAY();
   }
 }
 
-/*
- * Override libc's __stack_chk_fail to prevent pulling in abort(), raise(), and
- * printf() which bloat the binary by 120KB.
- */
 /*
  * P10 / OSV Härtung: Eigene Stack Protector Definitionen.
  * Wenn wir diese nicht bereitstellen, zieht GCC `stack_protector.o` aus
  * `libc_nano.a`, was `abort()`, `raise()` und letztlich `printf()` und IO
  * nachzieht -> 145KB Bloat!
  */
-uintptr_t __stack_chk_guard = 0xDEADBEEF;
+#if !defined(TOOB_MOCK_TEST) && !defined(TOOB_HOST_FUZZING) && !defined(_WIN32) &&                 \
+    !defined(__linux__) && !defined(__APPLE__) && !defined(__CPROVER__)
+uintptr_t __stack_chk_guard =
+    0x00ADBEEFU; /* NOLINT(misc-use-internal-linkage,bugprone-reserved-identifier,cert-dcl37-c) */
 
-void __stack_chk_fail(void);
+void __stack_chk_fail(void); /* NOLINT(bugprone-reserved-identifier,cert-dcl37-c) */
 
-void __stack_chk_fail(void) {
-  /* Stack smashing detected: Enter hardware panic */
-  boot_panic(NULL, BOOT_ERR_ECC_HARDFAULT);
+void __stack_chk_fail(
+    void) { /* NOLINT(misc-use-internal-linkage,bugprone-reserved-identifier,cert-dcl37-c) */
+  /* Stack smashing detected: Enter hardware terminal halt */
+  boot_terminal_halt(NULL, BOOT_ERR_ECC_HARDFAULT, SITE_COBS_SHIELD_FAIL);
 }
+#endif

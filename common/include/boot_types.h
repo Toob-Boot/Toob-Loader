@@ -47,49 +47,50 @@
 
 
 /**
- * @brief Universal Bootloader Return Type (GAP-06)
- * Uses high-hamming-distance constants to prevent 0x00 / 0x01 glitching.
+ * @brief Universal Bootloader Return Type (GAP-06 / MISRA C:2012 R10.1, R10.3)
+ * Defined as explicit unsigned 32-bit integer type with U-suffixed high-Hamming-distance
+ * constants so values > INT_MAX never trigger signed ISO C enum narrowing.
  */
-typedef enum {
-    BOOT_OK = 0x55AA55AA,             /**< Clean success (AUTOSAR Anti-Glitch) */
-    
-    /* HAL Errors (from hals.md) */
-    BOOT_ERR_FLASH             = 0xE1A1A1A1,  /**< Flash-Operation fehlgeschlagen */
-    BOOT_ERR_FLASH_ALIGN       = 0xE2B2B2B2,  /**< Adresse/Länge nicht aligned */
-    BOOT_ERR_FLASH_BOUNDS      = 0xE3C3C3C3,  /**< Adresse außerhalb des Flashs */
-    BOOT_ERR_CRYPTO            = 0xE4D4D4D4,  /**< Kryptografische Operation fehlgeschlagen */
-    BOOT_ERR_VERIFY            = 0xE5E5E5E5,  /**< Signatur/Hash ungültig */
-    BOOT_ERR_TIMEOUT           = 0xE6F6F6F6,  /**< Operation hat Zeitlimit überschritten */
-    BOOT_ERR_POWER             = 0xE7171717,  /**< Batteriespannung zu niedrig */
-    BOOT_ERR_NOT_SUPPORTED     = 0xE8282828,  /**< Feature auf diesem Chip nicht verfügbar */
-    BOOT_ERR_INVALID_ARG       = 0xE9393939,  /**< Ungültiger Parameter (NULL, 0-Länge, etc.) */
-    BOOT_ERR_STATE             = 0xEA4A4A4A,  /**< Ungültiger Zustand (z.B. init nicht aufgerufen) */
-    BOOT_ERR_FLASH_NOT_ERASED  = 0xEB5B5B5B,  /**< Zielsektor wurde vor Write nicht gelöscht */
-    BOOT_ERR_COUNTER_EXHAUSTED = 0xEC6C6C6C,  /**< OTP/eFuse Counter am Limit */
-    BOOT_ERR_DEFER             = 0xEC7C7C7C,  /**< Vorübergehende Vertagung (z.B. Energie/Spannung zu niedrig) */
-    BOOT_ERR_ECC_HARDFAULT     = 0xED7D7D7D,  /**< FATAL: NMI Unkorrigierbarer Bit-Rot (hals.md Z.47) */
-    BOOT_ERR_FLASH_HW          = 0xEE8E8E8E,  /**< FATAL: Hardware Flash Controller Error / Sektor-Mismatch */
-    
-    /* Core State-Machine Errors */
-    BOOT_ERR_NOT_FOUND         = 0xF1818181,  /**< Erwartetes Image/Metadata nicht gefunden */
-    BOOT_ERR_WDT_TRIGGER       = 0xF2929292,  /**< Watchdog Timeout simuliert/registriert */
-    BOOT_ERR_INVALID_STATE     = 0xF3A3A3A3,  /**< State-Machine Fehler (z.B. Delta base_mismatch) */
-    BOOT_ERR_WAL_FULL          = 0xF4B4B4B4,  /**< Journal Ring blockiert/voll */
-    BOOT_ERR_WAL_LOCKED        = 0xF5C5C5C5,  /**< Transaktion über WAL-Grenzen verboten */
-    BOOT_RECOVERY_REQUESTED    = 0xF6D6D6D6,  /**< Manueller/Hardware-Ausgelöster Fallback auf Serial Rescue */
-    BOOT_ERR_ABI_MISMATCH      = 0xF7E7E7E7,  /**< HAL ABI-Version eines Structs ist zu alt/inkompatibel */
-    BOOT_ERR_DOWNGRADE         = 0xF8F8F8F8,  /**< Hybrid SVN Check fehlgeschlagen (Anti-Rollback) */
-    
-    /* Cloud Command Errors */
-    BOOT_ERR_DEVICE_LOCKED       = 0xF9090909,
-    BOOT_ERR_CMD_REPLAY          = 0xFA1A1A1A,
-    BOOT_ERR_CMD_DEVICE_MISMATCH = 0xFB2B2B2B,
+typedef uint32_t boot_status_t;
 
-    /* TBM1 Manifest Errors (K2 v2 Fehler-Taxonomie) */
-    BOOT_ERR_MANIFEST_CORRUPT    = 0xFC3C3C3C,  /**< TBM1 CRC32 pre-check failed (staging corrupt) */
-    BOOT_ERR_MANIFEST_VERSION    = 0xFC4D4D4D,  /**< TBM1 version incompatible with this bootloader */
-    BOOT_ERR_MANIFEST_PRODUCT    = 0xFC5E5E5E   /**< vendor/product/hw_rev mismatch */
-} boot_status_t;
+#define BOOT_OK                      0x55AA55AAU /**< Clean success (AUTOSAR Anti-Glitch) */
+
+/* HAL Errors (from hals.md) */
+#define BOOT_ERR_FLASH               0xE1A1A1A1U /**< Flash-Operation fehlgeschlagen */
+#define BOOT_ERR_FLASH_ALIGN         0xE2B2B2B2U /**< Adresse/Laenge nicht aligned */
+#define BOOT_ERR_FLASH_BOUNDS        0xE3C3C3C3U /**< Adresse ausserhalb des Flashs */
+#define BOOT_ERR_CRYPTO              0xE4D4D4D4U /**< Kryptografische Operation fehlgeschlagen */
+#define BOOT_ERR_VERIFY              0xE5E5E5E5U /**< Signatur/Hash ungueltig */
+#define BOOT_ERR_TIMEOUT             0xE6F6F6F6U /**< Operation hat Zeitlimit ueberschritten */
+#define BOOT_ERR_POWER               0xE7171717U /**< Batteriespannung zu niedrig */
+#define BOOT_ERR_NOT_SUPPORTED       0xE8282828U /**< Feature auf diesem Chip nicht verfuegbar */
+#define BOOT_ERR_INVALID_ARG         0xE9393939U /**< Ungueltiger Parameter (NULL, 0-Laenge, etc.) */
+#define BOOT_ERR_STATE               0xEA4A4A4AU /**< Ungueltiger Zustand (z.B. init nicht aufgerufen) */
+#define BOOT_ERR_FLASH_NOT_ERASED    0xEB5B5B5BU /**< Zielsektor wurde vor Write nicht geloescht */
+#define BOOT_ERR_COUNTER_EXHAUSTED   0xEC6C6C6CU /**< OTP/eFuse Counter am Limit */
+#define BOOT_ERR_DEFER               0xEC7C7C7CU /**< Voruebergehende Vertagung (z.B. Energie/Spannung zu niedrig) */
+#define BOOT_ERR_ECC_HARDFAULT       0xED7D7D7DU /**< FATAL: NMI Unkorrigierbarer Bit-Rot (hals.md Z.47) */
+#define BOOT_ERR_FLASH_HW            0xEE8E8E8EU /**< FATAL: Hardware Flash Controller Error / Sektor-Mismatch */
+
+/* Core State-Machine Errors */
+#define BOOT_ERR_NOT_FOUND           0xF1818181U /**< Erwartetes Image/Metadata nicht gefunden */
+#define BOOT_ERR_WDT_TRIGGER         0xF2929292U /**< Watchdog Timeout simuliert/registriert */
+#define BOOT_ERR_INVALID_STATE       0xF3A3A3A3U /**< State-Machine Fehler (z.B. Delta base_mismatch) */
+#define BOOT_ERR_WAL_FULL            0xF4B4B4B4U /**< Journal Ring blockiert/voll */
+#define BOOT_ERR_WAL_LOCKED          0xF5C5C5C5U /**< Transaktion ueber WAL-Grenzen verboten */
+#define BOOT_RECOVERY_REQUESTED      0xF6D6D6D6U /**< Manueller/Hardware-Ausgeloester Fallback auf Serial Rescue */
+#define BOOT_ERR_ABI_MISMATCH        0xF7E7E7E7U /**< HAL ABI-Version eines Structs ist zu alt/inkompatibel */
+#define BOOT_ERR_DOWNGRADE           0xF8F8F8F8U /**< Hybrid SVN Check fehlgeschlagen (Anti-Rollback) */
+
+/* Cloud Command Errors */
+#define BOOT_ERR_DEVICE_LOCKED       0xF9090909U
+#define BOOT_ERR_CMD_REPLAY          0xFA1A1A1AU
+#define BOOT_ERR_CMD_DEVICE_MISMATCH 0xFB2B2B2BU
+
+/* TBM1 Manifest Errors (K2 v2 Fehler-Taxonomie) */
+#define BOOT_ERR_MANIFEST_CORRUPT    0xFC3C3C3CU /**< TBM1 CRC32 pre-check failed (staging corrupt) */
+#define BOOT_ERR_MANIFEST_VERSION    0xFC4D4D4DU /**< TBM1 version incompatible with this bootloader */
+#define BOOT_ERR_MANIFEST_PRODUCT    0xFC5E5E5EU /**< vendor/product/hw_rev mismatch */
 
 /**
  * @brief Fehlerklassen-Taxonomie: Ist der Fehler ein kontrollierter Reject?
@@ -106,9 +107,16 @@ static inline bool boot_error_is_rejectable(boot_status_t s) {
     case BOOT_ERR_DOWNGRADE:
     case BOOT_ERR_INVALID_ARG:
     case BOOT_ERR_FLASH_BOUNDS:
+    case BOOT_ERR_FLASH_ALIGN:
     case BOOT_ERR_INVALID_STATE:
     case BOOT_ERR_NOT_FOUND:
+    case BOOT_ERR_NOT_SUPPORTED:
     case BOOT_ERR_DEFER:
+    case BOOT_ERR_CMD_REPLAY:
+    case BOOT_ERR_CMD_DEVICE_MISMATCH:
+    case BOOT_ERR_MANIFEST_CORRUPT:
+    case BOOT_ERR_MANIFEST_VERSION:
+    case BOOT_ERR_MANIFEST_PRODUCT:
       return true;
     default:
       return false;
@@ -153,17 +161,25 @@ typedef enum {
  * \def TOOB_MAGIC_HEADER
  * 4-Byte Magic Header für Images, den Stage 0 validiert.
  */
-#define TOOB_MAGIC_HEADER 0x544F4F42 /* "TOOB" */
+#define TOOB_MAGIC_HEADER     0x544F4F42U /* "TOOB" */
+#define TOOB_STAGE1_SVN_MAGIC 0x31534254U /* "TBS1" */
 
 /**
- * @brief Generic Stage 1 Image Header Stub
- * Dieses Struct dient als Einstiegspunkt für Stage 0 Bounds-Checks.
+ * @brief Generic Stage 1 / App Image Header (20 bytes, ABI-locked).
+ * Bytes [12..19] carry base_fingerprint for App images and authenticated
+ * (svn_magic, stage1_svn) for signed Stage 1 banks (CRIT-29).
  */
 typedef struct {
-  uint32_t magic;            /**< TOOB_MAGIC_HEADER für S0 Validierung */
-  uint32_t image_size;       /**< Gesamte Payload-Größe für XIP Bounds */
-  uint32_t entry_point;      /**< XIP Entry-Vector Offset */
-  uint8_t  base_fingerprint[8]; /**< 8-Byte SHA256-Hash Prefix für Delta-Bases (gemäß CDDL) */
+  uint32_t magic;       /**< TOOB_MAGIC_HEADER for Stage 0 / Stage 1 validation */
+  uint32_t image_size;  /**< Payload size for bounds checking */
+  uint32_t entry_point; /**< Entry-point address (RAM) or offset (XIP) */
+  union {
+    uint8_t base_fingerprint[8]; /**< 8-byte SHA-256 prefix for App images */
+    struct {
+      uint32_t svn_magic;  /**< TOOB_STAGE1_SVN_MAGIC ("TBS1") */
+      uint32_t stage1_svn; /**< Authenticated Stage 1 Security Version Number */
+    } s1;
+  };
 } toob_image_header_t;
 
 _Static_assert(sizeof(toob_image_header_t) == 20, "toob_image_header_t ABI Size Mismatch!");

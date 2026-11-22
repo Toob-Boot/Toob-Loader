@@ -25,7 +25,7 @@
 
 /* Frame Sync Markers (COBS uses 0x00 as delimiter) */
 #define COBS_MARKER_START 0x00
-#define COBS_MARKER_END   0x00
+#define COBS_MARKER_END 0x00
 
 /**
  * @brief Streams a buffer to UART using Naked COBS encoding with O(1) memory.
@@ -37,8 +37,7 @@
  * @param data      Raw payload to encode and transmit.
  * @param len       Payload length in bytes (must be > 0).
  */
-void boot_cobs_send_frame(const boot_platform_t *platform,
-                          const uint8_t *data, size_t len);
+void boot_cobs_send_frame(const boot_platform_t *platform, const uint8_t *data, size_t len);
 
 /**
  * @brief O(1) in-place Naked COBS Decoder.
@@ -73,8 +72,7 @@ boot_status_t boot_cobs_decode_in_place(uint8_t *__restrict data, size_t len,
  *         the receive buffer is silently zeroized and the function retries
  *         (consistent with boot_panic.c overflow defense).
  */
-boot_status_t boot_cobs_recv_frame(const boot_platform_t *platform,
-                                   uint8_t *buf, size_t buf_max,
+boot_status_t boot_cobs_recv_frame(const boot_platform_t *platform, uint8_t *buf, size_t buf_max,
                                    size_t *out_len);
 
 #endif /* BOOT_COBS_H */

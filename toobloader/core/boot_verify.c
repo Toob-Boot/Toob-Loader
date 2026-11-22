@@ -23,8 +23,8 @@
  */
 
 #include "boot_verify.h"
-#include "boot_fih.h"
 #include "boot_ct_utils.h"
+#include "boot_fih.h"
 #include "boot_secure_zeroize.h"
 #include "boot_types.h"
 #include <stddef.h>
@@ -38,32 +38,27 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
                "das Double-Check Pattern zu garantieren!");
 
 /* P10 CFI Token Slots (Randomized per boot via TRNG) */
-#define VERIFY_CFI_SLOT_INIT      0
-#define VERIFY_CFI_SLOT_1         1
-#define VERIFY_CFI_SLOT_2         2
-#define VERIFY_CFI_SLOT_3         3
-#define VERIFY_CFI_SLOT_4         4
-#define VERIFY_CFI_SLOT_5         5
-#define VERIFY_CFI_SLOT_5_SKIP    6
-#define VERIFY_CFI_NUM_TOKENS     7
+#define VERIFY_CFI_SLOT_INIT 0
+#define VERIFY_CFI_SLOT_1 1
+#define VERIFY_CFI_SLOT_2 2
+#define VERIFY_CFI_SLOT_3 3
+#define VERIFY_CFI_SLOT_4 4
+#define VERIFY_CFI_SLOT_5 5
+#define VERIFY_CFI_SLOT_5_SKIP 6
+#define VERIFY_CFI_NUM_TOKENS 7
 
-
-
-
-boot_status_t
-boot_verify_manifest_envelope(const boot_platform_t *platform,
-                              const boot_verify_envelope_t *envelope,
-                              uint8_t *work_buffer, size_t work_buf_len) {
+boot_status_t boot_verify_manifest_envelope(const boot_platform_t *platform,
+                                            const boot_verify_envelope_t *envelope,
+                                            uint8_t *work_buffer, size_t work_buf_len) {
 
   /* ====================================================================
    * 1. P10 ALLOCATION & PESSIMISTIC INITIALIZATION
    * ==================================================================== */
-  boot_status_t final_status =
-      BOOT_ERR_VERIFY; /* Grundzustand: Kompromittiert / Default-Deny */
+  boot_status_t final_status = BOOT_ERR_VERIFY; /* Grundzustand: Kompromittiert / Default-Deny */
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t verify_cfi_seed = 0;
-  boot_random_safe(platform, (uint8_t *)&verify_cfi_seed, sizeof(verify_cfi_seed));
+  (void)boot_random_safe(platform, (uint8_t *)&verify_cfi_seed, sizeof(verify_cfi_seed));
   boot_cfi_ctx_t verify_cfi_ctx;
   boot_cfi_init(verify_cfi_ctx, verify_cfi_seed);
   boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_1);
@@ -100,7 +95,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   /* ====================================================================
    * 2. P10 ARGUMENT & BOUNDS VALIDATION (Zero-Trust)
    * ==================================================================== */
-  if (!platform || !platform->flash || !platform->wdt || !platform->crypto) {
+  if (!platform || !platform->flash || !platform->wdt || !platform->crypto || !platform->keystore) {
     final_status = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
@@ -110,7 +105,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  if (!platform->crypto->read_pubkey || !platform->crypto->verify_signature) {
+  if (!platform->keystore->read_pubkey || !platform->crypto->verify_signature) {
     final_status = BOOT_ERR_NOT_SUPPORTED;
     goto cleanup;
   }
@@ -129,6 +124,12 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     goto cleanup;
   }
 
+  bool ed_sig_ok = is_buffer_within(local_env.signature_ed25519, 64U, work_buffer, work_buf_len);
+  BOOT_SECURE_REQUIRE(ed_sig_ok, {
+    final_status = BOOT_ERR_INVALID_ARG;
+    goto cleanup;
+  });
+
   boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_1); /* Schritt 1 erfolgreich bewiesen */
 
   /* ====================================================================
@@ -140,12 +141,14 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
    */
   uint8_t next_idx = (uint8_t)(local_env.key_index + (local_env.key_index < 255));
 
-  if (platform->wdt && platform->wdt->kick)
+  if (platform->wdt && platform->wdt->kick) {
     platform->wdt->kick();
-  boot_status_t next_key_stat = platform->crypto->read_pubkey(
-      dummy_pubkey, sizeof(dummy_pubkey), next_idx);
-  if (platform->wdt && platform->wdt->kick)
+  }
+  boot_status_t next_key_stat =
+      platform->keystore->read_pubkey(dummy_pubkey, sizeof(dummy_pubkey), next_idx);
+  if (platform->wdt && platform->wdt->kick) {
     platform->wdt->kick();
+  }
 
   /* Hardware-Defekte / Timeout: Dürfen kein Downgrade freischalten!
    * Nur wenn der Slot definitiv leer (NOT_FOUND) ist, ist der aktuelle Key der
@@ -174,12 +177,14 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
    * könnte ein Glitch den Error-Branch überspringen und verify_ed25519 mit
    * dem genullten root_pubkey Puffer füttern.
    */
-  if (platform->wdt && platform->wdt->kick)
+  if (platform->wdt && platform->wdt->kick) {
     platform->wdt->kick();
-  boot_status_t key_stat = platform->crypto->read_pubkey(
-      root_pubkey, sizeof(root_pubkey), local_env.key_index);
-  if (platform->wdt && platform->wdt->kick)
+  }
+  boot_status_t key_stat =
+      platform->keystore->read_pubkey(root_pubkey, sizeof(root_pubkey), local_env.key_index);
+  if (platform->wdt && platform->wdt->kick) {
     platform->wdt->kick();
+  }
 
   if (boot_secure_confirm(key_stat) != BOOT_OK) {
     final_status = (key_stat != BOOT_OK) ? key_stat : BOOT_ERR_VERIFY;
@@ -188,8 +193,7 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
 
   /* BEWEIS DER KRYPTOGRAFISCHEN IDENTITÄT:
    * Verhindert Ed25519 "All-Zero Key" / "All-xFF" Trivial-Forging Exploits */
-  if (verify_not_all_zeros_glitch_safe(root_pubkey, sizeof(root_pubkey)) !=
-      BOOT_OK) {
+  if (verify_not_all_zeros_glitch_safe(root_pubkey, sizeof(root_pubkey)) != BOOT_OK) {
     final_status = BOOT_ERR_VERIFY;
     goto cleanup;
   }
@@ -199,13 +203,14 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
   /* ====================================================================
    * 5. ENVELOPE-FIRST ED25519 VERIFICATION (Glitch Hardened)
    * ==================================================================== */
-  if (platform->wdt && platform->wdt->kick)
+  if (platform->wdt && platform->wdt->kick) {
     platform->wdt->kick();
+  }
   boot_status_t verify_stat = platform->crypto->verify_signature(
-      work_buffer, local_env.manifest_size, local_env.signature_ed25519,
-      root_pubkey);
-  if (platform->wdt && platform->wdt->kick)
+      work_buffer, local_env.manifest_size, local_env.signature_ed25519, root_pubkey);
+  if (platform->wdt && platform->wdt->kick) {
     platform->wdt->kick();
+  }
 
 #if TOOB_DOUBLE_VERIFY
   /* DOUBLE-EXECUTION: Zweiter, vollständiger Krypto-Aufruf detektiert auch
@@ -214,10 +219,10 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
    * docs/security_model.md, Abschnitt "DPA vs. Glitch-Resistenz"). */
   BOOT_GLITCH_DELAY();
   boot_status_t verify_stat_2 = platform->crypto->verify_signature(
-      work_buffer, local_env.manifest_size, local_env.signature_ed25519,
-      root_pubkey);
-  if (platform->wdt && platform->wdt->kick)
+      work_buffer, local_env.manifest_size, local_env.signature_ed25519, root_pubkey);
+  if (platform->wdt && platform->wdt->kick) {
     platform->wdt->kick();
+  }
 
   boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
 
@@ -262,8 +267,8 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
       goto cleanup;
     }
 
-    if (!local_env.signature_pqc || local_env.signature_pqc_len == 0 ||
-        !local_env.pubkey_pqc || local_env.pubkey_pqc_len == 0) {
+    if (!local_env.signature_pqc || local_env.signature_pqc_len == 0 || !local_env.pubkey_pqc ||
+        local_env.pubkey_pqc_len == 0) {
       final_status = BOOT_ERR_INVALID_ARG;
       goto cleanup;
     }
@@ -272,12 +277,10 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
      * Wir beweisen mathematisch UB-frei, dass der vom Parser übergebene
      * PQC-Key-Pointer und Signatur-Pointer physisch innerhalb des durch Ed25519
      * signierten SRAM-Buffers liegen! */
-    bool pqc_pub_ok =
-        is_buffer_within(local_env.pubkey_pqc, local_env.pubkey_pqc_len,
-                         work_buffer, local_env.manifest_size);
-    bool pqc_sig_ok =
-        is_buffer_within(local_env.signature_pqc, local_env.signature_pqc_len,
-                         work_buffer, local_env.manifest_size);
+    bool pqc_pub_ok = is_buffer_within(local_env.pubkey_pqc, local_env.pubkey_pqc_len, work_buffer,
+                                       local_env.manifest_size);
+    bool pqc_sig_ok = is_buffer_within(local_env.signature_pqc, local_env.signature_pqc_len,
+                                       work_buffer, local_env.manifest_size);
 
     BOOT_SECURE_REQUIRE(pqc_pub_ok && pqc_sig_ok, {
       final_status = BOOT_ERR_INVALID_ARG;
@@ -285,20 +288,21 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     });
 
     /* ZERO-KEY FORGERY DEFENSE für PQC Algorithmen */
-    if (verify_not_all_zeros_glitch_safe(local_env.pubkey_pqc,
-                                         local_env.pubkey_pqc_len) != BOOT_OK) {
+    if (verify_not_all_zeros_glitch_safe(local_env.pubkey_pqc, local_env.pubkey_pqc_len) !=
+        BOOT_OK) {
       final_status = BOOT_ERR_VERIFY;
       goto cleanup;
     }
 
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
     boot_status_t pqc_stat = platform->crypto->verify_pqc(
-        work_buffer, local_env.manifest_size, local_env.signature_pqc,
-        local_env.signature_pqc_len, local_env.pubkey_pqc,
-        local_env.pubkey_pqc_len);
-    if (platform->wdt && platform->wdt->kick)
+        work_buffer, local_env.manifest_size, local_env.signature_pqc, local_env.signature_pqc_len,
+        local_env.pubkey_pqc, local_env.pubkey_pqc_len);
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
 
     if (boot_secure_confirm(pqc_stat) != BOOT_OK) {
       final_status = BOOT_ERR_VERIFY;
@@ -318,8 +322,12 @@ boot_verify_manifest_envelope(const boot_platform_t *platform,
     boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_5_SKIP); /* Negativer Pfad (Kein PQC) bewiesen */
   }
 #else
-  /* P7d: PQC nicht konfiguriert — statischer SKIP-Pfad.
-   * CFI: Negativer Pfad beweisen, damit der Akkumulator konsistent bleibt. */
+  /* P7d: PQC nicht konfiguriert — statischer SKIP-Pfad. */
+  if (platform->crypto->is_pqc_enforced && platform->crypto->is_pqc_enforced()) {
+    final_status = BOOT_ERR_NOT_SUPPORTED;
+    goto cleanup;
+  }
+
   boot_cfi_add_expected(verify_cfi_ctx, VERIFY_CFI_SLOT_5_SKIP);
   boot_cfi_step(verify_cfi_ctx, VERIFY_CFI_SLOT_5_SKIP);
 #endif

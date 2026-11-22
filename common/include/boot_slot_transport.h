@@ -18,7 +18,7 @@
 #include <stdbool.h>
 #include "boot_hal.h"        /* boot_platform_t, boot_status_t */
 #include "boot_journal.h"    /* wal_entry_payload_t */
-#include "boot_swap.h"       /* boot_dest_slot_t (migrates here when boot_swap retires) */
+/* boot_swap.h included at bottom after slot_transport_t is defined */
 #include "boot_slot_caps.h"
 
 /* ============================================================================
@@ -31,6 +31,7 @@
  *   [0..7]  multi-image component-completion bits (component_id 0..255)
  *   [3]     transport phase marker (oneway / swapmove)      — this header
  *   [4..5]  swapmove sub-step CRCs (cs, cp)                 — this header
+ *   [4..7]  K4 16B entry MAC on terminal security-bearing intents (boot_journal.c)
  *
  * !!! KNOWN HAZARD (pre-existing, flagged for fix): the legacy app-swap writes
  * CRC values into [0..2], and boot_multiimage_apply afterwards interprets the
@@ -51,9 +52,11 @@
 #define TOOB_PHASE_ONEWAY_BACKUP  0x0FB5AA33u
 #define TOOB_PHASE_ONEWAY_DEPLOY  0xF04A55CCu
 #define TOOB_PHASE_ONEWAY_RBACK   0x33CA5AF0u
+#define TOOB_PHASE_ONEWAY_RDELTA  0x55AA33CCu
 #define TOOB_PHASE_SWAPMOVE_MOVE  0x5AC3F00Fu
 #define TOOB_PHASE_SWAPMOVE_SWAP  0xA53C0FF0u
 #define TOOB_PHASE_POINTER_COPY   0x5A5A3C3Cu
+#define TOOB_PHASE_STREAM_WRITE   0x6996C33Cu
 
 /* Stable provider IDs — persisted into the WAL (ST-014) so a brownout resume
  * dispatches the SAME provider that began the transaction. Never renumber. */
@@ -62,6 +65,7 @@
 #define TOOB_TRANSPORT_ID_ONEWAY      2u
 #define TOOB_TRANSPORT_ID_SWAPMOVE    3u
 #define TOOB_TRANSPORT_ID_POINTER     4u
+#define TOOB_TRANSPORT_ID_SWAPOFFSET  5u
 
 /* Forward-compatible transport_id persistence: becomes real with ST-014
  * (wal_entry_payload_t gains .transport_id). Until then it is a no-op, so this
@@ -121,5 +125,7 @@ typedef struct {
                             slot_txn_t *txn,
                             uint8_t *arena, size_t arena_len);
 } slot_transport_t;
+
+#include "boot_swap.h"
 
 #endif /* BOOT_SLOT_TRANSPORT_H */

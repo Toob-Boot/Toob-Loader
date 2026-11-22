@@ -39,11 +39,28 @@ typedef enum {
   SLOT_EXEC_BANK_SWAP   = 3  /* hardware dual-bank flip (e.g. STM32 BFB2)        */
 } slot_exec_model_t;
 
+/**
+ * @brief Whether a committed slot selection survives a power cycle.
+ *
+ * PERSISTENT: the hardware latches the selection (e.g. option bytes, BFB2) —
+ *             get_active_slot() is the source of truth.
+ * VOLATILE:   the selection is lost on reset (e.g. ESP32 flash MMU) — the
+ *             TMR field active_app_slot is the source of truth and the Core
+ *             re-asserts the selection on every boot before handoff.
+ */
+typedef enum {
+  SLOT_COMMIT_PERSISTENT = 0,
+  SLOT_COMMIT_VOLATILE   = 1
+} slot_commit_persistence_t;
+
 /* ---- Model-specific commit operation types (union arms) ---- */
 
-/** HW dual-bank flip. target_bank: 0/1. Must be atomic in hardware. */
+/** HW dual-bank flip. target_bank: 0/1.
+ *  handover_jump: optional RAM-resident final handoff primitive for volatile
+ *  bus-matrix bank aliasing (e.g. STM32 SYSCFG MEMRMP) when Stage 1 runs XIP. */
 typedef struct {
   boot_status_t (*bank_flip)(uint32_t target_bank);
+  void (*handover_jump)(uint32_t vector_addr, uint32_t sp, uint32_t entry_pc);
 } slot_ops_bank_swap_t;
 
 /** Commit an XIP/MMU remap so slot_phys_addr becomes the execution window. */
@@ -51,9 +68,13 @@ typedef struct {
   boot_status_t (*xip_remap_commit)(uint32_t slot_phys_addr);
 } slot_ops_xip_remap_t;
 
-/** Select the execution entry for a relocatable image (e.g. VTOR base). */
+/** Select the execution entry for a relocatable image (e.g. VTOR base).
+ *  image_link_check proves BEFORE the commit that the image at exec_addr was
+ *  linked for exactly that address (e.g. reset vector inside the window);
+ *  the architecture package implements it. Both pointers are mandatory. */
 typedef struct {
-  boot_status_t (*exec_addr_select)(uint32_t slot_phys_addr);
+  boot_status_t (*exec_addr_select)(uint32_t exec_addr);
+  boot_status_t (*image_link_check)(uint32_t exec_addr, uint32_t image_size);
 } slot_ops_relocatable_t;
 
 /* SLOT_EXEC_FIXED: no commit operation — the image runs from a fixed address. */
@@ -71,7 +92,8 @@ typedef struct {
 typedef struct {
   slot_exec_model_t exec_model;
   uint8_t  slot_count;        /* bootable slots: 1 (in-place) or 2 (A/B)        */
-  uint8_t  _pad[3];
+  uint8_t  commit_persistence;/* slot_commit_persistence_t                       */
+  uint8_t  _pad[2];
   bool     has_scratch;       /* dedicated scratch/temp region present           */
   uint8_t  _pad2[3];
   uint32_t scratch_size;      /* bytes; 0 if none                               */
@@ -118,11 +140,14 @@ _Static_assert(offsetof(slot_caps_t, scratch_size) % 4 == 0,
       .get_active_slot = (get_active_),                                     \
       __VA_ARGS__ }
 
-/** @brief Relocatable model (PIC/dual-linked). Requires exec_addr_select. */
-#define TOOB_SLOT_CAPS_RELOCATABLE(slot_count_, exec_addr_, get_active_, ...) \
+/** @brief Relocatable model (PIC/dual-linked). Requires exec_addr_select and
+ *         image_link_check. The selection lives in the TMR (volatile HW). */
+#define TOOB_SLOT_CAPS_RELOCATABLE(slot_count_, exec_addr_, link_check_, get_active_, ...) \
     { .exec_model  = SLOT_EXEC_RELOCATABLE,                                   \
       .slot_count  = (slot_count_),                                           \
+      .commit_persistence = SLOT_COMMIT_VOLATILE,                             \
       .ops.relocatable.exec_addr_select = (exec_addr_),                       \
+      .ops.relocatable.image_link_check = (link_check_),                      \
       .get_active_slot = (get_active_),                                       \
       __VA_ARGS__ }
 

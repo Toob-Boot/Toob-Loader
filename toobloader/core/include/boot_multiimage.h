@@ -17,26 +17,27 @@
 #include "boot_hal.h"
 #include "boot_journal.h"
 #include "boot_types.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-
 /**
- * @brief Definition eines Sub-Images aus dem SUIT Manifest
+ * @brief Definition eines Sub-Images aus dem Manifest.
  * Striktes 8-Byte Alignment für DMA/Cortex-M0 Sicherheit.
  */
 typedef struct __attribute__((aligned(8))) {
-  uint32_t component_id; /**< ID (0-255) gebunden an das WAL Transfer-Bitmap */
-  uint32_t staging_offset; /**< Start-Offset dieses Images im Staging-Slot */
-  uint32_t
-      target_addr; /**< Absolute physikalische Zieladresse (intern/extern) */
-  uint32_t image_size;       /**< Größe der zu schreibenden Firmware */
-  uint8_t expected_hash[32]; /**< Erwarteter SHA-256 Hash für den Read-Back
-                                Beweis */
+  uint32_t component_id;            /**< ID (0-255) gebunden an das WAL Transfer-Bitmap */
+  uint32_t staging_offset;          /**< Start-Offset dieses Images relativ zu staging_base */
+  uint32_t target_addr;             /**< Absolute physikalische Zieladresse (intern/extern) */
+  uint32_t image_size;              /**< Größe der zu schreibenden Firmware */
+  uint8_t expected_hash[32];        /**< Legacy Whole-Image SHA-256 (falls chunk_size == 0) */
+  uint32_t chunk_hashes_flash_addr; /**< Flash-Adresse des Per-Chunk SHA-256 Arrays (TBM1 v2) */
+  uint32_t chunk_size;              /**< TBM1 v2 Blockgröße (0 = nutze expected_hash[32]) */
+  uint32_t num_chunks;              /**< TBM1 v2 Anzahl Chunks */
+  uint32_t _pad_mi;                 /**< Explizites 8-Byte Alignment Padding */
 } boot_component_t;
 
-_Static_assert(sizeof(boot_component_t) == 48,
-               "boot_component_t ABI Size Drift!");
+_Static_assert(sizeof(boot_component_t) == 64, "boot_component_t ABI Size Drift!");
 
 /**
  * @brief Whitelist für erlaubte Speicherbereiche (Arbitrary Write Defense).
@@ -47,35 +48,16 @@ typedef struct __attribute__((aligned(8))) {
   uint32_t max_size;
 } boot_allowed_region_t;
 
-/**
- * @brief Extrahiert, verifiziert und flasht n-sekundäre Images aus dem
- * Staging-Bereich.
- *
- * @param platform Boot HAL Pointer
- * @param staging_base Physische Startadresse des Update-Pakets
- * @param components Array der zu flashenden Komponenten-Deskriptoren
- * @param num_components Anzahl der Komponenten im Array
- * @param whitelist Array der erlaubten Zielspeicher-Regionen
- * @param num_regions Anzahl der Whitelist-Zonen
- * @param open_txn Das offene WAL Journal für O(1) Resume Bitmapping
- * @return BOOT_OK bei komplettem Erfolg, Error-Code bei
- * Glitch/Bounds-Breach/HW-Fault.
- */
-#include "boot_effect.h"
+typedef struct flash_effect_s flash_effect_t;
 
-boot_status_t boot_multiimage_apply(const boot_platform_t *platform,
-                                    uint32_t staging_base,
-                                    const boot_component_t *components,
-                                    uint32_t num_components,
-                                    const boot_allowed_region_t *whitelist,
-                                    uint32_t num_regions,
-                                    wal_entry_payload_t *open_txn,
-                                    uint8_t *arena, size_t arena_len);
+boot_status_t boot_multiimage_apply(const boot_platform_t *platform, uint32_t staging_base,
+                                    const boot_component_t *components, uint32_t num_components,
+                                    const boot_allowed_region_t *whitelist, uint32_t num_regions,
+                                    wal_entry_payload_t *open_txn, uint8_t *arena,
+                                    size_t arena_len);
 
-boot_status_t boot_multiimage_plan_component(const boot_platform_t *platform,
-                                             uint32_t staging_base,
-                                             const boot_component_t *comp,
-                                             uint32_t src_crc,
+boot_status_t boot_multiimage_plan_component(const boot_platform_t *platform, uint32_t staging_base,
+                                             const boot_component_t *comp, uint32_t src_crc,
                                              flash_effect_t *out_fx, size_t cap, size_t *n_out);
 
 #endif /* TOOB_BOOT_MULTIIMAGE_H */

@@ -23,6 +23,7 @@
  */
 
 #include "boot_main.h"
+#include "boot_features.h"
 #include "boot_proof.h"
 #include "generated_boot_config.h"
 
@@ -30,17 +31,22 @@
 #include "boot_ct_utils.h"
 #include "boot_delay.h"
 #include "boot_diag.h"
-#include "boot_panic.h"
 #include "boot_fih.h"
+#include "boot_flash_guard.h"
+#include "boot_identity.h"
+#include "boot_journal.h"
+#include "boot_panic.h"
+#include "boot_platform_bringup.h"
 #include "boot_provisioning.h"
 #include "boot_secure_zeroize.h"
 #include "boot_state.h"
-#include "boot_journal.h"
-#include "boot_identity.h"
+#include "boot_tbm1.h"
 #include <stddef.h>
 #include <string.h>
 
-
+#if !defined(BOOT_UART_BAUDRATE) && defined(TOOB_DRIVER_UART_BAUDRATE)
+#define BOOT_UART_BAUDRATE TOOB_DRIVER_UART_BAUDRATE
+#endif
 #ifndef BOOT_UART_BAUDRATE
 #define BOOT_UART_BAUDRATE 115200
 #endif
@@ -53,13 +59,13 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
 uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE] __attribute__((aligned(8)));
 
 /* P10 CFI Token Slots (Randomized per boot via TRNG) */
-#define MAIN_CFI_SLOT_INIT    0
-#define MAIN_CFI_SLOT_HW_UP   1
-#define MAIN_CFI_SLOT_EXEC    2
-#define MAIN_CFI_SLOT_BOUNDS  3
+#define MAIN_CFI_SLOT_INIT 0
+#define MAIN_CFI_SLOT_HW_UP 1
+#define MAIN_CFI_SLOT_EXEC 2
+#define MAIN_CFI_SLOT_BOUNDS 3
 #define MAIN_CFI_SLOT_HANDOFF 4
 #define MAIN_CFI_SLOT_HW_DOWN 5
-#define MAIN_CFI_NUM_TOKENS   6
+#define MAIN_CFI_NUM_TOKENS 6
 
 /* Init-Tracking Bitmask Flags für Fail-Safe Cleanup */
 #define INIT_MASK_CLOCK (1U << 0)
@@ -70,14 +76,15 @@ uint8_t crypto_arena[BOOT_CRYPTO_ARENA_SIZE] __attribute__((aligned(8)));
 #define INIT_MASK_CONFIRM (1U << 5)
 #define INIT_MASK_CONSOLE (1U << 6)
 #define INIT_MASK_SOC (1U << 7)
+#define INIT_MASK_KEYSTORE (1U << 8)
+#define INIT_MASK_ENTROPY (1U << 9)
 
 /*
  * ==============================================================================
  * Handoff Areal (.noinit Shared-RAM) gemäß libtoob_api.md und toob_telemetry.md
  * ==============================================================================
  */
-static inline toob_reset_reason_t
-translate_reset_reason(reset_reason_t internal_reason) {
+static inline toob_reset_reason_t translate_reset_reason(reset_reason_t internal_reason) {
   /* Da das 1:1 Mapping zentral in boot_types.h per Static Assert verifiziert
    * ist, ist ein O(1) Cast C17 sicher und portabel. */
   return (toob_reset_reason_t)internal_reason;
@@ -87,19 +94,54 @@ translate_reset_reason(reset_reason_t internal_reason) {
  * P10 Alignment Fix: Zwingend 8-Byte Alignment für 64-Bit Nonce Load/Stores
  * im Target OS, um Hardware-Traps zu verhindern.
  */
-#if defined(__GNUC__) || defined(__clang__)
-#define BOOT_NOINIT __attribute__((section(".noinit"), aligned(8)))
-#elif defined(__ICCARM__) || defined(__CC_ARM) || defined(__ARMCC_VERSION)
-#define BOOT_NOINIT __attribute__((section(".bss.noinit"), aligned(8)))
+#if defined(__GNUC__) || defined(__clang__) || defined(__ICCARM__)
+#define BOOT_HANDOFF_ALIGN8 __attribute__((aligned(8)))
+#elif defined(_MSC_VER)
+#define BOOT_HANDOFF_ALIGN8 __declspec(align(8))
 #else
-#define BOOT_NOINIT __attribute__((aligned(8)))
+#define BOOT_HANDOFF_ALIGN8
 #endif
 
-BOOT_NOINIT toob_handoff_t toob_handoff_state;
-BOOT_NOINIT toob_boot_diag_t toob_diag_state;
+TOOB_NOINIT_VAR(toob_handoff_state) BOOT_HANDOFF_ALIGN8 toob_handoff_t toob_handoff_state;
 
-boot_status_t boot_main(const boot_platform_t *platform,
-                        boot_target_config_t *target_out,
+static boot_status_t enforce_dslc_lifecycle(const boot_platform_t *platform,
+                                            boot_target_config_t *target_out) {
+  uint8_t dslc_val = 0xFFU;
+  size_t dslc_len = 1U;
+  boot_status_t dslc_st = platform->keystore->read_dslc(&dslc_val, &dslc_len);
+  if (dslc_st != BOOT_OK || dslc_len == 0U) {
+    boot_status_t err = (dslc_st != BOOT_OK) ? dslc_st : BOOT_ERR_INVALID_STATE;
+    boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+    boot_panic(platform, err);
+    return err;
+  }
+
+  BOOT_SECURE_REQUIRE(dslc_val != 0xFFU, {
+    boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+    boot_terminal_halt(platform, BOOT_ERR_DEVICE_LOCKED, SITE_STATE_LOCK_FAIL);
+  });
+
+  if (dslc_val == 0x00U) {
+#if TOOB_FEATURE_UART_PROVISIONING
+    if (platform->provisioning != NULL) {
+      boot_provisioning_run(platform, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+      return BOOT_ERR_NOT_SUPPORTED;
+    }
+#endif
+    boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+    boot_panic(platform, BOOT_ERR_NOT_SUPPORTED);
+    return BOOT_ERR_NOT_SUPPORTED;
+  }
+
+  BOOT_SECURE_REQUIRE(dslc_val != 0x00U && dslc_val != 0xFFU, {
+    boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+    boot_terminal_halt(platform, BOOT_ERR_DEVICE_LOCKED, SITE_STATE_LOCK_FAIL);
+  });
+
+  return BOOT_OK;
+}
+
+boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *target_out,
                         const uint32_t seal_key[4]) {
 
   /* P10 CFI Randomisierung: Seed wird später nach crypto->init gezogen */
@@ -125,8 +167,8 @@ boot_status_t boot_main(const boot_platform_t *platform,
     return BOOT_ERR_INVALID_ARG;
   }
 
-  if (platform->clock == NULL || platform->flash == NULL ||
-      platform->wdt == NULL || platform->crypto == NULL ||
+  if (platform->clock == NULL || platform->flash == NULL || platform->wdt == NULL ||
+      platform->crypto == NULL || platform->entropy == NULL || platform->keystore == NULL ||
       platform->confirm == NULL) {
     return BOOT_ERR_INVALID_ARG;
   }
@@ -135,40 +177,45 @@ boot_status_t boot_main(const boot_platform_t *platform,
   if (platform->clock->abi_version != TOOB_HAL_ABI_V2 ||
       platform->flash->abi_version != TOOB_HAL_ABI_V2 ||
       platform->wdt->abi_version != TOOB_HAL_ABI_V2 ||
-      platform->crypto->abi_version != TOOB_HAL_ABI_V2 ||
+      platform->crypto->abi_version != TOOB_HAL_ABI_V3 ||
+      platform->entropy->abi_version != TOOB_HAL_ABI_V3 ||
+      platform->keystore->abi_version != TOOB_HAL_ABI_V3 ||
       platform->confirm->abi_version != TOOB_HAL_ABI_V2) {
     return BOOT_ERR_ABI_MISMATCH;
   }
-  if (platform->console != NULL &&
-      platform->console->abi_version != TOOB_HAL_ABI_V2) {
+  if (platform->console != NULL && platform->console->abi_version != TOOB_HAL_ABI_V2) {
     return BOOT_ERR_ABI_MISMATCH;
   }
   if (platform->soc != NULL && platform->soc->abi_version != TOOB_HAL_ABI_V2) {
     return BOOT_ERR_ABI_MISMATCH;
   }
+  if (platform->provisioning != NULL && platform->provisioning->abi_version != TOOB_HAL_ABI_V3) {
+    return BOOT_ERR_ABI_MISMATCH;
+  }
 
-  if (platform->flash->max_erase_cycles == 0) {
+  if (platform->flash->max_erase_cycles < 4U) {
     return BOOT_ERR_INVALID_ARG;
   }
 
   /* Pflicht-Funktionspointer prüfen */
   if (platform->clock->init == NULL || platform->clock->deinit == NULL ||
-      platform->clock->get_tick_ms == NULL ||
-      platform->clock->get_reset_reason == NULL) {
+      platform->clock->get_tick_ms == NULL || platform->clock->get_reset_reason == NULL) {
     return BOOT_ERR_INVALID_ARG;
   }
   if (platform->flash->init == NULL || platform->flash->deinit == NULL ||
       platform->flash->read == NULL) {
     return BOOT_ERR_INVALID_ARG;
   }
-  if (platform->wdt->init == NULL || platform->wdt->deinit == NULL ||
-      platform->wdt->kick == NULL) {
+  if (platform->wdt->init == NULL || platform->wdt->deinit == NULL || platform->wdt->kick == NULL) {
     return BOOT_ERR_INVALID_ARG;
   }
   if (platform->confirm->init == NULL || platform->confirm->deinit == NULL) {
     return BOOT_ERR_INVALID_ARG;
   }
   if (platform->crypto->init == NULL || platform->crypto->deinit == NULL) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  if (platform->entropy->random == NULL || platform->keystore->read_dslc == NULL) {
     return BOOT_ERR_INVALID_ARG;
   }
 
@@ -188,11 +235,12 @@ boot_status_t boot_main(const boot_platform_t *platform,
 
   /*
    * ==============================================================================
-   * BLOCK 2 - Hardware Init Cascade (Strikt nach Spec)
+   * BLOCK 2 - Hardware Init Cascade (Strikt nach Spec, Duplikatsicher via REG-022)
    * ==============================================================================
    */
   boot_status_t status = BOOT_OK;
   uint32_t init_mask = 0;
+  bool already_up = boot_platform_is_brought_up(platform);
 
   if (platform->soc != NULL) {
     /* GAP Mitigation: Bus-Matrix flushen, um hängende DMAs von Sub-Cores vor
@@ -201,14 +249,20 @@ boot_status_t boot_main(const boot_platform_t *platform,
     platform->soc->assert_secondary_cores_reset();
   }
 
-  status = platform->clock->init();
-  if (status != BOOT_OK)
-    goto init_cleanup;
+  if (!already_up) {
+    status = platform->clock->init();
+    if (status != BOOT_OK) {
+      goto init_cleanup;
+    }
+  }
   init_mask |= INIT_MASK_CLOCK;
 
-  status = platform->flash->init();
-  if (status != BOOT_OK)
-    goto init_cleanup;
+  if (!already_up) {
+    status = platform->flash->init();
+    if (status != BOOT_OK) {
+      goto init_cleanup;
+    }
+  }
   init_mask |= INIT_MASK_FLASH;
 
   /* UPD-001: Unconditional init prevents cold-start garbage in .noinit.
@@ -245,7 +299,8 @@ boot_status_t boot_main(const boot_platform_t *platform,
 
     /* Fallback to flash if not found in RTC */
     if (!forensic_valid && platform->flash && platform->flash->read) {
-      boot_status_t f_read = platform->flash->read(CHIP_FORENSIC_SLOT_ABS_ADDR, &forensic_record, sizeof(forensic_record));
+      boot_status_t f_read = platform->flash->read(CHIP_FORENSIC_SLOT_ABS_ADDR, &forensic_record,
+                                                   sizeof(forensic_record));
       if (f_read == BOOT_OK && forensic_record.magic == 0x464F524E) {
         uint32_t calculated_crc = compute_boot_crc32((const uint8_t *)&forensic_record, 16);
         if (forensic_record.crc32 == calculated_crc) {
@@ -256,7 +311,7 @@ boot_status_t boot_main(const boot_platform_t *platform,
 
     if (forensic_valid) {
       boot_diag_set_error((boot_status_t)forensic_record.reason, forensic_record.site_id);
-      
+
       /* Invalidate the slot to prevent reading the same crash on next reboot */
       if (platform->soc && platform->soc->write_rtc_backup) {
         for (uint8_t slot = 1; slot <= 5; slot++) {
@@ -264,49 +319,85 @@ boot_status_t boot_main(const boot_platform_t *platform,
         }
       }
       if (platform->flash && platform->flash->erase_sector) {
-        (void)platform->flash->erase_sector(CHIP_FORENSIC_SLOT_ABS_ADDR);
+        (void)boot_flash_erase_sector_guarded(platform->flash, CHIP_FORENSIC_SLOT_ABS_ADDR);
       }
     }
   }
 
   if (platform->flash->set_otfdec_mode != NULL) {
     status = platform->flash->set_otfdec_mode(false);
-    if (status != BOOT_OK)
+    if (status != BOOT_OK) {
       goto init_cleanup;
+    }
     init_mask |= INIT_MASK_OTFDEC;
   }
 
-  status = platform->wdt->init(BOOT_WDT_TIMEOUT_MS);
-  if (status != BOOT_OK)
-    goto init_cleanup;
+  if (!already_up) {
+    status = platform->wdt->init(BOOT_WDT_TIMEOUT_MS);
+    if (status != BOOT_OK) {
+      goto init_cleanup;
+    }
+  }
   init_mask |= INIT_MASK_WDT;
 
-  status = platform->crypto->init();
-  if (status != BOOT_OK)
-    goto init_cleanup;
+  if (platform->keystore->init != NULL) {
+    if (!already_up) {
+      status = platform->keystore->init();
+      if (status != BOOT_OK) {
+        goto init_cleanup;
+      }
+    }
+    init_mask |= INIT_MASK_KEYSTORE;
+  }
+
+  if (platform->entropy->init != NULL) {
+    if (!already_up) {
+      status = platform->entropy->init();
+      if (status != BOOT_OK) {
+        goto init_cleanup;
+      }
+    }
+    init_mask |= INIT_MASK_ENTROPY;
+  }
+
+  if (!already_up) {
+    status = platform->crypto->init();
+    if (status != BOOT_OK) {
+      goto init_cleanup;
+    }
+  }
   init_mask |= INIT_MASK_CRYPTO;
 
-  status = platform->confirm->init();
-  if (status != BOOT_OK)
-    goto init_cleanup;
+  if (!already_up) {
+    status = platform->confirm->init();
+    if (status != BOOT_OK) {
+      goto init_cleanup;
+    }
+  }
   init_mask |= INIT_MASK_CONFIRM;
 
   if (platform->console != NULL) {
-    status = platform->console->init(BOOT_UART_BAUDRATE);
-    if (status != BOOT_OK)
-      goto init_cleanup;
+    if (!already_up) {
+      status = platform->console->init(BOOT_UART_BAUDRATE);
+      if (status != BOOT_OK) {
+        goto init_cleanup;
+      }
+    }
     init_mask |= INIT_MASK_CONSOLE;
   }
 
   if (platform->soc != NULL) {
-    status = platform->soc->init();
-    if (status != BOOT_OK)
-      goto init_cleanup;
+    if (!already_up) {
+      status = platform->soc->init();
+      if (status != BOOT_OK) {
+        goto init_cleanup;
+      }
+    }
     init_mask |= INIT_MASK_SOC;
   }
 
   /* TRNG ist jetzt verfügbar: CFI-Tokens ableiten */
-  boot_random_safe(platform, (uint8_t *)&main_cfi_seed, sizeof(main_cfi_seed));
+  (void)boot_random_safe(platform, (uint8_t *)&main_cfi_seed, sizeof(main_cfi_seed));
   boot_cfi_init(main_cfi_ctx, main_cfi_seed);
   for (uint8_t i = 1; i < MAIN_CFI_NUM_TOKENS; i++) {
     boot_cfi_add_expected(main_cfi_ctx, i);
@@ -318,23 +409,38 @@ boot_status_t boot_main(const boot_platform_t *platform,
 init_cleanup:
   /* Sauberes Rollback: Deinit in exakt umgekehrter Reihenfolge anhand der
    * Bitmaske */
-  if (init_mask & INIT_MASK_SOC)
+  if (init_mask & INIT_MASK_SOC) {
     platform->soc->deinit();
-  if (init_mask & INIT_MASK_CONSOLE)
+  }
+  if (init_mask & INIT_MASK_CONSOLE) {
     platform->console->deinit();
-  if (init_mask & INIT_MASK_CONFIRM)
+  }
+  if (init_mask & INIT_MASK_CONFIRM) {
     platform->confirm->deinit();
-  if (init_mask & INIT_MASK_CRYPTO)
+  }
+  if (init_mask & INIT_MASK_CRYPTO) {
     platform->crypto->deinit();
-  if (init_mask & INIT_MASK_WDT)
+  }
+  if ((init_mask & INIT_MASK_ENTROPY) && platform->entropy->deinit != NULL) {
+    platform->entropy->deinit();
+  }
+  if ((init_mask & INIT_MASK_KEYSTORE) && platform->keystore->deinit != NULL) {
+    platform->keystore->deinit();
+  }
+  if (init_mask & INIT_MASK_WDT) {
     platform->wdt->deinit();
-  if (init_mask & INIT_MASK_OTFDEC)
+  }
+  if (init_mask & INIT_MASK_OTFDEC) {
     (void)platform->flash->set_otfdec_mode(true);
-  if (init_mask & INIT_MASK_FLASH)
+  }
+  if (init_mask & INIT_MASK_FLASH) {
     platform->flash->deinit();
-  if (init_mask & INIT_MASK_CLOCK)
+  }
+  if (init_mask & INIT_MASK_CLOCK) {
     platform->clock->deinit();
+  }
 
+  boot_platform_mark_down();
   boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
   return status; /* Hard-Exit zurück an Stage 0 (Panic unsafe) */
 
@@ -347,7 +453,7 @@ init_success:
   if (platform->soc != NULL && platform->soc->get_recovery_pin_state != NULL) {
     if (platform->soc->get_recovery_pin_state()) {
       /* Debounce Wait: 500ms mit WDT Kicks (P10) */
-      boot_delay_with_wdt(platform, 500);
+      (void)boot_delay_with_wdt(platform, 500U);
 
       bool pin_active = platform->soc->get_recovery_pin_state();
       bool pin_failed = false;
@@ -363,23 +469,14 @@ init_success:
 
   /*
    * ==============================================================================
-   * BLOCK 2.6 - DSLC-Gated Provisioning Entry (Factory Only)
+   * BLOCK 2.6 - DSLC Lifecycle Enforcement & Factory Provisioning Gate
    * ==============================================================================
-   * Wenn das Gerät unprovisioniert ist (DSLC == 0x00), wird NICHT das OS
-   * gestartet, sondern die UART-Provisioning-Session betreten.
-   * Die Fabrik-Sicherheit wird durch den physischen Zugang zum Gerät
-   * gewährleistet — ein Recovery-Pin ist hier NICHT erforderlich.
+   * Permanently locked devices (0xFF) halt immediately; unprovisioned factory
+   * devices (0x00) enter UART provisioning or fail closed if unavailable.
    */
-  if (platform->crypto->read_dslc) {
-    uint8_t dslc_val = 0xFF;
-    size_t dslc_len = 1;
-    if (platform->crypto->read_dslc(&dslc_val, &dslc_len) == BOOT_OK &&
-        dslc_len > 0 && dslc_val == 0x00) {
-      if (platform->provisioning) {
-        boot_provisioning_run(platform, crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
-        return BOOT_ERR_NOT_SUPPORTED; /* Unreachable P10 Safety */
-      }
-    }
+  status = enforce_dslc_lifecycle(platform, target_out);
+  if (status != BOOT_OK) {
+    return status;
   }
 
   /*
@@ -410,24 +507,31 @@ init_success:
    * BLOCK 4 - Bounds Validation & XIP Safety
    * ==============================================================================
    */
+#if defined(__ARM_ARCH_PROFILE) && (__ARM_ARCH_PROFILE == 'M') &&                                  \
+    (!defined(CHIP_HAS_VTOR) || (CHIP_HAS_VTOR != 0))
+#define TOOB_APP_ENTRY_ALIGN_MASK 0x7FU
+#else
+#define TOOB_APP_ENTRY_ALIGN_MASK 0x03U
+#endif
+
   bool bounds_ok = false;
 
   if (boot_proof_verify(&target_out->proof, seal_key) == BOOT_OK) {
-    uint32_t absolute_entry = target_out->proof.image_addr + target_out->proof.entry_point;
+    const uint32_t img_addr = target_out->proof.image_addr;
+    const uint32_t img_size = target_out->proof.image_size;
+    const uint32_t entry_off = target_out->proof.entry_point;
+
+    if (img_size > (uint32_t)sizeof(toob_image_header_t) &&
+        entry_off >= (uint32_t)sizeof(toob_image_header_t) && entry_off < img_size &&
+        (UINT32_MAX - img_addr) >= entry_off) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wtype-limits"
-    if (CHIP_FLASH_BASE_ADDR == 0 || absolute_entry >= CHIP_FLASH_BASE_ADDR) {
+      if (CHIP_FLASH_BASE_ADDR == 0U || img_addr >= CHIP_FLASH_BASE_ADDR) {
 #pragma GCC diagnostic pop
-      uint32_t relative_offset = absolute_entry - CHIP_FLASH_BASE_ADDR;
-
-      /* O(1) Wrap-Around proof: Limit verification against Chip Size */
-      if (CHIP_FLASH_TOTAL_SIZE >= relative_offset) {
-        uint32_t max_allowed_size = CHIP_FLASH_TOTAL_SIZE - relative_offset;
-        if (target_out->proof.image_size > 0 &&
-            target_out->proof.image_size <= max_allowed_size) {
-          /* P10 Rule: OS Vector Tables müssen zwingend auf 4-Byte
-           * Architektur-Grenzen liegen */
-          if (absolute_entry % 4 == 0) {
+        const uint32_t img_rel = img_addr - CHIP_FLASH_BASE_ADDR;
+        if (img_rel < CHIP_FLASH_TOTAL_SIZE && img_size <= (CHIP_FLASH_TOTAL_SIZE - img_rel)) {
+          const uint32_t absolute_entry = img_addr + entry_off;
+          if ((absolute_entry & TOOB_APP_ENTRY_ALIGN_MASK) == 0U) {
             bounds_ok = true;
           }
         }
@@ -452,35 +556,62 @@ init_success:
    */
   boot_diag_set_boot_time(boot_duration_ms);
 
+  uint32_t mono_cnt = 0U;
+  (void)boot_read_monotonic_counter_safe(platform, &mono_cnt);
+
   wal_tmr_payload_t tmr __attribute__((aligned(8)));
   boot_secure_zeroize(&tmr, sizeof(tmr));
-  uint32_t session_id = 0;
-  uint32_t installed_app_svn = 0;
-  uint32_t installed_stage1_svn = 0;
+  uint32_t session_id = 0U;
+  uint32_t installed_app_svn = 0U;
+  uint32_t installed_stage1_svn = 0U;
+  uint32_t eff_fail_cnt = target_out->observed_failure_count;
+  uint32_t persisted_build = 0U;
+  uint32_t persisted_key = 0U;
+  uint16_t persisted_maj = 0U;
+  uint16_t persisted_min = 0U;
+  uint16_t persisted_pat = 0U;
   if (boot_journal_get_tmr(platform, &tmr) == BOOT_OK) {
-    boot_diag_set_recovery_events(tmr.boot_failure_counter);
+    if (tmr.boot_failure_counter > eff_fail_cnt) {
+      eff_fail_cnt = tmr.boot_failure_counter;
+    }
     session_id = tmr.chain_entry_count;
     installed_app_svn = tmr.app_svn;
     installed_stage1_svn = tmr.stage1_svn;
+    if (target_out->is_tentative_boot && (tmr.pending_key_index & WAL_TMR_PENDING_META_BIT) != 0U) {
+      persisted_build = tmr.pending_build_number;
+      persisted_maj = tmr.pending_fw_major;
+      persisted_min = tmr.pending_fw_minor;
+      persisted_pat = tmr.pending_fw_patch;
+      persisted_key = (uint32_t)(tmr.pending_key_index & WAL_TMR_KEY_INDEX_MASK);
+    } else {
+      persisted_build = tmr.app_build_number;
+      persisted_maj = tmr.app_fw_major;
+      persisted_min = tmr.app_fw_minor;
+      persisted_pat = tmr.app_fw_patch;
+      persisted_key = (uint32_t)(tmr.active_key_index & WAL_TMR_KEY_INDEX_MASK);
+    }
 
-    toob_ext_health_t wear = {
-        .wal_erase_count = 0, /* TMR has no aggregated WAL wear counter */
-        .app_slot_erase_count = tmr.app_slot_erase_counter,
-        .staging_slot_erase_count = tmr.staging_slot_erase_counter,
-        .swap_buffer_erase_count = tmr.swap_buffer_erase_counter
-    };
+    toob_ext_health_t wear = {.wal_erase_count = 0, /* TMR has no aggregated WAL wear counter */
+                              .app_slot_erase_count = tmr.app_slot_erase_counter,
+                              .staging_slot_erase_count = tmr.staging_slot_erase_counter,
+                              .swap_buffer_erase_count = tmr.swap_buffer_erase_counter};
     boot_diag_set_wear_data(&wear);
   }
   boot_secure_zeroize(&tmr, sizeof(tmr));
 
-  boot_diag_set_system_status(0, target_out->boot_recovery_os, session_id);
+  boot_diag_set_recovery_events(eff_fail_cnt);
+  boot_diag_set_system_status(0U, target_out->boot_recovery_os || target_out->rollback_occurred,
+                              session_id);
 
-  /* UPD-001: Populate SVN from TMR on EVERY boot, not only update boots.
-   * boot_diag_set_security_meta() in boot_state.c only fires during stage-check.
-   * Without this, a cold start reports garbage SVN to the server (B1). */
-  boot_diag_set_installed_state(installed_app_svn, installed_stage1_svn, 0);
+  /* UPD-001 / TDR1-02: Populate SVN & persisted App identity from TMR on EVERY boot. */
+  boot_diag_set_installed_state(installed_app_svn, installed_stage1_svn, persisted_build);
+  boot_diag_set_persisted_identity(persisted_key, persisted_build, persisted_maj, persisted_min,
+                                   persisted_pat, mono_cnt);
 
-  boot_diag_seal(); /* Kapselt CRC & Padding-Nulling perfekt ein */
+  if (boot_secure_confirm(boot_diag_seal()) != BOOT_OK) {
+    status = BOOT_ERR_VERIFY;
+    goto panic_fallthrough;
+  }
 
   /* Handoff Struct Population */
   toob_handoff_t local_handoff __attribute__((aligned(8)));
@@ -489,28 +620,33 @@ init_success:
   local_handoff.magic = target_out->is_tentative_boot ? TOOB_STATE_TENTATIVE : TOOB_STATE_COMMITTED;
   local_handoff.struct_version = TOOB_HANDOFF_STRUCT_VERSION;
   local_handoff.boot_nonce = target_out->generated_nonce;
+  local_handoff.boot_failure_count = eff_fail_cnt;
   local_handoff.reset_reason = translate_reset_reason(platform->clock->get_reset_reason());
-  local_handoff.booted_partition = target_out->boot_recovery_os ? TOOB_PARTITION_RECOVERY : TOOB_PARTITION_APP;
+  local_handoff.booted_partition =
+      target_out->boot_recovery_os ? TOOB_PARTITION_RECOVERY : TOOB_PARTITION_APP;
   local_handoff.net_search_accum_ms = target_out->net_search_accum_ms;
   local_handoff.resume_offset = target_out->resume_offset;
 
   /* Phase 4: Device-ID Derivation */
   boot_status_t id_status = boot_derive_device_id(platform, local_handoff.device_id);
   if (id_status != BOOT_OK) {
-      /* P10 Defensive: Fallback for Development Mode (unprovisioned keys) */
-      boot_secure_zeroize(local_handoff.device_id, 32);
+    /* P10 Defensive: Fallback for Development Mode (unprovisioned keys) */
+    boot_secure_zeroize(local_handoff.device_id, 32);
   }
   local_handoff.wipe_requested = target_out->wipe_requested ? 1 : 0;
+  local_handoff.active_slot = target_out->active_slot;
 
   platform->wdt->kick();
 
   size_t handoff_hash_len = offsetof(toob_handoff_t, crc32_trailer);
-  local_handoff.crc32_trailer = compute_boot_crc32((const uint8_t *)&local_handoff, handoff_hash_len);
+  local_handoff.crc32_trailer =
+      compute_boot_crc32((const uint8_t *)&local_handoff, handoff_hash_len);
 
   /* Atomarer Transfer (toob_diag_state wurde schon in boot_diag_seal aktualisiert) */
   memcpy(&toob_handoff_state, &local_handoff, sizeof(toob_handoff_t));
 
-  uint32_t ram_crc_handoff = compute_boot_crc32((const uint8_t *)&toob_handoff_state, handoff_hash_len);
+  uint32_t ram_crc_handoff =
+      compute_boot_crc32((const uint8_t *)&toob_handoff_state, handoff_hash_len);
 
   bool ram_ok = (ram_crc_handoff == local_handoff.crc32_trailer);
 
@@ -554,6 +690,12 @@ init_success:
   });
 
   platform->crypto->deinit();
+  if (platform->entropy->deinit != NULL) {
+    platform->entropy->deinit();
+  }
+  if (platform->keystore->deinit != NULL) {
+    platform->keystore->deinit();
+  }
   platform->confirm->deinit();
 
   if (platform->console != NULL) {
@@ -563,8 +705,9 @@ init_success:
   if (platform->soc != NULL) {
     /* MPU Core Data-Flush: Zeroize Shared-Cache Buffers/Matrices between boots!
      */
-    if (platform->soc->flush_bus_matrix)
+    if (platform->soc->flush_bus_matrix) {
       platform->soc->flush_bus_matrix();
+    }
     platform->soc->deinit();
   }
 
@@ -582,8 +725,31 @@ init_success:
     boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_MAIN_CFI_MISMATCH);
   });
 
-  /* Watchdog stirbt in der letzten Nanosekunde vor dem Assembler-Jump */
-  platform->wdt->deinit();
+  /* Keep hardware WDT armed and freshly kicked across tentative (unconfirmed)
+   * OS jumps so an early OS hang/crash triggers WDT rollback; deinit only on
+   * committed or Recovery OS transitions. */
+  if (target_out->is_tentative_boot) {
+    platform->wdt->kick();
+  } else {
+    platform->wdt->deinit();
+  }
+  boot_platform_mark_down();
+
+  if (platform->soc != NULL) {
+    if (platform->soc->flush_bus_matrix != NULL) {
+      platform->soc->flush_bus_matrix();
+    }
+    if (platform->soc->invalidate_icache != NULL) {
+      platform->soc->invalidate_icache();
+    }
+    if (platform->soc->lockdown_before_handoff != NULL) {
+      boot_status_t lock_st = platform->soc->lockdown_before_handoff();
+      if (boot_secure_confirm(lock_st) != BOOT_OK) {
+        boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+        boot_panic(platform, (lock_st != BOOT_OK) ? lock_st : BOOT_ERR_VERIFY);
+      }
+    }
+  }
 
   return BOOT_OK;
 
@@ -596,12 +762,13 @@ panic_fallthrough:
   boot_secure_zeroize(&local_diag_err, sizeof(local_diag_err));
 
   local_diag_err.struct_version = TOOB_DIAG_STRUCT_VERSION;
+  local_diag_err.reader_major = (uint16_t)TBM1_VERSION_MAJOR;
+  local_diag_err.reader_minor = (uint16_t)TBM1_VERSION_MINOR;
   local_diag_err.last_error_code = status;
   local_diag_err.boot_duration_ms = boot_duration_ms;
 
   size_t p_hash_len = offsetof(toob_boot_diag_t, crc32_trailer);
-  local_diag_err.crc32_trailer =
-      compute_boot_crc32((const uint8_t *)&local_diag_err, p_hash_len);
+  local_diag_err.crc32_trailer = compute_boot_crc32((const uint8_t *)&local_diag_err, p_hash_len);
 
   memcpy(&toob_diag_state, &local_diag_err, sizeof(toob_boot_diag_t));
   boot_secure_zeroize(&local_diag_err, sizeof(local_diag_err));

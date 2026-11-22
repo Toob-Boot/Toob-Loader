@@ -21,9 +21,10 @@
  * 2. BITMAP CLEANUP: legacy swap leaves crc_src/crc_dest/shield in
  *    transfer_bitmap[0..2]; boot_multiimage_apply afterwards interprets those
  *    same words as component-completion bits — random CRC bits can silently
- *    skip components. After a successful apply we clear [0..2] and persist the
- *    cleaned txn with one WAL append, so multi-image never sees stale CRCs
- *    (fresh path AND resume path).
+ *    skip components. After a successful apply we clear [0..3], set
+ *    delta_chunk_id = txn->length, and persist the cleaned txn with one WAL
+ *    append, so multi-image never sees stale CRCs and a post-swap brownout
+ *    never re-swaps the final chunk backwards.
  */
 
 #include "boot_transport.h"
@@ -31,55 +32,53 @@
 #if TOOB_TRANSPORT_PROVIDER == TOOB_TRANSPORT_SWAPSCRATCH
 
 #include "boot_fih.h"
+#include "boot_flash_guard.h"
 #include "boot_journal.h"
 #include "boot_rollback.h"
 #include "boot_secure_zeroize.h"
 #include "boot_swap.h"
 #include <stddef.h>
 
-static boot_status_t swapscratch_apply(const boot_platform_t *platform,
-                                       const slot_caps_t *caps,
-                                       slot_txn_t *txn,
-                                       wal_entry_payload_t *open_txn,
+static boot_status_t swapscratch_apply(const boot_platform_t *platform, const slot_caps_t *caps,
+                                       slot_txn_t *txn, wal_entry_payload_t *open_txn,
                                        uint8_t *arena, size_t arena_len) {
   (void)caps; /* legacy path needs no chip primitives */
 
-  if (!platform || !txn || !open_txn || !arena)
+  if (!platform || !txn || !open_txn || !arena) {
     return BOOT_ERR_INVALID_ARG;
+  }
 
   /* Verify-before-destruction gate (uniform across all providers). */
   BOOT_SECURE_REQUIRE(txn->src_verified, { return BOOT_ERR_VERIFY; });
 
   /* DELTA GUARD — see file header. Not a policy choice: with src ==
    * CHIP_SCRATCH the legacy 3-phase exchange is provably destructive. */
-  if (txn->src_is_delta_output)
+  if (txn->src_is_delta_output) {
     return BOOT_ERR_NOT_SUPPORTED;
+  }
 
   TOOB_TXN_SET_TRANSPORT(open_txn, TOOB_TRANSPORT_ID_SWAPSCRATCH);
 
-  boot_status_t status = boot_swap_apply(
-      platform, txn->src_addr, txn->dest_addr, txn->length,
-      (boot_dest_slot_t)txn->dest_slot, open_txn, arena, arena_len);
-  if (status != BOOT_OK)
+  boot_status_t status =
+      boot_swap_apply(platform, txn->src_addr, txn->dest_addr, txn->length,
+                      (boot_dest_slot_t)txn->dest_slot, open_txn, arena, arena_len);
+  if (status != BOOT_OK) {
     return status;
-
-  /* BITMAP CLEANUP — persist cleared [0..2] before multi-image runs. One extra
-   * WAL append per update; intent stays untouched, only the deduction words
-   * are cleared, so WAL semantics are unchanged. */
-  if (open_txn->transfer_bitmap[0] != 0 || open_txn->transfer_bitmap[1] != 0 ||
-      open_txn->transfer_bitmap[2] != 0) {
-    open_txn->transfer_bitmap[0] = 0;
-    open_txn->transfer_bitmap[1] = 0;
-    open_txn->transfer_bitmap[2] = 0;
-    status = boot_journal_append(platform, open_txn);
   }
+
+  /* BITMAP CLEANUP — persist cleared [0..3] and terminal offset before
+   * multi-image or commit runs. */
+  open_txn->delta_chunk_id = txn->length;
+  open_txn->transfer_bitmap[0] = 0;
+  open_txn->transfer_bitmap[1] = 0;
+  open_txn->transfer_bitmap[2] = 0;
+  open_txn->transfer_bitmap[3] = 0;
+  status = boot_journal_append(platform, open_txn);
   return status;
 }
 
-static boot_status_t swapscratch_rollback(const boot_platform_t *platform,
-                                          const slot_caps_t *caps,
-                                          slot_txn_t *txn,
-                                          uint8_t *arena, size_t arena_len) {
+static boot_status_t swapscratch_rollback(const boot_platform_t *platform, const slot_caps_t *caps,
+                                          slot_txn_t *txn, uint8_t *arena, size_t arena_len) {
   (void)caps;
   (void)txn; /* legacy revert derives everything from staging header + config */
   return boot_rollback_trigger_revert(platform, arena, arena_len);

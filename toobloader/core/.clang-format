@@ -1,0 +1,23 @@
+# Toob-Loader C17 Formatting Standard (LLVM 2-Space + MISRA C:2023 Rule 15.6 Braces)
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++17
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
+ColumnLimit: 100
+PointerAlignment: Right
+DerivePointerAlignment: false
+InsertBraces: true
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+IndentCaseLabels: false
+SpaceBeforeParens: ControlStatements
+SortIncludes: CaseSensitive
+ReflowComments: false
+...

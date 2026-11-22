@@ -19,17 +19,13 @@
 #include "boot_types.h"
 #include <stdint.h>
 
-
 #define TOOB_TDS_MAGIC 0x31534454 /* "TDS1" in Little Endian */
 
 /* High-Hamming Distance Opcodes (Glitch/EMFI-Prävention) */
-#define TOOB_TDS_OP_COPY_BASE                                                  \
-  0xC0C0C0C0 /**< Kopiert N Bytes aus der alten Firmware */
-#define TOOB_TDS_OP_INSERT_LIT                                                 \
-  0x1A1A1A1A /**< Fügt N Bytes direkt aus dem Delta-Stream ein */
-#define TOOB_TDS_OP_BZERO                                                      \
-  0x5A5A5A5A /**< Füllt N Bytes mit 0x00 (Extrem effizient für BSS) */
-#define TOOB_TDS_OP_EOF 0x0F0F0F0F /**< Legitimes Ende des Delta-Streams */
+#define TOOB_TDS_OP_COPY_BASE 0xC0C0C0C0  /**< Kopiert N Bytes aus der alten Firmware */
+#define TOOB_TDS_OP_INSERT_LIT 0x1A1A1A1A /**< Fügt N Bytes direkt aus dem Delta-Stream ein */
+#define TOOB_TDS_OP_BZERO 0x5A5A5A5A      /**< Füllt N Bytes mit 0x00 (Extrem effizient für BSS) */
+#define TOOB_TDS_OP_EOF 0x0F0F0F0F        /**< Legitimes Ende des Delta-Streams */
 
 /**
  * @brief TDS Header (Strictly 32-Byte P10 Aligned)
@@ -41,7 +37,7 @@ typedef struct __attribute__((aligned(8))) {
                                     Proof) */
   uint8_t base_fingerprint[8];   /**< Die ersten 8 Bytes des SHA-256 der ALTEN
                                     Firmware */
-  uint32_t base_size; /**< Erwartete physikalische Größe der alten Firmware */
+  uint32_t base_size;            /**< Erwartete physikalische Größe der alten Firmware */
   uint32_t literal_block_offset; /**< Offset im Stream, ab dem die INSERT_LIT
                                     Daten liegen */
   uint32_t instr_count;          /**< Anzahl der 16-Byte VM Instruktionen */
@@ -61,8 +57,7 @@ typedef struct __attribute__((aligned(8))) {
   uint32_t crc32;  /**< Isolierte CRC-32 pro Instruktion gegen SPI-Rauschen */
 } toob_tds_instr_t;
 
-_Static_assert(sizeof(toob_tds_instr_t) == 16,
-               "TDS Instruction ABI Size Drift!");
+_Static_assert(sizeof(toob_tds_instr_t) == 16, "TDS Instruction ABI Size Drift!");
 
 /**
  * @brief Führt den Delta-Patch als Streaming-VM aus und assembliert die
@@ -79,11 +74,9 @@ _Static_assert(sizeof(toob_tds_instr_t) == 16,
  * @return BOOT_OK bei Erfolg, passender Fehlercode bei Manipulation oder
  * Hardware-Fehler.
  */
-boot_status_t boot_delta_apply(const boot_platform_t *platform,
-                               uint32_t delta_addr, size_t delta_max_size,
-                               uint32_t dest_addr, size_t dest_max_size,
+boot_status_t boot_delta_apply(const boot_platform_t *platform, uint32_t delta_addr,
+                               size_t delta_max_size, uint32_t dest_addr, size_t dest_max_size,
                                uint32_t base_addr, size_t base_max_size,
-                               wal_entry_payload_t *open_txn,
-                               uint8_t *arena, size_t arena_len);
+                               wal_entry_payload_t *open_txn, uint8_t *arena, size_t arena_len);
 
 #endif /* TOOB_BOOT_DELTA_H */

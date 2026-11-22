@@ -1,0 +1,5 @@
+# Vendored third-party codec (Heatshrink LZSS) - excluded from formatting churn
+---
+DisableFormat: true
+SortIncludes: Never
+...

@@ -19,6 +19,20 @@
 #include "boot_hal.h"
 
 /**
+ * @brief Provisioning Command Opcodes (Wire Protocol).
+ */
+typedef enum {
+  PROV_CMD_BURN_KEY = 0x01,
+  PROV_CMD_SET_DSLC = 0x02,
+  PROV_CMD_SET_PROTECTION = 0x03,
+  PROV_CMD_ENABLE_SB = 0x04,
+  PROV_CMD_ENABLE_FE = 0x05,
+  PROV_CMD_READ_ID = 0x06,
+  PROV_CMD_LOCK_BOOT_FLASH = 0x07,
+  PROV_CMD_REBOOT = 0xFF,
+} prov_cmd_t;
+
+/**
  * @brief Factory Provisioning UART Loop.
  *
  * Activates only when DSLC == 0x00 (DEVELOPMENT state).
@@ -27,7 +41,7 @@
  *
  * @param platform Fully initialized platform (provisioning + console HAL required).
  */
-_Noreturn void boot_provisioning_run(const boot_platform_t *platform,
-                                     uint8_t *arena, size_t arena_len);
+_Noreturn void boot_provisioning_run(const boot_platform_t *platform, uint8_t *arena,
+                                     size_t arena_len);
 
 #endif /* BOOT_PROVISIONING_H */

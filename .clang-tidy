@@ -1,0 +1,92 @@
+# Toob-Loader Core & Stage-0 Safety/Security Static Analysis Profile
+# Standard: Pragmatic MISRA C:2023 (ISO C17) + CERT C + P10 Zero-Allocation
+# Documented Deviations: docs/misra_fih_profile.md (DEV-01..DEV-04)
+---
+Checks: >
+  -*,
+  clang-analyzer-core.*,
+  clang-analyzer-security.*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  clang-analyzer-nullability.*,
+  cert-arr39-c,
+  cert-con36-c,
+  cert-dcl03-c,
+  cert-dcl16-c,
+  cert-dcl37-c,
+  cert-env33-c,
+  cert-err33-c,
+  cert-err34-c,
+  cert-exp42-c,
+  cert-flp30-c,
+  cert-flp37-c,
+  cert-int09-c,
+  cert-msc24-c,
+  cert-msc30-c,
+  cert-msc32-c,
+  cert-msc33-c,
+  cert-sig30-c,
+  cert-str34-c,
+  bugprone-assignment-in-if-condition,
+  bugprone-bool-pointer-implicit-conversion,
+  bugprone-branch-clone,
+  bugprone-chained-comparison,
+  bugprone-float-loop-counter,
+  bugprone-implicit-widening-of-multiplication-result,
+  bugprone-inc-dec-in-conditions,
+  bugprone-incorrect-roundings,
+  bugprone-invalid-enum-default-initialization,
+  bugprone-macro-parentheses,
+  bugprone-macro-repeated-side-effects,
+  bugprone-misplaced-widening-cast,
+  bugprone-multi-level-implicit-pointer-conversion,
+  bugprone-narrowing-conversions,
+  bugprone-non-zero-enum-to-bool-conversion,
+  bugprone-redundant-branch-condition,
+  bugprone-reserved-identifier,
+  bugprone-signed-char-misuse,
+  bugprone-sizeof-expression,
+  bugprone-suspicious-enum-usage,
+  bugprone-suspicious-include,
+  bugprone-suspicious-memory-comparison,
+  bugprone-suspicious-memset-usage,
+  bugprone-suspicious-missing-comma,
+  bugprone-suspicious-semicolon,
+  bugprone-swapped-arguments,
+  bugprone-switch-missing-default-case,
+  bugprone-terminating-continue,
+  bugprone-too-small-loop-variable,
+  bugprone-undefined-memory-manipulation,
+  bugprone-unused-return-value,
+  misc-confusable-identifiers,
+  misc-definitions-in-headers,
+  misc-header-include-cycle,
+  misc-misleading-bidirectional,
+  misc-misleading-identifier,
+  misc-misplaced-const,
+  misc-no-recursion,
+  misc-redundant-expression,
+  misc-use-internal-linkage,
+  readability-braces-around-statements,
+  readability-isolate-declaration,
+  readability-misleading-indentation
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(toobloader/(core|stage0)|common/include)/.*\.h$'
+FormatStyle: file
+
+CheckOptions:
+  - key: bugprone-branch-clone.IgnoreMacros
+    value: 'true'
+  - key: bugprone-narrowing-conversions.WarnOnIntegerNarrowingConversion
+    value: 'true'
+  - key: bugprone-narrowing-conversions.WarnWithinTemplateInstantiation
+    value: 'false'
+  - key: bugprone-reserved-identifier.AllowedIdentifiers
+    value: '__stack_chk_guard;__stack_chk_fail;__global_pointer\$$;_sidata;_sdata;_edata;_sbss;_ebss;_stack_top;_stage0_start'
+  - key: cert-dcl37-c.AllowedIdentifiers
+    value: '__stack_chk_guard;__stack_chk_fail;__global_pointer\$$;_sidata;_sdata;_edata;_sbss;_ebss;_stack_top;_stage0_start'
+  - key: bugprone-unused-return-value.CheckedFunctions
+    value: '::boot_.*;::stage0_.*;::tbm1_.*;::constant_time_memcmp_glitch_safe$;::verify_not_all_zeros_glitch_safe$'
+  - key: bugprone-unused-return-value.AllowCastToVoid
+    value: 'true'
+...

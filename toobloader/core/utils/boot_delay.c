@@ -41,8 +41,7 @@
 _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein!");
 
-boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
-                                  uint32_t ms) {
+boot_status_t boot_delay_with_wdt(const boot_platform_t *platform, uint32_t ms) {
   /* ====================================================================
    * 1. P10 POINTER & HAL CAPABILITY GATING
    * ==================================================================== */
@@ -86,8 +85,8 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
    * oder delay_ms() übersprungen wird, wächst sw_accum extrem schnell.
    * Toleranz: Margin (target_ms * BOOT_DELAY_TOLERANCE_MULTIPLIER) für ungenaue
    * Hardware-Delays + 1000 Ticks. */
-  uint32_t max_sw_limit = (target_ms * BOOT_DELAY_TOLERANCE_MULTIPLIER) +
-                          1001; /* PATCH TEST BUGFIX */
+  uint32_t max_sw_limit =
+      (target_ms * BOOT_DELAY_TOLERANCE_MULTIPLIER) + 1001; /* PATCH TEST BUGFIX */
 
   while (1) {
     /* Anti-Starvation Guard für den regulären Lauf */
@@ -99,7 +98,8 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
 
     /* C-Standard garantiert, dass diese unsigned Subtraktion
      * Timer-Überläufe (Wraparounds der Hardware) korrekt verarbeitet. */
-    uint32_t iteration_delta = current_time - last_time;
+    uint32_t iteration_delta =
+        (uint32_t)(((uint64_t)current_time + 0x100000000ULL - (uint64_t)last_time) & 0xFFFFFFFFULL);
 
     /* ------------------------------------------------------------------
      * TIME-WARP & VENDOR-WRAP DEFENSE (Die wichtigste Härtung)
@@ -123,12 +123,10 @@ boot_status_t boot_delay_with_wdt(const boot_platform_t *platform,
     bool hw_ok = (elapsed_hw >= target_ms);
     bool sw_ok = (sw_accum >= target_ms);
 
-    BOOT_SECURE_REQUIRE(hw_ok && sw_ok, {
-      goto check_deadlock;
-    });
+    BOOT_SECURE_REQUIRE(hw_ok && sw_ok, { goto check_deadlock; });
     break; /* Successfully and legally delayed! */
 
-check_deadlock:
+  check_deadlock:
 
     /* ====================================================================
      * EXIT CONDITION 2: Hardware Deadlock / Instruction Skip Trap
@@ -143,8 +141,9 @@ check_deadlock:
      * 50ms ist absolut sicher für jeden Hardware-WDT (typ. min 500ms). */
     uint32_t remaining = (target_ms > sw_accum) ? (target_ms - sw_accum) : 1;
     uint32_t step = (remaining > 50) ? 50 : remaining;
-    if (step == 0)
+    if (step == 0) {
       step = 1;
+    }
 
     /* Physikalische Sleep-Ausführung an die Vendor-HAL abgeben */
     platform->clock->delay_ms(step);
@@ -174,9 +173,8 @@ check_deadlock:
   bool final_hw_ok = (elapsed_hw >= target_ms);
   bool final_sw_ok = (sw_accum >= target_ms);
 
-  BOOT_SECURE_REQUIRE(final_hw_ok && final_sw_ok, {
-    boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_DELAY_GLITCH);
-  });
+  BOOT_SECURE_REQUIRE(final_hw_ok && final_sw_ok,
+                      { boot_terminal_halt(platform, BOOT_ERR_VERIFY, SITE_DELAY_GLITCH); });
 
   return BOOT_OK;
 }

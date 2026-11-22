@@ -1,44 +1,87 @@
 # ==============================================================================
-# Submodule: toob_hal (Drei-Ebenen Hardware Abstraction)
+# Submodule: toob_hal (Three-Layer Hardware Abstraction)
 # 
 # Relevant Specs: 
-# - docs/structure_plan.md (Architektur -> Vendor -> Chip Konzept)
-# - docs/hals.md (Die 7 Interface Traits)
-# - docs/hal_layering.md (Ebenen-Design)
-# - docs/toobfuzzer_integration.md (chip_config.h Makro-Bridging)
+# - docs/structure_plan.md (Architecture -> Vendor -> Chip layout)
+# - docs/hals.md (HAL interface traits)
+# - docs/hal_layering.md (Layering design)
+# - docs/toobfuzzer_integration.md (chip_config.h macro bridging)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# Ebene 1: Architektur-Abstraktion (CPU ISA)
+# Layer 1: Architecture Abstraction (CPU ISA)
 # ------------------------------------------------------------------------------
-# P10/Ninja-GAP: Niemals nacktes GLOB nutzen! `CONFIGURE_DEPENDS` zwingt das
-# Buildsystem, bei neu hinzugefügten Architektur-Files CMake neu auszuführen.
-file(GLOB_RECURSE ARCH_SOURCES CONFIGURE_DEPENDS "${TOOB_HAL_ARCH_DIR}/*.c")
+# CONFIGURE_DEPENDS forces CMake to re-evaluate when architecture sources change.
+if(DEFINED TOOB_ARCH_SOURCES)
+    set(ARCH_SOURCES ${TOOB_ARCH_SOURCES})
+else()
+    file(GLOB_RECURSE ARCH_SOURCES CONFIGURE_DEPENDS "${TOOB_HAL_ARCH_DIR}/*.c")
+endif()
 
-# GAP-Integration: Sandbox Crash-Protection
-# Die Sandbox (Host) hat keine arch-Dateien ("kein arch/vendor"). 
-# Der if-Block bewahrt CMake vor einem FATAL ERROR.
+# Host SIL has no bare-metal architecture sources; guard target creation.
 if(ARCH_SOURCES)
     add_library(toob_arch STATIC ${ARCH_SOURCES})
     target_include_directories(toob_arch PUBLIC 
         ${TOOB_HAL_ARCH_DIR}/include
         ${CMAKE_SOURCE_DIR}/common/include
-        ${TOOB_CORE_DIR}/include                  # Unverzichtbar für boot_hal.h!
-        ${CMAKE_BINARY_DIR}/generated # Unverzichtbar für chip_config.h!
+        ${TOOB_CORE_DIR}/include
+        ${CMAKE_BINARY_DIR}/generated
         ${TOOB_SDK_DIR}/libtoob/include
     )
 endif()
 
 # ------------------------------------------------------------------------------
-# Ebene 2 & 3: Chip- und Driver-Abstraktion (Flat BOM)
+# Layer 2 & 3: Chip and Driver Abstraction (Flat BOM)
 # ------------------------------------------------------------------------------
-get_filename_component(TOOB_HAL_ROOT "${TOOB_HAL_CHIP_DIR}/../.." ABSOLUTE)
+if(NOT DEFINED TOOB_HAL_ROOT OR "${TOOB_HAL_ROOT}" STREQUAL "")
+    get_filename_component(TOOB_HAL_ROOT "${TOOB_HAL_CHIP_DIR}/../.." ABSOLUTE)
+endif()
 set(CHIP_MANIFEST "${TOOB_HAL_CHIP_DIR}/chip_manifest.json")
 
 set(FLAT_BOM_SOURCES "")
 set(FLAT_BOM_INCLUDES "")
 
-if(EXISTS ${CHIP_MANIFEST})
+# Helper: Generic <stem>_real.c <-> <stem>_mock.c TU mutual exclusion for
+# standalone CMake invocations when TOOB_DRIVER_SOURCES is not pre-resolved.
+function(toob_resolve_tu_list IN_LIST OUT_VAR ENABLE_MOCK)
+    set(_resolved "")
+    foreach(_src IN LISTS ${IN_LIST})
+        if(ENABLE_MOCK)
+            if(_src MATCHES "_real\\.c$")
+                string(REGEX REPLACE "_real\\.c$" "_mock.c" _mock_cand "${_src}")
+                if(EXISTS "${_mock_cand}")
+                    set(_src "${_mock_cand}")
+                endif()
+            endif()
+        else()
+            if(_src MATCHES "_mock\\.c$")
+                string(REGEX REPLACE "_mock\\.c$" "_real.c" _real_cand "${_src}")
+                if(EXISTS "${_real_cand}")
+                    set(_src "${_real_cand}")
+                else()
+                    continue()
+                endif()
+            endif()
+        endif()
+        list(APPEND _resolved "${_src}")
+    endforeach()
+    list(REMOVE_DUPLICATES _resolved)
+    set(${OUT_VAR} "${_resolved}" PARENT_SCOPE)
+endfunction()
+
+if(DEFINED TOOB_CHIP_SOURCES OR DEFINED TOOB_DRIVER_SOURCES)
+    list(APPEND FLAT_BOM_SOURCES ${TOOB_CHIP_SOURCES})
+    if(EXISTS ${CHIP_MANIFEST})
+        file(READ ${CHIP_MANIFEST} MANIFEST_JSON)
+        string(JSON CHIP_PLATFORM ERROR_VARIABLE JSON_ERR GET ${MANIFEST_JSON} sources platform)
+    endif()
+    if((JSON_ERR OR NOT CHIP_PLATFORM) AND EXISTS "${CMAKE_BINARY_DIR}/generated/generated_platform_wiring.c")
+        list(APPEND FLAT_BOM_SOURCES "${CMAKE_BINARY_DIR}/generated/generated_platform_wiring.c")
+    endif()
+    list(APPEND FLAT_BOM_SOURCES ${TOOB_DRIVER_SOURCES})
+    list(REMOVE_DUPLICATES FLAT_BOM_SOURCES)
+    list(APPEND FLAT_BOM_INCLUDES ${TOOB_CHIP_INCLUDES} ${TOOB_DRIVERS})
+elseif(EXISTS ${CHIP_MANIFEST})
     file(READ ${CHIP_MANIFEST} MANIFEST_JSON)
     
     # 1. Startup, Platform
@@ -66,18 +109,6 @@ if(EXISTS ${CHIP_MANIFEST})
         endforeach()
     endif()
 
-    # 2b. eFuse TU-Swap: Mock replaces Real when TOOB_MOCK_EFUSES is ON.
-    #     The manifest declares efuse_real.c in sources.extra. In sandbox
-    #     builds we swap it for efuse_mock.c (same symbols, RAM-backed data).
-    if(TOOB_MOCK_EFUSES)
-        set(_efuse_real "${TOOB_HAL_CHIP_DIR}/efuse_real.c")
-        set(_efuse_mock "${TOOB_HAL_CHIP_DIR}/efuse_mock.c")
-        if(EXISTS ${_efuse_mock})
-            list(REMOVE_ITEM FLAT_BOM_SOURCES "${_efuse_real}")
-            list(APPEND FLAT_BOM_SOURCES "${_efuse_mock}")
-        endif()
-    endif()
-
     # 3. Drivers
     string(JSON NUM_DRIVERS ERROR_VARIABLE JSON_ERR LENGTH ${MANIFEST_JSON} sources drivers)
     if(NOT JSON_ERR AND NUM_DRIVERS GREATER 0)
@@ -92,6 +123,8 @@ if(EXISTS ${CHIP_MANIFEST})
         endforeach()
     endif()
 
+    toob_resolve_tu_list(FLAT_BOM_SOURCES FLAT_BOM_SOURCES "${TOOB_MOCK_HW}")
+
     # 4. Includes
     string(JSON NUM_INCLUDES ERROR_VARIABLE JSON_ERR LENGTH ${MANIFEST_JSON} includes)
     if(NOT JSON_ERR AND NUM_INCLUDES GREATER 0)
@@ -105,12 +138,13 @@ if(EXISTS ${CHIP_MANIFEST})
             endif()
         endforeach()
     endif()
+    list(APPEND FLAT_BOM_INCLUDES ${TOOB_DRIVERS})
 endif()
 
 if(FLAT_BOM_SOURCES)
     add_library(toob_chip STATIC ${FLAT_BOM_SOURCES})
 
-    # Sichtbarkeit der Bootloader Core-Interfaces für die Chip-Ebene
+    # Expose bootloader core and generated interfaces to the chip HAL layer
     target_include_directories(toob_chip PUBLIC 
         ${TOOB_HAL_CHIP_DIR}
         ${TOOB_HAL_ROOT}
@@ -123,6 +157,9 @@ if(FLAT_BOM_SOURCES)
         ${TOOB_CRYPTO_BACKEND_DIR}
         ${TOOB_CRYPTO_HASH_DIR}
     )
+    if(DEFINED TOOB_CRYPTO_PQC_DIR AND NOT "${TOOB_CRYPTO_PQC_DIR}" STREQUAL "")
+        target_include_directories(toob_chip PUBLIC ${TOOB_CRYPTO_PQC_DIR})
+    endif()
     if(TOOB_CHIP STREQUAL "sandbox")
         target_include_directories(toob_chip PUBLIC test/mocks)
     endif()
@@ -132,9 +169,7 @@ if(FLAT_BOM_SOURCES)
     endif()
 endif()
 
-# GAP-Integration: Custom-Target Dependency `generate_manifest` 
-# Da `chip_platform.c` die Datei `chip_config.h` aus `${CMAKE_BINARY_DIR}/generated/`
-# importiert, müssen wir verifizieren, dass der Manifest-Compiler/Script Davor lief.
+# Ensure generated headers exist before compiling chip HAL sources.
 if(TARGET generate_manifest AND TARGET toob_chip)
     add_dependencies(toob_chip generate_manifest)
 endif()

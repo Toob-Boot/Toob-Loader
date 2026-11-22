@@ -5,7 +5,7 @@
  * This module is responsible for accumulating boot metadata (timings, errors,
  * security revisions, wear data) into the `.noinit` shared memory section
  * `toob_diag_state`. This ensures that the Feature-OS (via libtoob) can extract
- * the CBOR telemetry package for fleet management.
+ * the structured binary telemetry package for fleet management.
  */
 
 #ifndef TOOB_BOOT_DIAG_H
@@ -85,8 +85,14 @@ void boot_diag_set_wear_data(const toob_ext_health_t *wear_stats);
  * @param stage1_svn   Current Stage-1 SVN from TMR.
  * @param build_number CI build number (0 if unavailable from TMR).
  */
-void boot_diag_set_installed_state(uint32_t app_svn, uint32_t stage1_svn,
-                                   uint32_t build_number);
+void boot_diag_set_installed_state(uint32_t app_svn, uint32_t stage1_svn, uint32_t build_number);
+
+/**
+ * @brief Populates persisted App identity & hardware monotonic counter on non-update boots (TDR1-02, TDR1-06).
+ */
+void boot_diag_set_persisted_identity(uint32_t key_idx, uint32_t build_number,
+                                      uint16_t fw_ver_major, uint16_t fw_ver_minor,
+                                      uint16_t fw_ver_patch, uint32_t monotonic_counter);
 
 /**
  * @brief Sets the outcome and fine-grained reject reason of the last update (UPD-007).
@@ -96,9 +102,10 @@ void boot_diag_set_installed_state(uint32_t app_svn, uint32_t stage1_svn,
 void boot_diag_set_update_result(uint8_t outcome, uint8_t reject_reason);
 
 /**
- * @brief Calculates the CRC-32 trailer and mathematically seals the payload.
+ * @brief Calculates the CRC-32 trailer, seals the payload into .noinit RAM, and
+ * verifies the read-back CRC-32 against bit-flips or TOCTOU corruption (TDR1-07).
  * Must be the last call before jumping to the Feature-OS.
  */
-void boot_diag_seal(void);
+boot_status_t boot_diag_seal(void);
 
 #endif /* TOOB_BOOT_DIAG_H */

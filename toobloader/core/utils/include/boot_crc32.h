@@ -9,10 +9,10 @@
 #ifndef TOOB_BOOT_CRC32_H
 #define TOOB_BOOT_CRC32_H
 
-#include <stdint.h>
-#include <stddef.h>
-#include "boot_types.h"
 #include "boot_hal.h"
+#include "boot_types.h"
+#include <stddef.h>
+#include <stdint.h>
 
 /**
  * @brief Computes standard CRC-32 over a byte buffer
@@ -28,12 +28,16 @@ uint32_t compute_boot_crc32(const uint8_t *data, size_t len);
  * Liest in arena-großen Chunks und berechnet CRC-32 inkrementell.
  * Arena wird nach Abschluss zeroized (P10 Leakage Prevention).
  */
-boot_status_t boot_crc32_flash_stream(const boot_platform_t *platform,
-                                      uint32_t addr, size_t len,
-                                      uint32_t *out_crc,
-                                      uint8_t *arena, size_t arena_len);
+boot_status_t boot_crc32_flash_stream(const boot_platform_t *platform, uint32_t addr, size_t len,
+                                      uint32_t *out_crc, uint8_t *arena, size_t arena_len);
 
 uint32_t boot_crc32_update(uint32_t crc_init, const uint8_t *data, size_t len);
 uint32_t boot_crc32_fill(uint32_t crc_init, uint8_t val, size_t len);
+
+/**
+ * @brief Fast word-wise blank-check over a flash region with early exit.
+ */
+boot_status_t boot_flash_is_erased(const boot_platform_t *platform, uint32_t addr, size_t len,
+                                   bool *out_erased);
 
 #endif /* TOOB_BOOT_CRC32_H */

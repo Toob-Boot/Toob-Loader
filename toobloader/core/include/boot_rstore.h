@@ -29,11 +29,11 @@
  * protect a single record type via majority vote.
  */
 typedef struct {
-    const uint32_t *slot_addrs;  /**< Array of slot base addresses */
-    const size_t   *slot_sizes;  /**< Array of slot sizes (sector sizes) */
-    uint8_t         slot_count;  /**< Number of slots (>= 3 for true quorum) */
-    uint16_t        record_size; /**< Size of the user record in bytes */
-    uint32_t        magic;       /**< Sector-level magic for identification */
+  const uint32_t *slot_addrs; /**< Array of slot base addresses */
+  const size_t *slot_sizes;   /**< Array of slot sizes (sector sizes) */
+  uint8_t slot_count;         /**< Number of slots (>= 3 for true quorum) */
+  uint16_t record_size;       /**< Size of the user record in bytes */
+  uint32_t magic;             /**< Sector-level magic for identification */
 } boot_rstore_desc_t;
 
 /**
@@ -42,10 +42,10 @@ typedef struct {
  * Layout: [header (16 bytes)] [record_data (record_size bytes)] [padding to sector end]
  */
 typedef struct {
-    uint32_t magic;        /**< Must match desc->magic */
-    uint32_t sequence_id;  /**< Monotonic sequence for ordering */
-    uint32_t erase_count;  /**< Cumulative erase counter for wear tracking */
-    uint32_t header_crc32; /**< CRC-32 over header + record_data */
+  uint32_t magic;        /**< Must match desc->magic */
+  uint32_t sequence_id;  /**< Monotonic sequence for ordering */
+  uint32_t erase_count;  /**< Cumulative erase counter for wear tracking */
+  uint32_t header_crc32; /**< CRC-32 over header + record_data */
 } boot_rstore_slot_header_t;
 
 _Static_assert(sizeof(boot_rstore_slot_header_t) == 16,
@@ -65,8 +65,7 @@ _Static_assert(sizeof(boot_rstore_slot_header_t) % 4 == 0,
  * @param out_record  Output buffer (must be >= desc->record_size bytes)
  * @return BOOT_OK on success, BOOT_ERR_NOT_FOUND if no valid majority
  */
-boot_status_t boot_rstore_read(const boot_platform_t *platform,
-                               const boot_rstore_desc_t *desc,
+boot_status_t boot_rstore_read(const boot_platform_t *platform, const boot_rstore_desc_t *desc,
                                void *out_record);
 
 /**
@@ -81,8 +80,7 @@ boot_status_t boot_rstore_read(const boot_platform_t *platform,
  * @param record    Record data to write (must be desc->record_size bytes)
  * @return BOOT_OK on success, error code on flash failure
  */
-boot_status_t boot_rstore_write(const boot_platform_t *platform,
-                                const boot_rstore_desc_t *desc,
+boot_status_t boot_rstore_write(const boot_platform_t *platform, const boot_rstore_desc_t *desc,
                                 const void *record);
 
 #endif /* BOOT_RSTORE_H */

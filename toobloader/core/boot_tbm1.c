@@ -22,7 +22,7 @@
 
 #include "boot_tbm1.h"
 #include "boot_crc32.h"
-#include <stdint.h>   /* uintptr_t */
+#include <stdint.h> /* uintptr_t */
 
 /* --------------------------------------------------------------------------
  * Internal helpers
@@ -49,44 +49,53 @@ tbm1_reject_t tbm1_precheck(const uint8_t *buf, size_t staging_cap) {
   /* Null / alignment guard. The header is read via a (tbm1_header_t *) cast;
    * a misaligned or null buffer is a hard-fault risk on ARMv6-M (M0/M0+).
    * Cheap belt-and-suspenders even though the struct is `packed`. */
-  if (buf == NULL || ((uintptr_t)buf & (sizeof(uint32_t) - 1u)) != 0u)
+  if (buf == NULL || ((uintptr_t)buf & (sizeof(uint32_t) - 1u)) != 0u) {
     return TBM1_BAD_ALIGN;
+  }
 
-  if (staging_cap < TBM1_FIXED_LEN)
+  if (staging_cap < TBM1_FIXED_LEN) {
     return TBM1_BAD_TOTAL_LEN;
+  }
 
   const tbm1_header_t *h = (const tbm1_header_t *)buf;
 
-  if (h->magic != TBM1_MAGIC)
+  if (h->magic != TBM1_MAGIC) {
     return TBM1_BAD_MAGIC;
+  }
 
-  if (h->fixed_len != TBM1_FIXED_LEN)
+  if (h->fixed_len != TBM1_FIXED_LEN) {
     return TBM1_BAD_FIXED_LEN;
+  }
 
-  if (h->version_major != TBM1_VERSION_MAJOR)
+  if (h->version_major != TBM1_VERSION_MAJOR) {
     return TBM1_BAD_VERSION;
+  }
 
   /* total_len drives the signature hash loop — clamp BEFORE anything hashes. */
-  if (h->total_len < (uint32_t)(TBM1_FIXED_LEN + TBM1_SIG_LEN))
+  if (h->total_len < (uint32_t)(TBM1_FIXED_LEN + TBM1_SIG_LEN)) {
     return TBM1_BAD_TOTAL_LEN;
-  if (h->total_len > staging_cap)
+  }
+  if (h->total_len > staging_cap) {
     return TBM1_BAD_TOTAL_LEN;
+  }
 
   /* Must-understand critical flags gate. */
-  if ((h->flags_critical & ~(uint16_t)TBM1_CRIT_KNOWN_MASK) != 0)
+  if ((h->flags_critical & ~(uint16_t)TBM1_CRIT_KNOWN_MASK) != 0) {
     return TBM1_BAD_CRIT_FLAG;
+  }
 
   /* Reader version gate: reject if the manifest needs a newer reader. */
   if (h->min_reader_major > TBM1_VERSION_MAJOR ||
-      (h->min_reader_major == TBM1_VERSION_MAJOR &&
-       h->min_reader_minor > TBM1_VERSION_MINOR))
+      (h->min_reader_major == TBM1_VERSION_MAJOR && h->min_reader_minor > TBM1_VERSION_MINOR)) {
     return TBM1_BAD_READER_VERSION;
+  }
 
   /* CRC32 pre-check: separates "staging corrupt" from "signature invalid".
    * Non-security integrity only — the Ed25519 signature is the real anchor. */
   uint32_t crc = compute_boot_crc32(buf, TBM1_CRC_LEN);
-  if (crc != h->fixed_crc32)
+  if (crc != h->fixed_crc32) {
     return TBM1_BAD_CRC;
+  }
 
   return TBM1_OK;
 }
@@ -102,39 +111,46 @@ tbm1_reject_t tbm1_precheck(const uint8_t *buf, size_t staging_cap) {
  * -------------------------------------------------------------------------- */
 tbm1_reject_t tbm1_validate_regions(const tbm1_header_t *h) {
   size_t sig_start = tbm1_signed_len(h);
-  if (sig_start == 0)
+  if (sig_start == 0) {
     return TBM1_BAD_TOTAL_LEN;
+  }
 
-  uint32_t prev_end = TBM1_FIXED_LEN;   /* regions live after the fixed header */
-  uint16_t seen_ids = 0;                /* dup bitset for standard IDs (0..15) */
+  uint32_t prev_end = TBM1_FIXED_LEN; /* regions live after the fixed header */
+  uint16_t seen_ids = 0;              /* dup bitset for standard IDs (0..15) */
 
   for (unsigned i = 0; i < TBM1_MAX_REGIONS; i++) {
     const tbm1_region_t *r = &h->regions[i];
-    if (r->region_id == TBM1_REGION_NONE)
+    if (r->region_id == TBM1_REGION_NONE) {
       continue;
+    }
 
     /* Duplicate detection for standard IDs (< 16) via bitset.
      * Vendor IDs (>= 16) are not dup-checked — documented limitation. */
     if (r->region_id < 16) {
       uint16_t bit = (uint16_t)(1u << r->region_id);
-      if (seen_ids & bit)
+      if (seen_ids & bit) {
         return TBM1_BAD_REGION_DUP;
+      }
       seen_ids |= bit;
     }
 
     /* Overflow-safe bounds: region must fit within the signed area. */
-    if (r->off > (uint32_t)sig_start)
+    if (r->off > (uint32_t)sig_start) {
       return TBM1_BAD_REGION_BOUNDS;
-    if (r->len > (uint32_t)sig_start - r->off)
+    }
+    if (r->len > (uint32_t)sig_start - r->off) {
       return TBM1_BAD_REGION_BOUNDS;
+    }
 
     /* Canonical order: ascending offsets, non-overlapping. */
-    if (r->off < prev_end)
+    if (r->off < prev_end) {
       return TBM1_BAD_REGION_ORDER;
+    }
     /* Alignment rule: region starts must be 8-byte aligned */
-    if ((r->off & 7u) != 0u)
+    if ((r->off & 7u) != 0u) {
       return TBM1_BAD_REGION_ALIGN;
-    prev_end = r->off + r->len;   /* no overflow: r->off + r->len <= sig_start */
+    }
+    prev_end = r->off + r->len; /* no overflow: r->off + r->len <= sig_start */
   }
 
   return TBM1_OK;
@@ -150,64 +166,141 @@ tbm1_reject_t tbm1_validate_regions(const tbm1_header_t *h) {
  * Precondition: tbm1_validate_regions(h) has passed, so region bounds hold.
  * out_off must point to an array of at least TBM1_MAX_IMAGES uint32_t.
  * -------------------------------------------------------------------------- */
-tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap,
-                                   uint32_t *out_off) {
-  if (h->image_count < 1 || h->image_count > TBM1_MAX_IMAGES)
+tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap, uint32_t *out_off) {
+  if (h->image_count < 1 || h->image_count > TBM1_MAX_IMAGES) {
     return TBM1_BAD_IMAGE_COUNT;
+  }
 
-  if (h->key_index >= TOOB_DEVICE_KEY_SLOTS)
+  if (h->key_index >= TOOB_DEVICE_KEY_SLOTS) {
     return TBM1_BAD_KEY_INDEX;
+  }
 
   /* HW compatibility gate (compile-time device identity).
    * A production build MUST define TOOB_DEVICE_PRODUCT_ID (see boot_tbm1.h),
    * otherwise this check is compiled out and firmware ships without gating. */
 #if TOOB_DEVICE_PRODUCT_ID != 0xFFFFU
-  if (h->product_id != TOOB_DEVICE_PRODUCT_ID)
+#if TOOB_DEVICE_VENDOR_ID != 0xFFFFU
+  if (h->vendor_id != TOOB_DEVICE_VENDOR_ID) {
     return TBM1_BAD_HW_COMPAT;
-  if (TOOB_DEVICE_HW_REV < h->hw_rev_min || TOOB_DEVICE_HW_REV > h->hw_rev_max)
+  }
+#endif
+  if (h->product_id != TOOB_DEVICE_PRODUCT_ID) {
     return TBM1_BAD_HW_COMPAT;
+  }
+  if (TOOB_DEVICE_HW_REV < h->hw_rev_min || TOOB_DEVICE_HW_REV > h->hw_rev_max) {
+    return TBM1_BAD_HW_COMPAT;
+  }
 #endif
 
   const tbm1_region_t *chunks = tbm1_find_region(h, TBM1_REGION_CHUNK_HASHES);
-  if (chunks == NULL)
+  if (chunks == NULL) {
     return TBM1_BAD_CHUNKHASH_LEN;
+  }
 
-  uint64_t acc = 0;   /* running byte offset into the chunk-hash region */
+  uint64_t acc = 0; /* running byte offset into the chunk-hash region */
 
   for (unsigned i = 0; i < h->image_count; i++) {
     const tbm1_image_desc_t *d = &h->images[i];
 
     /* --- chunk math (overflow-safe ceiling) --- */
-    if (d->chunk_size == 0u)
+    if (d->chunk_size == 0u) {
       return TBM1_BAD_CHUNK_MATH;
-    if (d->num_chunks != ceil_div_u32(d->installed_size, d->chunk_size))
+    }
+    if (d->num_chunks != ceil_div_u32(d->installed_size, d->chunk_size)) {
       return TBM1_BAD_CHUNK_MATH;
+    }
 
     /* --- field plausibility (unknown enum/slot → reject) --- */
-    if (d->target_slot > TBM1_SLOT_STAGE1)
+    if (d->target_slot > TBM1_SLOT_STAGE1) {
       return TBM1_BAD_IMAGE_FIELD;
-    if (d->compression_alg > TBM1_COMP_LZ4)
+    }
+    if (d->compression_alg > TBM1_COMP_LZ4) {
       return TBM1_BAD_IMAGE_FIELD;
-    if (d->delta_alg > TBM1_DELTA_DETOOLS)
+    }
+    if (d->delta_alg > TBM1_DELTA_TDS1) {
       return TBM1_BAD_IMAGE_FIELD;
+    }
 
     /* --- staging data-pointer bounds (overflow-safe, size_t arithmetic) --- */
-    if ((size_t)d->data_off >= staging_cap)
+    if ((size_t)d->data_off >= staging_cap) {
       return TBM1_BAD_IMAGE_FIELD;
-    if ((size_t)d->stored_size > staging_cap - (size_t)d->data_off)
+    }
+    if ((size_t)d->stored_size > staging_cap - (size_t)d->data_off) {
       return TBM1_BAD_IMAGE_FIELD;
+    }
+
+    /* --- non-overlapping ascending payload order ---
+     * Raw Zero-Copy TrailerLayout executes primary image in-place at offset 0.
+     * Compressed/Delta TrailerLayout allows data_off > 0 so scratch-less
+     * POINTER devices can stream output into [0 .. installed_size). */
+    if (i == 0u && (h->flags_critical & TBM1_CRIT_TRAILER_LAYOUT) != 0u &&
+        d->compression_alg == TBM1_COMP_NONE && d->delta_alg == TBM1_DELTA_NONE) {
+      if (d->data_off != 0u) {
+        return TBM1_BAD_PAYLOAD_LAYOUT;
+      }
+    }
+    if (i > 0) {
+      const tbm1_image_desc_t *prev = &h->images[i - 1];
+      if (d->data_off < prev->data_off + prev->stored_size) {
+        return TBM1_BAD_PAYLOAD_LAYOUT;
+      }
+    }
 
     /* --- chunk-hash partitioning: per-image offset via prefix sum ---
      * (uint32_t)acc is exact on the success path: on return TBM1_OK we have
      * acc == chunks->len <= UINT32_MAX, so every intermediate acc fits u32.
      * chunks->off + acc <= sig_start (region bounds) → no offset overflow. */
+    if (acc > (uint64_t)chunks->len) {
+      return TBM1_BAD_CHUNKHASH_LEN;
+    }
     out_off[i] = chunks->off + (uint32_t)acc;
-    acc += (uint64_t)d->num_chunks * 32u;   /* 32 = SHA-256 digest bytes */
+    acc += (uint64_t)d->num_chunks * 32u; /* 32 = SHA-256 digest bytes */
   }
 
   /* Exact length cross-check: region holds exactly Σ(num_chunks_i)×32 bytes. */
-  if (acc != (uint64_t)chunks->len)
+  if (acc != (uint64_t)chunks->len) {
     return TBM1_BAD_CHUNKHASH_LEN;
+  }
+
+  /* --- Region 6: Reverse-Delta Validation --- */
+  const tbm1_region_t *rdelta = tbm1_find_region(h, TBM1_REGION_REVERSE_DELTA);
+  if (rdelta != NULL) {
+    if (rdelta->len == 0 || (rdelta->len % sizeof(tbm1_rdelta_desc_t)) != 0) {
+      return TBM1_BAD_RDELTA;
+    }
+
+    size_t count = rdelta->len / sizeof(tbm1_rdelta_desc_t);
+    const tbm1_rdelta_desc_t *records =
+        (const tbm1_rdelta_desc_t *)((const uint8_t *)h + rdelta->off);
+    uint32_t last_payload_end = 0;
+    if (h->image_count > 0) {
+      last_payload_end =
+          h->images[h->image_count - 1].data_off + h->images[h->image_count - 1].stored_size;
+    }
+
+    for (size_t r = 0; r < count; r++) {
+      const tbm1_rdelta_desc_t *rd = &records[r];
+      if (rd->target_slot > TBM1_SLOT_STAGE1) {
+        return TBM1_BAD_RDELTA;
+      }
+      if (rd->delta_alg != TBM1_DELTA_TDS1) {
+        return TBM1_BAD_RDELTA;
+      }
+      if (rd->data_off < last_payload_end) {
+        return TBM1_BAD_PAYLOAD_LAYOUT;
+      }
+      if ((size_t)rd->data_off >= staging_cap) {
+        return TBM1_BAD_RDELTA;
+      }
+      if ((size_t)rd->stored_size > staging_cap - (size_t)rd->data_off) {
+        return TBM1_BAD_RDELTA;
+      }
+      if (rd->restored_size == 0) {
+        return TBM1_BAD_RDELTA;
+      }
+      last_payload_end = rd->data_off + rd->stored_size;
+    }
+  }
 
   return TBM1_OK;
 }
@@ -224,18 +317,22 @@ tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap,
  * -------------------------------------------------------------------------- */
 tbm1_reject_t tbm1_validate(const uint8_t *buf, size_t manifest_cap, size_t staging_cap,
                             uint32_t *out_off) {
-  tbm1_reject_t rc;
-
-  if ((rc = tbm1_precheck(buf, manifest_cap)) != TBM1_OK)
+  tbm1_reject_t rc = tbm1_precheck(buf, manifest_cap);
+  if (rc != TBM1_OK) {
     return rc;
+  }
 
   const tbm1_header_t *h = (const tbm1_header_t *)buf;
 
-  if ((rc = tbm1_validate_regions(h)) != TBM1_OK)
+  rc = tbm1_validate_regions(h);
+  if (rc != TBM1_OK) {
     return rc;
+  }
 
-  if ((rc = tbm1_validate_images(h, staging_cap, out_off)) != TBM1_OK)
+  rc = tbm1_validate_images(h, staging_cap, out_off);
+  if (rc != TBM1_OK) {
     return rc;
+  }
 
   return TBM1_OK;
 }
@@ -249,23 +346,25 @@ tbm1_reject_t tbm1_validate(const uint8_t *buf, size_t manifest_cap, size_t stag
  * -------------------------------------------------------------------------- */
 boot_status_t tbm1_reject_to_boot_status(tbm1_reject_t rc) {
   switch (rc) {
-    case TBM1_OK:
-      return BOOT_OK;
+  case TBM1_OK:
+    return BOOT_OK;
 
-    case TBM1_BAD_CRC:
-      return BOOT_ERR_MANIFEST_CORRUPT;
+  case TBM1_BAD_CRC:
+    return BOOT_ERR_MANIFEST_CORRUPT;
 
-    case TBM1_BAD_HW_COMPAT:
-      return BOOT_ERR_MANIFEST_PRODUCT;
+  case TBM1_BAD_HW_COMPAT:
+    return BOOT_ERR_MANIFEST_PRODUCT;
 
-    case TBM1_BAD_VERSION:
-    case TBM1_BAD_CRIT_FLAG:
-    case TBM1_BAD_READER_VERSION:
-      return BOOT_ERR_MANIFEST_VERSION;
+  case TBM1_BAD_CRIT_FLAG:
+    return BOOT_ERR_NOT_SUPPORTED;
 
-    default:
-      /* magic, fixed_len, total_len, align, image_count, key_index,
+  case TBM1_BAD_VERSION:
+  case TBM1_BAD_READER_VERSION:
+    return BOOT_ERR_MANIFEST_VERSION;
+
+  default:
+    /* magic, fixed_len, total_len, align, image_count, key_index,
        * chunk_math, image_field, region_*, chunkhash_len */
-      return BOOT_ERR_INVALID_ARG;
+    return BOOT_ERR_INVALID_ARG;
   }
 }

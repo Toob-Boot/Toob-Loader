@@ -15,27 +15,27 @@
 
 #include "boot_hal.h"
 #include "generated_boot_config.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 /**
  * @brief Boot Verify Kontext für asymmetrische Envelope Validierungen
  * Setzt den Kontext für den vollständigen Signatur-Schild.
  */
 typedef struct {
-    uint32_t manifest_flash_addr;     /* Absoluter physikalischer SPI Pointer */
-    size_t   manifest_size;           /* Exakte Größe des signierten Bereichs (total_len - 64).
+  uint32_t manifest_flash_addr;     /* Absoluter physikalischer SPI Pointer */
+  size_t manifest_size;             /* Exakte Größe des signierten Bereichs (total_len - 64).
                                        * MUSS aus dem TBM1-Header kommen, NIEMALS aus dem Pufferrand inferiert. */
-    const uint8_t* signature_ed25519; /* Pointer auf die Ed25519 Signatur */
-    uint8_t  key_index;               /* eFuse OTP Key-Index (0..) für Key-Revocation Check */
+  const uint8_t *signature_ed25519; /* Pointer auf die Ed25519 Signatur */
+  uint8_t key_index;                /* eFuse OTP Key-Index (0..) für Key-Revocation Check */
 
 #if TOOB_PQC_ENABLED
-    bool     pqc_hybrid_active;       /* Ist PQC-Migration (ML-DSA) durch das Manifest verlangt? */
-    const uint8_t* signature_pqc;     /* Signatur-Block für PQC */
-    size_t   signature_pqc_len;       /* Länge des PQC Blocks */
-    const uint8_t* pubkey_pqc;        /* Der PQC-Public-Key (Anchored in Payload) */
-    size_t   pubkey_pqc_len;          /* Länge des PQC Keys */
+  bool pqc_hybrid_active;       /* Ist PQC-Migration (ML-DSA) durch das Manifest verlangt? */
+  const uint8_t *signature_pqc; /* Signatur-Block für PQC */
+  size_t signature_pqc_len;     /* Länge des PQC Blocks */
+  const uint8_t *pubkey_pqc;    /* Der PQC-Public-Key (Anchored in Payload) */
+  size_t pubkey_pqc_len;        /* Länge des PQC Keys */
 #endif
 } boot_verify_envelope_t;
 
@@ -59,9 +59,8 @@ typedef struct {
  * @param work_buf_len  Größe des verfügbaren Puffers
  * @return BOOT_OK (0x55AA55AA) wenn mathematisch/physisch einwandfrei, sonst Fehlercode.
  */
-boot_status_t boot_verify_manifest_envelope(const boot_platform_t* platform, 
-                                            const boot_verify_envelope_t* envelope,
-                                            uint8_t* work_buffer,
-                                            size_t work_buf_len);
+boot_status_t boot_verify_manifest_envelope(const boot_platform_t *platform,
+                                            const boot_verify_envelope_t *envelope,
+                                            uint8_t *work_buffer, size_t work_buf_len);
 
 #endif /* TOOB_BOOT_VERIFY_H */

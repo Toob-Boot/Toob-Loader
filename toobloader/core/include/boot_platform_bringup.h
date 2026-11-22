@@ -10,27 +10,27 @@
 #ifndef BOOT_PLATFORM_BRINGUP_H
 #define BOOT_PLATFORM_BRINGUP_H
 
-#include <stddef.h>
-#include <stdbool.h>
 #include "boot_hal.h"
 #include "boot_panic.h"
+#include <stdbool.h>
+#include <stddef.h>
 
 typedef enum {
-    BOOT_HAL_KIND_CLOCK = 0,
-    BOOT_HAL_KIND_FLASH,
-    BOOT_HAL_KIND_WDT,
-    BOOT_HAL_KIND_CRYPTO,
-    BOOT_HAL_KIND_CONFIRM,
-    BOOT_HAL_KIND_CONSOLE,
-    BOOT_HAL_KIND_SOC,
-    BOOT_HAL_KIND_ENTROPY,
-    BOOT_HAL_KIND_KEYSTORE,
+  BOOT_HAL_KIND_CLOCK = 0,
+  BOOT_HAL_KIND_FLASH,
+  BOOT_HAL_KIND_WDT,
+  BOOT_HAL_KIND_CRYPTO,
+  BOOT_HAL_KIND_CONFIRM,
+  BOOT_HAL_KIND_CONSOLE,
+  BOOT_HAL_KIND_SOC,
+  BOOT_HAL_KIND_ENTROPY,
+  BOOT_HAL_KIND_KEYSTORE,
 } boot_hal_kind_t;
 
 typedef struct {
-    boot_hal_kind_t kind;
-    bool            mandatory;
-    uint16_t        panic_site;
+  boot_hal_kind_t kind;
+  bool mandatory;
+  uint16_t panic_site;
 } bringup_step_t;
 
 /**
@@ -41,8 +41,19 @@ typedef struct {
  * @param n     Number of steps in the array
  * @return BOOT_OK if all mandatory steps succeed. Panics on mandatory failure.
  */
-boot_status_t boot_platform_bringup(const boot_platform_t *p,
-                                    const bringup_step_t *steps,
+boot_status_t boot_platform_bringup(const boot_platform_t *p, const bringup_step_t *steps,
                                     size_t n);
+
+/**
+ * @brief Returns true if @p p has already completed boot_platform_bringup()
+ *        and has not yet been torn down. Prevents duplicate hardware init
+ *        between startup/wiring bringup and boot_main()/stage0_main().
+ */
+bool boot_platform_is_brought_up(const boot_platform_t *p);
+
+/**
+ * @brief Clears the brought-up tracking pointer upon HAL deinitialization.
+ */
+void boot_platform_mark_down(void);
 
 #endif /* BOOT_PLATFORM_BRINGUP_H */

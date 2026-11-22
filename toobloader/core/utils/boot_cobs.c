@@ -22,22 +22,22 @@
 #include "boot_secure_zeroize.h"
 #include <stddef.h>
 
-void boot_cobs_send_frame(const boot_platform_t *platform,
-                          const uint8_t *data, size_t len) {
-  if (!platform || !platform->console || !platform->console->putchar ||
-      len == 0 || !data)
+void boot_cobs_send_frame(const boot_platform_t *platform, const uint8_t *data, size_t len) {
+  if (!platform || !platform->console || !platform->console->putchar || len == 0 || !data) {
     return;
+  }
 
   /* Frame Start Marker (Sync) */
   platform->console->putchar((char)COBS_MARKER_START);
 
   size_t ptr = 0;
+  bool trailing_zero = false;
   while (ptr < len) {
-    uint8_t code = 1;
+    uint8_t code = 1U;
     size_t end = ptr;
 
     /* Find next zero or hit 254 data bytes limit (0xFF code) */
-    while (end < len && data[end] != 0 && code < 0xFF) {
+    while (end < len && data[end] != 0U && code < 0xFFU) {
       end++;
       code++;
     }
@@ -48,15 +48,21 @@ void boot_cobs_send_frame(const boot_platform_t *platform,
     /* Write Block Data */
     for (size_t i = ptr; i < end; i++) {
       platform->console->putchar((char)data[i]);
-      if (platform->wdt && platform->wdt->kick)
+      if (platform->wdt && platform->wdt->kick) {
         platform->wdt->kick();
+      }
     }
 
     ptr = end;
     /* Consume the physical zero that we encoded virtually */
-    if (ptr < len && data[ptr] == 0) {
+    trailing_zero = (ptr < len && data[ptr] == 0U);
+    if (trailing_zero) {
       ptr++;
     }
+  }
+
+  if (trailing_zero) {
+    platform->console->putchar((char)0x01);
   }
 
   /* Frame End Marker */
@@ -68,16 +74,18 @@ void boot_cobs_send_frame(const boot_platform_t *platform,
 
 boot_status_t boot_cobs_decode_in_place(uint8_t *__restrict data, size_t len,
                                         size_t *__restrict out_len) {
-  if (!data || !out_len || len == 0)
+  if (!data || !out_len || len == 0) {
     return BOOT_ERR_INVALID_ARG;
+  }
 
   size_t read_idx = 0;
   size_t write_idx = 0;
 
   while (read_idx < len) {
     uint8_t code = data[read_idx++];
-    if (code == 0)
+    if (code == 0) {
       return BOOT_ERR_INVALID_ARG; /* Zeroes sind in COBS-Payloads illegal */
+    }
 
     uint8_t copy_len = code - 1;
 
@@ -95,8 +103,9 @@ boot_status_t boot_cobs_decode_in_place(uint8_t *__restrict data, size_t len,
 
     /* Implizite Nullen wiederherstellen */
     if (code < 0xFF && read_idx < len) {
-      if (write_idx >= len)
+      if (write_idx >= len) {
         return BOOT_ERR_INVALID_ARG;
+      }
       data[write_idx++] = 0x00;
     }
   }
@@ -112,22 +121,24 @@ boot_status_t boot_cobs_decode_in_place(uint8_t *__restrict data, size_t len,
   return BOOT_OK;
 }
 
-boot_status_t boot_cobs_recv_frame(const boot_platform_t *platform,
-                                   uint8_t *buf, size_t buf_max,
+boot_status_t boot_cobs_recv_frame(const boot_platform_t *platform, uint8_t *buf, size_t buf_max,
                                    size_t *out_len) {
-  if (!platform || !platform->console || !platform->console->getchar ||
-      !buf || !out_len || buf_max == 0)
+  if (!platform || !platform->console || !platform->console->getchar || !buf || !out_len ||
+      buf_max == 0) {
     return BOOT_ERR_INVALID_ARG;
+  }
 
   size_t rx_len = 0;
 
   while (1) {
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
 
     uint8_t c;
-    if (platform->console->getchar(&c, 100) != BOOT_OK)
+    if (platform->console->getchar(&c, 100) != BOOT_OK) {
       continue;
+    }
 
     if (c == COBS_MARKER_END) {
       if (rx_len > 0) {

@@ -23,14 +23,18 @@
  */
 
 #include "boot_provisioning.h"
-#include "boot_fih.h"
 #include "boot_cobs.h"
 #include "boot_crc32.h"
+#include "boot_features.h"
+#include "boot_fih.h"
+#include "boot_flash_guard.h"
 #include "boot_panic.h"
 #include "boot_secure_zeroize.h"
 #include "generated_boot_config.h"
 #include <stddef.h>
 #include <string.h>
+
+#if TOOB_FEATURE_UART_PROVISIONING
 
 /* P5: Arena is now passed explicitly by the caller */
 
@@ -45,21 +49,8 @@ _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 512,
 #define PROV_TX_MAX_SIZE 16
 #define PROV_KEY_MAX_SIZE 128
 
-_Static_assert((PROV_RX_MAX_SIZE + PROV_TX_MAX_SIZE + PROV_KEY_MAX_SIZE) <=
-                   BOOT_CRYPTO_ARENA_SIZE,
+_Static_assert((PROV_RX_MAX_SIZE + PROV_TX_MAX_SIZE + PROV_KEY_MAX_SIZE) <= BOOT_CRYPTO_ARENA_SIZE,
                "Provisioning arena partitions exceed BOOT_CRYPTO_ARENA_SIZE");
-
-/* ==============================================================================
- * Provisioning Command Opcodes (Wire Protocol)
- * ==============================================================================
- */
-#define PROV_CMD_BURN_KEY 0x01
-#define PROV_CMD_SET_DSLC 0x02
-#define PROV_CMD_SET_PROTECTION 0x03
-#define PROV_CMD_ENABLE_SB 0x04
-#define PROV_CMD_ENABLE_FE 0x05
-#define PROV_CMD_READ_ID 0x06
-#define PROV_CMD_REBOOT 0xFF
 
 /* Frame layout: [CMD(1)] [PAYLOAD(N)] [CRC32(4)] — min 5 bytes */
 #define PROV_FRAME_MIN_SIZE 5
@@ -73,8 +64,7 @@ _Static_assert((PROV_RX_MAX_SIZE + PROV_TX_MAX_SIZE + PROV_KEY_MAX_SIZE) <=
 /**
  * @brief Sends a 4-byte Little-Endian status response via COBS.
  */
-static void send_status(const boot_platform_t *platform, uint8_t *tx_buf,
-                        boot_status_t status) {
+static void send_status(const boot_platform_t *platform, uint8_t *tx_buf, boot_status_t status) {
   tx_buf[0] = (uint8_t)(status & 0xFF);
   tx_buf[1] = (uint8_t)((status >> 8) & 0xFF);
   tx_buf[2] = (uint8_t)((status >> 16) & 0xFF);
@@ -88,12 +78,13 @@ static void send_status(const boot_platform_t *platform, uint8_t *tx_buf,
  * ==============================================================================
  */
 
-_Noreturn void boot_provisioning_run(const boot_platform_t *platform,
-                                     uint8_t *arena, size_t arena_len) {
+_Noreturn void boot_provisioning_run(const boot_platform_t *platform, uint8_t *arena,
+                                     size_t arena_len) {
   /* P10 Defensive: Verify prerequisites before entering the loop */
-  if (!platform || !platform->provisioning || !platform->console ||
+  if (!platform || !platform->provisioning ||
+      platform->provisioning->abi_version != TOOB_HAL_ABI_V3 || !platform->console ||
       !platform->console->getchar || !platform->console->putchar) {
-    /* Terminal halt — no provisioning HAL, no UART */
+    /* Terminal halt — no provisioning HAL, ABI mismatch, or no UART */
     boot_terminal_halt(platform, BOOT_ERR_INVALID_ARG, SITE_PROVISIONING_GLITCH);
   }
 
@@ -111,17 +102,18 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform,
    * ==============================================================================
    */
   while (1) {
-    if (platform->wdt && platform->wdt->kick)
+    if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
+    }
 
     /* Receive a COBS-framed command */
     boot_secure_zeroize(rx_buf, PROV_RX_MAX_SIZE);
     size_t raw_len = 0;
 
-    boot_status_t recv_stat =
-        boot_cobs_recv_frame(platform, rx_buf, PROV_RX_MAX_SIZE, &raw_len);
-    if (recv_stat != BOOT_OK)
+    boot_status_t recv_stat = boot_cobs_recv_frame(platform, rx_buf, PROV_RX_MAX_SIZE, &raw_len);
+    if (recv_stat != BOOT_OK) {
       continue;
+    }
 
     /* Decode COBS in-place */
     size_t decoded_len = 0;
@@ -138,10 +130,12 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform,
 
     uint32_t computed_crc = compute_boot_crc32(rx_buf, payload_len);
 
-    BOOT_SECURE_REQUIRE(received_crc == computed_crc, {
+    bool crc_ok = true;
+    BOOT_SECURE_REQUIRE(received_crc == computed_crc, { crc_ok = false; });
+    if (!crc_ok) {
       send_status(platform, tx_buf, BOOT_ERR_VERIFY);
       continue;
-    });
+    }
 
     /* Command Dispatch */
     uint8_t cmd = rx_buf[0];
@@ -174,18 +168,18 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform,
 
     case PROV_CMD_SET_DSLC: {
       /* Payload: [dslc_value(1)] */
-      if (cmd_payload_len != 1 || !platform->provisioning->write_dslc) {
+      if (cmd_payload_len != 1U || cmd_payload[0] == 0x00U || cmd_payload[0] == 0xFFU ||
+          !platform->provisioning->write_dslc) {
         result = BOOT_ERR_INVALID_ARG;
         break;
       }
-      result = platform->provisioning->write_dslc(cmd_payload[0]);
+      result = platform->provisioning->write_dslc(&cmd_payload[0], 1U);
       break;
     }
 
     case PROV_CMD_SET_PROTECTION: {
       /* Payload: [bitmask(4)] LE */
-      if (cmd_payload_len != 4 ||
-          !platform->provisioning->set_protection_bits) {
+      if (cmd_payload_len != 4 || !platform->provisioning->set_protection_bits) {
         result = BOOT_ERR_INVALID_ARG;
         break;
       }
@@ -215,20 +209,55 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform,
 
     case PROV_CMD_READ_ID: {
       /* Response: [status(4)] + [chip_uid(N)] as a second frame */
-      if (!platform->crypto || !platform->crypto->read_chip_uid) {
+      if (!platform->keystore || !platform->keystore->read_chip_uid) {
         result = BOOT_ERR_NOT_SUPPORTED;
         break;
       }
       boot_secure_zeroize(key_buf, PROV_KEY_MAX_SIZE);
       size_t uid_len = 0;
-      result =
-          platform->crypto->read_chip_uid(key_buf, PROV_KEY_MAX_SIZE, &uid_len);
+      result = platform->keystore->read_chip_uid(key_buf, PROV_KEY_MAX_SIZE, &uid_len);
       send_status(platform, tx_buf, result);
       if (result == BOOT_OK && uid_len > 0) {
         boot_cobs_send_frame(platform, key_buf, uid_len);
       }
       boot_secure_zeroize(key_buf, PROV_KEY_MAX_SIZE);
       continue; /* Skip the default send_status at loop end */
+    }
+
+    case PROV_CMD_LOCK_BOOT_FLASH: {
+      if (!platform->provisioning->lock_immutable_flash) {
+        result = BOOT_ERR_NOT_SUPPORTED;
+        break;
+      }
+      uint32_t lock_offset = 0U;
+      uint32_t lock_size = 0U;
+      if (cmd_payload_len == 0U) {
+#if defined(CHIP_STAGE0_ABS_ADDR)
+        lock_offset = (uint32_t)CHIP_STAGE0_ABS_ADDR;
+        lock_size = (uint32_t)CHIP_STAGE0_SIZE;
+#else
+        lock_offset = 0U;
+        lock_size = (uint32_t)CHIP_FLASH_IMMUTABLE_BOOT_END;
+#endif
+        if (lock_size == 0U || (UINT32_MAX - lock_offset) < lock_size) {
+          result = BOOT_ERR_INVALID_ARG;
+          break;
+        }
+      } else if (cmd_payload_len == 8U) {
+        lock_offset = (uint32_t)cmd_payload[0] | ((uint32_t)cmd_payload[1] << 8) |
+                      ((uint32_t)cmd_payload[2] << 16) | ((uint32_t)cmd_payload[3] << 24);
+        lock_size = (uint32_t)cmd_payload[4] | ((uint32_t)cmd_payload[5] << 8) |
+                    ((uint32_t)cmd_payload[6] << 16) | ((uint32_t)cmd_payload[7] << 24);
+        if (lock_size == 0U || (UINT32_MAX - lock_offset) < lock_size) {
+          result = BOOT_ERR_INVALID_ARG;
+          break;
+        }
+      } else {
+        result = BOOT_ERR_INVALID_ARG;
+        break;
+      }
+      result = platform->provisioning->lock_immutable_flash(lock_offset, lock_size);
+      break;
     }
 
     case PROV_CMD_REBOOT: {
@@ -250,3 +279,14 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform,
     send_status(platform, tx_buf, result);
   }
 }
+
+#else /* !TOOB_FEATURE_UART_PROVISIONING */
+
+_Noreturn void boot_provisioning_run(const boot_platform_t *platform, uint8_t *arena,
+                                     size_t arena_len) {
+  (void)arena;
+  (void)arena_len;
+  boot_terminal_halt(platform, BOOT_ERR_NOT_SUPPORTED, SITE_PROVISIONING_GLITCH);
+}
+
+#endif /* TOOB_FEATURE_UART_PROVISIONING */

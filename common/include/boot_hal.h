@@ -222,11 +222,12 @@ typedef struct {
       __VA_ARGS__ }
 
 /**
- * @brief Cryptographic Core Engine
- * Offloads hashing and Ed25519/PQC signatures, as well as accessing eFuse IDs.
+ * @brief Cryptographic Core Engine (ABI v3)
+ * Pure cryptographic hashing and signature verification engine.
+ * Entropy/TRNG and OTP/Keystore operations live on entropy_hal_t and keystore_hal_t.
  */
 typedef struct {
-  uint32_t abi_version;
+  uint32_t abi_version; /**< MUST be 0x03000000 (V3) */
 
   boot_status_t (*init)(void);
   /** 
@@ -249,30 +250,7 @@ typedef struct {
       const uint8_t *sig, size_t sig_len,
       const uint8_t *pubkey, size_t pubkey_len);
 
-  /* RNG */
-  /**
-   * @brief Generate cryptographic random bytes.
-   * HAL-Contract: Die Implementierung MUSS NIST SP 800-90B
-   * Repetition Count und Adaptive Proportion Tests intern
-   * durchführen. Bei Versagen: BOOT_ERR_CRYPTO zurückgeben.
-   */
-  boot_status_t (*random)(uint8_t *buf, size_t len);
-
   uint32_t (*get_last_vendor_error)(void);
-
-  /* Hardware Roots (eFuse / OTP) */
-  boot_status_t (*read_pubkey)(uint8_t *key, size_t key_len, uint8_t key_index);
-  boot_status_t (*read_chip_uid)(uint8_t *buf, size_t max_len, size_t *out_len);
-  boot_status_t (*read_dslc)(uint8_t *buffer, size_t *len);
-  boot_status_t (*write_dslc)(const uint8_t *value, size_t len);
-  /**
-   * @brief Read hardware monotonic counter.
-   * HAL-Contract: Die Implementierung MUSS den gelesenen Wert intern
-   * durch Komplement-Prüfung (read + read_inverted) validieren und
-   * bei Diskrepanz BOOT_ERR_VERIFY zurückgeben.
-   */
-  boot_status_t (*read_monotonic_counter)(uint32_t *ctr);
-  boot_status_t (*advance_monotonic_counter)(void);
 
   size_t (*get_hash_ctx_size)(void);
   bool has_hw_acceleration;
@@ -281,25 +259,6 @@ typedef struct {
       const uint8_t *msg_digest,
       const uint8_t *sig, const uint8_t *pubkey);
 } crypto_hal_t;
-
-/**
- * @brief Initializer for crypto_hal_t (REG-033).
- * Positional: 8 core primitives (init..get_hash_ctx_size).
- * OTP accessors, PQC, and vendor-error via trailing designated initializers.
- */
-#define TOOB_CRYPTO_HAL_V2(init_, deinit_, hash_init_, hash_update_,        \
-                           hash_finish_, verify_sig_, random_,              \
-                           get_hash_ctx_size_, ...)                         \
-    { .abi_version        = TOOB_HAL_ABI_V2,                               \
-      .init               = (init_),                                       \
-      .deinit             = (deinit_),                                     \
-      .hash_init          = (hash_init_),                                  \
-      .hash_update        = (hash_update_),                                \
-      .hash_finish        = (hash_finish_),                                \
-      .verify_signature   = (verify_sig_),                                 \
-      .random             = (random_),                                     \
-      .get_hash_ctx_size  = (get_hash_ctx_size_),                          \
-      __VA_ARGS__ }
 
 #define TOOB_CRYPTO_HAL_V3(init_, deinit_, hash_init_, hash_update_,        \
                            hash_finish_, verify_sig_,                       \
@@ -423,6 +382,14 @@ typedef struct {
    * Contract: MUST be non-blocking (< 1ms execution budget) and fail-safe.
    */
   toob_swap_notify_fn swap_notify;
+
+  /**
+   * @brief Optional pre-handoff sticky hardware protection hook.
+   * Invoked immediately before jumping to the guest OS to engage per-boot
+   * sticky protections (e.g. RISC-V PMP L=1, ESP APM/PMS, nRF BPROT/ACL)
+   * covering Stage 0 and immutable boot regions.
+   */
+  boot_status_t (*lockdown_before_handoff)(void);
 } soc_hal_t;
 
 /**
@@ -439,17 +406,28 @@ typedef struct {
 /* --- 8. Provisioning HAL (Factory & Lifecycle) --- */
 
 /**
- * @brief Factory Provisioning and Key-Lock Interface
+ * @brief Factory Provisioning and Key-Lock Interface (ABI v3)
  * Extracted from crypto_hal_t to enforce separation of concerns and
- * ensure that normal firmware cannot accidentally write eFuses.
+ * ensure that normal firmware cannot accidentally write eFuses or OTP.
  */
 typedef struct {
+    uint32_t abi_version; /**< MUST be 0x03000000 (V3) */
+
     boot_status_t (*burn_pubkey)(const uint8_t *key, size_t len, uint8_t index);
-    boot_status_t (*write_dslc)(uint8_t value);
+    boot_status_t (*write_dslc)(const uint8_t *value, size_t len);
     boot_status_t (*set_protection_bits)(uint32_t bitmask);
     boot_status_t (*enable_secure_boot)(void);
     boot_status_t (*enable_flash_encryption)(void);
+    /**
+     * @brief Optional factory physical write-protection hook for immutable boot sectors
+     * (e.g. SPI-NOR TB/BPx/SRP status bits or MCU option-byte WRP).
+     */
+    boot_status_t (*lock_immutable_flash)(uint32_t offset, uint32_t size);
 } provisioning_hal_t;
+
+#define TOOB_PROVISIONING_HAL_V3(...)                                      \
+    { .abi_version = TOOB_HAL_ABI_V3,                                      \
+      __VA_ARGS__ }
 
 /* --- Master Platform Container --- */
 
@@ -465,17 +443,17 @@ typedef struct {
  * Instantiated natively by the Host/Sandbox or target Vendor startup sequence.
  */
 typedef struct {
-  const flash_hal_t *flash;     /**< PFLICHT */
-  const confirm_hal_t *confirm; /**< PFLICHT */
-  const crypto_hal_t *crypto;   /**< PFLICHT */
-  const clock_hal_t *clock;     /**< PFLICHT */
-  const wdt_hal_t *wdt;         /**< PFLICHT */
+  const flash_hal_t *flash;               /**< PFLICHT */
+  const confirm_hal_t *confirm;           /**< Optional when hardware lacks RTC confirm */
+  const crypto_hal_t *crypto;             /**< PFLICHT (ABI v3) */
+  const clock_hal_t *clock;               /**< PFLICHT */
+  const wdt_hal_t *wdt;                   /**< PFLICHT */
   const console_hal_t *console;           /**< Optional */
   const soc_hal_t *soc;                   /**< Optional */
-  const provisioning_hal_t *provisioning; /**< Optional */
+  const provisioning_hal_t *provisioning; /**< Optional (ABI v3) */
   const slot_caps_t *slot_caps;           /**< Optional, added in ST-015 */
-  const entropy_hal_t *entropy;           /**< Optional in v2, PFLICHT in v3 */
-  const keystore_hal_t *keystore;         /**< Optional in v2, PFLICHT in v3 */
+  const entropy_hal_t *entropy;           /**< PFLICHT (ABI v3) */
+  const keystore_hal_t *keystore;         /**< PFLICHT (ABI v3) */
 } boot_platform_t;
 
 /**
@@ -498,17 +476,5 @@ const boot_platform_t *boot_platform_init(void);
  * ein ECC-Rot detektiert wurde (anstatt ins Leere zu loopen).
  */
 extern void toob_ecc_trap(void);
-
-/* --- Crypto HAL Generic Symbols --- */
-boot_status_t toob_crypto_hal_init(void);
-void toob_crypto_hal_deinit(void);
-boot_status_t toob_crypto_hal_hash_init(void *ctx, size_t ctx_size);
-boot_status_t toob_crypto_hal_hash_update(void *ctx, const void *data, size_t len);
-boot_status_t toob_crypto_hal_hash_finish(void *ctx, uint8_t *digest, size_t *digest_len);
-boot_status_t toob_crypto_hal_verify_signature(const uint8_t *message, size_t msg_len, const uint8_t *sig, const uint8_t *pubkey);
-boot_status_t toob_crypto_hal_verify_pqc(const uint8_t *message, size_t msg_len, const uint8_t *sig, size_t sig_len, const uint8_t *pubkey, size_t pubkey_len);
-boot_status_t toob_crypto_hal_verify_signature_ph(const uint8_t *msg_digest, const uint8_t *sig, const uint8_t *pubkey);
-size_t toob_crypto_hal_get_hash_ctx_size(void);
-bool toob_crypto_hal_is_pqc_enforced(void);
 
 #endif /* TOOB_BOOT_HAL_H */

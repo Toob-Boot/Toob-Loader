@@ -20,11 +20,11 @@
  */
 
 #include "boot_merkle.h"
+#include "boot_ct_utils.h"
+#include "boot_fih.h"
 #include "boot_secure_zeroize.h"
 #include "boot_types.h"
-#include "boot_fih.h"
 #include <string.h>
-
 
 /* Mathematisches Glitch-Resistenz-Gating. Darf sich statisch nicht auf
  * implizierte Enums verlassen! */
@@ -32,12 +32,11 @@ _Static_assert(BOOT_OK == 0x55AA55AA,
                "BOOT_OK muss zwingend ein High-Hamming-Weight Pattern sein, um "
                "das Double-Check Pattern zu garantieren!");
 
-boot_status_t
-boot_merkle_verify_stream(const boot_platform_t *platform,
-                          uint32_t image_flash_addr, uint32_t image_size,
-                          uint32_t chunk_size, const uint8_t *chunk_hashes,
-                          uint32_t chunk_hashes_len, uint32_t num_chunks,
-                          uint8_t *crypto_arena, size_t arena_size) {
+boot_status_t boot_merkle_verify_stream(const boot_platform_t *platform, uint32_t image_flash_addr,
+                                        uint32_t image_size, uint32_t chunk_size,
+                                        const uint8_t *chunk_hashes, uint32_t chunk_hashes_len,
+                                        uint32_t num_chunks, uint8_t *crypto_arena,
+                                        size_t arena_size) {
 
   boot_status_t stat = BOOT_OK;
 
@@ -76,8 +75,8 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
     goto cleanup;
   }
 
-  if (image_size == 0 || chunk_size == 0 || num_chunks == 0 ||
-      arena_size == 0 || chunk_hashes_len == 0) {
+  if (image_size == 0 || chunk_size == 0 || num_chunks == 0 || arena_size == 0 ||
+      chunk_hashes_len == 0) {
     stat = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
@@ -120,8 +119,7 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
   }
 
   /* 3.4 Pointer-Space Wrap-Around Guard */
-  if ((uintptr_t)chunk_hashes >
-      (UINTPTR_MAX - (num_chunks * BOOT_MERKLE_HASH_LEN))) {
+  if ((uintptr_t)chunk_hashes > (UINTPTR_MAX - (num_chunks * BOOT_MERKLE_HASH_LEN))) {
     stat = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
@@ -131,14 +129,14 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
     stat = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
-  if (platform->flash->write_align > 0 &&
-      (chunk_size % platform->flash->write_align) != 0) {
+  if (platform->flash->write_align > 0 && (chunk_size % platform->flash->write_align) != 0) {
     stat = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
 
-  /* 3.6 SRAM Buffer Bounds-Check */
-  if (arena_size < chunk_size) {
+  /* 3.6 SRAM Buffer Bounds-Check (Sub-Chunk Streaming Capable for <=2KB Arenas) */
+  if (arena_size < BOOT_MERKLE_HASH_LEN ||
+      (platform->flash->write_align > 0U && arena_size < (size_t)platform->flash->write_align)) {
     stat = BOOT_ERR_INVALID_ARG;
     goto cleanup;
   }
@@ -146,8 +144,7 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
   /* 3.7 Malleability by Truncation Defense (Exakte Hash-Anzahl Evaluierung,
    * Wraparound-Safe) Verhindert Angriffe durch Abschneiden des Manifests. O(1)
    * Branchless Math. */
-  uint32_t required_chunks =
-      (image_size / chunk_size) + ((image_size % chunk_size) > 0 ? 1U : 0U);
+  uint32_t required_chunks = (image_size / chunk_size) + ((image_size % chunk_size) > 0 ? 1U : 0U);
   if (num_chunks != required_chunks) {
     stat = BOOT_ERR_VERIFY;
     goto cleanup;
@@ -162,32 +159,42 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
   uint32_t remaining_bytes = image_size;
   uint32_t current_flash_addr = image_flash_addr;
   const uint8_t *current_hash_ptr = chunk_hashes;
+  uint32_t max_slice = (arena_size > (size_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)arena_size;
 
   for (uint32_t i = 0; i < num_chunks; i++) {
-    /* Anti-Lockup (concept_fusion.md): Watchdog vor schweren IO-Operationen
-     * füttern */
-    platform->wdt->kick();
+    uint32_t chunk_len = (remaining_bytes < chunk_size) ? remaining_bytes : chunk_size;
 
-    uint32_t read_len =
-        (remaining_bytes < chunk_size) ? remaining_bytes : chunk_size;
-
-    /* O(1) Chunk RAM-Transfer (Vermeidet OTFDEC Timings) */
-    stat = platform->flash->read(current_flash_addr, crypto_arena, read_len);
-
-    platform->wdt->kick();
-
+    /* Stream-basiertes asymmetrisches Flat-Hashing über Sub-Slices */
+    stat = platform->crypto->hash_init(hash_ctx, sizeof(hash_ctx));
     if (stat != BOOT_OK) {
       goto cleanup;
     }
 
-    /* Stream-basiertes asymmetrisches Flat-Hashing */
-    stat = platform->crypto->hash_init(hash_ctx, sizeof(hash_ctx));
-    if (stat != BOOT_OK)
-      goto cleanup;
+    uint32_t chunk_rem = chunk_len;
+    while (chunk_rem > 0U) {
+      /* Anti-Lockup (concept_fusion.md): Watchdog vor schweren IO-Operationen
+       * füttern */
+      platform->wdt->kick();
 
-    stat = platform->crypto->hash_update(hash_ctx, crypto_arena, read_len);
-    if (stat != BOOT_OK)
-      goto cleanup;
+      uint32_t step = (chunk_rem < max_slice) ? chunk_rem : max_slice;
+
+      /* O(1) Sub-Chunk RAM-Transfer (Vermeidet OTFDEC Timings) */
+      stat = platform->flash->read(current_flash_addr, crypto_arena, step);
+
+      platform->wdt->kick();
+
+      if (stat != BOOT_OK) {
+        goto cleanup;
+      }
+
+      stat = platform->crypto->hash_update(hash_ctx, crypto_arena, step);
+      if (stat != BOOT_OK) {
+        goto cleanup;
+      }
+
+      current_flash_addr += step;
+      chunk_rem -= step;
+    }
 
     /* P10 Rule: Buffer sicher nullen, bevor er an externe HW-Register übergeben
      * wird */
@@ -203,8 +210,7 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
 
     /* Glitch-Resistant CONSTANT-TIME Verifikation (gibt sauber BOOT_ERR_VERIFY
      * bei Fail zurück) */
-    stat = constant_time_memcmp_glitch_safe(computed_hash, current_hash_ptr,
-                                            BOOT_MERKLE_HASH_LEN);
+    stat = constant_time_memcmp_glitch_safe(computed_hash, current_hash_ptr, BOOT_MERKLE_HASH_LEN);
 
     /* O(1) Säuberung transienter Secrets sofort nach der Nutzung (Verhindert
      * Leakage bei Interrupts) */
@@ -216,8 +222,7 @@ boot_merkle_verify_stream(const boot_platform_t *platform,
 
     /* O(1) Pointer-Arithmetik statt der alten "i * chunk_size" Multiplikation
      */
-    remaining_bytes -= read_len;
-    current_flash_addr += read_len;
+    remaining_bytes -= chunk_len;
     current_hash_ptr += BOOT_MERKLE_HASH_LEN;
   }
 
