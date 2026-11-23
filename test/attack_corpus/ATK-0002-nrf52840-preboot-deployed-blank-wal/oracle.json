@@ -1,0 +1,9 @@
+{
+  "must_not_contain_uart": [
+    "[APP] BOOT",
+    "[PROBE] BOOT",
+    "BOOT OK",
+    "HANDOFF OK"
+  ],
+  "stage0_sha256_unchanged": true
+}

@@ -1,0 +1,11 @@
+{
+  "wait_uart_marker": "[REC] listening...",
+  "must_contain_uart": [
+    "=== TOOB STAGE 0 BOOT ===",
+    "[S0] Signature verification PASSED!"
+  ],
+  "must_not_contain_uart": [
+    "[APP] BOOT",
+    "APP_STARTED"
+  ]
+}

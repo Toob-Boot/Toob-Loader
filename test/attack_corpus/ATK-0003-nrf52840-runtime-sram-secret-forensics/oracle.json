@@ -1,0 +1,6 @@
+{
+  "crypto_arena_nonzero_max": 0,
+  "journal_key_nonzero_max": 0,
+  "journal_key_valid_max": 0,
+  "domain_leaks_max": 0
+}

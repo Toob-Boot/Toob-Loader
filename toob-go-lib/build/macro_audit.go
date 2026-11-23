@@ -243,7 +243,7 @@ func skipMacroParamList(src []byte, i int) int {
 	return i
 }
 
-func isZeroIfDirectiveArg(rest []byte) bool {
+func cleanedIfDirectiveArg(rest []byte) []byte {
 	// Trim horizontal whitespace and inline comments on the same line.
 	var cleaned []byte
 	for i := 0; i < len(rest); {
@@ -266,10 +266,46 @@ func isZeroIfDirectiveArg(rest []byte) bool {
 			i++
 		}
 	}
+	return cleaned
+}
+
+func isZeroIfDirectiveArg(rest []byte) bool {
+	cleaned := cleanedIfDirectiveArg(rest)
 	return bytes.Equal(cleaned, []byte("0")) ||
 		bytes.EqualFold(cleaned, []byte("0u")) ||
 		bytes.EqualFold(cleaned, []byte("0ul")) ||
 		bytes.EqualFold(cleaned, []byte("0ull"))
+}
+
+func isConstTrueIfDirectiveArg(rest []byte) bool {
+	s := strings.ToLower(string(cleanedIfDirectiveArg(rest)))
+	for _, suf := range []string{"ull", "llu", "ul", "lu", "ll", "u", "l"} {
+		if trimmed, ok := strings.CutSuffix(s, suf); ok {
+			s = trimmed
+			break
+		}
+	}
+	isHex := false
+	if hexDigits, ok := strings.CutPrefix(s, "0x"); ok {
+		s = hexDigits
+		isHex = true
+	}
+	if s == "" {
+		return false
+	}
+	nonZero := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		isDigit := c >= '0' && c <= '9'
+		isHexDigit := isHex && c >= 'a' && c <= 'f'
+		if !isDigit && !isHexDigit {
+			return false
+		}
+		if c != '0' {
+			nonZero = true
+		}
+	}
+	return nonZero
 }
 
 // forEachConsumerIdentifierExt visits every C identifier token in rawSrc except
@@ -280,9 +316,9 @@ func forEachConsumerIdentifierExt(rawSrc []byte, ext string, visit func(ident []
 	isAsm := ext == ".s"
 
 	type condFrame struct {
-		parentActive bool
-		branchActive bool
-		everMatched  bool
+		parentActive  bool
+		branchActive  bool
+		definiteMatch bool
 	}
 	var condStack []condFrame
 	isActive := func() bool {
@@ -360,17 +396,18 @@ func forEachConsumerIdentifierExt(rawSrc []byte, ext string, visit func(ident []
 					flushPendingIfndef()
 					parent := isActive()
 					branch := parent && !isZeroIfDirectiveArg(src[i:])
-					condStack = append(condStack, condFrame{parentActive: parent, branchActive: branch, everMatched: branch})
+					definite := parent && isConstTrueIfDirectiveArg(src[i:])
+					condStack = append(condStack, condFrame{parentActive: parent, branchActive: branch, definiteMatch: definite})
 					continue
 				case "ifdef":
 					flushPendingIfndef()
 					parent := isActive()
-					condStack = append(condStack, condFrame{parentActive: parent, branchActive: parent, everMatched: parent})
+					condStack = append(condStack, condFrame{parentActive: parent, branchActive: parent, definiteMatch: false})
 					continue
 				case "ifndef":
 					flushPendingIfndef()
 					parent := isActive()
-					condStack = append(condStack, condFrame{parentActive: parent, branchActive: parent, everMatched: parent})
+					condStack = append(condStack, condFrame{parentActive: parent, branchActive: parent, definiteMatch: false})
 					if parent {
 						captureIfndefIdent = true
 					}
@@ -379,13 +416,12 @@ func forEachConsumerIdentifierExt(rawSrc []byte, ext string, visit func(ident []
 					flushPendingIfndef()
 					if n := len(condStack); n > 0 {
 						f := &condStack[n-1]
-						if !f.parentActive || f.everMatched {
+						if !f.parentActive || f.definiteMatch || isZeroIfDirectiveArg(src[i:]) {
 							f.branchActive = false
 						} else {
-							branch := !isZeroIfDirectiveArg(src[i:])
-							f.branchActive = branch
-							if branch {
-								f.everMatched = true
+							f.branchActive = true
+							if isConstTrueIfDirectiveArg(src[i:]) {
+								f.definiteMatch = true
 							}
 						}
 					}
@@ -394,8 +430,8 @@ func forEachConsumerIdentifierExt(rawSrc []byte, ext string, visit func(ident []
 					flushPendingIfndef()
 					if n := len(condStack); n > 0 {
 						f := &condStack[n-1]
-						f.branchActive = f.parentActive && !f.everMatched
-						f.everMatched = true
+						f.branchActive = f.parentActive && !f.definiteMatch
+						f.definiteMatch = true
 					}
 					continue
 				case "endif":

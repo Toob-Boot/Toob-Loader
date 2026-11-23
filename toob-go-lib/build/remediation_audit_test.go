@@ -495,13 +495,31 @@ func TestAuditRemediationsHighAndMedium(t *testing.T) {
 			t.Fatal("expected case-folded duplicate JSON key to be rejected")
 		}
 
-		// MED-44: #if 0, #include <...>, ASM ; comment, and standalone #ifndef/#define fallback guard do NOT satisfy macro audit.
+		// MED-44: #if 0, #include <...>, ASM ; comment, and standalone #ifndef/#define fallback guard do NOT satisfy macro audit,
+		// while #else / #elif branches of symbolic #if / #ifdef conditionals MUST still be audited and satisfied.
 		srcDir := t.TempDir()
 		outDir := filepath.Join(t.TempDir(), "out")
 		writeTempFile(t, srcDir, "tricky.c", strings.Join([]string{
 			"#include <CHIP_FAKE_HEADER.h>",
 			"#if 0",
 			"uint32_t dead = CHIP_DEAD_IF0;",
+			"#else",
+			"uint32_t live_else0 = CHIP_LIVE_ELSE_OF_IF0;",
+			"#endif",
+			"#if 1",
+			"uint32_t live_if1 = CHIP_LIVE_IF1;",
+			"#else",
+			"uint32_t dead_else1 = CHIP_DEAD_ELSE_OF_IF1;",
+			"#endif",
+			"#if defined(SOME_CHIP_A)",
+			"uint32_t sym_a = CHIP_IF_BRANCH_A;",
+			"#else",
+			"uint32_t sym_b = CHIP_ELSE_BRANCH_B;",
+			"#endif",
+			"#ifdef SOME_CHIP_C",
+			"uint32_t def_c = CHIP_IFDEF_A;",
+			"#else",
+			"uint32_t def_d = CHIP_IFDEF_ELSE_B;",
 			"#endif",
 			"#ifndef CHIP_FALLBACK_ONLY",
 			"#define CHIP_FALLBACK_ONLY 1U",
@@ -510,13 +528,15 @@ func TestAuditRemediationsHighAndMedium(t *testing.T) {
 		}, "\n")+"\n")
 		writeTempFile(t, srcDir, "tricky.S", "    ; CHIP_ASM_COMMENT\n    @ CHIP_ARM_COMMENT\n")
 
-		for _, unconsumed := range []string{"CHIP_FAKE_HEADER", "CHIP_DEAD_IF0", "CHIP_FALLBACK_ONLY", "CHIP_ASM_COMMENT", "CHIP_ARM_COMMENT"} {
+		for _, unconsumed := range []string{"CHIP_FAKE_HEADER", "CHIP_DEAD_IF0", "CHIP_DEAD_ELSE_OF_IF1", "CHIP_FALLBACK_ONLY", "CHIP_ASM_COMMENT", "CHIP_ARM_COMMENT"} {
 			if err := auditMacroUsage([]string{unconsumed}, []string{srcDir}, outDir); err == nil {
 				t.Errorf("MED-44: %s must NOT satisfy macro audit", unconsumed)
 			}
 		}
-		if err := auditMacroUsage([]string{"CHIP_ACTUALLY_USED"}, []string{srcDir}, outDir); err != nil {
-			t.Errorf("CHIP_ACTUALLY_USED should pass macro audit: %v", err)
+		for _, consumed := range []string{"CHIP_ACTUALLY_USED", "CHIP_LIVE_ELSE_OF_IF0", "CHIP_LIVE_IF1", "CHIP_IF_BRANCH_A", "CHIP_ELSE_BRANCH_B", "CHIP_IFDEF_A", "CHIP_IFDEF_ELSE_B"} {
+			if err := auditMacroUsage([]string{consumed}, []string{srcDir}, outDir); err != nil {
+				t.Errorf("%s should pass macro audit: %v", consumed, err)
+			}
 		}
 
 		// MED-46: usableRAMWindow trims both bottom and top reserved RAM regions.

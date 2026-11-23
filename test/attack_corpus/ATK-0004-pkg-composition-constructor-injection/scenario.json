@@ -1,0 +1,4 @@
+{
+  "action": "conformance",
+  "package_dir": "payload/evil_ctor_drv"
+}

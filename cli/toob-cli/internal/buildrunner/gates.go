@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/Toob-Boot/Toob-Loader/toob-go-lib/build"
@@ -119,7 +121,11 @@ func runStage1AndRecoveryGates(
 		return fmt.Errorf("stage1 post-link gate: %w", err)
 	}
 
+	stage1XIP := stage1UsesGeneratedFlashLD(opts.Plan)
 	s1Cfg := newStageAuditConfig(opts.BuildDir, "toob_stage1", "stage1a", auditProfile, reservedRAM, layout, hw, uint64(layout.Stage1A.Budget), hasSU)
+	if !stage1XIP {
+		s1Cfg.FlashBounds = iramMemoryRegion(hw)
+	}
 	s1Report, err := auditELFStrict(stage1ELF, s1Cfg)
 	if err != nil {
 		return fmt.Errorf("stage1 ELF audit: %w", err)
@@ -135,7 +141,7 @@ func runStage1AndRecoveryGates(
 	}
 
 	stage1bELF := findBuildArtifact(opts.BuildDir, "toob_stage1b", "toob_stage1b.elf")
-	if layout.Stage1B.Budget > 0 && stage1bELF == "" {
+	if stage1XIP && layout.Stage1B.Budget > 0 && stage1bELF == "" {
 		return errors.New("stage1b partition budgeted in layout, but toob_stage1b ELF artifact is missing")
 	}
 	if stage1bELF != "" {
@@ -455,6 +461,39 @@ func stageFlashBoundsAndForbidden(
 		forbidden = append(forbidden, slotExecRegion(res, winBase, execBase))
 	}
 	return flashBounds, forbidden
+}
+
+var includeFlashLayoutRe = regexp.MustCompile(`(?m)\bINCLUDE[ \t]+flash_layout\.ld\b`)
+
+func stage1UsesGeneratedFlashLD(plan *resolve.Plan) bool {
+	if plan == nil || strings.TrimSpace(plan.ChipLinker) == "" {
+		return true
+	}
+	// #nosec G304 -- plan.ChipLinker is validated via resolve.Contain inside the resolved chip directory.
+	raw, err := os.ReadFile(plan.ChipLinker)
+	if err != nil {
+		return false
+	}
+	return includeFlashLayoutRe.Match(raw)
+}
+
+func iramMemoryRegion(hw *manifest.HardwareJson) *elfaudit.MemoryRegion {
+	if hw == nil || strings.TrimSpace(hw.Memory.IramBase) == "" || strings.TrimSpace(hw.Memory.IramSize) == "" {
+		return nil
+	}
+	base, err := build.ParseU64Literal(hw.Memory.IramBase)
+	if err != nil {
+		return nil
+	}
+	size, err := build.ParseU64Literal(hw.Memory.IramSize)
+	if err != nil || size == 0 {
+		return nil
+	}
+	return &elfaudit.MemoryRegion{
+		Name: "iram",
+		Base: base,
+		Size: size,
+	}
 }
 
 func hasStackUsageArtifacts(buildDir string) bool {

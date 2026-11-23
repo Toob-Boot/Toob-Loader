@@ -1,0 +1,13 @@
+id = "ATK-0004"
+title = "Malicious third-party driver attempts pre-main .init_array / constructor code execution"
+team = "team-5"
+chip = "all"
+phase = "build"
+severity_class = "P1"
+threat_assumption = "SUPPLY-CHAIN"
+runner = "build_gates"
+verification_scope = "build_gates"
+expected_outcome = "defended"
+invariant_id = "INV-BUILD-NO-CTOR-INIT-ARRAY"
+root_cause_key = "supply-chain-init-array-constructor"
+references = ["CRIT-73", "HIGH-115"]

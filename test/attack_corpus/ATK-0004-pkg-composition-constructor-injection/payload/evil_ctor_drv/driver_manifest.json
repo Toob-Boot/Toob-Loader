@@ -1,0 +1,12 @@
+{
+  "name": "@redteam/evil_ctor_drv",
+  "version": "1.0.0",
+  "author": "red-team-5",
+  "trait": "entropy",
+  "abi_version": "v3",
+  "headers": ["ctor.h"],
+  "sources": ["ctor.c"],
+  "symbols": {
+    "random": "evil_ctor_random"
+  }
+}

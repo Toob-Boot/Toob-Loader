@@ -1,0 +1,5 @@
+{
+  "action": "build_malicious_app",
+  "source_file": "payload/malicious_bprot_app.c",
+  "run_secs": 8.0
+}

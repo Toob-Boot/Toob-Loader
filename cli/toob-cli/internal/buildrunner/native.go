@@ -646,14 +646,28 @@ func buildSubprocessEnv(ctx context.Context, tcBinDir string) []string {
 	return setEnvFold(env, "PATH", tcBinDir+sep+curPath)
 }
 
-func hasExecutableInEnv(env []string, name string) bool {
+func lookupExecutableInEnv(env []string, name string) (string, bool) {
 	pathList := getEnvFold(env, "PATH")
+	names := []string{name}
 	if runtime.GOOS == "windows" && !strings.HasSuffix(strings.ToLower(name), ".exe") {
-		if hasExeInPathList(pathList, name+".exe") {
-			return true
+		names = []string{name + ".exe", name}
+	}
+	for _, dir := range filepath.SplitList(pathList) {
+		if dir == "" {
+			continue
+		}
+		for _, cand := range names {
+			if isRegularFileInDir(dir, cand) {
+				return filepath.Join(dir, cand), true
+			}
 		}
 	}
-	return hasExeInPathList(pathList, name)
+	return name, false
+}
+
+func hasExecutableInEnv(env []string, name string) bool {
+	_, ok := lookupExecutableInEnv(env, name)
+	return ok
 }
 
 func runCMakeConfigure(
@@ -741,8 +755,9 @@ func execCMakeSubprocess(
 	verbose bool,
 	stdout, stderr io.Writer,
 ) error {
-	// #nosec G204 -- exe is "cmake" and args are validated via ValidateCMakeArgPath / fixed flags.
-	cmd := exec.CommandContext(ctx, exe, args...)
+	resolvedExe, _ := lookupExecutableInEnv(cmdEnv, exe)
+	// #nosec G204,G702 -- exe is "cmake" resolved from validated cmdEnv PATH and args are validated via ValidateCMakeArgPath / fixed flags.
+	cmd := exec.CommandContext(ctx, resolvedExe, args...)
 	cmd.Env = cmdEnv
 
 	ring := NewRingBuffer(defaultRingBufferBytes)

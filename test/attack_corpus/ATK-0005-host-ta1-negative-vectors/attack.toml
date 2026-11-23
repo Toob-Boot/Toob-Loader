@@ -1,0 +1,13 @@
+id = "ATK-0005"
+title = "Host-SIL ASan+UBSan replay of TA-1 zero-wear, blank-WAL, KDM replay, PQC pin & unsigned rollback vectors"
+team = "team-3"
+chip = "host"
+phase = "update"
+severity_class = "P0"
+threat_assumption = "TA-1"
+runner = "host_sil"
+verification_scope = "host_sil"
+expected_outcome = "defended"
+invariant_id = "INV-TA1-AUTH-UPDATE-ROLLBACK"
+root_cause_key = "ta1-host-sil-negative-vectors"
+references = ["CRIT-68", "CRIT-69", "CRIT-70", "CRIT-71", "HIGH-104", "MED-84"]

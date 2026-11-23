@@ -1,0 +1,13 @@
+id = "ATK-0003"
+title = "Compromised App-OS inspects SRAM at handoff PC for residual HUK, journal_key or domain literals"
+team = "team-2"
+chip = "nrf52840"
+phase = "runtime"
+severity_class = "P1"
+threat_assumption = "TA-3"
+runner = "renode_nrf52840"
+verification_scope = "renode"
+expected_outcome = "defended"
+invariant_id = "INV-SRAM-ZEROIZE-HANDOFF"
+root_cause_key = "sram-handoff-secret-residual"
+references = ["CRIT-69", "HIGH-102", "HIGH-114"]

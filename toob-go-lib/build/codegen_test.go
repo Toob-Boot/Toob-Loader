@@ -984,6 +984,31 @@ func TestLinkerScriptsAnd64BitAddresses(t *testing.T) {
 		}
 	}
 
+	hwUnifiedRAM := &HardwareJson{
+		Flash: FlashSpec{
+			Stage0ExecMode: "ram",
+			Size:           0x400000,
+		},
+		Memory: MemorySpec{
+			IramBase:  "0x40800000",
+			IramSize:  "0x7C000",
+			LpRamBase: "0x50000000",
+			LpRamSize: "0x4000",
+		},
+	}
+	s0UnifiedLD, err := renderStage0LD(hwUnifiedRAM).finish()
+	if err != nil {
+		t.Fatalf("renderStage0LD unified RAM: %v", err)
+	}
+	for _, want := range []string{
+		"PHDRS {", "rx_seg PT_LOAD FLAGS(5);", "rw_seg PT_LOAD FLAGS(6);",
+		"lp_seg PT_LOAD FLAGS(6);", "} > S0_RAM :rx_seg", "} > S0_RAM :rw_seg", "} > LP_RAM :lp_seg",
+	} {
+		if !strings.Contains(string(s0UnifiedLD), want) {
+			t.Errorf("unified-RAM stage0_layout.ld missing %q:\n%s", want, s0UnifiedLD)
+		}
+	}
+
 	flashLD, err := renderFlashLD(ctx, cfg, layout).finish()
 	if err != nil {
 		t.Fatalf("renderFlashLD: %v", err)

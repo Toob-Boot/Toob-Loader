@@ -1,0 +1,13 @@
+id = "ATK-0002"
+title = "TA-1 attacker erases K4 WAL on deployed DSLC=0x01 device hoping for factory blank reset"
+team = "team-1"
+chip = "nrf52840"
+phase = "preboot"
+severity_class = "P0"
+threat_assumption = "TA-1"
+runner = "renode_nrf52840"
+verification_scope = "renode"
+expected_outcome = "defended"
+invariant_id = "INV-K4-NO-DEPLOYED-RESET"
+root_cause_key = "k4-deployed-blank-wal-reset"
+references = ["CRIT-69"]

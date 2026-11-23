@@ -730,3 +730,60 @@ func main() {
 	}
 	return outExe
 }
+
+func TestLookupExecutableInEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	exeName := "cmake"
+	if runtime.GOOS == "windows" {
+		exeName += ".exe"
+	}
+	wantPath := filepath.Join(tmpDir, exeName)
+	if err := os.WriteFile(wantPath, []byte("stub"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := []string{"PATH=" + tmpDir}
+	if !hasExecutableInEnv(env, "cmake") {
+		t.Fatalf("expected hasExecutableInEnv to locate %s in custom PATH", exeName)
+	}
+	gotPath, ok := lookupExecutableInEnv(env, "cmake")
+	if !ok || filepath.Clean(gotPath) != filepath.Clean(wantPath) {
+		t.Fatalf("lookupExecutableInEnv = (%q, %v), want (%q, true)", gotPath, ok, wantPath)
+	}
+	if missingPath, missingOK := lookupExecutableInEnv(env, "nonexistent-tool"); missingOK || missingPath != "nonexistent-tool" {
+		t.Fatalf("expected fallback for missing binary, got (%q, %v)", missingPath, missingOK)
+	}
+}
+
+func TestStage1UsesGeneratedFlashLDAndIRAMBounds(t *testing.T) {
+	dir := t.TempDir()
+	xipLD := filepath.Join(dir, "xip_stage1.ld")
+	if err := os.WriteFile(xipLD, []byte("/* XIP wrapper */\nINCLUDE flash_layout.ld\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	iramLD := filepath.Join(dir, "esp32c6_stage1.ld")
+	if err := os.WriteFile(iramLD, []byte("MEMORY { iram (rwx) : ORIGIN = 0x40810000, LENGTH = 0x6C000 }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if !stage1UsesGeneratedFlashLD(&resolve.Plan{}) {
+		t.Fatal("expected nil/empty ChipLinker to default to generated flash_layout.ld")
+	}
+	if !stage1UsesGeneratedFlashLD(&resolve.Plan{ChipLinker: xipLD}) {
+		t.Fatal("expected INCLUDE flash_layout.ld wrapper to return true")
+	}
+	if stage1UsesGeneratedFlashLD(&resolve.Plan{ChipLinker: iramLD}) {
+		t.Fatal("expected custom IRAM linker script without flash_layout.ld to return false")
+	}
+
+	hw := &manifest.HardwareJson{
+		Memory: build.MemorySpec{
+			IramBase: "0x40800000",
+			IramSize: "0x7C000",
+		},
+	}
+	reg := iramMemoryRegion(hw)
+	if reg == nil || reg.Base != 0x40800000 || reg.Size != 0x7C000 || reg.End() != 0x4087C000 {
+		t.Fatalf("unexpected iramMemoryRegion: %+v", reg)
+	}
+}

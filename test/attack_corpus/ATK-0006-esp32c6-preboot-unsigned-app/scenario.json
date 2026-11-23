@@ -1,0 +1,10 @@
+{
+  "action": "flash_overlay",
+  "run_secs": 15.0,
+  "overlays": [
+    {
+      "offset": "0x050000",
+      "hex_bytes": "544F4F4231000000000000000000000000000000DEADBEEFCAFEBABE1337C0DE"
+    }
+  ]
+}

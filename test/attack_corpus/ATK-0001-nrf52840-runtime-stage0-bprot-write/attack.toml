@@ -1,0 +1,13 @@
+id = "ATK-0001"
+title = "Compromised App-OS attempts BPROT clear + Stage-0 flash erase/write"
+team = "team-2"
+chip = "nrf52840"
+phase = "runtime"
+severity_class = "P0"
+threat_assumption = "TA-3"
+runner = "renode_nrf52840"
+verification_scope = "renode"
+expected_outcome = "defended"
+invariant_id = "INV-STAGE0-BPROT-LOCK"
+root_cause_key = "nrf52840-runtime-bprot-stage0-write"
+references = ["HIGH-102", "HIGH-114"]

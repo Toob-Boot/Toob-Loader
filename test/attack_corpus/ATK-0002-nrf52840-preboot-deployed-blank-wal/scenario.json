@@ -1,0 +1,11 @@
+{
+  "action": "flash_overlay",
+  "run_secs": 1.8,
+  "overlays": [
+    {
+      "offset": "0x0D8000",
+      "fill_byte": "0xFF",
+      "length": "0x004000"
+    }
+  ]
+}

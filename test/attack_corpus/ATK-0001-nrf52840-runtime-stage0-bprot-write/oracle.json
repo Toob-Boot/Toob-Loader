@@ -1,0 +1,15 @@
+{
+  "wait_uart_marker": "[ATK-0001] DONE",
+  "must_contain_uart": [
+    "[ATK-0001] BOOT handoff=OK confirm=OK",
+    "sticky=OK",
+    "status=PROTECTED",
+    "[ATK-0001] DONE"
+  ],
+  "must_not_contain_uart": [
+    "BREACH",
+    "sticky=FAIL"
+  ],
+  "bprot_blocked_min": 2,
+  "stage0_sha256_unchanged": true
+}

@@ -1,0 +1,13 @@
+id = "ATK-0006"
+title = "ESP32-C6 TA-1 unsigned TOOB image injected into App Slot 0 must fail closed before execution"
+team = "team-4"
+chip = "esp32c6"
+phase = "preboot"
+severity_class = "P0"
+threat_assumption = "TA-1"
+runner = "qemu_esp32c6"
+verification_scope = "qemu"
+expected_outcome = "defended"
+invariant_id = "INV-STAGE1-TSIG-AUTHENTICATED-BOOT"
+root_cause_key = "esp32c6-unsigned-app-slot0-boot"
+references = ["CRIT-68"]

@@ -392,6 +392,16 @@ func renderStage0LDForContext(ctx *Context, hw *HardwareJson) *cSource {
 	isRAMExec := mode == "ram"
 	harvardRAMExec := isRAMExec && mem.hasSram && mem.sramBase != mem.iramBase
 	segmentedBootrom := isSegmentedBootrom(hw)
+	useUnifiedRamPhdrs := isRAMExec && !harvardRAMExec
+	rxTag, rwTag, lpTag := "", "", ""
+	if useUnifiedRamPhdrs {
+		rxTag = " :rx_seg"
+		rwTag = " :rw_seg"
+		lpTag = " :rw_seg"
+		if mem.hasLpRAM {
+			lpTag = " :lp_seg"
+		}
+	}
 	ramBase, ramSize := mem.iramBase, mem.iramSize
 	if mem.hasSram && (!isRAMExec || harvardRAMExec) {
 		ramBase, ramSize = mem.sramBase, mem.sramSize
@@ -420,6 +430,16 @@ func renderStage0LDForContext(ctx *Context, hw *HardwareJson) *cSource {
 	}
 	s.line("}")
 	s.blank()
+	if useUnifiedRamPhdrs {
+		s.line("PHDRS {")
+		s.line("    rx_seg PT_LOAD FLAGS(5);")
+		s.line("    rw_seg PT_LOAD FLAGS(6);")
+		if mem.hasLpRAM {
+			s.line("    lp_seg PT_LOAD FLAGS(6);")
+		}
+		s.line("}")
+		s.blank()
+	}
 
 	outRegion := "S0_ROM"
 	switch {
@@ -438,14 +458,21 @@ func renderStage0LDForContext(ctx *Context, hw *HardwareJson) *cSource {
 	s.line("        *(.literal .literal.*)")
 	s.line("        *(.text .text.*)")
 	s.line("        . = ALIGN(4);")
-	s.linef("    } > %s", outRegion)
+	s.linef("    } > %s%s", outRegion, rxTag)
 	s.blank()
 	if !harvardRAMExec {
 		s.line("    .rodata : ALIGN(4) {")
 		s.line("        *(.rodata .rodata.*)")
 		s.line("        *(.srodata .srodata.*)")
-		s.linef("    } > %s", outRegion)
+		s.linef("    } > %s%s", outRegion, rxTag)
 		s.blank()
+		if useUnifiedRamPhdrs {
+			s.line("    .toob_mock_section : ALIGN(4) {")
+			s.line("        KEEP(*(.toob_mock_section))")
+			s.line("        KEEP(*(.toob_mock_section.*))")
+			s.linef("    } > %s%s", outRegion, rxTag)
+			s.blank()
+		}
 	}
 	switch {
 	case isRAMExec && (!harvardRAMExec || segmentedBootrom):
@@ -472,7 +499,7 @@ func renderStage0LDForContext(ctx *Context, hw *HardwareJson) *cSource {
 	case harvardRAMExec:
 		s.line("    } > S0_RAM AT > S0_IRAM")
 	case isRAMExec:
-		s.line("    } > S0_RAM")
+		s.line("    } > S0_RAM" + rwTag)
 	default:
 		s.line("    } > S0_RAM AT > S0_ROM")
 	}
@@ -485,7 +512,7 @@ func renderStage0LDForContext(ctx *Context, hw *HardwareJson) *cSource {
 	s.line("        *(COMMON)")
 	s.line("        _ebss = .;")
 	s.line("        _bss_end = .;")
-	s.line("    } > S0_RAM")
+	s.line("    } > S0_RAM" + rwTag)
 	s.blank()
 	s.line("    .noinit (NOLOAD) : ALIGN(8) {")
 	s.line("        _noinit_base = .;")
@@ -497,13 +524,15 @@ func renderStage0LDForContext(ctx *Context, hw *HardwareJson) *cSource {
 	s.line("        . = MAX(., _noinit_base + 0x118);")
 	s.line("        . = ALIGN(8);")
 	s.line("        *(.noinit .noinit.*)")
-	s.linef("    } > %s", noinitRegion)
+	s.linef("    } > %s%s", noinitRegion, lpTag)
 	s.blank()
-	s.line("    .toob_mock_section : ALIGN(4) {")
-	s.line("        KEEP(*(.toob_mock_section))")
-	s.line("        KEEP(*(.toob_mock_section.*))")
-	s.linef("    } > %s", outRegion)
-	s.blank()
+	if !useUnifiedRamPhdrs {
+		s.line("    .toob_mock_section : ALIGN(4) {")
+		s.line("        KEEP(*(.toob_mock_section))")
+		s.line("        KEEP(*(.toob_mock_section.*))")
+		s.linef("    } > %s", outRegion)
+		s.blank()
+	}
 	s.line("    _stack_top = ORIGIN(S0_RAM) + LENGTH(S0_RAM);")
 	s.linef("    ASSERT(_stack_top >= _ebss + 0x%X, \"Stage 0: insufficient stack space (< %d bytes)\")", minLinkerStackBytes, minLinkerStackBytes)
 	if isRAMExec {
