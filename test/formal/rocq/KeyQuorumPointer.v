@@ -511,3 +511,147 @@ Proof.
   intros [s0 s1 act mmu tent w0 w1] cand_B; cbv zeta.
   destruct act; vm_compute; repeat split; reflexivity.
 Qed.
+
+(* ========================================================================== *)
+(* SECTION 3: Wave-1 HIGH-104 — KDM Sequence Floor & Anti-Rollback in TMR     *)
+(*            Mirrors toobloader/core/boot_cloud_cmd.c & boot_journal.c       *)
+(* ========================================================================== *)
+
+Record KdmCloudState : Type := mkKdmCloudState {
+  kcs_tmr_kdm_floor : nat;
+  kcs_quorum        : KdmQuorumStore;
+  kcs_dslc          : nat
+}.
+
+Inductive KdmLoadResult : Type :=
+  | KLR_Record        : KdmRecord -> KdmLoadResult
+  | KLR_EfuseFallback : nat -> KdmLoadResult
+  | KLR_Rejected      : BootErrCode -> KdmLoadResult.
+
+Definition eval_load_active_cloud_key
+    (st : KdmCloudState) (root_sig_ok : KdmRecord -> bool)
+    (efuse_key1_valid : bool) : KdmLoadResult :=
+  match kdm_quorum_read (kcs_quorum st) with
+  | Some rec =>
+      if (kcs_tmr_kdm_floor st <=? kr_epoch rec) && root_sig_ok rec then
+        KLR_Record rec
+      else if (kcs_tmr_kdm_floor st =? 0) && (kcs_dslc st =? 0) && efuse_key1_valid then
+        KLR_EfuseFallback 0
+      else
+        KLR_Rejected Err_NotFound
+  | None =>
+      if (kcs_tmr_kdm_floor st =? 0) && (kcs_dslc st =? 0) && efuse_key1_valid then
+        KLR_EfuseFallback 0
+      else
+        KLR_Rejected Err_NotFound
+  end.
+
+Definition eval_kdm_rotate
+    (st : KdmCloudState) (root_sig_ok : KdmRecord -> bool)
+    (efuse_key1_valid : bool) (new_rec : KdmRecord) (cmd_root_ok : bool)
+    : (bool * KdmCloudState) :=
+  let loaded := eval_load_active_cloud_key st root_sig_ok efuse_key1_valid in
+  match loaded with
+  | KLR_Rejected _ => (false, st)
+  | KLR_Record cur_rec =>
+      if cmd_root_ok && (kr_epoch cur_rec <? kr_epoch new_rec) then
+        let new_floor := Nat.max (kcs_tmr_kdm_floor st) (kr_epoch new_rec) in
+        let q' := kdm_write_with_brownout cur_rec new_rec 3 in
+        (true, mkKdmCloudState new_floor q' (kcs_dslc st))
+      else
+        (false, st)
+  | KLR_EfuseFallback cur_seq =>
+      if cmd_root_ok && (cur_seq <? kr_epoch new_rec) then
+        let new_floor := Nat.max (kcs_tmr_kdm_floor st) (kr_epoch new_rec) in
+        let q' := mkKdmQuorum (Some new_rec) (Some new_rec) (Some new_rec) in
+        (true, mkKdmCloudState new_floor q' (kcs_dslc st))
+      else
+        (false, st)
+  end.
+
+Theorem high104_kdm_seq_floor_strictly_monotone :
+  forall st root_sig_ok efuse_ok new_rec cmd_ok accepted st',
+    eval_kdm_rotate st root_sig_ok efuse_ok new_rec cmd_ok = (accepted, st') ->
+    (* 1. Floor never decreases across ANY rotation attempt *)
+    kcs_tmr_kdm_floor st <= kcs_tmr_kdm_floor st' /\
+    (* 2. Any accepted rotation strictly advances tmr.kdm_seq_floor and matches new_rec *)
+    (accepted = true ->
+       kcs_tmr_kdm_floor st < kcs_tmr_kdm_floor st' /\
+       kcs_tmr_kdm_floor st' = kr_epoch new_rec /\
+       kdm_quorum_read (kcs_quorum st') = Some new_rec) /\
+    (* 3. Deployed or floor > 0 devices never use eFuse fallback *)
+    ((0 < kcs_tmr_kdm_floor st \/ kcs_dslc st <> 0) ->
+       eval_load_active_cloud_key st root_sig_ok efuse_ok <> KLR_EfuseFallback 0) /\
+    (* 4. Any quorum record below tmr.kdm_seq_floor is rejected *)
+    (forall rec,
+       kdm_quorum_read (kcs_quorum st) = Some rec ->
+       kr_epoch rec < kcs_tmr_kdm_floor st ->
+       (exists err, eval_load_active_cloud_key st root_sig_ok efuse_ok = KLR_Rejected err)).
+Proof.
+  intros st root_sig_ok efuse_ok new_rec cmd_ok accepted st' Hrot.
+  assert (Hload_ge : forall r,
+    eval_load_active_cloud_key st root_sig_ok efuse_ok = KLR_Record r ->
+    kcs_tmr_kdm_floor st <= kr_epoch r).
+  { intros r Hld; unfold eval_load_active_cloud_key in Hld.
+    destruct (kdm_quorum_read (kcs_quorum st)) as [rec|].
+    - destruct ((kcs_tmr_kdm_floor st <=? kr_epoch rec) && root_sig_ok rec) eqn:Echk.
+      + apply Bool.andb_true_iff in Echk as [Hle _].
+        apply Nat.leb_le in Hle; inversion Hld; subst; exact Hle.
+      + destruct ((kcs_tmr_kdm_floor st =? 0) && (kcs_dslc st =? 0) && efuse_ok); discriminate.
+    - destruct ((kcs_tmr_kdm_floor st =? 0) && (kcs_dslc st =? 0) && efuse_ok); discriminate. }
+  assert (Hfallback_gate :
+    (0 < kcs_tmr_kdm_floor st \/ kcs_dslc st <> 0) ->
+    eval_load_active_cloud_key st root_sig_ok efuse_ok <> KLR_EfuseFallback 0).
+  { intros [Hf_pos | Hdslc_nz] Hfb; unfold eval_load_active_cloud_key in Hfb.
+    - assert (Ez : (kcs_tmr_kdm_floor st =? 0) = false) by (apply Nat.eqb_neq; lia).
+      rewrite Ez in Hfb; simpl in Hfb.
+      destruct (kdm_quorum_read (kcs_quorum st)) as [rec|];
+        [destruct ((kcs_tmr_kdm_floor st <=? kr_epoch rec) && root_sig_ok rec)|]; discriminate Hfb.
+    - assert (Ez : (kcs_dslc st =? 0) = false) by (apply Nat.eqb_neq; lia).
+      rewrite Ez, Bool.andb_false_r, Bool.andb_false_l in Hfb.
+      destruct (kdm_quorum_read (kcs_quorum st)) as [rec|];
+        [destruct ((kcs_tmr_kdm_floor st <=? kr_epoch rec) && root_sig_ok rec)|]; discriminate Hfb. }
+  assert (Hlow_rej :
+    forall rec,
+      kdm_quorum_read (kcs_quorum st) = Some rec ->
+      kr_epoch rec < kcs_tmr_kdm_floor st ->
+      exists err, eval_load_active_cloud_key st root_sig_ok efuse_ok = KLR_Rejected err).
+  { intros rec Hq Hlt.
+    unfold eval_load_active_cloud_key; rewrite Hq.
+    assert (Ele : (kcs_tmr_kdm_floor st <=? kr_epoch rec) = false) by (apply Nat.leb_gt; lia).
+    assert (Ez : (kcs_tmr_kdm_floor st =? 0) = false) by (apply Nat.eqb_neq; lia).
+    rewrite Ele, Ez; simpl; exists Err_NotFound; reflexivity. }
+  split; [|split; [|split; [exact Hfallback_gate | exact Hlow_rej]]].
+  - unfold eval_kdm_rotate in Hrot.
+    destruct (eval_load_active_cloud_key st root_sig_ok efuse_ok) as [cur | cseq | err] eqn:Hld.
+    + destruct (cmd_ok && (kr_epoch cur <? kr_epoch new_rec));
+        inversion Hrot; subst; simpl; lia.
+    + destruct (cmd_ok && (cseq <? kr_epoch new_rec));
+        inversion Hrot; subst; simpl; lia.
+    + inversion Hrot; subst; lia.
+  - intros Hacc; subst accepted.
+    unfold eval_kdm_rotate in Hrot.
+    destruct (eval_load_active_cloud_key st root_sig_ok efuse_ok) as [cur | cseq | err] eqn:Hld.
+    + destruct (cmd_ok && (kr_epoch cur <? kr_epoch new_rec)) eqn:Erot; [|discriminate].
+      apply Bool.andb_true_iff in Erot as [_ Hlt].
+      apply Nat.ltb_lt in Hlt.
+      pose proof (Hload_ge cur eq_refl) as Hcur_ge.
+      inversion Hrot; subst; simpl; clear Hrot.
+      split; [lia | split; [lia|]].
+      unfold kdm_write_with_brownout, kdm_quorum_read; simpl; rewrite kdm_eqb_refl; reflexivity.
+    + destruct (cmd_ok && (cseq <? kr_epoch new_rec)) eqn:Erot; [|discriminate].
+      apply Bool.andb_true_iff in Erot as [_ Hlt].
+      apply Nat.ltb_lt in Hlt.
+      assert (Hfb0 : kcs_tmr_kdm_floor st = 0 /\ cseq = 0).
+      { clear Hrot Hlt. unfold eval_load_active_cloud_key in Hld.
+        destruct (kdm_quorum_read (kcs_quorum st)) as [rec|];
+          [destruct ((kcs_tmr_kdm_floor st <=? kr_epoch rec) && root_sig_ok rec); [discriminate|]|];
+          destruct ((kcs_tmr_kdm_floor st =? 0) && (kcs_dslc st =? 0) && efuse_ok) eqn:Ef; try discriminate;
+          apply Bool.andb_true_iff in Ef as [Ef _]; apply Bool.andb_true_iff in Ef as [Ez _];
+          apply Nat.eqb_eq in Ez; inversion Hld; split; assumption || reflexivity. }
+      destruct Hfb0 as [Hfl0 Hcs0].
+      inversion Hrot; subst; simpl; clear Hrot.
+      split; [lia | split; [lia|]].
+      unfold kdm_quorum_read; simpl; rewrite kdm_eqb_refl; reflexivity.
+    + discriminate.
+Qed.

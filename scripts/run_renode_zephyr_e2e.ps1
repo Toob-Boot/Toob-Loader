@@ -112,7 +112,7 @@ try {
     Write-Host "=== [2/4] Signing XIP Stage 1 & Recovery OS (256-Byte SCB->VTOR Entry 0x100) ==="
     & $ToobExe sign stage1 "$BootBuildDir\toob_stage1.bin" --entry 0x100 --mock -o "$BootBuildDir\toob_stage1.signed.bin"
     if ($LASTEXITCODE -ne 0) { throw "toob sign stage1 failed" }
-    & $ToobExe sign image "$BootBuildDir\toob_recovery.raw.bin" --entry 0x100 -o "$BootBuildDir\toob_recovery.bin"
+    & $ToobExe sign image "$BootBuildDir\toob_recovery.raw.bin" --entry 0x100 --mock -o "$BootBuildDir\toob_recovery.bin"
     if ($LASTEXITCODE -ne 0) { throw "toob sign recovery failed" }
 
     Write-Host "=== [3/4] Building Real Multi-Threaded Zephyr 4.0 Kernel Apps (v1.0.0, v2.0.0, bad_v3) ==="
@@ -202,7 +202,7 @@ try {
         Copy-Item -Force $elfPath $outElf
         Copy-Item -Force $rawPath $outRaw
 
-        & $ToobExe sign image $outRaw --entry 0x100 -o $outToob
+        & $ToobExe sign image $outRaw --entry 0x100 --mock -o $outToob
         if ($LASTEXITCODE -ne 0) { throw "toob sign image failed for $($v.Name)" }
     }
 

@@ -62,10 +62,19 @@ static const size_t g_rstore_sizes[3] = {
 };
 #endif
 
+#ifdef TOOB_OTP_MAX_SLOTS
+#define CBMC_MAX_OTP_SLOTS TOOB_OTP_MAX_SLOTS
+#else
+#define CBMC_MAX_OTP_SLOTS 256U
+#endif
+
 static uint8_t  g_root_pubkey[32];
+static uint8_t  g_device_secret[32];
 static uint8_t  g_chip_uid[32];
 static size_t   g_chip_uid_len;
 static uint32_t g_otp_epoch;
+static uint8_t  g_dslc_byte;
+static uint8_t  g_active_otp_limit;
 static bool g_fast_init_mode = false;
 static bool g_slot0_occupied = false;
 static bool g_wal_mode       = true;
@@ -206,11 +215,48 @@ static boot_status_t journal_read_pubkey(uint8_t *out_key, size_t key_len,
     __CPROVER_assert(out_key != NULL && key_len == 32U &&
                          __CPROVER_w_ok(out_key, 32U),
                      "keystore->read_pubkey requires writable 32B buffer");
-    __CPROVER_assert(key_slot == 0U, "K4 journal KDF queries Root slot 0");
+    __CPROVER_assert((uint32_t)key_slot < (uint32_t)CBMC_MAX_OTP_SLOTS,
+                     "OTP key slot scan must stay within [0, TOOB_MAX_OTP_SLOTS)");
     if (nondet_bool()) {
+        return nondet_bool() ? BOOT_ERR_NOT_FOUND : BOOT_ERR_FLASH_HW;
+    }
+    if (key_slot >= g_active_otp_limit) {
         return BOOT_ERR_NOT_FOUND;
     }
     memcpy(out_key, g_root_pubkey, 32U);
+    return BOOT_OK;
+}
+
+static boot_status_t journal_read_dslc(uint8_t *out_dslc, size_t *inout_len) {
+    __CPROVER_assert(out_dslc != NULL && inout_len != NULL &&
+                         __CPROVER_r_ok(inout_len, sizeof(*inout_len)) &&
+                         *inout_len >= 1U &&
+                         __CPROVER_w_ok(out_dslc, 1U),
+                     "keystore->read_dslc requires writable 1B buffer");
+    if (nondet_bool()) {
+        return BOOT_ERR_FLASH_HW;
+    }
+    *out_dslc = g_dslc_byte;
+    *inout_len = 1U;
+    return BOOT_OK;
+}
+
+static boot_status_t journal_read_device_secret(uint8_t *out_secret, size_t max_len,
+                                                size_t *out_len) {
+    __CPROVER_assert(out_secret != NULL && max_len >= 32U &&
+                         __CPROVER_w_ok(out_secret, max_len) &&
+                         out_len != NULL &&
+                         __CPROVER_w_ok(out_len, sizeof(*out_len)),
+                     "keystore->read_device_secret requires valid output buffers");
+    uint8_t mode = nondet_uint8_t();
+    if (mode == 0U) {
+        return BOOT_ERR_NOT_SUPPORTED;
+    }
+    if (mode == 1U) {
+        return BOOT_ERR_FLASH_HW;
+    }
+    memcpy(out_secret, g_device_secret, 32U);
+    *out_len = 32U;
     return BOOT_OK;
 }
 
@@ -397,7 +443,20 @@ static void prove_wal_init_quorum_and_migration(const boot_platform_t *platform)
     __CPROVER_assert(boot_journal_init(NULL) == BOOT_ERR_INVALID_ARG,
                      "NULL platform must be rejected by boot_journal_init");
 
+    const bool wal_all_blank =
+        (g_wh0.sector_magic != WAL_ABI_VERSION_MAGIC_CURRENT &&
+         g_wh0.sector_magic != WAL_ABI_VERSION_MAGIC_LEGACY) &&
+        (g_wh1.sector_magic != WAL_ABI_VERSION_MAGIC_CURRENT &&
+         g_wh1.sector_magic != WAL_ABI_VERSION_MAGIC_LEGACY) &&
+        (g_wh2.sector_magic != WAL_ABI_VERSION_MAGIC_CURRENT &&
+         g_wh2.sector_magic != WAL_ABI_VERSION_MAGIC_LEGACY) &&
+        (g_wh3.sector_magic != WAL_ABI_VERSION_MAGIC_CURRENT &&
+         g_wh3.sector_magic != WAL_ABI_VERSION_MAGIC_LEGACY);
     boot_status_t st = boot_journal_init(platform);
+    if (wal_all_blank && (g_otp_epoch > 0U || g_dslc_byte != 0x00U)) {
+        __CPROVER_assert(st != BOOT_OK,
+                         "CRIT-69: deployed device must reject blank-WAL factory reset");
+    }
     if (st != BOOT_OK) {
         return;
     }
@@ -510,12 +569,16 @@ static void init_journal_env(flash_hal_t *flash_hal,
                              bool init_wal,
                              bool allow_legacy) {
     CBMC_HAVOC_OBJECT(g_root_pubkey);
+    CBMC_HAVOC_OBJECT(g_device_secret);
     CBMC_HAVOC_OBJECT(g_chip_uid);
 
     g_chip_uid_len = nondet_size_t();
     __CPROVER_assume(g_chip_uid_len <= 32U);
-    g_otp_epoch = nondet_uint32_t();
-    g_wal_mode  = init_wal;
+    g_otp_epoch        = nondet_uint32_t();
+    g_dslc_byte        = nondet_uint8_t();
+    g_active_otp_limit = nondet_uint8_t();
+    __CPROVER_assume(g_active_otp_limit <= (uint8_t)CBMC_MAX_OTP_SLOTS);
+    g_wal_mode         = init_wal;
 
     if (init_wal) {
         if (g_fast_init_mode) {
@@ -563,7 +626,9 @@ static void init_journal_env(flash_hal_t *flash_hal,
     *keystore_hal = (keystore_hal_t){
         .read_pubkey            = journal_read_pubkey,
         .read_chip_uid          = journal_read_chip_uid,
+        .read_dslc              = journal_read_dslc,
         .read_monotonic_counter = journal_read_monotonic_counter,
+        .read_device_secret     = journal_read_device_secret,
     };
 
     *platform = (boot_platform_t){

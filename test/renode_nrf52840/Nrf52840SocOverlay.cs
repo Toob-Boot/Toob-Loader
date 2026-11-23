@@ -26,6 +26,14 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
 
         public uint DeviceId0 { get; set; } = 0x01008452U;
         public uint DeviceId1 { get; set; } = 0xEFBEADDEU;
+        public uint Er0 { get; set; } = 0x4E524635U;
+        public uint Er1 { get; set; } = 0x32383430U;
+        public uint Er2 { get; set; } = 0xA55A1F01U;
+        public uint Er3 { get; set; } = 0xC33C2E02U;
+        public uint Ir0 { get; set; } = 0x91827364U;
+        public uint Ir1 { get; set; } = 0x55AA33CCU;
+        public uint Ir2 { get; set; } = 0x13572468U;
+        public uint Ir3 { get; set; } = 0x87654321U;
 
         public uint ReadDoubleWord(long offset)
         {
@@ -39,6 +47,22 @@ namespace Antmicro.Renode.Peripherals.Miscellaneous
                 return DeviceId0;
             case 0x064:
                 return DeviceId1;
+            case 0x080:
+                return Er0;
+            case 0x084:
+                return Er1;
+            case 0x088:
+                return Er2;
+            case 0x08C:
+                return Er3;
+            case 0x090:
+                return Ir0;
+            case 0x094:
+                return Ir1;
+            case 0x098:
+                return Ir2;
+            case 0x09C:
+                return Ir3;
             case 0x0A0:
                 return 0x00000001U;
             case 0x0A4:

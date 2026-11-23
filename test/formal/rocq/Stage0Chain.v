@@ -502,6 +502,7 @@ Proof.
                 (cfg_max_retries cfg <? boot_failure_counter ta));
         [|inversion Hs3; subst; left; congruence].
       destruct (negb (hdr_valid (backup_slot s25))); [discriminate|].
+      destruct (negb (sig_valid (backup_slot s25))); [discriminate|].
       inversion Hs3; subst; simpl; right; congruence.
     - destruct (boot_failure_counter ta <=? cfg_max_retries cfg);
         [inversion Hs3; subst; left; congruence|].
@@ -509,11 +510,15 @@ Proof.
         [inversion Hs3; subst; left; congruence | discriminate]. }
   destruct (step4_update_pipeline s3 w3 t3 otp25 oi3)
     as [[[[s4 w4] t4] oi4] upd_p] eqn:Hs4.
+  set (br4 := if upd_p && wal_intent_eqb oi4 WI_TxnCommit then false else br3) in *.
   set (app_hdr_ok := hdr_valid (app_slot s4)) in *.
-  set (fb := negb br3 && negb app_hdr_ok && recovery_rom_valid s4 &&
+  set (fb := negb br4 && negb app_hdr_ok && recovery_rom_valid s4 &&
              (recovery_failure_counter t4 <=? cfg_max_recovery_retries cfg)) in *.
-  set (br5 := br3 || fb) in *.
+  set (br5 := br4 || fb) in *.
   destruct (negb (if br5 then recovery_rom_valid s4 else app_hdr_ok)) eqn:Eth; [discriminate|].
+  destruct (negb (if br5
+                  then recovery_rom_valid s4
+                  else slot_tsig_valid (app_slot s4) (otp_active_key_index otp25))) eqn:Etsig; [discriminate|].
   destruct br5 eqn:Ebr5; [discriminate|].
   inversion Heval; subst app_img st_out; simpl.
   apply Bool.negb_false_iff in Eth; unfold app_hdr_ok in Eth.

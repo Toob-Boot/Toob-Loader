@@ -135,7 +135,7 @@ try {
         $toobDst = Join-Path $AppsOutDir "$($v.Name).toob"
 
         Copy-Item -Force $elfSrc $elfDst
-        Invoke-ToobCli sign image $xipRaw -o $toobDst --entry 0x18
+        Invoke-ToobCli sign image $xipRaw -o $toobDst --entry 0x18 --mock
         if ($LASTEXITCODE -ne 0) { throw "toob sign image failed for $($v.Name)" }
     }
 

@@ -327,8 +327,10 @@ Proof.
     rewrite Htsvn; exact Hcan. }
   rewrite Htm in Hcan2; rewrite ?Htm in Eboot2.
   rewrite Hcan2 in Eboot2; simpl in Eboot2.
-  pose proof (staging_can_apply_verified _ _ _ Hcan2) as [[Hhdr_h _] _].
-  rewrite Hhdr_h in Eboot2; simpl in Eboot2.
+  pose proof (staging_can_apply_verified _ _ _ Hcan2) as [[Hhdr_h [Hsig_h [_ [_ Hkey_h]]]] _].
+  assert (Htsig_h : slot_tsig_valid healed_img (otp_active_key_index (st_otp st_deg)) = true)
+    by (unfold slot_tsig_valid; rewrite Hhdr_h, Hsig_h, Hkey_h, Nat.eqb_refl; reflexivity).
+  rewrite Hhdr_h, Htsig_h in Eboot2; simpl in Eboot2.
   inversion Eboot2; subst out2 st_healed; simpl; repeat split; reflexivity.
 Qed.
 

@@ -7,16 +7,6 @@
 (*   - Theorem 2: torn_write_power_loss_idempotence                           *)
 (*   - Theorem 3: monotonic_anti_rollback_safety                              *)
 (*   - Theorem 4: auth_before_mutate                                          *)
-(*   - Theorem 5: swapscratch_sector_conservation_and_resume &                *)
-(*                swapmove_sector_conservation_and_resume (Arbitrary N >= 1)  *)
-(*   - Theorem 6: tcc1_killswitch_non_bypassable,                             *)
-(*                tcc1_killswitch_non_bypassable_hardened &                   *)
-(*                tcc1_otp_depletion_cap_and_replay_immunity                  *)
-(*   - Theorem 7: mailbox_replay_and_zero_nonce_immunity,                     *)
-(*                confirm_nonce_mismatch_cannot_heal &                        *)
-(*                cross_epoch_trial_boot_isolation                            *)
-(*   - Theorem 8: k4_spi_tamper_fail_closed &                                 *)
-(*                dual_failure_escalation_to_serial_rescue                    *)
 (* ========================================================================== *)
 
 From Stdlib Require Import Bool Arith Lia List.
@@ -169,8 +159,7 @@ Proof.
       rewrite !Bool.andb_true_iff in Hgate.
       destruct Hgate as [[_ _] [[Hctr _] _]].
       apply Nat.ltb_lt in Hctr.
-      destruct cmd; try destruct (wal_intent_eqb oi WI_DeviceLocked);
-        inversion H; subst; simpl; repeat split; lia.
+      destruct cmd; inversion H; subst; simpl; repeat split; lia.
 Qed.
 
 Lemma step2_5_cloud_idempotent_after_run :
@@ -190,8 +179,7 @@ Proof.
                      (ctr - otp_min_svn otp <=? toob_cmd_max_burn_steps)))) eqn:Hgate.
     + inversion H; subst.
       rewrite Hcs, Hc, Ht, Hgate; reflexivity.
-    + destruct cmd; try destruct (wal_intent_eqb oi WI_DeviceLocked);
-        inversion H; subst; simpl in Hcs; rewrite Hcs; reflexivity.
+    + destruct cmd; inversion H; subst; simpl in Hcs; rewrite Hcs; reflexivity.
 Qed.
 
 (* ========================================================================== *)
@@ -249,26 +237,23 @@ Theorem unauth_mailbox_confirm_never_commits :
     (exists err, step1_mailbox_consume slots wal tmr = Mbx_Err err) \/
     (exists slots' wal' tmr',
        step1_mailbox_consume slots wal tmr = Mbx_Done slots' wal' tmr' /\
-       (wal' = wal \/
-        wal' = (let w1 := if rr then wal_append_valid wal WI_RecoveryResolved 0 else wal in
-                if ru then wal_append_valid w1 WI_UpdatePending 0 else w1))) \/
-    step1_mailbox_consume slots wal tmr = Mbx_Done slots wal tmr.
+       wal' = (let w1 := if rr then wal_append_valid wal WI_RecoveryResolved 0 else wal in
+               if ru then wal_append_valid w1 WI_UpdatePending 0 else w1) \/
+       (step1_mailbox_consume slots wal tmr = Mbx_Done slots wal tmr)).
 Proof.
   intros slots wal tmr crc seq ru rr mn Hmbx Hbad.
   unfold step1_mailbox_consume; rewrite Hmbx.
-  destruct (negb crc); [right; right; reflexivity|].
+  destruct (negb crc); [right; exists slots, wal, tmr; right; reflexivity|].
   simpl.
-  destruct (mn =? 0) eqn:Hmn0; [right; right; reflexivity|].
-  destruct (seq <=? last_mbx_seq tmr); [right; right; reflexivity|].
-  right; left.
-  destruct (wal_is_device_locked wal).
-  - eexists _, _, _; split; [reflexivity | left; reflexivity].
-  - assert (Hmatch : ((0 <? active_nonce tmr) && (mn =? active_nonce tmr)) = false).
-    { destruct Hbad as [Hz | Hneq].
-      - rewrite Hz; reflexivity.
-      - apply Nat.eqb_neq in Hneq; rewrite Hneq, Bool.andb_false_r; reflexivity. }
-    rewrite Hmatch; simpl.
-    eexists _, _, _; split; [reflexivity | right; reflexivity].
+  destruct (mn =? 0) eqn:Hmn0; [right; exists slots, wal, tmr; right; reflexivity|].
+  destruct (seq <=? last_mbx_seq tmr); [right; exists slots, wal, tmr; right; reflexivity|].
+  right.
+  assert (Hmatch : ((0 <? active_nonce tmr) && (mn =? active_nonce tmr)) = false).
+  { destruct Hbad as [Hz | Hneq].
+    - rewrite Hz; reflexivity.
+    - apply Nat.eqb_neq in Hneq; rewrite Hneq, Bool.andb_false_r; reflexivity. }
+  rewrite Hmatch; simpl.
+  eexists _, _, _; left; split; reflexivity.
 Qed.
 
 (* Core Theorem 4: Auth-Before-Mutate across the complete Stage 1 pipeline *)
@@ -318,14 +303,12 @@ Proof.
       destruct (negb (rc || ru || rr)); [inversion Hmbx; subst; apply Hnorb|].
       destruct (rc && (mn =? 0)); [inversion Hmbx; subst; apply Hnorb|].
       destruct (seq <=? last_mbx_seq (st_tmr st)); [inversion Hmbx; subst; apply Hnorb|].
-      destruct (wal_is_device_locked (st_wal st)).
-      + inversion Hmbx; subst; apply Hnorb.
-      + rewrite Hnonce0 in Hmbx; simpl in Hmbx.
-        rewrite Bool.andb_false_r in Hmbx.
-        inversion Hmbx; subst.
-        destruct ru, rr; simpl; unfold wal_reconstruct_txn; simpl;
-          try (split; discriminate);
-          apply Hnorb. }
+      rewrite Hnonce0 in Hmbx; simpl in Hmbx.
+      rewrite Bool.andb_false_r in Hmbx.
+      inversion Hmbx; subst.
+      destruct ru, rr; simpl; unfold wal_reconstruct_txn; simpl;
+        try (split; discriminate);
+        apply Hnorb. }
   destruct (wal_reconstruct_txn wal1) as [[oi1 oe1]|] eqn:Hrec_txn.
   2: { inversion Heval; subst; simpl; repeat split; congruence. }
   destruct (step2_confirm_check slots1 wal1 tmr1 (st_confirm st) oi1 oe1)
@@ -469,25 +452,23 @@ Proof.
     - rewrite Herased; reflexivity. }
   unfold step4_update_pipeline in Heval.
   destruct (negb (wal_intent_eqb oi3 WI_UpdatePending)).
-  - destruct (negb (if rec3 || (negb rec3 && negb (hdr_valid (app_slot slots2)) &&
-                                recovery_rom_valid slots2 &&
-                                (recovery_failure_counter tmr3 <=? cfg_max_recovery_retries cfg))
-                    then recovery_rom_valid slots2 else hdr_valid (app_slot slots2))).
-    + inversion Heval; subst; simpl; repeat split; congruence.
-    + destruct (rec3 || (negb rec3 && negb (hdr_valid (app_slot slots2)) &&
-                         recovery_rom_valid slots2 &&
-                         (recovery_failure_counter tmr3 <=? cfg_max_recovery_retries cfg)));
-        inversion Heval; subst; simpl; repeat split; congruence.
+  - match type of Heval with
+    | context[if negb ?th then _ else if negb ?tt then _ else _] =>
+        destruct (negb th); [|destruct (negb tt)]
+    end;
+      try (match type of Heval with
+           | (if ?br then _ else _) = _ => destruct br
+           end);
+      inversion Heval; subst; simpl; repeat split; congruence.
   - rewrite Hstg2_bad in Heval.
-    destruct (negb (if rec3 || (negb rec3 && negb (hdr_valid (app_slot slots2)) &&
-                                recovery_rom_valid slots2 &&
-                                (recovery_failure_counter tmr3 <=? cfg_max_recovery_retries cfg))
-                    then recovery_rom_valid slots2 else hdr_valid (app_slot slots2))).
-    + inversion Heval; subst; simpl; repeat split; congruence.
-    + destruct (rec3 || (negb rec3 && negb (hdr_valid (app_slot slots2)) &&
-                         recovery_rom_valid slots2 &&
-                         (recovery_failure_counter tmr3 <=? cfg_max_recovery_retries cfg)));
-        inversion Heval; subst; simpl; repeat split; congruence.
+    match type of Heval with
+    | context[if negb ?th then _ else if negb ?tt then _ else _] =>
+        destruct (negb th); [|destruct (negb tt)]
+    end;
+      try (match type of Heval with
+           | (if ?br then _ else _) = _ => destruct br
+           end);
+      inversion Heval; subst; simpl; repeat split; congruence.
 Qed.
 
 (* ========================================================================== *)
@@ -594,7 +575,8 @@ Proof.
       - destruct (rst_indicates_crash (st_reset st) && negb healed2 ||
                   wal_intent_eqb oi2 WI_TxnRollbackPending ||
                   (cfg_max_retries cfg <? boot_failure_counter t_acc)); [|discriminate].
-        destruct (negb (hdr_valid (backup_slot slots2))); [inversion Hs3; subst; exact Htacc_svn | discriminate].
+        destruct (negb (hdr_valid (backup_slot slots2))); [inversion Hs3; subst; exact Htacc_svn|].
+        destruct (negb (sig_valid (backup_slot slots2))); [inversion Hs3; subst; exact Htacc_svn | discriminate].
       - destruct (boot_failure_counter t_acc <=? cfg_max_retries cfg); [discriminate|].
         destruct (recovery_failure_counter t_acc <=? cfg_max_recovery_retries cfg); [discriminate|].
         inversion Hs3; subst; exact Htacc_svn. }
@@ -622,6 +604,7 @@ Proof.
                     wal_intent_eqb oi2 WI_TxnRollbackPending ||
                     (cfg_max_retries cfg <? boot_failure_counter t_acc)).
           -- destruct (negb (hdr_valid (backup_slot slots2))) eqn:Hbhdr; [discriminate|].
+             destruct (negb (sig_valid (backup_slot slots2))); [discriminate|].
              inversion Hs3; subst; simpl.
              destruct Hinv2 as [_ Hbk2_ok].
              split; [split; exact Hbk2_ok | exact Htacc_svn].
@@ -650,13 +633,19 @@ Proof.
   destruct Hs4_inv as [Hinv4 Hsvn4].
   pose proof Hinv4 as [Happ4_ok Hbk4_ok].
   (* Analyze Step 5 *)
-  set (fb := negb rec3 && negb (hdr_valid (app_slot slots4)) &&
+  set (br4 := if upd_pend && wal_intent_eqb oi4 WI_TxnCommit then false else rec3) in *.
+  set (fb := negb br4 && negb (hdr_valid (app_slot slots4)) &&
              recovery_rom_valid slots4 &&
              (recovery_failure_counter tmr4 <=? cfg_max_recovery_retries cfg)) in *.
-  destruct (negb (if rec3 || fb then recovery_rom_valid slots4 else hdr_valid (app_slot slots4))) eqn:Htarg.
+  destruct (negb (if br4 || fb then recovery_rom_valid slots4 else hdr_valid (app_slot slots4))) eqn:Htarg.
   { inversion Heval; subst; simpl;
     split; [exact Hinv4 | split; [lia | split; [lia | split; [lia | intros; discriminate]]]]. }
-  destruct (rec3 || fb) eqn:Hrec5.
+  destruct (negb (if br4 || fb
+                  then recovery_rom_valid slots4
+                  else slot_tsig_valid (app_slot slots4) (otp_active_key_index (st_otp st)))) eqn:Htsig.
+  { inversion Heval; subst; simpl;
+    split; [exact Hinv4 | split; [lia | split; [lia | split; [lia | intros; discriminate]]]]. }
+  destruct (br4 || fb) eqn:Hrec5.
   - inversion Heval; subst; simpl;
     split; [exact Hinv4 | split; [lia | split; [lia | split; [lia | intros; discriminate]]]].
   - simpl in Htarg.
@@ -1070,28 +1059,31 @@ Proof.
       rewrite Hleb_t; simpl.
       unfold step4_update_pipeline; simpl; cbv zeta.
       destruct (hdr_valid (app_slot (st_slots st))) eqn:Happ_hdr; simpl; cbv zeta.
-      * (* App header valid: either verified Boot_App (done in 0!) or unverified -> recurse *)
-        destruct (is_verified_boot_app (app_slot (st_slots st)) (st_otp st)) eqn:Hver; simpl.
-        -- apply is_verified_boot_app_spec in Hver.
-           split; [lia | split; [reflexivity | exact Hver]].
-        -- set (st_next := next_unconfirmed_reboot_state false tent_rst
-                  (mkState (st_slots st) (st_wal st)
-                    (set_tmr_nonce
-                      (mkTMR (tmr_app_svn (st_tmr st)) (tmr_stage1_svn (st_tmr st))
-                             (S (boot_failure_counter (st_tmr st)))
-                             (recovery_failure_counter (st_tmr st))
-                             (active_nonce (st_tmr st)) (last_mbx_seq (st_tmr st))
-                             (last_cloud_issued_at (st_tmr st)) (tmr_mac_valid (st_tmr st))) 0)
-                    (st_confirm st) (st_otp st) RR_Watchdog)).
-           assert (Hidle_next : IdleInputs st_next).
-           { unfold IdleInputs, st_next, next_unconfirmed_reboot_state; simpl.
-             repeat split; try assumption; try reflexivity.
-             eapply step1_mailbox_idempotent_after_run; [exact Hmbx | simpl; lia | reflexivity]. }
-           specialize (IH cfg tent_rst fuel' st_next Hidle_next eq_refl eq_refl Hwal
-                         ltac:(simpl; lia) ltac:(lia)).
-           destruct (run_until_safe cfg tent_rst fuel' st_next) as [[out_f st_f] reb].
-           destruct IH as [Hreb Hsafe].
-           split; [lia | exact Hsafe].
+      * destruct (slot_tsig_valid (app_slot (st_slots st)) (otp_active_key_index (st_otp st))) eqn:Htsig; simpl.
+        -- (* App header + TSIG valid: either verified Boot_App (done in 0!) or SVN/Merkle mismatch -> recurse *)
+           destruct (is_verified_boot_app (app_slot (st_slots st)) (st_otp st)) eqn:Hver; simpl.
+           ++ apply is_verified_boot_app_spec in Hver.
+              split; [lia | split; [reflexivity | exact Hver]].
+           ++ set (st_next := next_unconfirmed_reboot_state false tent_rst
+                     (mkState (st_slots st) (st_wal st)
+                       (set_tmr_nonce
+                         (mkTMR (tmr_app_svn (st_tmr st)) (tmr_stage1_svn (st_tmr st))
+                                (S (boot_failure_counter (st_tmr st)))
+                                (recovery_failure_counter (st_tmr st))
+                                (active_nonce (st_tmr st)) (last_mbx_seq (st_tmr st))
+                                (last_cloud_issued_at (st_tmr st)) (tmr_mac_valid (st_tmr st))) 0)
+                       (st_confirm st) (st_otp st) RR_Watchdog)).
+              assert (Hidle_next : IdleInputs st_next).
+              { unfold IdleInputs, st_next, next_unconfirmed_reboot_state; simpl.
+                repeat split; try assumption; try reflexivity.
+                eapply step1_mailbox_idempotent_after_run; [exact Hmbx | simpl; lia | reflexivity]. }
+              specialize (IH cfg tent_rst fuel' st_next Hidle_next eq_refl eq_refl Hwal
+                            ltac:(simpl; lia) ltac:(lia)).
+              destruct (run_until_safe cfg tent_rst fuel' st_next) as [[out_f st_f] reb].
+              destruct IH as [Hreb Hsafe].
+              split; [lia | exact Hsafe].
+        -- (* App failed TSIG signature/active-key gate -> immediate Err_Verify (0 reboots!) *)
+           split; [lia | exact I].
       * (* App header invalid: falls back to Recovery OS or Serial Rescue in 0 reboots! *)
         rewrite Hrec_rom; simpl.
         destruct (recovery_failure_counter (st_tmr st) <=? cfg_max_recovery_retries cfg);
@@ -1152,9 +1144,13 @@ Proof.
         rewrite Hgt1, Bool.orb_true_r; reflexivity. }
       rewrite Hpos, Hmust; simpl.
       destruct (hdr_valid (backup_slot (st_slots st))) eqn:Hbhdr; simpl.
-      - unfold step4_update_pipeline; simpl; cbv zeta.
-        rewrite Hbhdr; simpl.
-        specialize (Hbk_ver eq_refl).
+      - specialize (Hbk_ver eq_refl).
+        pose proof Hbk_ver as [_ [Hbsig [_ [_ Hbkey]]]].
+        rewrite Hbsig; simpl.
+        unfold step4_update_pipeline; simpl; cbv zeta.
+        assert (Hbtsig : slot_tsig_valid (backup_slot (st_slots st)) (otp_active_key_index (st_otp st)) = true)
+          by (unfold slot_tsig_valid; rewrite Hbhdr, Hbsig, Hbkey, Nat.eqb_refl; reflexivity).
+        rewrite Hbhdr, Hbtsig; simpl.
         eexists _, _; split; [reflexivity | split;
           [split; [reflexivity | exact Hbk_ver]
           | rewrite Bool.andb_true_r; apply is_verified_boot_app_spec; exact Hbk_ver]].
@@ -1202,8 +1198,13 @@ Proof.
             rewrite Hgt1, Bool.orb_true_r; reflexivity. }
         rewrite Hpos, Hmust; simpl.
         destruct (hdr_valid (backup_slot (st_slots st))) eqn:Hbhdr; simpl.
-        - unfold step4_update_pipeline; simpl; cbv zeta; rewrite Hbhdr; simpl.
-          specialize (Hbk_ver eq_refl).
+        - specialize (Hbk_ver eq_refl).
+          pose proof Hbk_ver as [_ [Hbsig [_ [_ Hbkey]]]].
+          rewrite Hbsig; simpl.
+          unfold step4_update_pipeline; simpl; cbv zeta.
+          assert (Hbtsig : slot_tsig_valid (backup_slot (st_slots st)) (otp_active_key_index (st_otp st)) = true)
+            by (unfold slot_tsig_valid; rewrite Hbhdr, Hbsig, Hbkey, Nat.eqb_refl; reflexivity).
+          rewrite Hbhdr, Hbtsig; simpl.
           eexists _, _; split; [reflexivity | split;
             [split; [reflexivity | exact Hbk_ver]
             | rewrite Bool.andb_true_r; apply is_verified_boot_app_spec; exact Hbk_ver]].
@@ -1235,7 +1236,8 @@ Proof.
       rewrite Hltb_f2; simpl.
       unfold step4_update_pipeline; simpl; cbv zeta.
       destruct (hdr_valid (app_slot (st_slots st))) eqn:Happ_hdr; simpl; cbv zeta.
-      * (* Tentative boot continues to next reboot (`negb true = false`) *)
+      * destruct (slot_tsig_valid (app_slot (st_slots st)) (otp_active_key_index (st_otp st))) eqn:Htsig; simpl; [|split; [lia | exact I]].
+        (* Tentative boot continues to next reboot (`negb true = false`) *)
         rewrite Bool.andb_false_r.
         set (st_next := next_unconfirmed_reboot_state true tent_rst
                (mkState (st_slots st)
@@ -1301,7 +1303,9 @@ Proof.
       rewrite Hgt1, Bool.orb_true_r; reflexivity. }
     rewrite Hpos, Hmust; simpl.
     destruct (hdr_valid (backup_slot (st_slots st))) eqn:Hbhdr; simpl.
-    + unfold step4_update_pipeline; simpl; cbv zeta; rewrite Hbhdr; simpl.
+    + destruct (sig_valid (backup_slot (st_slots st))) eqn:Hbsig; simpl; [|split; [lia | exact I]].
+      unfold step4_update_pipeline; simpl; cbv zeta; rewrite Hbhdr; simpl.
+      destruct (slot_tsig_valid (backup_slot (st_slots st)) (otp_active_key_index (st_otp st))) eqn:Hbk_tsig; simpl; [|split; [lia | exact I]].
       destruct (is_verified_boot_app (backup_slot (st_slots st)) (st_otp st)) eqn:Hver; simpl.
       * apply is_verified_boot_app_spec in Hver; split; [lia | split; [reflexivity | exact Hver]].
       * set (st_next := next_unconfirmed_reboot_state false tent_rst _).
@@ -1354,7 +1358,9 @@ Proof.
         rewrite Hgt1, Bool.orb_true_r; reflexivity. }
       rewrite Hpos, Hmust; simpl.
       destruct (hdr_valid (backup_slot (st_slots st))) eqn:Hbhdr; simpl.
-      * unfold step4_update_pipeline; simpl; cbv zeta; rewrite Hbhdr; simpl.
+      * destruct (sig_valid (backup_slot (st_slots st))) eqn:Hbsig; simpl; [|split; [lia | exact I]].
+        unfold step4_update_pipeline; simpl; cbv zeta; rewrite Hbhdr; simpl.
+        destruct (slot_tsig_valid (backup_slot (st_slots st)) (otp_active_key_index (st_otp st))) eqn:Hbk_tsig; simpl; [|split; [lia | exact I]].
         destruct (is_verified_boot_app (backup_slot (st_slots st)) (st_otp st)) eqn:Hver; simpl.
         -- apply is_verified_boot_app_spec in Hver; split; [lia | split; [reflexivity | exact Hver]].
         -- set (st_next := next_unconfirmed_reboot_state false tent_rst _).
@@ -1394,7 +1400,8 @@ Proof.
       rewrite Hltb_f; simpl; rewrite Hltb_f2; simpl.
       unfold step4_update_pipeline; simpl; cbv zeta.
       destruct (hdr_valid (app_slot (st_slots st))) eqn:Happ_hdr; simpl; cbv zeta.
-      * rewrite Bool.andb_false_r.
+      * destruct (slot_tsig_valid (app_slot (st_slots st)) (otp_active_key_index (st_otp st))) eqn:Htsig; simpl; [|split; [lia | exact I]].
+        rewrite Bool.andb_false_r.
         set (st_next := next_unconfirmed_reboot_state true tent_rst _).
         assert (Hidle_n : IdleInputs st_next).
         { unfold IdleInputs, st_next, next_unconfirmed_reboot_state; simpl.
@@ -1450,14 +1457,18 @@ Proof.
   destruct (step4_update_pipeline slots3 wal3 tmr3 otp25 oi3)
     as [[[[slots4 wal4] tmr4] oi4] upd_pend] eqn:Hs4.
   cbv zeta in Heval.
-  set (fb := negb rec3 && negb (hdr_valid (app_slot slots4)) &&
+  set (br4 := if upd_pend && wal_intent_eqb oi4 WI_TxnCommit then false else rec3) in *.
+  set (fb := negb br4 && negb (hdr_valid (app_slot slots4)) &&
              recovery_rom_valid slots4 &&
              (recovery_failure_counter tmr4 <=? cfg_max_recovery_retries cfg)) in *.
-  destruct (negb (if rec3 || fb then recovery_rom_valid slots4 else hdr_valid (app_slot slots4))) eqn:Htarg;
+  destruct (negb (if br4 || fb then recovery_rom_valid slots4 else hdr_valid (app_slot slots4))) eqn:Htarg;
     [discriminate|].
-  destruct (rec3 || fb) eqn:Hrec5; [discriminate|].
-  apply Bool.orb_false_iff in Hrec5 as [Hrec3_f Hfb_f].
-  subst rec3.
+  destruct (negb (if br4 || fb
+                  then recovery_rom_valid slots4
+                  else slot_tsig_valid (app_slot slots4) (otp_active_key_index otp25))) eqn:Htsig;
+    [discriminate|].
+  destruct (br4 || fb) eqn:Hrec5; [discriminate|].
+  apply Bool.orb_false_iff in Hrec5 as [Hbr4_f Hfb_f].
   inversion Heval; subst img tent nonce st1.
   assert (Hs3_full :
     recovery_rom_valid slots3 = true /\
@@ -1468,7 +1479,7 @@ Proof.
     tmr_mac_valid tmr3 = true /\
     last_mbx_seq tmr3 = last_mbx_seq tmr1 /\
     last_cloud_issued_at tmr3 = last_cloud_issued_at tmr25 /\
-    boot_failure_counter tmr3 <= cfg_max_retries cfg /\
+    (rec3 = false -> boot_failure_counter tmr3 <= cfg_max_retries cfg) /\
     oi3 <> WI_DeviceLocked /\ oi3 <> WI_TxnRollback /\ oi3 <> WI_TxnRollbackPending /\
     (oi3 = WI_ConfirmCommit -> False) /\
     (oi3 = WI_RecoveryResolved -> False) /\
@@ -1532,8 +1543,7 @@ Proof.
                          (last_cloud_issued_at tmr2 <? iss) &&
                          (ctr - otp_min_svn (st_otp st0) <=? toob_cmd_max_burn_steps)))).
         + inversion Hs25; subst; left; split; reflexivity.
-        + destruct cmd; try destruct (wal_intent_eqb oi2 WI_DeviceLocked);
-            inversion Hs25; subst; auto. }
+        + destruct cmd; inversion Hs25; subst; auto. }
     assert (Hoi25_clean :
       oi25 <> WI_DeviceLocked /\ oi25 <> WI_ConfirmCommit /\ oi25 <> WI_RecoveryResolved /\
       (oi25 = WI_None /\ healed2 = false ->
@@ -1588,6 +1598,7 @@ Proof.
                     wal_intent_eqb oi25 WI_TxnRollbackPending ||
                     (cfg_max_retries cfg <? boot_failure_counter t_acc)) eqn:Emust.
           -- destruct (negb (hdr_valid (backup_slot slots25))); [discriminate|].
+             destruct (negb (sig_valid (backup_slot slots25))); [discriminate|].
              inversion Hs3; subst; simpl.
              repeat split; try congruence; try lia; try discriminate.
              right; congruence.
@@ -1603,14 +1614,19 @@ Proof.
              ++ left; congruence.
              ++ intros [? _]; discriminate.
         * destruct (boot_failure_counter t_acc <=? cfg_max_retries cfg) eqn:Ele_m;
-            [|destruct (recovery_failure_counter t_acc <=? cfg_max_recovery_retries cfg); discriminate].
-          apply Nat.leb_le in Ele_m.
-          inversion Hs3; subst.
-          repeat split; try congruence; try lia.
-          -- left; congruence.
-          -- intro H; subst; simpl in Etrb; discriminate.
-          -- intro H; subst; simpl in Ecasea; rewrite ?Bool.orb_true_r in Ecasea; discriminate.
-          -- exact Hnone25.
+            [|destruct (recovery_failure_counter t_acc <=? cfg_max_recovery_retries cfg); [|discriminate]].
+          -- apply Nat.leb_le in Ele_m.
+             inversion Hs3; subst.
+             repeat split; try congruence; try lia; try discriminate.
+             ++ left; congruence.
+             ++ intro H; subst; simpl in Etrb; discriminate.
+             ++ intro H; subst; simpl in Ecasea; rewrite ?Bool.orb_true_r in Ecasea; discriminate.
+             ++ exact Hnone25.
+          -- inversion Hs3; subst; repeat split; try congruence; try discriminate.
+             ++ left; congruence.
+             ++ intro H; subst; simpl in Etrb; discriminate.
+             ++ intro H; subst; simpl in Ecasea; rewrite ?Bool.orb_true_r in Ecasea; discriminate.
+             ++ exact Hnone25.
       + apply Bool.orb_false_iff in Ehasf as [Hbf0 Hnrp].
         apply Nat.ltb_ge in Hbf0.
         inversion Hs3; subst.
@@ -1627,6 +1643,9 @@ Proof.
     assert (Hoi3_cases : oi3 = WI_None \/ oi3 = WI_TxnCommit).
     { destruct oi3; simpl in *; try contradiction; try discriminate; auto. }
     inversion Hs4; subst slots4 wal4 tmr4 oi4 upd_pend.
+    assert (Hrec3_f : rec3 = false).
+    { unfold br4 in Hbr4_f; destruct oi3; simpl in *; try exact Hbr4_f; congruence. }
+    specialize (Hbf3 Hrec3_f).
     assert (Hidle_out : IdleInputs st_next).
     { unfold st_next, IdleInputs, next_unconfirmed_reboot_state; simpl.
       repeat split; try assumption; try reflexivity.
@@ -1656,6 +1675,7 @@ Proof.
         eapply step2_5_cloud_idempotent_after_run; [exact Hs25 | simpl in Ht; congruence | simpl; congruence].
       * destruct Happ3 as [Ha | Hb]; [right; exact Ha | left; exact Hb].
     + inversion Hs4; subst slots4 wal4 tmr4 oi4 upd_pend; simpl.
+      unfold br4 in Hbr4_f; simpl in Hbr4_f; specialize (Hbf3 Hbr4_f).
       unfold st_next, IdleInputs, next_unconfirmed_reboot_state; simpl.
       repeat split; try reflexivity; try lia; try discriminate.
       * exact Hrec3.
@@ -1852,6 +1872,7 @@ Proof.
         - destruct (wal_intent_eqb oi2 WI_TxnCommit || wal_intent_eqb oi2 WI_TxnRollbackPending).
           + destruct (im || wal_intent_eqb oi2 WI_TxnRollbackPending || (cfg_max_retries cfg <? boot_failure_counter ta)).
             * destruct (negb (hdr_valid (backup_slot s2))); [discriminate|].
+              destruct (negb (sig_valid (backup_slot s2))); [discriminate|].
               inversion Es3; subst; simpl; split; [reflexivity | discriminate].
             * inversion Es3; subst; split; [reflexivity | exact Hoi2_noup].
           + destruct (boot_failure_counter ta <=? cfg_max_retries cfg); [|
@@ -1867,6 +1888,9 @@ Proof.
       set (fb := negb r3 && negb (hdr_valid (app_slot s3)) && recovery_rom_valid s3 &&
                  (recovery_failure_counter t3 <=? cfg_max_recovery_retries cfg)) in *.
       destruct (negb (if r3 || fb then recovery_rom_valid s3 else hdr_valid (app_slot s3))); [discriminate|].
+      destruct (negb (if r3 || fb
+                      then recovery_rom_valid s3
+                      else slot_tsig_valid (app_slot s3) (otp_active_key_index (st_otp st0)))); [discriminate|].
       destruct (r3 || fb); [discriminate|].
       inversion Heval0; subst; simpl; split; congruence. }
     destruct Hbk_kept as [Hbk1 Hotp1].
@@ -3012,12 +3036,13 @@ Theorem tcc1_wipe_unlocks_and_preserves_wipe_flag :
     boot_failure_counter (st_tmr st) = 0 ->
     rst_indicates_crash (st_reset st) = false ->
     hdr_valid (app_slot (st_slots st)) = true ->
+    slot_tsig_valid (app_slot (st_slots st)) (otp_active_key_index (st_otp st)) = true ->
     let '(out, st') := eval_boot_state cfg st in
     out = Boot_App (app_slot (st_slots st)) false 0 /\
     eval_boot_wipe_requested cfg st = true /\
     wal_reconstruct_txn (st_wal st') = Some (WI_None, 0).
 Proof.
-  intros cfg st exp_n sig_ok dev_ok ctr iss Hmac Hwal Htok Hok Hbf0 Hrst Hhdr.
+  intros cfg st exp_n sig_ok dev_ok ctr iss Hmac Hwal Htok Hok Hbf0 Hrst Hhdr Htsig.
   cbv zeta.
   destruct (step1_mailbox_preserves_device_lock
               (st_slots st) (st_wal st) (st_tmr st) exp_n Hwal)
@@ -3035,7 +3060,7 @@ Proof.
   unfold step3_failure_and_rollback; cbv zeta.
   rewrite Hrst, Hbf1, Hbf0; simpl.
   unfold step4_update_pipeline; cbv zeta; simpl.
-  rewrite Happ1, Hhdr; simpl.
+  rewrite Happ1, Hhdr, Htsig; simpl.
   repeat split; reflexivity.
 Qed.
 
@@ -3090,7 +3115,8 @@ Proof.
     + destruct (rst_indicates_crash (st_reset st) && negb healed2 ||
                 wal_intent_eqb oi25 WI_TxnRollbackPending ||
                 (cfg_max_retries cfg <? boot_failure_counter ta)); [|discriminate].
-      destruct (negb (hdr_valid (backup_slot slots25))); inversion Hs3; subst; exact Hta.
+      destruct (negb (hdr_valid (backup_slot slots25))); [inversion Hs3; subst; exact Hta|].
+      destruct (negb (sig_valid (backup_slot slots25))); inversion Hs3; subst; exact Hta.
     + destruct (boot_failure_counter ta <=? cfg_max_retries cfg); [discriminate|].
       destruct (recovery_failure_counter ta <=? cfg_max_recovery_retries cfg);
         inversion Hs3; subst; exact Hta.
@@ -3117,7 +3143,8 @@ Proof.
                   wal_intent_eqb oi25 WI_TxnRollbackPending ||
                   (cfg_max_retries cfg <? boot_failure_counter ta));
           [|inversion Hs3; subst; exact Hta].
-        destruct (negb (hdr_valid (backup_slot slots25))); inversion Hs3; subst; simpl; exact Hta.
+        destruct (negb (hdr_valid (backup_slot slots25))); [inversion Hs3; subst; simpl; exact Hta|].
+        destruct (negb (sig_valid (backup_slot slots25))); inversion Hs3; subst; simpl; exact Hta.
       - destruct (boot_failure_counter ta <=? cfg_max_retries cfg);
           [inversion Hs3; subst; exact Hta|].
         destruct (recovery_failure_counter ta <=? cfg_max_recovery_retries cfg);
@@ -3129,11 +3156,16 @@ Proof.
       destruct (negb (wal_intent_eqb oi3 WI_UpdatePending)); [inversion Hs4; subst; exact Hiss3|].
       destruct (staging_can_apply (staging_slot slots3) tmr3 otp25);
         inversion Hs4; subst; simpl; exact Hiss3. }
+    set (br4 := if upd_p && wal_intent_eqb oi4 WI_TxnCommit then false else boot_rec3).
     set (app_hdr_ok := hdr_valid (app_slot slots4)).
-    set (fb := negb boot_rec3 && negb app_hdr_ok && recovery_rom_valid slots4 &&
+    set (fb := negb br4 && negb app_hdr_ok && recovery_rom_valid slots4 &&
                (recovery_failure_counter tmr4 <=? cfg_max_recovery_retries cfg)).
-    set (br5 := boot_rec3 || fb).
+    set (br5 := br4 || fb).
     destruct (negb (if br5 then recovery_rom_valid slots4 else app_hdr_ok));
+      [simpl; exact Hiss4|].
+    destruct (negb (if br5
+                    then recovery_rom_valid slots4
+                    else slot_tsig_valid (app_slot slots4) (otp_active_key_index otp25)));
       [simpl; exact Hiss4 | destruct br5; simpl; exact Hiss4].
 Qed.
 
@@ -3366,10 +3398,14 @@ Proof.
   destruct (step4_update_pipeline s3 w3 t3 otp25 oi3)
     as [[[[s4 w4] t4] oi4] upd4] eqn:Es4.
   cbv zeta in Heval.
-  set (fb := negb r3 && negb (hdr_valid (app_slot s4)) && recovery_rom_valid s4 &&
+  set (br4 := if upd4 && wal_intent_eqb oi4 WI_TxnCommit then false else r3) in *.
+  set (fb := negb br4 && negb (hdr_valid (app_slot s4)) && recovery_rom_valid s4 &&
              (recovery_failure_counter t4 <=? cfg_max_recovery_retries cfg)) in *.
-  destruct (negb (if r3 || fb then recovery_rom_valid s4 else hdr_valid (app_slot s4))); [discriminate|].
-  destruct (r3 || fb); [discriminate|].
+  destruct (negb (if br4 || fb then recovery_rom_valid s4 else hdr_valid (app_slot s4))); [discriminate|].
+  destruct (negb (if br4 || fb
+                  then recovery_rom_valid s4
+                  else slot_tsig_valid (app_slot s4) (otp_active_key_index otp25))); [discriminate|].
+  destruct (br4 || fb); [discriminate|].
   assert (Htent : wal_intent_eqb oi4 WI_TxnCommit = true) by (inversion Heval; reflexivity).
   apply wal_intent_eqb_eq in Htent; subst oi4.
   inversion Heval; subst img gen_nonce st1; clear Heval; simpl in *.
@@ -3400,7 +3436,8 @@ Proof.
       + destruct (rst_indicates_crash (st_reset st0) && negb h2 ||
                   wal_intent_eqb oi25 WI_TxnRollbackPending ||
                   (cfg_max_retries cfg <? boot_failure_counter ta)).
-        * destruct (negb (hdr_valid (backup_slot s25))); [discriminate | inversion Es3; subst; simpl; intuition congruence].
+        * destruct (negb (hdr_valid (backup_slot s25))); [discriminate|].
+          destruct (negb (sig_valid (backup_slot s25))); [discriminate | inversion Es3; subst; simpl; intuition congruence].
         * inversion Es3; subst; intuition congruence.
       + destruct (boot_failure_counter ta <=? cfg_max_retries cfg);
           [inversion Es3; subst; intuition congruence|].
@@ -3470,10 +3507,15 @@ Proof.
   destruct (rst_indicates_crash rst_next || (cfg_max_retries cfg <? boot_failure_counter ta2)); simpl.
   - destruct (negb (hdr_valid (backup_slot s4))); simpl.
     + split; intros; discriminate.
-    + unfold step4_update_pipeline; simpl; cbv zeta.
+    + destruct (negb (sig_valid (backup_slot s4))); simpl; [split; intros; discriminate|].
+      unfold step4_update_pipeline; simpl; cbv zeta.
       set (fb2 := negb (hdr_valid (backup_slot s4)) && recovery_rom_valid s4 &&
                   (recovery_failure_counter ta2 <=? cfg_max_recovery_retries cfg)).
       destruct (negb (if fb2 then recovery_rom_valid s4 else hdr_valid (backup_slot s4)));
+        [split; intros; discriminate|].
+      destruct (negb (if fb2
+                      then recovery_rom_valid s4
+                      else slot_tsig_valid (backup_slot s4) (otp_active_key_index otp25)));
         [split; intros; discriminate|].
       destruct fb2; [split; intros; discriminate|].
       split; intros img2 n2 Hout2; inversion Hout2; subst; simpl; split; reflexivity.
@@ -3481,6 +3523,10 @@ Proof.
     set (fb2 := negb (hdr_valid (app_slot s4)) && recovery_rom_valid s4 &&
                 (recovery_failure_counter ta2 <=? cfg_max_recovery_retries cfg)).
     destruct (negb (if fb2 then recovery_rom_valid s4 else hdr_valid (app_slot s4)));
+      [split; intros; discriminate|].
+    destruct (negb (if fb2
+                    then recovery_rom_valid s4
+                    else slot_tsig_valid (app_slot s4) (otp_active_key_index otp25)));
       [split; intros; discriminate|].
     destruct fb2; [split; intros; discriminate|].
     split; intros img2 n2 Hout2; inversion Hout2; subst; simpl; split; reflexivity.
@@ -3539,14 +3585,13 @@ Proof.
       [inversion Hev; subst; simpl; exact Hotp_le|].
     destruct (step4_update_pipeline s3 w3 t3 otp25 oi3) as [[[[s4 w4] t4] oi4] upd4].
     cbv zeta in Hev.
-    destruct (negb (if r3 || (negb r3 && negb (hdr_valid (app_slot s4)) &&
-                              recovery_rom_valid s4 &&
-                              (recovery_failure_counter t4 <=? cfg_max_recovery_retries cfg))
-                    then recovery_rom_valid s4 else hdr_valid (app_slot s4)));
-      [inversion Hev; subst; simpl; exact Hotp_le|].
-    destruct (r3 || (negb r3 && negb (hdr_valid (app_slot s4)) &&
-                     recovery_rom_valid s4 &&
-                     (recovery_failure_counter t4 <=? cfg_max_recovery_retries cfg)));
+    match type of Hev with
+    | context[if negb ?th then _ else if negb ?tt then _ else _] =>
+        destruct (negb th); [|destruct (negb tt)]
+    end;
+      try (match type of Hev with
+           | (if ?br then _ else _) = _ => destruct br
+           end);
       inversion Hev; subst; simpl; exact Hotp_le.
   - intro Hmac_f; unfold eval_boot_state in Hev; rewrite Hmac_f in Hev; simpl in Hev.
     inversion Hev; subst; split_conj; try reflexivity; intros; discriminate.
@@ -3687,7 +3732,10 @@ Proof.
       destruct (negb (if rec3 || fb then recovery_rom_valid (st_slots st)
                       else hdr_valid (app_slot (st_slots st)))).
       * simpl; split; [lia | reflexivity].
-      * set (st1 := mkState (st_slots st) (st_wal st)
+      * destruct (negb (if rec3 || fb then recovery_rom_valid (st_slots st)
+                        else slot_tsig_valid (app_slot (st_slots st)) (otp_active_key_index (st_otp st))));
+          [simpl; split; [lia | reflexivity]|].
+        set (st1 := mkState (st_slots st) (st_wal st)
                       (mkTMR (tmr_app_svn (st_tmr st)) (tmr_stage1_svn (st_tmr st))
                              bf_n rf_n 0 (last_mbx_seq (st_tmr st))
                              (last_cloud_issued_at (st_tmr st)) (tmr_mac_valid (st_tmr st)))
@@ -3744,9 +3792,14 @@ Proof.
   destruct (step4_update_pipeline s3 w3 t3 otp25 oi3)
     as [[[[s4 w4] t4] oi4] upd4] eqn:Es4.
   cbv zeta in Hev.
-  set (fb := negb r3 && negb (hdr_valid (app_slot s4)) && recovery_rom_valid s4 &&
+  set (br4 := if upd4 && wal_intent_eqb oi4 WI_TxnCommit then false else r3) in *.
+  set (fb := negb br4 && negb (hdr_valid (app_slot s4)) && recovery_rom_valid s4 &&
              (recovery_failure_counter t4 <=? cfg_max_recovery_retries cfg)) in *.
-  destruct (negb (if r3 || fb then recovery_rom_valid s4 else hdr_valid (app_slot s4)));
+  destruct (negb (if br4 || fb then recovery_rom_valid s4 else hdr_valid (app_slot s4)));
+    [inversion Hev; subst; discriminate|].
+  destruct (negb (if br4 || fb
+                  then recovery_rom_valid s4
+                  else slot_tsig_valid (app_slot s4) (otp_active_key_index otp25)));
     [inversion Hev; subst; discriminate|].
   assert (Hs2_oi :
     oi2 = WI_UpdatePending \/ oi2 = WI_TxnCommit \/ oi2 = WI_TxnRollback \/
@@ -3837,6 +3890,7 @@ Proof.
                     wal_intent_eqb oi25 WI_TxnRollbackPending ||
                     (cfg_max_retries cfg <? boot_failure_counter ta)) eqn:Emr.
           -- destruct (negb (hdr_valid (backup_slot s25))); [discriminate|].
+             destruct (negb (sig_valid (backup_slot s25))); [discriminate|].
              inversion Es3; subst; simpl; split_conj;
                try exact Hta_m; try exact Hta_s; try exact Hta_i; try reflexivity.
              right; right; split; [reflexivity | left; reflexivity].
@@ -3886,7 +3940,7 @@ Proof.
              then wal_append_valid w4 oi4 0 else w4)
             (set_tmr_nonce t4 (if wal_intent_eqb oi4 WI_TxnCommit then cfg_fresh_nonce cfg else 0))
             c2 otp25 (st_reset st0)).
-  { destruct (r3 || fb); inversion Hev; reflexivity. }
+  { destruct (br4 || fb); inversion Hev; reflexivity. }
   subst st1.
   assert (Hstab_out : StabilizedPostBoot st_next).
   { unfold StabilizedPostBoot, st_next, next_dual_fault_reboot_state; simpl.
@@ -3981,12 +4035,19 @@ Proof.
           rewrite Epos in Hev1; simpl in Hev1.
           destruct (negb (hdr_valid (backup_slot (st_slots st_n1)))) eqn:Ebh;
             [inversion Hev1; subst; discriminate|].
+          destruct (negb (sig_valid (backup_slot (st_slots st_n1)))) eqn:Ebs;
+            [inversion Hev1; subst; discriminate|].
           unfold step4_update_pipeline in Hev1; simpl in Hev1; cbv zeta in Hev1.
           set (fb2 := negb (hdr_valid (backup_slot (st_slots st_n1))) &&
                       recovery_rom_valid (st_slots st_n1) &&
                       (recovery_failure_counter ta <=? cfg_max_recovery_retries cfg)) in *.
           destruct (negb (if fb2 then recovery_rom_valid (st_slots st_n1)
                           else hdr_valid (backup_slot (st_slots st_n1))));
+            [inversion Hev1; subst; discriminate|].
+          destruct (negb (if fb2
+                          then recovery_rom_valid (st_slots st_n1)
+                          else slot_tsig_valid (backup_slot (st_slots st_n1))
+                                               (otp_active_key_index (st_otp st_n1))));
             [inversion Hev1; subst; discriminate|].
           assert (Hst2 :
             st2 = mkState
@@ -4162,4 +4223,177 @@ Proof.
     + apply Nat.ltb_lt in Epos; repeat split; lia.
     + apply Nat.ltb_ge in Epos; repeat split; lia.
     + repeat split; [lia | intro H; discriminate H].
+Qed.
+
+(* ========================================================================== *)
+(* SECTION 11: Wave-1 Dir 4.1 Security Invariants                             *)
+(*             (CRIT-68/71 TSIG, CRIT-69 Blank-WAL & Secret KDF,              *)
+(*              CRIT-70 PQC Pinning, Recovery Counter Preservation)           *)
+(* ========================================================================== *)
+
+Theorem crit68_71_authenticated_boot_invariant :
+  (forall cfg st img tent nonce st',
+     eval_boot_state cfg st = (Boot_App img tent nonce, st') ->
+     hdr_valid img = true /\
+     sig_valid img = true /\
+     key_index img = otp_active_key_index (st_otp st') /\
+     slot_tsig_valid img (otp_active_key_index (st_otp st')) = true) /\
+  (forall rec_hdr_ok rec_tsig_ok app_img active_key,
+     boot_handoff_seal_gate false rec_hdr_ok rec_tsig_ok app_img active_key = None ->
+     slot_tsig_valid app_img active_key = true) /\
+  (forall rec_hdr_ok rec_tsig_ok app_img active_key,
+     boot_handoff_seal_gate true rec_hdr_ok rec_tsig_ok app_img active_key = None ->
+     rec_hdr_ok = true /\ rec_tsig_ok = true) /\
+  (forall bkup active_key,
+     boot_rollback_verify_slot_before_copy bkup active_key = None ->
+     slot_tsig_valid bkup active_key = true).
+Proof.
+  split_conj.
+  - intros cfg st img tent nonce st' Heval.
+    unfold eval_boot_state in Heval; cbv zeta in Heval.
+    destruct (negb (tmr_mac_valid (st_tmr st))); [discriminate|].
+    destruct (step1_mailbox_consume (st_slots st) (st_wal st) (st_tmr st)); [discriminate|].
+    destruct (wal_reconstruct_txn _) as [[oi1 oe1]|]; [|discriminate].
+    destruct (step2_confirm_check _ _ _ _ oi1 oe1); [discriminate|].
+    destruct (step2_5_cloud_cmd _ _ _ _ _) as [[[[s25 w25] t25] otp25] oi25].
+    destruct (wal_intent_eqb oi25 WI_DeviceLocked); [discriminate|].
+    destruct (step3_failure_and_rollback _ _ _ _ _ _ _) as [|s3 w3 t3 oi3 h3 br3]; [discriminate|].
+    destruct (step4_update_pipeline _ _ _ _ _) as [[[[s4 w4] t4] oi4] upd4].
+    match type of Heval with
+    | context[if negb ?th then _ else if negb ?tt then _ else _] =>
+        destruct (negb th) eqn:Eth; [discriminate|];
+        destruct (negb tt) eqn:Ett; [discriminate|]
+    end.
+    match type of Heval with
+    | (if ?br then _ else _) = _ => destruct br eqn:Ebr; [discriminate|]
+    end.
+    inversion Heval; subst img st'; clear Heval.
+    simpl in Ett; apply Bool.negb_false_iff in Ett.
+    pose proof Ett as Htsig.
+    unfold slot_tsig_valid in Ett.
+    rewrite !Bool.andb_true_iff, Nat.eqb_eq in Ett.
+    destruct Ett as [[Hh Hs] Hk].
+    repeat split; assumption.
+  - intros rec_hdr_ok rec_tsig_ok app_img active_key Hgate.
+    unfold boot_handoff_seal_gate in Hgate; simpl in Hgate.
+    destruct (negb (hdr_valid app_img)); [discriminate|].
+    destruct (slot_tsig_valid app_img active_key); [reflexivity | discriminate].
+  - intros rec_hdr_ok rec_tsig_ok app_img active_key Hgate.
+    unfold boot_handoff_seal_gate in Hgate; simpl in Hgate.
+    destruct rec_hdr_ok; destruct rec_tsig_ok; simpl in Hgate; try discriminate; auto.
+  - intros bkup active_key Hrb.
+    unfold boot_rollback_verify_slot_before_copy in Hrb.
+    destruct (negb (hdr_valid bkup)); [discriminate|].
+    destruct (slot_tsig_valid bkup active_key); [reflexivity | discriminate].
+Qed.
+
+Theorem crit69_deployed_wal_integrity_and_secret_binding :
+  (forall efuse_epoch dslc,
+     (0 < efuse_epoch \/ dslc <> 0) ->
+     device_is_deployed efuse_epoch dslc = true /\
+     eval_blank_wal_init true efuse_epoch dslc = WB_Reject Err_Verify) /\
+  (forall all_erased efuse_epoch dslc,
+     eval_blank_wal_init all_erased efuse_epoch dslc = WB_FormatFresh ->
+     all_erased = true /\ efuse_epoch = 0 /\ dslc = 0) /\
+  (forall kdf uid pk,
+     eval_derive_journal_key kdf None uid pk false = JKR_Err Err_NotSupported) /\
+  (forall kdf sec1 sec2 uid pk,
+     (forall a b c, kdf sec1 uid pk = kdf a b c -> sec1 = a) ->
+     sec1 <> sec2 ->
+     eval_derive_journal_key kdf (Some sec1) uid pk false <>
+     eval_derive_journal_key kdf (Some sec2) uid pk false).
+Proof.
+  split_conj.
+  - intros efuse_epoch dslc [Hep | Hds].
+    + assert (Hdep : device_is_deployed efuse_epoch dslc = true).
+      { unfold device_is_deployed. apply Bool.orb_true_intro; left; apply Nat.ltb_lt; exact Hep. }
+      split; [exact Hdep | unfold eval_blank_wal_init; rewrite Hdep; reflexivity].
+    + assert (Hdep : device_is_deployed efuse_epoch dslc = true).
+      { unfold device_is_deployed. apply Bool.orb_true_intro; right.
+        apply Bool.negb_true_iff, Nat.eqb_neq; exact Hds. }
+      split; [exact Hdep | unfold eval_blank_wal_init; rewrite Hdep; reflexivity].
+  - intros all_erased efuse_epoch dslc Hfmt.
+    unfold eval_blank_wal_init in Hfmt.
+    destruct all_erased; [|discriminate].
+    destruct (device_is_deployed efuse_epoch dslc) eqn:Edep; [discriminate|].
+    unfold device_is_deployed in Edep.
+    apply Bool.orb_false_iff in Edep as [Eep Eds].
+    apply Nat.ltb_ge in Eep; apply Bool.negb_false_iff, Nat.eqb_eq in Eds.
+    repeat split; lia.
+  - intros; reflexivity.
+  - intros kdf sec1 sec2 uid pk Hinj Hneq Heq.
+    simpl in Heq; inversion Heq as [Hkdf].
+    apply Hinj in Hkdf; contradiction.
+Qed.
+
+Theorem crit70_pqc_pubkey_pinning_sound :
+  forall ctx,
+    (pqc_enforced ctx = true \/ pqc_hybrid_active ctx = true) ->
+    eval_pqc_verify ctx = None ->
+    exists pin_h,
+      0 < pin_h /\
+      pqc_ks_pinned_hash ctx = Some pin_h /\
+      pqc_manifest_digest ctx = Some pin_h /\
+      pqc_sig_valid ctx = true.
+Proof.
+  intros ctx Hreq Heval.
+  unfold eval_pqc_verify in Heval.
+  assert (Hact : (pqc_enforced ctx || pqc_hybrid_active ctx) = true).
+  { apply Bool.orb_true_iff; exact Hreq. }
+  rewrite Hact in Heval; simpl in Heval.
+  destruct (pqc_ks_pinned_hash ctx) as [pin_h|] eqn:Epin; [|discriminate].
+  destruct (pqc_manifest_digest ctx) as [man_h|] eqn:Eman; [|discriminate].
+  destruct ((0 <? pin_h) && (pin_h =? man_h) && pqc_sig_valid ctx) eqn:Echk; [|discriminate].
+  rewrite !Bool.andb_true_iff, Nat.ltb_lt, Nat.eqb_eq in Echk.
+  destruct Echk as [[Hpos Heq] Hsig].
+  subst man_h; exists pin_h; repeat split; assumption.
+Qed.
+
+Theorem recovery_failure_counter_preserved_until_confirm :
+  forall cfg st,
+    tmr_mac_valid (st_tmr st) = true ->
+    mailbox_slot (st_slots st) = MBX_Empty ->
+    cloud_slot (st_slots st) = CC_Empty ->
+    wal_reconstruct_txn (st_wal st) = Some (WI_UpdatePending, 0) ->
+    reconstruct_aux_entries (wal_entries (st_wal st)) = Aux_None ->
+    rtc_nonce (st_confirm st) = 0 ->
+    recovery_failure_counter (st_tmr st) <= cfg_max_recovery_retries cfg ->
+    staging_can_apply (staging_slot (st_slots st)) (st_tmr st) (st_otp st) = true ->
+    let '(out, st') := eval_boot_state cfg st in
+    out = Boot_App (staging_slot (st_slots st)) true (cfg_fresh_nonce cfg) /\
+    boot_failure_counter (st_tmr st') = 0 /\
+    recovery_failure_counter (st_tmr st') = recovery_failure_counter (st_tmr st) /\
+    wal_reconstruct_txn (st_wal st') = Some (WI_TxnCommit, 0).
+Proof.
+  intros cfg st Hmac Hmbx Hcld Hwal Haux Hrtc0 Hrf Hcan.
+  pose proof (staging_can_apply_verified _ _ _ Hcan) as [[Hh [Hs [Hm [Hsvn Hk]]]] _].
+  cbv zeta; unfold eval_boot_state; cbv zeta.
+  rewrite Hmac; simpl.
+  unfold step1_mailbox_consume; rewrite Hmbx; simpl.
+  rewrite Hwal.
+  unfold step2_confirm_check; cbv zeta.
+  rewrite Hrtc0, Haux.
+  assert (Hrtc_f : ((0 <? active_nonce (st_tmr st)) && (0 =? active_nonce (st_tmr st))) = false)
+    by (destruct (active_nonce (st_tmr st)); reflexivity).
+  rewrite Hrtc_f; simpl.
+  unfold step2_5_cloud_cmd; rewrite Hcld; simpl.
+  assert (Hs3_eq :
+    exists br3,
+      step3_failure_and_rollback cfg (st_slots st) (st_wal st) (st_tmr st)
+                                 (st_reset st) WI_UpdatePending false =
+      S3_Ok (st_slots st) (st_wal st) (st_tmr st) WI_UpdatePending false br3).
+  { unfold step3_failure_and_rollback; cbv zeta; simpl.
+    rewrite !Bool.andb_false_r; simpl.
+    destruct (0 <? boot_failure_counter (st_tmr st)); simpl.
+    - destruct (boot_failure_counter (st_tmr st) <=? cfg_max_retries cfg).
+      + exists false; reflexivity.
+      + apply Nat.leb_le in Hrf; rewrite Hrf; exists true; reflexivity.
+    - exists false; reflexivity. }
+  destruct Hs3_eq as [br3 Hs3].
+  rewrite Hs3.
+  unfold step4_update_pipeline; simpl; cbv zeta.
+  rewrite Hcan; simpl.
+  unfold slot_tsig_valid; simpl.
+  rewrite Hh, Hs, Hk, Nat.eqb_refl; simpl.
+  destruct br3; repeat split; reflexivity.
 Qed.

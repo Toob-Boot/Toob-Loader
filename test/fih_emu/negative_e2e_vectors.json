@@ -1,0 +1,48 @@
+{
+  "suite": "toob_boot_tier2_negative_e2e_vectors",
+  "target": "nrf52840_cortex_m4",
+  "scenarios": [
+    {
+      "id": "NEG-01-TA1-ZERO-WEAR-BYPASS",
+      "requirement": "TA-1 zero-wear bypass",
+      "description": "Reject forged/mismatched post_crc or unverified staging-to-slot commit when TOOB_TA1_STRICT_NO_CRC_SKIP=1.",
+      "runners": ["neg_e2e_vectors"],
+      "expected_outcome": "fail_closed_boot_err_flash_hw_and_no_unverified_skip"
+    },
+    {
+      "id": "NEG-02-DEPLOYED-BLANK-WAL",
+      "requirement": "Deployed blank-WAL rejection",
+      "description": "With DSLC=0x01 (Production/Deployed) and erased 0xFF WAL sectors, Stage 1 boot_journal_init must fail closed without formatting or booting App.",
+      "runners": ["renode_live", "neg_e2e_vectors"],
+      "expected_outcome": "boot_panic_no_app_boot"
+    },
+    {
+      "id": "NEG-03-KDM-FLOOR-REPLAY",
+      "requirement": "KDM floor replay",
+      "description": "Replaying a root-signed KDM with sequence_number <= WAL TMR kdm_seq_floor or outdated TCC1 floor must fail closed.",
+      "runners": ["neg_e2e_vectors"],
+      "expected_outcome": "boot_err_rollback_or_verify"
+    },
+    {
+      "id": "NEG-04-PQC-HASH-MISMATCH",
+      "requirement": "PQC hash mismatch",
+      "description": "With TOOB_PQC_ENABLED=1 and OTP PQC pubkey SHA-256 hash pinning, an Ed25519-valid envelope carrying an unpinned ML-DSA pubkey must fail closed.",
+      "runners": ["neg_e2e_vectors"],
+      "expected_outcome": "boot_err_verify_pqc_pinning_mismatch"
+    },
+    {
+      "id": "NEG-05-UNSIGNED-AND-TAMPERED-TSIG-ROLLBACK",
+      "requirement": "Unsigned / tampered TSIG rollback image",
+      "description": "An unsigned App Slot image, a 1-bit tampered TSIG trailer, a revoked key_index, or a tampered Stage 1A image must fail closed before jump_to_vtor_image.",
+      "runners": ["renode_live", "neg_e2e_vectors"],
+      "expected_outcome": "fail_closed_no_app_boot"
+    },
+    {
+      "id": "NEG-06-BLANK-UICR-FAIL-CLOSED",
+      "requirement": "Blank 0xFF OTP/UICR rejection",
+      "description": "Stage 0 rejects all-0xFF UICR pubkey and halts prior to loading Stage 1 or Guest OS.",
+      "runners": ["renode_live"],
+      "expected_outcome": "stage0_halt_no_app_boot"
+    }
+  ]
+}

@@ -67,6 +67,10 @@ static bool                g_transport_failed;
 static bool                g_main_fast_mode;
 static boot_status_t       g_last_panic_reason;
 static uint32_t            g_init_order_depth;
+static bool                g_secrets_zeroized;
+static bool                g_slot_verified;
+static bool                g_aux_healed_found;
+static bool                g_cloud_cmd_accepted;
 
 _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
     (void)platform;
@@ -187,15 +191,22 @@ boot_status_t boot_journal_reconstruct_aux_heal(const boot_platform_t *platform,
                          __CPROVER_w_ok(out_found, sizeof(*out_found)),
                      "boot_journal_reconstruct_aux_heal preconditions");
     if (nondet_bool()) {
+        *out_found = false;
+        g_aux_healed_found = false;
         return BOOT_ERR_FLASH_HW;
     }
     *out_found = nondet_bool();
+    g_aux_healed_found = *out_found;
     if (*out_found) {
         CBMC_HAVOC_OBJECT(*out_heal);
     } else {
         memset(out_heal, 0, sizeof(*out_heal));
     }
     return BOOT_OK;
+}
+
+void boot_journal_zeroize_secrets(void) {
+    g_secrets_zeroized = true;
 }
 
 boot_status_t boot_mailbox_consume(const boot_platform_t *platform) {
@@ -216,6 +227,7 @@ boot_status_t boot_cloud_cmd_evaluate_flash(const boot_platform_t *platform,
                      "boot_cloud_cmd_evaluate_flash arena must reside in crypto_arena");
     if (g_force_cloud_cmd) {
         *out_cmd = g_forced_cmd;
+        g_cloud_cmd_accepted = true;
         return BOOT_OK;
     }
     if (g_main_fast_mode || nondet_bool()) {
@@ -227,6 +239,7 @@ boot_status_t boot_cloud_cmd_evaluate_flash(const boot_platform_t *platform,
         __CPROVER_assume(c != (uint8_t)TOOB_CMD_FORCE_UPDATE);
     }
     *out_cmd = (toob_cloud_cmd_t)c;
+    g_cloud_cmd_accepted = true;
     return BOOT_OK;
 }
 
@@ -250,6 +263,27 @@ boot_status_t boot_verify_manifest_envelope(const boot_platform_t *platform,
     }
 #endif
     return nondet_bool() ? BOOT_OK : BOOT_ERR_VERIFY;
+}
+
+boot_status_t boot_verify_slot_image(const boot_platform_t *platform,
+                                     uint32_t slot_addr,
+                                     uint32_t slot_size,
+                                     const toob_image_header_t *hdr,
+                                     uint8_t *arena,
+                                     size_t arena_len) {
+    __CPROVER_assert(platform != NULL && hdr != NULL && arena != NULL &&
+                         __CPROVER_r_ok(hdr, sizeof(*hdr)) &&
+                         __CPROVER_w_ok(arena, arena_len),
+                     "boot_verify_slot_image preconditions");
+    __CPROVER_assert(hdr->magic == TOOB_MAGIC_HEADER &&
+                         hdr->image_size <= slot_size &&
+                         (UINT32_MAX - slot_addr) >= hdr->image_size,
+                     "boot_verify_slot_image bounds check before TSIG");
+    if (nondet_bool()) {
+        return BOOT_ERR_VERIFY;
+    }
+    g_slot_verified = true;
+    return BOOT_OK;
 }
 
 boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform,
@@ -742,16 +776,22 @@ static boot_platform_t make_fv07_platform(clock_hal_t *clock,
  * Entrypoint 1: Real TBM1 Update Pipeline + Arena Non-Aliasing + TDR1-02/03
  * ========================================================================== */
 void prove_boot_state_update_pipeline(void) {
-    g_main_fast_mode            = false;
-    g_force_cloud_cmd           = false;
+    g_main_fast_mode             = false;
+    g_force_cloud_cmd            = false;
     g_skip_unlocked_force_update = false;
-    g_transport_failed = false;
-    g_tmr_updated      = false;
+    g_transport_failed           = false;
+    g_tmr_updated                = false;
+    g_slot_verified              = false;
+    g_aux_healed_found           = false;
+    g_cloud_cmd_accepted         = false;
     boot_diag_init();
 
     CBMC_HAVOC_OBJECT(g_tmr_state);
     __CPROVER_assume(g_tmr_state.recovery_failure_counter < UINT32_MAX);
     __CPROVER_assume(g_tmr_state.boot_failure_counter < UINT32_MAX);
+    const uint32_t orig_rec_fails = g_tmr_state.recovery_failure_counter;
+    const bool pre_no_nonce =
+        (g_tmr_state.active_nonce_lo == 0U && g_tmr_state.active_nonce_hi == 0U);
 
     CBMC_HAVOC_OBJECT(g_txn_state);
     g_txn_state.intent = WAL_INTENT_UPDATE_PENDING;
@@ -784,6 +824,15 @@ void prove_boot_state_update_pipeline(void) {
     }
 
     if (st == BOOT_OK && g_txn_state.intent == WAL_INTENT_TXN_COMMIT) {
+        __CPROVER_assert(g_slot_verified,
+                         "CRIT-68: target slot verified via boot_verify_slot_image prior to seal");
+        __CPROVER_assert(!target.boot_recovery_os,
+                         "UPDATE_PENDING -> TXN_COMMIT clears boot_recovery_os");
+        if (pre_no_nonce && !g_aux_healed_found && !g_cloud_cmd_accepted &&
+            orig_rec_fails <= BOOT_CONFIG_MAX_RECOVERY_RETRIES) {
+            __CPROVER_assert(g_tmr_state.recovery_failure_counter == orig_rec_fails,
+                             "recovery_failure_counter preserved across UPDATE_PENDING -> TXN_COMMIT until CONFIRM_COMMIT");
+        }
         __CPROVER_assert(target.is_tentative_boot,
                          "newly committed update requires tentative confirmation");
         __CPROVER_assert(target.generated_nonce != 0ULL,
@@ -884,6 +933,7 @@ void prove_boot_main_lifecycle_and_handoff(void) {
     g_main_fast_mode   = true;
     g_force_cloud_cmd  = false;
     g_init_order_depth = 0U;
+    g_secrets_zeroized = false;
     boot_platform_mark_down();
 
     CBMC_HAVOC_OBJECT(g_tmr_state);
@@ -928,6 +978,8 @@ void prove_boot_main_lifecycle_and_handoff(void) {
                      "every initialized flash HAL instance is cleanly deinitialized");
 
     if (st == BOOT_OK) {
+        __CPROVER_assert(g_secrets_zeroized,
+                         "CRIT-69: boot_journal_zeroize_secrets called before OS handoff");
         uint32_t abs_entry = target.proof.image_addr + target.proof.entry_point;
         __CPROVER_assert((abs_entry & 0x7FU) == 0U,
                          "HIGH-29: Cortex-M VTOR entry point is 128-byte aligned");

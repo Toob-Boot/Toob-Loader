@@ -740,6 +740,22 @@ static boot_status_t sim_advance_monotonic(void) {
   return BOOT_OK;
 }
 
+static boot_status_t sim_read_device_secret(uint8_t *secret_out, size_t max_len,
+                                            size_t *actual_len) {
+  static const uint8_t k_huk[32] = {
+      0x41U, 0x52U, 0x63U, 0x74U, 0x85U, 0x96U, 0xA7U, 0xB8U,
+      0xC9U, 0xDAU, 0xEBU, 0xFCU, 0x0DU, 0x1EU, 0x2FU, 0x30U,
+      0x01U, 0x12U, 0x23U, 0x34U, 0x45U, 0x56U, 0x67U, 0x78U,
+      0x89U, 0x9AU, 0xABU, 0xBCU, 0xCDU, 0xDEU, 0xEFU, 0xF1U
+  };
+  if (!secret_out || !actual_len || max_len < sizeof(k_huk)) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  memcpy(secret_out, k_huk, sizeof(k_huk));
+  *actual_len = sizeof(k_huk);
+  return BOOT_OK;
+}
+
 static const crypto_hal_t s_crypto_hal = {
     .abi_version = TOOB_HAL_ABI_V3,
     .init = crypto_monocypher_init,
@@ -767,6 +783,7 @@ static const keystore_hal_t s_keystore_hal = {
     .read_dslc = sim_read_dslc,
     .read_monotonic_counter = sim_read_monotonic,
     .advance_monotonic_counter = sim_advance_monotonic,
+    .read_device_secret = sim_read_device_secret,
 };
 
 /* --- Slot Capabilities (Mutable in Profile 1 for BFB2 vs XIP_REMAP) --- */
@@ -1005,6 +1022,21 @@ static void build_test_image(signed_image_ref_t *out, size_t len, uint32_t svn,
   hdr.image_size = (uint32_t)len;
   hdr.entry_point = 0x100U;
   memcpy(buf, &hdr, sizeof(hdr));
+
+  assert(len >= sizeof(toob_image_header_t) + sizeof(toob_img_sig_trailer_t));
+  size_t signed_len = len - sizeof(toob_img_sig_trailer_t);
+  uint8_t tsig_digest[32];
+  sha256_buf(buf, signed_len, tsig_digest);
+
+  toob_img_sig_trailer_t trailer;
+  memset(&trailer, 0, sizeof(trailer));
+  trailer.magic = TOOB_IMG_SIG_MAGIC;
+  trailer.key_index = 0U;
+  trailer.flags = TOOB_IMG_SIG_FLAG_SHA256;
+  trailer.reserved = 0U;
+  crypto_ed25519_sign(trailer.sig_ed25519, s_root_sk, tsig_digest,
+                      sizeof(tsig_digest));
+  memcpy(buf + signed_len, &trailer, sizeof(trailer));
 
   out->bytes = buf;
   out->len = len;
@@ -1380,11 +1412,24 @@ static void init_fresh_device(const signed_image_ref_t *v1,
   s_record_ops = false;
   s_cut_at_op = 0U;
   s_flash_op_counter = 0U;
-  s_otp_svn = v1->svn;
-  s_dslc_state = 0x01U;
+  s_otp_svn = 0U;
+  s_dslc_state = 0x00U;
   s_bfb2_bank = 0U;
   s_xip_volatile_slot = 0U;
   s_rtc_confirm_nonce = 0ULL;
+  sim_reset_sram_globals(RESET_REASON_POWER_ON);
+
+  /* Initialize blank WAL while factory unprovisioned (DSLC == 0x00, epoch == 0, CRIT-69),
+   * then step OTP epoch/app_svn up to v1->svn and lock device as deployed (DSLC == 0x01). */
+  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  wal_tmr_payload_t tmr;
+  while (s_otp_svn < v1->svn) {
+    s_otp_svn++;
+    assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
+    tmr.app_svn = v1->svn;
+    assert(boot_journal_update_tmr(&s_platform, &tmr) == BOOT_OK);
+  }
+  s_dslc_state = 0x01U;
   sim_reset_sram_globals(RESET_REASON_POWER_ON);
 
   /* Provision 3-way KDM quorum via boot_rstore_write (tests 8B/32B ECC alignment!) */
@@ -1419,7 +1464,7 @@ static void init_fresh_device(const signed_image_ref_t *v1,
   raw_erase_and_program_region(CHIP_RECOVERY_OS_ABS_ADDR, CHIP_RECOVERY_OS_SIZE,
                                recovery->bytes, recovery->len);
 
-  /* Run baseline cold boot + seed initial TMR app_svn = v1->svn */
+  /* Run baseline cold boot + verify initial TMR app_svn = v1->svn */
   boot_target_config_t target;
   assert(boot_main(&s_platform, &target, k_seal_key) == BOOT_OK);
   assert(target.boot_recovery_os == false);
@@ -1427,7 +1472,6 @@ static void init_fresh_device(const signed_image_ref_t *v1,
 
   sim_reset_sram_globals(RESET_REASON_POWER_ON);
   assert(boot_journal_init(&s_platform) == BOOT_OK);
-  wal_tmr_payload_t tmr;
   assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
   tmr.app_svn = v1->svn;
   assert(boot_journal_update_tmr(&s_platform, &tmr) == BOOT_OK);

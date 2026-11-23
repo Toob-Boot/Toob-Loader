@@ -93,7 +93,7 @@ foreach ($v in $Variants) {
 
     $signedOk = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        & $ToobCli sign image $raw -o $toob --entry 0x14
+        & $ToobCli sign image $raw -o $toob --entry 0x14 --mock
         if ($LASTEXITCODE -eq 0) {
             $signedOk = $true
             break

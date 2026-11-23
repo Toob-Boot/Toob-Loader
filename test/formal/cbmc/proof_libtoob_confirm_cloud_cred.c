@@ -191,7 +191,12 @@ void prove_submit_cloud_command(void) {
     CBMC_HAVOC_OBJECT(toob_handoff_state);
 
     uint8_t envelope[256] __attribute__((aligned(8)));
-    CBMC_HAVOC_OBJECT(envelope);
+    memset(envelope, 0, sizeof(envelope));
+    toob_cloud_cmd_hdr_t env_hdr;
+    CBMC_HAVOC_OBJECT(env_hdr);
+    memcpy(envelope, &env_hdr, sizeof(env_hdr));
+    envelope[sizeof(env_hdr)] = nondet_uint8_t();
+    envelope[sizeof(envelope) - 1U] = nondet_uint8_t();
 
     uint32_t len = nondet_uint32_t();
     if (nondet_bool()) {

@@ -1,0 +1,37 @@
+# Renode Monitor Script: Stage 1 -> Guest OS SRAM Handover Secret Hygiene Audit
+#
+# Parameter variables (override before `include` or via generated wrapper):
+#   $OVERLAY_CS     Path to Nrf52840SocOverlay.cs
+#   $REPL_PATH      Path to nrf52840_toob.repl
+#   $FLASH_BIN      Provisioned flash binary (1 MB)
+#   $UICR_BIN       Provisioned UICR binary (4 KB)
+#   $AUDIT_OUT_PATH Output file path for 256 KB SRAM dump [0x20000000..0x20040000)
+#   $HANDOFF_PC     Address of jump_to_vtor_image (resolved from toob_stage1 ELF)
+#   $UART_PORT      ServerSocketTerminal TCP port for UART log capture
+
+$OVERLAY_CS?=@test/renode_nrf52840/Nrf52840SocOverlay.cs
+$REPL_PATH?=@test/renode_nrf52840/nrf52840_toob.repl
+$FLASH_BIN?=@D:/ToobStorage/tmp_build/w2sec/fih_emu/provisioned_flash.bin
+$UICR_BIN?=@D:/ToobStorage/tmp_build/w2sec/fih_emu/provisioned_uicr.bin
+$AUDIT_OUT_PATH?="D:/ToobStorage/tmp_build/w2sec/fih_emu/sram_handover_dump.bin"
+$HANDOFF_PC?=0x00008cfe
+$UART_PORT?=34561
+
+include $OVERLAY_CS
+mach create "nrf52840_sram_audit"
+machine LoadPlatformDescription $REPL_PATH
+sysbus.nvmc InstallFlashHooks
+emulation CreateServerSocketTerminal $UART_PORT "term" false
+connector Connect sysbus.uart0 term
+sysbus.flash LoadBinary $FLASH_BIN 0x0
+sysbus.uicr LoadBinary $UICR_BIN
+
+macro reset
+"""
+    sysbus.cpu VectorTableOffset 0x0
+    sysbus.cpu SP `sysbus ReadDoubleWord 0x0`
+    sysbus.cpu PC `sysbus ReadDoubleWord 0x4`
+"""
+runMacro $reset
+
+sysbus.cpu AddHook $HANDOFF_PC "import System.IO; data = machine.SystemBus.ReadBytes(0x20000000, 0x40000); p = System.Environment.GetEnvironmentVariable('TOOB_SRAM_AUDIT_OUT') or 'D:/ToobStorage/tmp_build/w2sec/fih_emu/sram_handover_dump.bin'; System.IO.File.WriteAllBytes(p, data); machine.Pause()"

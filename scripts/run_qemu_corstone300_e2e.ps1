@@ -152,7 +152,7 @@ try {
 
     Write-Host "=== [4/5] Signing Stage 1 & Recovery OS + Building Non-Secure Cortex-M55 Guest Apps ==="
     Invoke-Toob @("sign", "stage1", "$BuildDir\toob_stage1.bin", "--entry", "0x100", "--mock", "-o", "$BuildDir\toob_stage1.signed.bin")
-    Invoke-Toob @("sign", "image", "$BuildDir\toob_recovery.raw.bin", "--entry", "0x100", "-o", "$BuildDir\toob_recovery.bin")
+    Invoke-Toob @("sign", "image", "$BuildDir\toob_recovery.raw.bin", "--entry", "0x100", "--mock", "-o", "$BuildDir\toob_recovery.bin")
 
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $RepoRoot "test\qemu_corstone300\guest_app\build_apps.ps1") -BuildDir $BuildDir -OutDir $AppsDir -ToobCli $ToobExe
     if ($LASTEXITCODE -ne 0) { throw "Guest app build failed" }

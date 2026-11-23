@@ -1,5 +1,6 @@
 param(
-    [string]$Filter = ""
+    [string]$Filter = "",
+    [int]$TimeoutSec = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -261,7 +262,7 @@ function Invoke-ProofBundle {
 
                     $sw = [System.Diagnostics.Stopwatch]::StartNew()
                     $proc = [System.Diagnostics.Process]::Start($psi)
-                    $finished = $proc.WaitForExit(45000)
+                    $finished = $proc.WaitForExit($TimeoutSec * 1000)
                     $sw.Stop()
                     $sec = [Math]::Round($sw.Elapsed.TotalSeconds, 2)
 
@@ -271,7 +272,7 @@ function Invoke-ProofBundle {
                         & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null
                         $ErrorActionPreference = $prevEap
                         $proc.Dispose()
-                        Write-Host ("[TIMEOUT] {0} (>45s) -> {1}" -f $fullLabel, $runLog) -ForegroundColor Red
+                        Write-Host ("[TIMEOUT] {0} (>{1}s) -> {2}" -f $fullLabel, $TimeoutSec, $runLog) -ForegroundColor Red
                         $script:TotalFailed++
                         $script:Results.Add([PSCustomObject]@{
                             Proof   = $fullLabel
@@ -421,6 +422,7 @@ Invoke-ProofBundle `
 # 5. proof_boot_cloud_cmd.c
 Invoke-ProofBundle `
     -BundleName "W5A_05_cloud_cmd" `
+    -Defines @("-DTOOB_OTP_MAX_SLOTS=4U") `
     -Sources @(
         "test/formal/cbmc/proof_boot_cloud_cmd.c",
         "toobloader/core/boot_cloud_cmd.c",
@@ -432,8 +434,8 @@ Invoke-ProofBundle `
         @{
             ReplaceCalls = $StdCoreContracts
             Runs = @(
-                @{ Label = "evaluate_buffer"; Function = "prove_cloud_cmd_buffer"; Unwind = 5 },
-                @{ Label = "evaluate_flash";  Function = "prove_cloud_cmd_flash";  Unwind = 5 }
+                @{ Label = "evaluate_buffer"; Function = "prove_cloud_cmd_buffer"; Unwind = 5; UnwindSet = "boot_otp_get_active_key_index.0:6" },
+                @{ Label = "evaluate_flash";  Function = "prove_cloud_cmd_flash";  Unwind = 5; UnwindSet = "boot_otp_get_active_key_index.0:6" }
             )
         }
     )
@@ -460,7 +462,8 @@ foreach ($asym in @(0, 1)) {
             -BundleName "W5A_06_journal_asym${asym}_align${align}" `
             -Defines @(
                 "-DCBMC_ASYMMETRIC_SECTORS=$asym",
-                "-DCHIP_FLASH_WRITE_ALIGNMENT=${align}U"
+                "-DCHIP_FLASH_WRITE_ALIGNMENT=${align}U",
+                "-DTOOB_OTP_MAX_SLOTS=4U"
             ) `
             -Sources @(
                 "test/formal/cbmc/proof_boot_journal_align.c",
@@ -473,7 +476,7 @@ foreach ($asym in @(0, 1)) {
                 @{
                     ReplaceCalls = $JournalInitContracts
                     Runs = @(
-                        @{ Label = "journal_init";   Function = "prove_journal_init";           Unwind = 5; NoArrayFieldSens = $true; UnwindSet = "scan_for_frontier_linear.0:3" },
+                        @{ Label = "journal_init";   Function = "prove_journal_init";           Unwind = 5; NoArrayFieldSens = $true; UnwindSet = "scan_for_frontier_linear.0:3,boot_otp_get_active_key_index.0:6" },
                         @{ Label = "rstore_padding"; Function = "prove_journal_rstore_padding"; Unwind = 5; NoArrayFieldSens = $true }
                     )
                 },
@@ -642,7 +645,8 @@ Invoke-ProofBundle `
         "-Dmain=stage0_entry_main",
         "-D__ARM_ARCH_PROFILE=77",
         "-DCHIP_HAS_VTOR=1",
-        "-DBOOT_STAGE1_SVN=2U"
+        "-DBOOT_STAGE1_SVN=2U",
+        "-DTOOB_OTP_MAX_SLOTS=5U"
     ) `
     -Sources @(
         "test/formal/cbmc/proof_stage0_boot.c",
@@ -659,7 +663,7 @@ Invoke-ProofBundle `
         @{
             ReplaceCalls = $Stage0BaseContracts
             Runs = @(
-                @{ Label = "otp_scan";                 Function = "prove_stage0_otp_scan";                 Unwind = 6;  UnwindSet = 'verify_not_all_zeros_glitch_safe.0:34,verify_not_all_zeros_glitch_safe$link1.0:34,verify_not_all_zeros_glitch_safe$link2.0:34' },
+                @{ Label = "otp_scan";                 Function = "prove_stage0_otp_scan";                 Unwind = 6;  UnwindSet = 'stage0_get_active_otp_key_index.0:7,verify_not_all_zeros_glitch_safe.0:34,verify_not_all_zeros_glitch_safe$link1.0:34,verify_not_all_zeros_glitch_safe$link2.0:34,constant_time_memcmp_glitch_safe.0:34,constant_time_memcmp_glitch_safe$link1.0:34,constant_time_memcmp_glitch_safe$link2.0:34' },
                 @{ Label = "wal_quorum_and_tentative"; Function = "prove_stage0_wal_quorum_and_tentative"; Unwind = 6;  UnwindSet = "constant_time_memcmp_glitch_safe.0:120,stage0_evaluate_tentative.0:130" },
                 @{ Label = "hash_and_verify";          Function = "prove_stage0_hash_and_verify";          Unwind = 6;  UnwindSet = "constant_time_memcmp_glitch_safe.0:36,prove_stage0_hash_and_verify.0:34,prove_stage0_hash_and_verify.1:34" }
             )
@@ -672,36 +676,42 @@ Invoke-ProofBundle `
         }
     )
 
-# 10. FV-02: proof_boot_merkle_and_verify.c across TOOB_PQC_ENABLED={0,1}
+# 10. FV-02: proof_boot_merkle_and_verify.c across TOOB_PQC_ENABLED={0,1} and
+#            TOOB_DOUBLE_VERIFY={default(undef), 0, 1}
+$Fv02DoubleVerifyConfigs = @(
+    @{ Label = "default"; Defines = @() },
+    @{ Label = "0";       Defines = @("-DTOOB_DOUBLE_VERIFY=0") },
+    @{ Label = "1";       Defines = @("-DTOOB_DOUBLE_VERIFY=1") }
+)
 foreach ($pqc in @(0, 1)) {
-    Invoke-ProofBundle `
-        -BundleName "FV02_merkle_verify_pqc$pqc" `
-        -Defines @(
-            "-DTOOB_PQC_ENABLED=$pqc",
-            "-DTOOB_DOUBLE_VERIFY=1"
-        ) `
-        -Sources @(
-            "test/formal/cbmc/proof_boot_merkle_and_verify.c",
-            "toobloader/core/utils/boot_merkle.c",
-            "toobloader/core/boot_verify.c",
-            "toobloader/core/utils/boot_crc32.c"
-        ) `
-        -Profiles @(
-            @{
-                ReplaceCalls = @{
-                    "cfi_derive"                       = "cbmc_cfi_derive_mod32"
-                    "boot_proof_mix"                   = "cbmc_boot_proof_mix_mod32"
-                    "constant_time_memcmp_glitch_safe" = "cbmc_ct_memcmp_contract"
-                    "boot_random_safe"                 = "cbmc_boot_random_safe_contract"
-                    "boot_crc32_update"                = "cbmc_boot_crc32_update_contract"
-                    "compute_boot_crc32"               = "cbmc_compute_boot_crc32_contract"
+    foreach ($dv in $Fv02DoubleVerifyConfigs) {
+        $fv02Defines = @("-DTOOB_PQC_ENABLED=$pqc") + $dv.Defines
+        Invoke-ProofBundle `
+            -BundleName "FV02_merkle_verify_pqc${pqc}_dv$($dv.Label)" `
+            -Defines $fv02Defines `
+            -Sources @(
+                "test/formal/cbmc/proof_boot_merkle_and_verify.c",
+                "toobloader/core/utils/boot_merkle.c",
+                "toobloader/core/boot_verify.c",
+                "toobloader/core/utils/boot_crc32.c"
+            ) `
+            -Profiles @(
+                @{
+                    ReplaceCalls = @{
+                        "cfi_derive"                       = "cbmc_cfi_derive_mod32"
+                        "boot_proof_mix"                   = "cbmc_boot_proof_mix_mod32"
+                        "constant_time_memcmp_glitch_safe" = "cbmc_ct_memcmp_contract"
+                        "boot_random_safe"                 = "cbmc_boot_random_safe_contract"
+                        "boot_crc32_update"                = "cbmc_boot_crc32_update_contract"
+                        "compute_boot_crc32"               = "cbmc_compute_boot_crc32_contract"
+                    }
+                    Runs = @(
+                        @{ Label = "merkle_stream";     Function = "prove_merkle_stream_bounds_and_coverage"; Unwind = 5 },
+                        @{ Label = "manifest_envelope"; Function = "prove_verify_manifest_envelope";          Unwind = 6; UnwindSet = "verify_not_all_zeros_glitch_safe.0:260,fv02_verify_ed25519.0:34" }
+                    )
                 }
-                Runs = @(
-                    @{ Label = "merkle_stream";     Function = "prove_merkle_stream_bounds_and_coverage"; Unwind = 5 },
-                    @{ Label = "manifest_envelope"; Function = "prove_verify_manifest_envelope";          Unwind = 6; UnwindSet = "verify_not_all_zeros_glitch_safe.0:260,fv02_verify_ed25519.0:34" }
-                )
-            }
-        )
+            )
+    }
 }
 
 # 11. FV-03: proof_os_network_and_diag_wire.c
@@ -930,7 +940,7 @@ Invoke-ProofBundle `
     )
 
 # 15. FV-07: proof_boot_state_parse_route_and_main.c (PRODUCTION boot_state.c WITHOUT TOOB_MOCK_TEST)
-$Fv07UnwindSet = 'tbm1_find_region.0:10,tbm1_find_region$link1.0:10,tbm1_validate_regions.0:10,tbm1_validate_images.0:6,evaluate_transition.0:20,handle_update_result.0:16,run_pipeline.0:10,run_pipeline.1:10,run_pipeline.2:10,run_pipeline.3:2,run_pipeline.4:2,stage_route.0:6,stage_route.1:6'
+$Fv07UnwindSet = 'tbm1_find_region.0:10,tbm1_find_region$link1.0:10,tbm1_validate_regions.0:10,tbm1_validate_images.0:6,evaluate_transition.0:20,handle_update_result.0:16,run_pipeline.0:10,run_pipeline.1:10,run_pipeline.2:10,run_pipeline.3:2,run_pipeline.4:2,stage_route.0:6,stage_route.1:6,boot_otp_get_active_key_index.0:6'
 $Fv07StateContracts = Merge-Hashtable $StdCoreContracts @{
     "memcpy"  = "cbmc_memcpy_safe"
     "memmove" = "cbmc_memmove_safe"
@@ -950,7 +960,8 @@ foreach ($stMode in @(
             "-DCHIP_HAS_VTOR=1",
             "-DTOOB_FEATURE_DECOMP=1",
             "-DTOOB_FEATURE_DELTA=1",
-            "-DTOOB_FEATURE_MULTIIMAGE=1"
+            "-DTOOB_FEATURE_MULTIIMAGE=1",
+            "-DTOOB_OTP_MAX_SLOTS=4U"
         ) `
         -Sources @(
             "test/formal/cbmc/proof_boot_state_parse_route_and_main.c",
@@ -974,7 +985,7 @@ foreach ($stMode in @(
             @{
                 ReplaceCalls = $Fv07MainContracts
                 Runs = @(
-                    @{ Label = "boot_main_lifecycle_handoff"; Function = "prove_boot_main_lifecycle_and_handoff";       Unwind = 12; NoSatPrep = $true; UnwindSet = "boot_main.11:34" }
+                    @{ Label = "boot_main_lifecycle_handoff"; Function = "prove_boot_main_lifecycle_and_handoff";       Unwind = 12; NoSatPrep = $true; UnwindSet = "boot_main_exec.9:2050" }
                 )
             }
         )

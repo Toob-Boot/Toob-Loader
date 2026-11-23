@@ -69,7 +69,7 @@ foreach ($v in $Variants) {
     & $Objcopy -O binary $elf $raw
     if ($LASTEXITCODE -ne 0) { throw "objcopy failed for $($v.Name)" }
 
-    & $ToobCli sign image $raw -o $toob --entry 0x14
+    & $ToobCli sign image $raw -o $toob --entry 0x14 --mock
     if ($LASTEXITCODE -ne 0) { throw "toob sign image failed for $($v.Name)" }
 }
 

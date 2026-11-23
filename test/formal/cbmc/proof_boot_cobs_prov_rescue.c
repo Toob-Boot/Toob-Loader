@@ -75,6 +75,10 @@ void boot_secure_zeroize(void *ptr, size_t len) {
         *(fv04_z2048_t *)ptr = z;
         return;
     }
+    if (len <= 16U) {
+        memset(ptr, 0, len);
+        return;
+    }
     ((uint8_t *)ptr)[0] = 0U;
 }
 
@@ -345,6 +349,7 @@ void prove_cobs_decode_and_roundtrip(void) {
 
 static uint8_t g_rx_stream[FV04_RX_STREAM_CAP];
 static size_t  g_rx_pos = 0U;
+static bool    g_rx_allow_timeout = true;
 
 static boot_status_t fv04_rx_getchar(uint8_t *out_char, uint32_t timeout_ms) {
     (void)timeout_ms;
@@ -353,7 +358,7 @@ static boot_status_t fv04_rx_getchar(uint8_t *out_char, uint32_t timeout_ms) {
     if (g_rx_pos >= FV04_RX_STREAM_CAP) {
         __CPROVER_assume(false);
     }
-    if (nondet_bool() && g_rx_pos + 2U < FV04_RX_STREAM_CAP) {
+    if (g_rx_allow_timeout && nondet_bool() && g_rx_pos + 2U < FV04_RX_STREAM_CAP) {
         g_rx_pos++;
         return BOOT_ERR_TIMEOUT;
     }
@@ -364,6 +369,19 @@ static boot_status_t fv04_rx_getchar(uint8_t *out_char, uint32_t timeout_ms) {
 void prove_cobs_recv_frame(void) {
     CBMC_HAVOC_OBJECT(g_rx_stream);
     g_rx_pos = 0U;
+
+    /* Cover explicit overflow-drain discard followed by clean post-delimiter frame */
+    bool test_overflow_drain = nondet_bool();
+    g_rx_allow_timeout = !test_overflow_drain;
+    if (test_overflow_drain) {
+        for (size_t i = 0U; i < 8U; i++) {
+            __CPROVER_assume(g_rx_stream[i] != COBS_MARKER_END);
+        }
+        g_rx_stream[8]  = COBS_MARKER_END; /* terminates overflowed frame (must wipe & discard) */
+        g_rx_stream[9]  = 0x21U;
+        g_rx_stream[10] = 0x22U;
+        g_rx_stream[11] = COBS_MARKER_END; /* valid 2-byte frame after drain */
+    }
 
     console_hal_t con = { .getchar = fv04_rx_getchar };
     boot_platform_t plat = { .console = &con, .wdt = &g_cbmc_wdt_hal };
@@ -387,6 +405,13 @@ void prove_cobs_recv_frame(void) {
     __CPROVER_assume(k < out_len);
     __CPROVER_assert(rx_buf[k] != COBS_MARKER_END,
                      "Received COBS body excludes delimiter bytes");
+
+    if (test_overflow_drain) {
+        size_t z = nondet_size_t();
+        __CPROVER_assume(z >= 2U && z < FV04_RX_BUF_CAP);
+        __CPROVER_assert(rx_buf[z] == 0U,
+                         "Overflow drain wipes rx_buf before next frame without tail leakage");
+    }
 }
 
 /* ==========================================================================
@@ -551,13 +576,33 @@ void prove_provisioning_firewall(void) {
  * ========================================================================== */
 
 static uint32_t g_rtc_words[8];
+static uint8_t  g_fv04_active_otp_slot = 0U;
+
+boot_status_t boot_otp_get_active_key_index(const boot_platform_t *platform,
+                                            uint8_t *out_idx) {
+    __CPROVER_assert(platform != NULL && out_idx != NULL &&
+                         __CPROVER_w_ok(out_idx, sizeof(*out_idx)),
+                     "boot_otp_get_active_key_index requires writable out_idx");
+    if (nondet_bool()) {
+        return BOOT_ERR_VERIFY;
+    }
+    g_fv04_active_otp_slot = nondet_uint8_t();
+    *out_idx = g_fv04_active_otp_slot;
+    return BOOT_OK;
+}
 
 boot_status_t fv04_rtc_write(uint8_t slot, uint32_t val) {
     __CPROVER_assert(slot < 8U, "RTC backup slot index within bounds");
     if (slot == RTC_SLOT_AUTH_ATTEMPTS) {
-        __CPROVER_assert(val == g_initial_auth_attempts + 1U,
-                         "RTC auth counter increments monotonically on failed 2FA");
-        g_initial_auth_attempts = val;
+        if (val == 0U) {
+            __CPROVER_assert(g_2fa_authenticated,
+                             "RTC auth counter resets to 0 only after authenticated 2FA + OTP advance");
+            g_initial_auth_attempts = 0U;
+        } else {
+            __CPROVER_assert(val == g_initial_auth_attempts + 1U,
+                             "RTC auth counter increments monotonically on failed 2FA");
+            g_initial_auth_attempts = val;
+        }
     }
     g_rtc_words[slot] = val;
     return g_forensic_rtc_ok ? BOOT_OK : BOOT_ERR_FLASH_HW;
@@ -594,8 +639,8 @@ static boot_status_t fv04_ks_read_dslc(uint8_t *out_buf, size_t *inout_len) {
 }
 
 static boot_status_t fv04_ks_read_pubkey(uint8_t *out_key, size_t key_len, uint8_t slot) {
-    __CPROVER_assert(slot == 0U && key_len == 32U,
-                     "Stage 1.5 Serial Rescue must verify against Root Key Slot 0");
+    __CPROVER_assert(slot == g_fv04_active_otp_slot && key_len == 32U,
+                     "Stage 1.5 Serial Rescue must verify against active OTP Root Key slot");
     cbmc_assert_writable(out_key, key_len, "read_pubkey buffer must be writable");
     cbmc_havoc_bytes(out_key, key_len);
     return nondet_bool() ? BOOT_OK : BOOT_ERR_FLASH_HW;

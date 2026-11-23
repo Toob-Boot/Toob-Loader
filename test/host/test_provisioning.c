@@ -21,6 +21,7 @@
 #include "boot_hal.h"
 #include "boot_cobs.h"
 #include "boot_crc32.h"
+#include "boot_journal.h"
 #include "boot_panic.h"
 #include "boot_provisioning.h"
 #include "boot_secure_zeroize.h"
@@ -30,6 +31,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#ifdef _WIN32
+#define __USE_MINGW_SETJMP_NON_SEH
+#endif
 #include <setjmp.h>
 
 #define ARENA_SIZE 1024
@@ -252,6 +256,19 @@ static void test_efuse_mock_primitives(void) {
 static uint32_t s_lock_flash_calls = 0U;
 static uint32_t s_last_lock_offset = 0U;
 static uint32_t s_last_lock_size = 0U;
+static uint32_t s_wal_init_calls = 0U;
+static uint32_t s_wal_zeroize_calls = 0U;
+static boot_status_t s_wal_init_result = BOOT_OK;
+
+boot_status_t boot_journal_init(const boot_platform_t *platform) {
+    (void)platform;
+    s_wal_init_calls++;
+    return s_wal_init_result;
+}
+
+void boot_journal_zeroize_secrets(void) {
+    s_wal_zeroize_calls++;
+}
 
 static boot_status_t mock_lock_immutable_flash(uint32_t offset, uint32_t size) {
     if (size == 0U || UINT32_MAX - offset < size) {
@@ -269,6 +286,9 @@ static void test_provisioning_protocol_loop(void) {
     s_lock_flash_calls = 0U;
     s_last_lock_offset = 0U;
     s_last_lock_size = 0U;
+    s_wal_init_calls = 0U;
+    s_wal_zeroize_calls = 0U;
+    s_wal_init_result = BOOT_OK;
 
     /* Prepare UART fifos */
     s_uart_rx_head = 0;
@@ -371,12 +391,14 @@ static void test_provisioning_protocol_loop(void) {
     assert(s_last_lock_size == 0x00008000U);
     printf("  [PASS] PROV_CMD_LOCK_BOOT_FLASH default & explicit 8B LE payloads verified\n");
 
-    /* Verify that DSLC is now 0x01 */
+    /* Verify that DSLC is now 0x01 after formatting genesis WAL and wiping secrets */
+    assert(s_wal_init_calls == 1U);
+    assert(s_wal_zeroize_calls == 1U);
     uint8_t final_dslc = 0;
     size_t dlen = 1;
     assert(mock_keystore.read_dslc(&final_dslc, &dlen) == BOOT_OK);
     assert(final_dslc == 0x01);
-    printf("  [PASS] Device lifecycle state advanced to PROVISIONED (0x01)\n");
+    printf("  [PASS] Genesis WAL formatted, secrets zeroized, and DSLC = PROVISIONED (0x01)\n");
 }
 
 static void test_provisioning_tamper_rejection(void) {
@@ -386,6 +408,9 @@ static void test_provisioning_tamper_rejection(void) {
     s_uart_rx_tail = 0;
     s_uart_tx_len = 0;
     s_lock_flash_calls = 0U;
+    s_wal_init_calls = 0U;
+    s_wal_zeroize_calls = 0U;
+    s_wal_init_result = BOOT_OK;
 
     keystore_hal_t mock_keystore = {
         .abi_version = TOOB_HAL_ABI_V3,
@@ -470,7 +495,73 @@ static void test_provisioning_tamper_rejection(void) {
 
     assert(s_last_halt_reason == BOOT_OK);
     assert(s_lock_flash_calls == 0U);
+    assert(s_wal_init_calls == 0U);
+    assert(s_wal_zeroize_calls == 0U);
     printf("  [PASS] Corrupted CRC, ABI check, and invalid lock bounds handled safely\n");
+}
+
+static void test_provisioning_wal_init_fail_closed(void) {
+    printf("\n[4/4] Testing Genesis WAL Failure Prevents DSLC Transition...\n");
+    esp_efuse_mock_reset();
+    s_uart_rx_head = 0;
+    s_uart_rx_tail = 0;
+    s_uart_tx_len = 0;
+    s_wal_init_calls = 0U;
+    s_wal_zeroize_calls = 0U;
+    s_wal_init_result = BOOT_ERR_FLASH_HW;
+
+    keystore_hal_t mock_keystore = {
+        .abi_version = TOOB_HAL_ABI_V3,
+        .read_pubkey = esp_efuse_read_pubkey,
+        .read_chip_uid = esp_efuse_read_chip_uid,
+        .read_dslc = esp_efuse_read_dslc,
+        .write_dslc = esp_efuse_write_dslc,
+        .read_monotonic_counter = esp_efuse_read_monotonic,
+        .advance_monotonic_counter = esp_efuse_advance_monotonic
+    };
+
+    provisioning_hal_t mock_prov = {
+        .abi_version = TOOB_HAL_ABI_V3,
+        .burn_pubkey = esp_efuse_burn_pubkey,
+        .write_dslc = esp_efuse_write_dslc,
+        .set_protection_bits = esp_efuse_set_protection_bits,
+        .enable_secure_boot = esp_efuse_enable_secure_boot,
+        .enable_flash_encryption = esp_efuse_enable_flash_encryption,
+        .lock_immutable_flash = mock_lock_immutable_flash
+    };
+
+    boot_platform_t platform = {
+        .console = &s_mock_console_hal,
+        .keystore = &mock_keystore,
+        .provisioning = &mock_prov,
+        .wdt = NULL
+    };
+
+    uint8_t initial_dslc = 0U;
+    size_t dlen = 1U;
+    assert(mock_keystore.read_dslc(&initial_dslc, &dlen) == BOOT_OK);
+
+    uint8_t cmd_dslc_fail[] = { PROV_CMD_SET_DSLC, 0x03U };
+    queue_cobs_frame(cmd_dslc_fail, sizeof(cmd_dslc_fail));
+    uint8_t cmd_reboot[] = { PROV_CMD_REBOOT };
+    queue_cobs_frame(cmd_reboot, sizeof(cmd_reboot));
+
+    uint8_t arena[ARENA_SIZE];
+    s_halt_expected = true;
+    if (setjmp(s_halt_jmp) == 0) {
+        boot_provisioning_run(&platform, arena, sizeof(arena));
+    }
+    s_halt_expected = false;
+
+    assert(s_last_halt_reason == BOOT_OK);
+    assert(s_wal_init_calls == 1U);
+    assert(s_wal_zeroize_calls == 1U);
+    uint8_t after_dslc = 0U;
+    dlen = 1U;
+    assert(mock_keystore.read_dslc(&after_dslc, &dlen) == BOOT_OK);
+    assert(after_dslc == initial_dslc);
+    s_wal_init_result = BOOT_OK;
+    printf("  [PASS] Genesis WAL failure aborted DSLC write & wiped secrets\n");
 }
 
 int main(void) {
@@ -481,6 +572,7 @@ int main(void) {
     test_efuse_mock_primitives();
     test_provisioning_protocol_loop();
     test_provisioning_tamper_rejection();
+    test_provisioning_wal_init_fail_closed();
 
     printf("\n==================================================\n");
     printf("   ALL PROVISIONING TESTS PASSED\n");

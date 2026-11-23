@@ -115,7 +115,7 @@ foreach ($v in $Variants) {
     & $Objcopy -O binary $elf $raw
     if ($LASTEXITCODE -ne 0) { throw "objcopy failed for $($v.Name)" }
 
-    Invoke-ToobSign @("sign", "image", $raw, "-o", $toob, "--entry", "0x100")
+    Invoke-ToobSign @("sign", "image", $raw, "-o", $toob, "--entry", "0x100", "--mock")
 }
 
 Write-Host "Built all 4 Corstone-300 Cortex-M55 Non-Secure guest apps in $OutDir"

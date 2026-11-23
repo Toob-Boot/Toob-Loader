@@ -159,6 +159,7 @@ static uint32_t s_fail_at_write_op = 0U;
 static reset_reason_t s_reset_reason = RESET_REASON_POWER_ON;
 static uint32_t s_hw_active_slot = 0U;
 static uint32_t s_otp_svn = 0U;
+static uint8_t s_dslc_state = 0x00U;
 
 static void sim_reset_boot_globals(void) {
   wal_initialized = false;
@@ -174,6 +175,7 @@ static void sim_flash_format(void) {
   s_reset_reason = RESET_REASON_POWER_ON;
   s_hw_active_slot = 0U;
   s_otp_svn = 0U;
+  s_dslc_state = 0x00U;
   sim_reset_boot_globals();
 }
 
@@ -331,8 +333,25 @@ static boot_status_t sim_crypto_read_dslc(uint8_t *buf, size_t *len) {
   if (!buf || !len || *len == 0U) {
     return BOOT_ERR_INVALID_ARG;
   }
-  buf[0] = 0x01U; /* Provisioned */
+  buf[0] = s_dslc_state;
   *len = 1U;
+  return BOOT_OK;
+}
+
+static boot_status_t sim_crypto_read_device_secret(uint8_t *secret_out,
+                                                   size_t max_len,
+                                                   size_t *actual_len) {
+  static const uint8_t k_huk[32] = {
+      0x21U, 0x32U, 0x43U, 0x54U, 0x65U, 0x76U, 0x87U, 0x98U,
+      0xA9U, 0xBAU, 0xCBU, 0xDCU, 0xEDU, 0xFEU, 0x0FU, 0x10U,
+      0x11U, 0x22U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U,
+      0x99U, 0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xFFU, 0x00U
+  };
+  if (!secret_out || !actual_len || max_len < sizeof(k_huk)) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  memcpy(secret_out, k_huk, sizeof(k_huk));
+  *actual_len = sizeof(k_huk);
   return BOOT_OK;
 }
 
@@ -367,7 +386,8 @@ static const keystore_hal_t s_keystore_hal = TOOB_KEYSTORE_HAL_V3(
     NULL, NULL, sim_crypto_read_pubkey, sim_crypto_read_dslc, NULL,
     .read_chip_uid = sim_crypto_read_uid,
     .read_monotonic_counter = sim_crypto_read_monotonic,
-    .advance_monotonic_counter = sim_crypto_advance_monotonic);
+    .advance_monotonic_counter = sim_crypto_advance_monotonic,
+    .read_device_secret = sim_crypto_read_device_secret);
 
 #if !TOOB_TEST_ONEWAY_RDELTA
 static boot_status_t sim_xip_remap_commit(uint32_t phys_addr) {
@@ -453,6 +473,7 @@ static void test_sdvm_direct_and_brownout_resume(const uint8_t *v1,
 
   sim_flash_format();
   assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
 
   memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], v1, v1_len);
   const uint32_t delta_addr = CHIP_STAGING_SLOT_ABS_ADDR + 0x10000U;
@@ -480,6 +501,7 @@ static void test_sdvm_direct_and_brownout_resume(const uint8_t *v1,
   for (uint32_t crash_op = 1U; crash_op <= baseline_writes; crash_op++) {
     sim_flash_format();
     assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
     memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], v1, v1_len);
     memcpy(&s_flash[delta_addr], tds1_raw, tds1_len);
 
@@ -504,6 +526,7 @@ static void test_sdvm_direct_and_brownout_resume(const uint8_t *v1,
     s_fail_at_write_op = 0U;
     sim_reset_boot_globals();
     assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
     wal_entry_payload_t resumed_txn;
     memset(&resumed_txn, 0, sizeof(resumed_txn));
     assert(boot_journal_reconstruct_txn(&s_platform, &resumed_txn, NULL, NULL) == BOOT_OK);
@@ -521,6 +544,7 @@ static void test_sdvm_direct_and_brownout_resume(const uint8_t *v1,
   /* Negative Test A: Wrong base_fingerprint -> BOOT_ERR_DOWNGRADE */
   sim_flash_format();
   assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
   memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], v1, v1_len);
   s_flash[CHIP_APP_SLOT_ABS_ADDR + 32U] ^= 0x55U; /* Mutate base byte */
   memcpy(&s_flash[delta_addr], tds1_raw, tds1_len);
@@ -536,6 +560,7 @@ static void test_sdvm_direct_and_brownout_resume(const uint8_t *v1,
   /* Negative Test B: Trailing unparsed byte -> BOOT_ERR_VERIFY */
   sim_flash_format();
   assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
   memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], v1, v1_len);
   memcpy(&s_flash[delta_addr], tds1_raw, tds1_len);
   s_flash[delta_addr + tds1_len] = 0xAAU;
@@ -559,6 +584,7 @@ static void test_pointer_zerocopy_trailer_delta_e2e(
   /* Subtest 2A: Tamper staged TDS1 header base_fingerprint vs signed TBM1 -> rejected before erase! */
   sim_flash_format();
   assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
   wal_tmr_payload_t tmr;
   memset(&tmr, 0, sizeof(tmr));
   assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
@@ -604,6 +630,7 @@ static void test_pointer_zerocopy_trailer_delta_e2e(
   /* Subtest 2B: Valid TrailerLayout TDS1 update with mid-SDVM brownout + clean resume! */
   sim_flash_format();
   assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
   memset(&tmr, 0, sizeof(tmr));
   assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
   tmr.app_svn = 1U;
@@ -663,6 +690,7 @@ static void test_oneway_reverse_delta_e2e(const uint8_t *v1, size_t v1_len,
    *    must abort BEFORE erasing CHIP_APP_SLOT_ABS_ADDR! */
   sim_flash_format();
   assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
   wal_tmr_payload_t tmr;
   memset(&tmr, 0, sizeof(tmr));
   assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
@@ -703,6 +731,7 @@ static void test_oneway_reverse_delta_e2e(const uint8_t *v1, size_t v1_len,
   /* 2. Full Apply -> v2 deployed -> Tentative Watchdog Crash -> Mid-Rollback Brownout -> Rollback to v1! */
   sim_flash_format();
   assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_dslc_state = 0x01U;
   memset(&tmr, 0, sizeof(tmr));
   assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
   tmr.app_svn = 1U;

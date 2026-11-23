@@ -139,6 +139,10 @@ Definition image_is_verified (img : SlotImage) (min_svn active_key : nat) : Prop
   image_svn img >= min_svn /\
   key_index img = active_key.
 
+(* Wave-1 CRIT-68 / CRIT-71: Flashed slot TSIG verification matching boot_verify_slot_image *)
+Definition slot_tsig_valid (img : SlotImage) (active_key : nat) : bool :=
+  hdr_valid img && sig_valid img && Nat.eqb (key_index img) active_key.
+
 Inductive CloudCmdKind : Type :=
   | CCK_Nop         : CloudCmdKind
   | CCK_ForceUpdate : CloudCmdKind
@@ -337,3 +341,57 @@ Record DiagTelemetrySnapshot : Type := mkDiagSnapshot {
   dts_handoff_identity   : AppIdentityMeta;
   dts_observed_failures  : nat
 }.
+
+(* -------------------------------------------------------------------------- *)
+(* 7. Wave-1 CRIT-69 / CRIT-70 Security Models                                *)
+(* -------------------------------------------------------------------------- *)
+
+Definition device_is_deployed (efuse_epoch dslc : nat) : bool :=
+  (0 <? efuse_epoch) || negb (dslc =? 0).
+
+Inductive WalBlankInitOutcome : Type :=
+  | WB_FormatFresh : WalBlankInitOutcome
+  | WB_Reject      : BootErrCode -> WalBlankInitOutcome.
+
+Definition eval_blank_wal_init
+    (all_erased : bool) (efuse_epoch dslc : nat) : WalBlankInitOutcome :=
+  if all_erased then
+    if device_is_deployed efuse_epoch dslc then WB_Reject Err_Verify
+    else WB_FormatFresh
+  else WB_Reject Err_NotFound.
+
+Inductive JournalKeyResult : Type :=
+  | JKR_Ok  : nat -> JournalKeyResult
+  | JKR_Err : BootErrCode -> JournalKeyResult.
+
+Definition eval_derive_journal_key
+    (kdf : nat -> nat -> nat -> nat)
+    (device_secret : option nat)
+    (chip_uid active_pubkey : nat)
+    (allow_degraded : bool) : JournalKeyResult :=
+  match device_secret with
+  | Some sec => JKR_Ok (kdf sec chip_uid active_pubkey)
+  | None =>
+      if allow_degraded then JKR_Ok (kdf 0 chip_uid active_pubkey)
+      else JKR_Err Err_NotSupported
+  end.
+
+Record PqcVerifyContext : Type := mkPqcVerifyCtx {
+  pqc_enforced        : bool;
+  pqc_hybrid_active   : bool;
+  pqc_ks_pinned_hash  : option nat;
+  pqc_manifest_digest : option nat;
+  pqc_sig_valid       : bool
+}.
+
+Definition eval_pqc_verify (ctx : PqcVerifyContext) : option BootErrCode :=
+  if negb (pqc_enforced ctx || pqc_hybrid_active ctx) then None
+  else
+    match pqc_ks_pinned_hash ctx, pqc_manifest_digest ctx with
+    | Some pin_h, Some man_h =>
+        if (0 <? pin_h) && (pin_h =? man_h) && pqc_sig_valid ctx
+        then None
+        else Some Err_Verify
+    | None, _ => Some Err_NotSupported
+    | _, None => Some Err_Verify
+    end.

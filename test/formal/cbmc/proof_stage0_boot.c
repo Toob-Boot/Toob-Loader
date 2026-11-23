@@ -469,11 +469,12 @@ void prove_stage0_hash_and_verify(void) {
     CBMC_HAVOC_OBJECT(sig);
     CBMC_HAVOC_OBJECT(pub);
 
-    __CPROVER_assert(stage0_verify_signature(NULL, sig, pub, digest) == -1,
+    __CPROVER_assert(stage0_verify_signature(NULL, sig, pub, digest) == BOOT_ERR_INVALID_ARG,
                      "NULL platform rejected by stage0_verify_signature");
-    int vrc = stage0_verify_signature(&g_s0_platform, sig, pub, digest);
-    __CPROVER_assert(vrc == 0 || vrc == -1,
-                     "stage0_verify_signature returns canonical 0 or -1");
+    boot_status_t vrc = stage0_verify_signature(&g_s0_platform, sig, pub, digest);
+    __CPROVER_assert(vrc == BOOT_OK || vrc == BOOT_ERR_VERIFY ||
+                         vrc == BOOT_ERR_CRYPTO || vrc == BOOT_ERR_INVALID_ARG,
+                     "stage0_verify_signature returns canonical boot_status_t");
 }
 
 /* Entrypoint 4: Full Stage 0 boot orchestrator (stage0_main.c) */

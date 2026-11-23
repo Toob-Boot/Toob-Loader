@@ -234,7 +234,7 @@ void prove_ct_utils_standalone(void) {
     __CPROVER_assert(er_st == BOOT_OK && flash_erased == all_ones,
                      "boot_flash_is_erased exactness across 32-bit words and tail bytes");
 
-    /* TRNG stuck-at-0x00 / stuck-at-0xFF health check in boot_random_safe */
+    /* TRNG stuck-at-0x00 / stuck-at-0xFF / uniform repeating-byte RCT in boot_random_safe */
     CBMC_HAVOC_OBJECT(g_trng_sample);
     entropy_hal_t entropy = { .random = trng_mock_random };
     platform.entropy = &entropy;
@@ -244,8 +244,13 @@ void prove_ct_utils_standalone(void) {
                    g_trng_sample[2] == 0U && g_trng_sample[3] == 0U);
     bool stuck1 = (g_trng_sample[0] == 0xFFU && g_trng_sample[1] == 0xFFU &&
                    g_trng_sample[2] == 0xFFU && g_trng_sample[3] == 0xFFU);
-    __CPROVER_assert((rnd_st == BOOT_OK) == (!stuck0 && !stuck1),
-                     "boot_random_safe rejects stuck-at-0x00 and stuck-at-0xFF entropy");
+    bool all_same = (g_trng_sample[0] == g_trng_sample[1] &&
+                     g_trng_sample[0] == g_trng_sample[2] &&
+                     g_trng_sample[0] == g_trng_sample[3]);
+    __CPROVER_assert(!((stuck0 || stuck1 || all_same) && rnd_st == BOOT_OK),
+                     "boot_random_safe rejects stuck-at-0x00, stuck-at-0xFF, and uniform TRNG draws");
+    __CPROVER_assert((rnd_st == BOOT_OK) == !all_same,
+                     "boot_random_safe(4) succeeds iff entropy draw is non-uniform");
 
     /* RFC 1982 serial number wraparound antisymmetry (excluding midpoint 2^31) */
     uint32_t s1 = nondet_uint32_t();
@@ -500,6 +505,11 @@ void prove_energy_median_and_hysteresis(void) {
     g_low_power_entered = false;
     g_energy_rst        = nondet_bool() ? RESET_REASON_BROWNOUT : RESET_REASON_POWER_ON;
 
+    g_trng_sample[0] = 0x12U;
+    g_trng_sample[1] = 0x34U;
+    g_trng_sample[2] = 0x56U;
+    g_trng_sample[3] = 0x78U;
+    entropy_hal_t entropy = { .random = trng_mock_random };
     clock_hal_t clock = {
         .get_tick_ms      = energy_get_tick_ms,
         .delay_ms         = energy_delay_ms,
@@ -512,9 +522,10 @@ void prove_energy_median_and_hysteresis(void) {
         .enter_low_power    = energy_enter_lp,
     };
     boot_platform_t platform = {
-        .clock = &clock,
-        .wdt   = &g_cbmc_wdt_hal,
-        .soc   = nondet_bool() ? &soc : NULL,
+        .clock   = &clock,
+        .entropy = &entropy,
+        .wdt     = &g_cbmc_wdt_hal,
+        .soc     = nondet_bool() ? &soc : NULL,
     };
 
     boot_status_t st = boot_energy_check_safe_update(&platform);

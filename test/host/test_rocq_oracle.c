@@ -293,6 +293,8 @@ static uint8_t s_cloud_sk[ORACLE_ED25519_SK_BYTES];
 static uint8_t s_cloud_pk[ORACLE_ED25519_PK_BYTES];
 
 static uint32_t s_otp_svn = ORACLE_BASELINE_OTP_SVN;
+static uint8_t s_dslc_val = ORACLE_DSLC_PROVISIONED;
+static bool s_has_device_secret = true;
 static uint32_t s_supply_mv = ORACLE_SUPPLY_MV;
 static uint64_t s_rtc_confirm_nonce = 0ULL;
 static reset_reason_t s_reset_reason = RESET_REASON_POWER_ON;
@@ -534,8 +536,27 @@ static boot_status_t sim_read_dslc(uint8_t *buf, size_t *len) {
   if (buf == NULL || len == NULL || *len < 1U) {
     return BOOT_ERR_INVALID_ARG;
   }
-  buf[0] = ORACLE_DSLC_PROVISIONED;
+  buf[0] = s_dslc_val;
   *len = 1U;
+  return BOOT_OK;
+}
+
+static boot_status_t sim_read_device_secret(uint8_t *buf, size_t max_len,
+                                            size_t *out_len) {
+  static const uint8_t k_huk[ORACLE_SHA256_BYTES] = {
+      0xA1U, 0xB2U, 0xC3U, 0xD4U, 0xE5U, 0xF6U, 0x07U, 0x18U,
+      0x29U, 0x3AU, 0x4BU, 0x5CU, 0x6DU, 0x7EU, 0x8FU, 0x90U,
+      0x11U, 0x22U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U,
+      0x99U, 0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xFFU, 0x01U
+  };
+  if (!s_has_device_secret) {
+    return BOOT_ERR_NOT_SUPPORTED;
+  }
+  if (buf == NULL || out_len == NULL || max_len < sizeof(k_huk)) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  memcpy(buf, k_huk, sizeof(k_huk));
+  *out_len = sizeof(k_huk);
   return BOOT_OK;
 }
 
@@ -579,6 +600,7 @@ static const keystore_hal_t s_keystore_hal = {
     .read_dslc = sim_read_dslc,
     .read_monotonic_counter = sim_read_monotonic,
     .advance_monotonic_counter = sim_advance_monotonic,
+    .read_device_secret = sim_read_device_secret,
 };
 
 static const slot_caps_t s_active_caps = TOOB_SLOT_CAPS_FIXED(
@@ -619,7 +641,8 @@ static void sha256_buf(const uint8_t *data, size_t len,
 
 static void build_raw_slot_image(uint8_t out[ORACLE_IMAGE_BYTES],
                                  uint8_t payload_tag) {
-  for (size_t i = 0U; i < ORACLE_IMAGE_BYTES; i++) {
+  const size_t signed_len = ORACLE_IMAGE_BYTES - sizeof(toob_img_sig_trailer_t);
+  for (size_t i = 0U; i < signed_len; i++) {
     out[i] = (uint8_t)(payload_tag ^ (uint8_t)((i * 29U + 0x3CU) & 0xFFU));
   }
   toob_image_header_t hdr;
@@ -628,6 +651,19 @@ static void build_raw_slot_image(uint8_t out[ORACLE_IMAGE_BYTES],
   hdr.image_size = ORACLE_IMAGE_BYTES;
   hdr.entry_point = ORACLE_ENTRY_POINT_OFFSET;
   memcpy(out, &hdr, sizeof(hdr));
+
+  uint8_t digest[ORACLE_SHA256_BYTES];
+  sha256_buf(out, signed_len, digest);
+
+  toob_img_sig_trailer_t trailer;
+  memset(&trailer, 0, sizeof(trailer));
+  trailer.magic = TOOB_IMG_SIG_MAGIC;
+  trailer.key_index = ORACLE_KEY_INDEX_ACTIVE;
+  trailer.flags = TOOB_IMG_SIG_FLAG_SHA256;
+  trailer.reserved = 0U;
+  crypto_ed25519_sign(trailer.sig_ed25519, s_root_sk_1, digest,
+                      sizeof(digest));
+  memcpy(out + signed_len, &trailer, sizeof(trailer));
 }
 
 static void build_staging_bundle(uint8_t bundle[ORACLE_STG_BUNDLE_BYTES],
@@ -771,9 +807,20 @@ static void init_oracle_fixtures(void) {
   memset(&kdm, 0, sizeof(kdm));
   kdm.sequence_number = ORACLE_KDM_SEQ_INIT;
   memcpy(kdm.new_cloud_pubkey, s_cloud_pk, sizeof(s_cloud_pk));
-  crypto_ed25519_sign(kdm.signature_ed25519, s_root_sk_0, (const uint8_t *)&kdm,
+  crypto_ed25519_sign(kdm.signature_ed25519, s_root_sk_1, (const uint8_t *)&kdm,
                       offsetof(toob_kdm_t, signature_ed25519));
   assert(boot_rstore_write(&s_platform, &kdm_desc, &kdm) == BOOT_OK);
+
+  /* CRIT-69: Blank-WAL formatting is only permitted during factory provisioning
+   * (efuse_epoch == 0 && dslc == 0). Provision initial clean WAL quorum before
+   * advancing oracle baseline state to deployed. */
+  s_otp_svn = 0U;
+  s_dslc_val = 0U;
+  s_has_device_secret = true;
+  sim_reset_sram_globals(RESET_REASON_POWER_ON);
+  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  s_otp_svn = ORACLE_BASELINE_OTP_SVN;
+  s_dslc_val = ORACLE_DSLC_PROVISIONED;
 
   memcpy(s_base_flash, s_flash, sizeof(s_flash));
 }
@@ -992,6 +1039,9 @@ static uint32_t inspect_post_boot_app_id(void) {
 
 static void inspect_post_boot_wal_and_tmr(wal_tmr_payload_t *out_tmr,
                                           uint32_t *out_wal_code) {
+  if (!wal_initialized) {
+    (void)boot_journal_init(&s_platform);
+  }
   if (wal_initialized) {
     assert(boot_journal_get_tmr(&s_platform, out_tmr) == BOOT_OK);
     wal_entry_payload_t txn;
@@ -1335,6 +1385,7 @@ int main(void) {
     /* Re-stage v3 and confirm via RTC nonce: pending promotes into app_* */
     memcpy(&s_flash[CHIP_STAGING_SLOT_ABS_ADDR],
            s_stg_bundles[ORACLE_STG_CFG_VALID_V3], ORACLE_STG_BUNDLE_BYTES);
+    assert(boot_journal_init(&s_platform) == BOOT_OK);
     assert(boot_journal_append(&s_platform, &upd_ent) == BOOT_OK);
 
     sim_reset_sram_globals(RESET_REASON_POWER_ON);
@@ -1418,6 +1469,7 @@ int main(void) {
     int pan_def = execute_boot_with_panic_trap(&tgt_def, &st_def);
 
     wal_tmr_payload_t tmr_def;
+    assert(boot_journal_init(&s_platform) == BOOT_OK);
     assert(boot_journal_get_tmr(&s_platform, &tmr_def) == BOOT_OK);
     wal_entry_payload_t txn_def;
     memset(&txn_def, 0, sizeof(txn_def));
@@ -1455,6 +1507,98 @@ int main(void) {
       fprintf(stderr, "MISMATCH extended FV-17b post-recharge liveness check\n");
       mismatches++;
     }
+
+    /* 9d. CRIT-68/CRIT-71: Unsigned/tampered TSIG App or Recovery slots fail closed */
+    memcpy(s_flash, s_base_flash, sizeof(s_flash));
+    s_otp_svn = ORACLE_BASELINE_OTP_SVN;
+    s_dslc_val = ORACLE_DSLC_PROVISIONED;
+    s_has_device_secret = true;
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], s_img_app_v2, ORACLE_IMAGE_BYTES);
+    /* Corrupt TSIG byte in App slot -> must fail closed with BOOT_ERR_VERIFY (never boot unsigned) */
+    s_flash[CHIP_APP_SLOT_ABS_ADDR + ORACLE_IMAGE_BYTES - 1U] ^= 0xFFU;
+    sim_reset_sram_globals(RESET_REASON_POWER_ON);
+    s_rtc_confirm_nonce = 0ULL;
+    boot_target_config_t tgt_tsig;
+    memset(&tgt_tsig, 0, sizeof(tgt_tsig));
+    boot_status_t st_tsig = BOOT_OK;
+    int pan_tsig = execute_boot_with_panic_trap(&tgt_tsig, &st_tsig);
+    if ((pan_tsig == 0 && st_tsig == BOOT_OK) || st_tsig != BOOT_ERR_VERIFY ||
+        tgt_tsig.boot_recovery_os ||
+        tgt_tsig.proof.image_addr == CHIP_APP_SLOT_ABS_ADDR) {
+      fprintf(stderr, "MISMATCH extended CRIT-68 corrupted-TSIG App slot check\n");
+      mismatches++;
+    }
+
+    /* Corrupt Recovery OS TSIG with no valid App/Backup -> must fail closed to Serial Rescue */
+    memcpy(s_flash, s_base_flash, sizeof(s_flash));
+    s_flash[CHIP_RECOVERY_OS_ABS_ADDR + ORACLE_IMAGE_BYTES - 1U] ^= 0xFFU;
+    sim_reset_sram_globals(RESET_REASON_POWER_ON);
+    s_rtc_confirm_nonce = 0ULL;
+    boot_target_config_t tgt_rec_bad;
+    memset(&tgt_rec_bad, 0, sizeof(tgt_rec_bad));
+    boot_status_t st_rec_bad = BOOT_OK;
+    int pan_rec_bad = execute_boot_with_panic_trap(&tgt_rec_bad, &st_rec_bad);
+    if ((pan_rec_bad == 0 && st_rec_bad == BOOT_OK) || tgt_rec_bad.boot_recovery_os) {
+      fprintf(stderr, "MISMATCH extended CRIT-71 corrupted-TSIG Recovery OS check\n");
+      mismatches++;
+    }
+
+    /* 9e. CRIT-69: Deployed devices forbid blank-WAL reset & require device secret */
+    memcpy(s_flash, s_base_flash, sizeof(s_flash));
+    memset(&s_flash[CHIP_WAL_ABS_ADDR], CHIP_FLASH_ERASED_BYTE, CHIP_WAL_SIZE);
+    s_otp_svn = ORACLE_BASELINE_OTP_SVN;
+    s_dslc_val = 0U;
+    sim_reset_sram_globals(RESET_REASON_POWER_ON);
+    if (boot_journal_init(&s_platform) != BOOT_ERR_VERIFY) {
+      fprintf(stderr, "MISMATCH extended CRIT-69 blank-WAL with efuse_epoch>0 check\n");
+      mismatches++;
+    }
+
+    s_otp_svn = 0U;
+    s_dslc_val = ORACLE_DSLC_PROVISIONED;
+    sim_reset_sram_globals(RESET_REASON_POWER_ON);
+    if (boot_journal_init(&s_platform) != BOOT_ERR_VERIFY) {
+      fprintf(stderr, "MISMATCH extended CRIT-69 blank-WAL with dslc!=0 check\n");
+      mismatches++;
+    }
+
+    s_has_device_secret = false;
+    uint8_t k4_probe[32];
+    if (boot_derive_journal_key(&s_platform, k4_probe) != BOOT_ERR_NOT_SUPPORTED) {
+      fprintf(stderr, "MISMATCH extended CRIT-69 missing HUK KDF check\n");
+      mismatches++;
+    }
+    boot_secure_zeroize(k4_probe, sizeof(k4_probe));
+    s_has_device_secret = true;
+
+    /* 9f. HIGH-104: Active OTP key index & KDM kdm_seq_floor anti-rollback */
+    memcpy(s_flash, s_base_flash, sizeof(s_flash));
+    s_otp_svn = ORACLE_BASELINE_OTP_SVN;
+    s_dslc_val = ORACLE_DSLC_PROVISIONED;
+    uint8_t active_kidx = 0U;
+    if (boot_otp_get_active_key_index(&s_platform, &active_kidx) != BOOT_OK ||
+        active_kidx != ORACLE_KEY_INDEX_ACTIVE) {
+      fprintf(stderr, "MISMATCH extended active OTP key index check\n");
+      mismatches++;
+    }
+
+    sim_reset_sram_globals(RESET_REASON_POWER_ON);
+    assert(boot_journal_init(&s_platform) == BOOT_OK);
+    wal_tmr_payload_t tmr_kdm;
+    assert(boot_journal_get_tmr(&s_platform, &tmr_kdm) == BOOT_OK);
+    tmr_kdm.kdm_seq_floor = 5U;
+    tmr_kdm.last_accepted_issued_at = ORACLE_BASELINE_CLOUD_ISSUED;
+    assert(boot_journal_update_tmr(&s_platform, &tmr_kdm) == BOOT_OK);
+
+    /* Rewrite KDM quorum with lower sequence_number (1 < floor 5) -> must reject cmd */
+    materialize_cloud_cfg(2U);
+    uint8_t cloud_arena[BOOT_CRYPTO_ARENA_SIZE];
+    toob_cloud_cmd_t cmd_out = TOOB_CMD_NOP;
+    boot_status_t kdm_st = boot_cloud_cmd_evaluate_flash(&s_platform, cloud_arena, &cmd_out);
+    if (kdm_st == BOOT_OK) {
+      fprintf(stderr, "MISMATCH extended HIGH-104 KDM seq floor replay check\n");
+      mismatches++;
+    }
   }
 
   printf("[Suite 0: Cartesian Core + 2x2x2 Staging Cube] vectors=%u\n",
@@ -1468,6 +1612,7 @@ int main(void) {
   printf("[Suite 4: K4 TMR & Security-Entry MAC Tamper]  vectors=%u\n",
          suite_counts[4]);
   printf("[Suite 5: TDR1-02/03 & Low-Vbat Deferral]      checks=3\n");
+  printf("[Suite 6: Wave-1 Auth-Boot/CRIT-69/HIGH-104]   checks=6\n");
   printf("ROCQ_ORACLE_SUMMARY vectors=%u mismatches=%u status=%s\n",
          (unsigned)ROCQ_ORACLE_VECTOR_COUNT, mismatches,
          (mismatches == 0U) ? "PASS" : "FAIL");

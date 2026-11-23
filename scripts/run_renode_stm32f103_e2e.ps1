@@ -121,7 +121,7 @@ try {
     Write-Host "=== [4/5] Signing XIP Stage 1 & Recovery OS (256-Byte Header, Cortex-M3 VTOR Entry 0x100) + Guest Apps ==="
     & $ToobExe sign stage1 "$BuildDir\toob_stage1.bin" --entry 0x100 --mock -o "$BuildDir\toob_stage1.signed.bin"
     if ($LASTEXITCODE -ne 0) { throw "toob sign stage1 failed" }
-    & $ToobExe sign image "$BuildDir\toob_recovery.raw.bin" --entry 0x100 -o "$BuildDir\toob_recovery.bin"
+    & $ToobExe sign image "$BuildDir\toob_recovery.raw.bin" --entry 0x100 --mock -o "$BuildDir\toob_recovery.bin"
     if ($LASTEXITCODE -ne 0) { throw "toob sign recovery failed" }
 
     powershell -ExecutionPolicy Bypass -File "test\renode_stm32f103\guest_app\build_apps.ps1" -BuildDir $BuildDir -OutDir $AppsDir -ToobCli $ToobExe

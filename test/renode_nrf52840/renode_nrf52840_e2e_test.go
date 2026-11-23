@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -638,6 +639,35 @@ func buildDeltaTrailerBundle(t *testing.T, signer tbm1.Signer, keyIndex uint8, b
 	return bundle, len(deltaPayload)
 }
 
+const (
+	toobImgSigMagic      = uint32(0x54534947)
+	toobImgSigFlagSHA256 = uint8(0x01)
+	toobImgSigTrailerLen = 72
+)
+
+func resignTSIGImage(t *testing.T, signer tbm1.Signer, img []byte, keyIndex uint8) []byte {
+	t.Helper()
+	if len(img) < 20+4+toobImgSigTrailerLen {
+		t.Fatalf("TSIG image too short (%d bytes)", len(img))
+	}
+	out := bytes.Clone(img)
+	trailerOff := len(out) - toobImgSigTrailerLen
+	if gotMagic := binary.LittleEndian.Uint32(out[trailerOff : trailerOff+4]); gotMagic != toobImgSigMagic {
+		t.Fatalf("missing TSIG trailer magic: got 0x%08X want 0x%08X", gotMagic, toobImgSigMagic)
+	}
+	out[trailerOff+4] = keyIndex
+	out[trailerOff+5] = toobImgSigFlagSHA256
+	out[trailerOff+6] = 0
+	out[trailerOff+7] = 0
+	digest := sha256.Sum256(out[:trailerOff])
+	sig, err := signer.Sign(digest[:])
+	if err != nil {
+		t.Fatalf("sign TSIG digest (key_index=%d): %v", keyIndex, err)
+	}
+	copy(out[trailerOff+8:], sig)
+	return out
+}
+
 func streamUARTOTA(t *testing.T, h *renodeHarness, bundle []byte, chunkSize int) int {
 	t.Helper()
 	off := h.markOffset()
@@ -716,6 +746,12 @@ func TestRenodeNRF52840_1a_BlankUicrFailClosed(t *testing.T) {
 
 func TestRenodeNRF52840_FullLifecycle_Provision_FullOTA_TDS1Delta_WDTRollback(t *testing.T) {
 	art := loadArtifacts(t)
+	// Phase 1 burns OTP key slot 1 via PROV_CMD_BURN_KEY, revoking key_index=0 for subsequent slot verification.
+	art.recoveryBin = resignTSIGImage(t, art.signer, art.recoveryBin, 1)
+	art.appV1 = resignTSIGImage(t, art.signer, art.appV1, 1)
+	art.appV2 = resignTSIGImage(t, art.signer, art.appV2, 1)
+	art.appV3 = resignTSIGImage(t, art.signer, art.appV3, 1)
+	art.appBadV4 = resignTSIGImage(t, art.signer, art.appBadV4, 1)
 	tmp := t.TempDir()
 	flashPath := writeInitialFlash(t, tmp, art, false)
 
@@ -849,26 +885,49 @@ func TestRenodeNRF52840_FullLifecycle_Provision_FullOTA_TDS1Delta_WDTRollback(t 
 	}
 }
 
+func runFactoryProvisioning(t *testing.T, h *renodeHarness, off int, lockBoot bool) int {
+	t.Helper()
+	off = h.waitForStringSince(off, "[S0] Signature verification PASSED!", 12*time.Second)
+	off = h.waitForSince(off, cobsEncode([]byte("PROV")), 8*time.Second)
+
+	sendChecked := func(name string, cmd byte, payload []byte) {
+		h.writeAll(buildProvFrame(cmd, payload))
+		var stFrame []byte
+		stFrame, off = h.readCOBSFrameSince(off, 8*time.Second)
+		if len(stFrame) != 4 || binary.LittleEndian.Uint32(stFrame) != bootStatusOK {
+			t.Fatalf("%s status = %x, want %08x", name, stFrame, bootStatusOK)
+		}
+	}
+
+	if lockBoot {
+		sendChecked("PROV_CMD_LOCK_BOOT_FLASH", provCmdLockBootFlash, nil)
+	}
+	sendChecked("PROV_CMD_SET_DSLC", provCmdSetDSLC, []byte{0x01})
+	sendChecked("PROV_CMD_REBOOT", provCmdReboot, nil)
+	return off
+}
+
 func TestRenodeNRF52840_HardwareBprotStage0NonBrickability(t *testing.T) {
 	art := loadArtifacts(t)
 	tmp := t.TempDir()
 	flashPath := writeInitialFlash(t, tmp, art, false)
 
-	// Provisioned UICR: KEY0 burned + DSLC = 0x01 (~0x01 = 0xFFFFFFFE)
+	// Factory UICR: KEY0 burned with DSLC = 0xFFFFFFFF (0x00) so UART provisioning formats K4 WAL before setting DSLC=0x01.
 	uicr := newErasedUicr()
 	copy(uicr[uicrOffKey0:], art.rootPubKey)
-	binary.LittleEndian.PutUint32(uicr[uicrOffDSLC:uicrOffDSLC+4], 0xFFFFFFFE)
 
 	uicrPath := filepath.Join(tmp, "uicr.bin")
 	if err := os.WriteFile(uicrPath, uicr, 0o644); err != nil {
 		t.Fatalf("write uicr.bin: %v", err)
 	}
 
-	h := startRenode(t, tmp, flashPath, uicrPath, 35*time.Second)
+	h := startRenode(t, tmp, flashPath, uicrPath, 60*time.Second)
 	defer h.stop()
 
+	off := runFactoryProvisioning(t, h, 0, true)
+
 	// Boot to Guest App v1.0.0; verify both cold boot AND warm reboot re-assert BPROT->CONFIG0 = 0x000000FF!
-	off := h.waitForStringSince(0, "[APP] BOOT ver=1.0.0 slot=0 tent=0 handoff=OK", 15*time.Second)
+	off = h.waitForStringSince(off, "[APP] BOOT ver=1.0.0 slot=0 tent=0 handoff=OK", 15*time.Second)
 	h.writeAll([]byte("REBOOT\n"))
 	off = h.waitForStringSince(off, "[APP] BOOT ver=1.0.0 slot=0 tent=0 handoff=OK", 15*time.Second)
 
@@ -894,20 +953,22 @@ func TestRenodeNRF52840_RecoveryOS_XMODEM_Rescue(t *testing.T) {
 	// Corrupt BOTH App Slot and Staging Slot while keeping Stage 0, Stage 1, and Recovery OS intact!
 	flashPath := writeInitialFlash(t, tmp, art, true)
 
+	// Factory UICR: KEY0 burned with DSLC = 0xFFFFFFFF (0x00) so UART provisioning formats K4 WAL before setting DSLC=0x01.
 	uicr := newErasedUicr()
 	copy(uicr[uicrOffKey0:], art.rootPubKey)
-	binary.LittleEndian.PutUint32(uicr[uicrOffDSLC:uicrOffDSLC+4], 0xFFFFFFFE) // Provisioned
 
 	uicrPath := filepath.Join(tmp, "uicr.bin")
 	if err := os.WriteFile(uicrPath, uicr, 0o644); err != nil {
 		t.Fatalf("write uicr.bin: %v", err)
 	}
 
-	h := startRenode(t, tmp, flashPath, uicrPath, 90*time.Second)
+	h := startRenode(t, tmp, flashPath, uicrPath, 110*time.Second)
 	defer h.stop()
 
+	off := runFactoryProvisioning(t, h, 0, false)
+
 	t.Log("Booting with corrupted App & Staging slots -> expecting Stage 1 VTOR handoff to Recovery OS at 0x00098100...")
-	off := h.waitForStringSince(0, "[REC] listening...", 18*time.Second)
+	off = h.waitForStringSince(off, "[REC] listening...", 18*time.Second)
 	off = h.waitForStringSince(off, "C", 8*time.Second)
 
 	rescueBundle := buildFullTrailerBundle(t, art.signer, 0, art.appV3, 1, 3)

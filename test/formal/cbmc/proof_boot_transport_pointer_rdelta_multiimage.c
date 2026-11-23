@@ -297,6 +297,23 @@ boot_status_t boot_journal_flush_tmr(const boot_platform_t *platform) {
     return nondet_bool() ? BOOT_OK : BOOT_ERR_FLASH_HW;
 }
 
+boot_status_t boot_verify_slot_image(const boot_platform_t *platform,
+                                     uint32_t slot_addr,
+                                     uint32_t slot_size,
+                                     const toob_image_header_t *hdr,
+                                     uint8_t *arena,
+                                     size_t arena_len) {
+    __CPROVER_assert(platform != NULL && hdr != NULL && arena != NULL &&
+                         __CPROVER_r_ok(hdr, sizeof(*hdr)) &&
+                         __CPROVER_w_ok(arena, arena_len),
+                     "boot_verify_slot_image preconditions");
+    __CPROVER_assert(hdr->magic == TOOB_MAGIC_HEADER &&
+                         hdr->image_size <= slot_size &&
+                         (UINT32_MAX - slot_addr) >= hdr->image_size,
+                     "boot_verify_slot_image slot bounds invariant");
+    return nondet_bool() ? BOOT_OK : BOOT_ERR_VERIFY;
+}
+
 static boot_platform_t make_fv06_platform(flash_hal_t *flash,
                                           crypto_hal_t *crypto,
                                           entropy_hal_t *entropy,
@@ -460,8 +477,10 @@ void prove_rollback_svn_and_revert(void) {
     rollback_target_t target = (rollback_target_t)nondet_uint32_t();
     boot_status_t svn_st = boot_rollback_verify_svn(&platform, manifest_svn, target);
     if ((uint32_t)target > (uint32_t)ROLLBACK_TARGET_STAGE1) {
-        __CPROVER_assert(svn_st == BOOT_ERR_INVALID_ARG || svn_st == BOOT_ERR_FLASH_HW,
-                         "unknown rollback_target_t returns BOOT_ERR_INVALID_ARG (or early TMR HW error)");
+        __CPROVER_assert(svn_st == BOOT_ERR_INVALID_ARG ||
+                             svn_st == BOOT_ERR_FLASH_HW ||
+                             svn_st == BOOT_ERR_CRYPTO,
+                         "unknown rollback_target_t returns BOOT_ERR_INVALID_ARG (or early HW/TRNG error)");
     }
 
     /* 2. Crash cascade evaluation (normal -> recovery -> panic escalation) */
@@ -567,10 +586,11 @@ void prove_multiimage_apply_bounds(void) {
     uint32_t saved_bitmap[8];
     memcpy(saved_bitmap, open_txn.transfer_bitmap, sizeof(saved_bitmap));
 
-    boot_component_t comps[1];
+    boot_component_t comps[2];
     CBMC_HAVOC_OBJECT(comps);
 
-    if (nondet_bool()) {
+    uint8_t mode = nondet_uint8_t();
+    if (mode == 0U) {
         /* Path A: Unconstrained symbolic component testing firewall & CRIT-30 >= 32 rejection */
         bool is_bad_id = (comps[0].component_id >= 32U && comps[0].image_size > 0U);
         bool in_wl = cbmc_subrange_of(comps[0].target_addr, comps[0].image_size,
@@ -585,8 +605,26 @@ void prove_multiimage_apply_bounds(void) {
             __CPROVER_assert(st != BOOT_OK && g_write_count == 0U && g_erase_count == 0U,
                              "out-of-whitelist or component_id >= 32 rejected with zero flash wear");
         }
+    } else if (mode == 1U) {
+        /* Path B: Duplicate component_id across distinct whitelisted slots must fail closed */
+        uint32_t dup_id = nondet_uint32_t();
+        __CPROVER_assume(dup_id < 32U);
+        comps[0].component_id   = dup_id;
+        comps[0].staging_offset = 0U;
+        comps[0].target_addr    = CHIP_STAGE1A_ABS_ADDR;
+        comps[0].image_size     = CHIP_FLASH_WRITE_ALIGNMENT;
+        comps[1].component_id   = dup_id;
+        comps[1].staging_offset = CHIP_FLASH_WRITE_ALIGNMENT;
+        comps[1].target_addr    = CHIP_STAGE1B_ABS_ADDR;
+        comps[1].image_size     = CHIP_FLASH_WRITE_ALIGNMENT;
+
+        boot_status_t dst = boot_multiimage_apply(
+            &platform, CHIP_STAGING_SLOT_ABS_ADDR, comps, 2U, wl, 2U,
+            &open_txn, arena, sizeof(arena));
+        __CPROVER_assert(dst != BOOT_OK && g_write_count == 0U && g_erase_count == 0U,
+                         "duplicate component_id rejected before any flash write or erase");
     } else {
-        /* Path B: Whitelisted sector-aligned component exercising ERASE + COPY + SHA-256 readback */
+        /* Path C: Whitelisted sector-aligned component exercising ERASE + COPY + SHA-256 readback */
         comps[0].component_id   = nondet_uint32_t();
         __CPROVER_assume(comps[0].component_id < 32U);
         comps[0].staging_offset = 0U;
@@ -647,8 +685,10 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform,
                                       CHIP_STAGING_SLOT_ABS_ADDR, CHIP_STAGING_SLOT_SIZE),
                      "reverse-delta stream must lie strictly within Staging slot");
     __CPROVER_assert(target_flash_addr == CHIP_APP_SLOT_ABS_ADDR &&
-                         target_slot_size == CHIP_APP_SLOT_SIZE,
-                     "reverse-delta target must be CHIP_APP_SLOT");
+                         target_slot_size == CHIP_APP_SLOT_SIZE &&
+                         (target_flash_addr % 8U) == 0U &&
+                         (target_slot_size % 8U) == 0U,
+                     "reverse-delta target must be 8-byte aligned CHIP_APP_SLOT");
     if (base_image_size > 0U) {
         bool base_ok = cbmc_subrange_of(base_flash_addr, base_image_size,
                                         CHIP_STAGING_SLOT_ABS_ADDR, CHIP_STAGING_SLOT_SIZE) ||

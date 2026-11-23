@@ -366,6 +366,21 @@ static boot_status_t sim_advance_monotonic(void) {
     return BOOT_OK;
 }
 
+static boot_status_t sim_read_device_secret(uint8_t *secret_out, size_t max_len, size_t *actual_len) {
+    static const uint8_t k_huk[32] = {
+        0x31U, 0x42U, 0x53U, 0x64U, 0x75U, 0x86U, 0x97U, 0xA8U,
+        0xB9U, 0xCAU, 0xDBU, 0xECU, 0xFDU, 0x0EU, 0x1FU, 0x20U,
+        0x12U, 0x23U, 0x34U, 0x45U, 0x56U, 0x67U, 0x78U, 0x89U,
+        0x9AU, 0xABU, 0xBCU, 0xCDU, 0xDEU, 0xEFU, 0xF0U, 0x01U
+    };
+    if (!secret_out || !actual_len || max_len < sizeof(k_huk)) {
+        return BOOT_ERR_INVALID_ARG;
+    }
+    memcpy(secret_out, k_huk, sizeof(k_huk));
+    *actual_len = sizeof(k_huk);
+    return BOOT_OK;
+}
+
 static const crypto_hal_t s_sim_crypto_hal = {
     .abi_version = TOOB_HAL_ABI_V3,
     .init = crypto_monocypher_init,
@@ -399,6 +414,7 @@ static const keystore_hal_t s_sim_keystore_hal = {
     .write_dslc = sim_write_dslc,
     .read_monotonic_counter = sim_read_monotonic,
     .advance_monotonic_counter = sim_advance_monotonic,
+    .read_device_secret = sim_read_device_secret,
 };
 
 /* --- Dual-Slot XIP Remap Slot Caps (mirrors esp_mmu_remap) --- */
@@ -478,7 +494,9 @@ static void erase_flash_range(uint32_t base, uint32_t size) {
 }
 
 static void write_raw_bootable_image(uint32_t slot_base, uint32_t total_img_size, uint8_t fill_byte) {
-    assert(total_img_size >= sizeof(toob_image_header_t));
+    const uint32_t min_size =
+        (uint32_t)(sizeof(toob_image_header_t) + sizeof(toob_img_sig_trailer_t));
+    assert(total_img_size >= min_size);
     assert((total_img_size % CHIP_FLASH_WRITE_ALIGNMENT) == 0U);
     uint8_t *buf = &s_flash[slot_base];
     memset(buf, fill_byte, total_img_size);
@@ -489,6 +507,19 @@ static void write_raw_bootable_image(uint32_t slot_base, uint32_t total_img_size
     hdr.image_size = total_img_size;
     hdr.entry_point = 0x100U;
     memcpy(buf, &hdr, sizeof(hdr));
+
+    uint32_t signed_len = total_img_size - (uint32_t)sizeof(toob_img_sig_trailer_t);
+    uint8_t digest[32];
+    sha256_once(buf, signed_len, digest);
+
+    toob_img_sig_trailer_t trailer;
+    memset(&trailer, 0, sizeof(trailer));
+    trailer.magic = TOOB_IMG_SIG_MAGIC;
+    trailer.key_index = 0U;
+    trailer.flags = TOOB_IMG_SIG_FLAG_SHA256;
+    trailer.reserved = 0U;
+    crypto_ed25519_sign(trailer.sig_ed25519, s_root_sk, digest, sizeof(digest));
+    memcpy(buf + signed_len, &trailer, sizeof(trailer));
 }
 
 /**
@@ -647,7 +678,7 @@ static void provision_device_fixtures(void) {
     s_total_sector_erases = 0U;
     s_rtc_confirm_nonce = 0ULL;
     s_otp_counter = 0U;
-    s_dslc_state = 0x01U;
+    s_dslc_state = 0x00U; /* Factory unprovisioned during initial WAL formatting (CRIT-69) */
     s_active_hw_slot = 0U;
     s_mapped_xip_src_addr = CHIP_APP_SLOT_ABS_ADDR;
     s_reset_reason = RESET_REASON_POWER_ON;
@@ -696,6 +727,10 @@ static void provision_device_fixtures(void) {
     /* Factory baseline App in Slot 0 + immutable Recovery OS */
     write_raw_bootable_image(CHIP_APP_SLOT_ABS_ADDR, 4096U, 0xA0U);
     write_raw_bootable_image(CHIP_RECOVERY_OS_ABS_ADDR, 4096U, 0xE0U);
+
+    /* Initialize blank WAL while DSLC == 0x00 (CRIT-69), then transition to deployed (DSLC == 0x01) */
+    assert(boot_journal_init(&s_sim_platform) == BOOT_OK);
+    s_dslc_state = 0x01U;
 }
 
 /* ============================================================================

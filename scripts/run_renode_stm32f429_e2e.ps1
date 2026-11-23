@@ -35,7 +35,7 @@ try {
     Write-Host "=== [2/4] Signing XIP Stage 1 & Recovery OS (256-Byte SCB->VTOR Entry 0x100) ==="
     & $ToobExe sign stage1 "$BuildDir\toob_stage1.bin" --entry 0x100 --mock -o "$BuildDir\toob_stage1.signed.bin"
     if ($LASTEXITCODE -ne 0) { throw "toob sign stage1 failed" }
-    & $ToobExe sign image "$BuildDir\toob_recovery.raw.bin" --entry 0x100 -o "$BuildDir\toob_recovery.bin"
+    & $ToobExe sign image "$BuildDir\toob_recovery.raw.bin" --entry 0x100 --mock -o "$BuildDir\toob_recovery.bin"
     if ($LASTEXITCODE -ne 0) { throw "toob sign recovery failed" }
 
     Write-Host "=== [3/4] Building Bare-Metal Cortex-M4 sdk/libtoob Guest Apps (v1.0.0, v2.0.0, v3.0.0, bad_v4) ==="

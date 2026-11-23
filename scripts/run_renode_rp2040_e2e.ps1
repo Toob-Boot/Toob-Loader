@@ -49,7 +49,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "toob sign stage0 failed" }
     .\toob.exe sign stage1 "$BuildDir\toob_stage1.bin" --entry 0x100 --mock -o "$BuildDir\toob_stage1.signed.bin"
     if ($LASTEXITCODE -ne 0) { throw "toob sign stage1 failed" }
-    .\toob.exe sign image "$BuildDir\toob_recovery.raw.bin" --entry 0x100 -o "$BuildDir\toob_recovery.bin"
+    .\toob.exe sign image "$BuildDir\toob_recovery.raw.bin" --entry 0x100 --mock -o "$BuildDir\toob_recovery.bin"
     if ($LASTEXITCODE -ne 0) { throw "toob sign recovery failed" }
 
     Write-Host "=== [3/4] Building Bare-Metal Cortex-M0+ sdk/libtoob Guest Apps (v1.0.0, v2.0.0, v3.0.0, bad_v4) ==="

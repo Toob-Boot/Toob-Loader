@@ -131,14 +131,28 @@ boot_status_t boot_journal_append(const boot_platform_t *platform,
     return nondet_bool() ? BOOT_OK : BOOT_ERR_FLASH_HW;
 }
 
+static bool mailbox_proof_seq_is_newer(uint32_t cand, uint32_t cur) {
+    if (cand == 0U) {
+        return false;
+    }
+    if (cur == 0U) {
+        return true;
+    }
+    uint32_t diff = (cand >= cur)
+                        ? (cand - cur)
+                        : ((UINT32_MAX - cur) + 1U + cand);
+    return (diff != 0U) && (diff < 0x80000000U);
+}
+
 boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
                                       const wal_tmr_payload_t *new_tmr) {
     __CPROVER_assert(platform != NULL && new_tmr != NULL &&
                          __CPROVER_r_ok(new_tmr, sizeof(*new_tmr)),
                      "boot_journal_update_tmr new_tmr must be readable");
-    __CPROVER_assert(new_tmr->last_mbx_request_id >
-                         g_initial_tmr.last_mbx_request_id,
-                     "TMR mailbox watermark must advance strictly monotonically");
+    __CPROVER_assert(new_tmr->last_mbx_request_id != 0U &&
+                         mailbox_proof_seq_is_newer(new_tmr->last_mbx_request_id,
+                                                    g_initial_tmr.last_mbx_request_id),
+                     "TMR mailbox watermark must advance under RFC-1982 wrap-safe ordering");
     g_tmr_updated = true;
     return nondet_bool() ? BOOT_OK : BOOT_ERR_FLASH_HW;
 }

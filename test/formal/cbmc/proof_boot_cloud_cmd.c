@@ -19,22 +19,49 @@
  *      (TOCTOU single-read into crypto_arena + non-aliasing work_arena).
  */
 
+#define CBMC_NO_ZEROIZE_STUB 1
+
 #include "cbmc_common.h"
 #include "boot_cloud_cmd.h"
 #include "boot_journal.h"
 #include "boot_rstore.h"
 
+void boot_secure_zeroize(void *ptr, size_t len) {
+    cbmc_assert_writable(ptr, len, "boot_secure_zeroize target buffer must be writable");
+    if (ptr == NULL || len == 0U) {
+        return;
+    }
+    if (len == BOOT_CRYPTO_ARENA_SIZE && __CPROVER_POINTER_OFFSET(ptr) == 0) {
+        typedef struct {
+            uint8_t b[BOOT_CRYPTO_ARENA_SIZE];
+        } w5a05_arena_t;
+        w5a05_arena_t z = {{0}};
+        *(w5a05_arena_t *)ptr = z;
+        return;
+    }
+    ((uint8_t *)ptr)[0] = 0U;
+}
+
 #define KDM_RECORD_FLASH_BYTES (sizeof(boot_rstore_slot_header_t) + sizeof(toob_kdm_t))
 #define TCC1_PROOF_ENV_CAP     320U
+
+#ifdef TOOB_OTP_MAX_SLOTS
+#define CBMC_CLOUD_OTP_SLOTS TOOB_OTP_MAX_SLOTS
+#else
+#define CBMC_CLOUD_OTP_SLOTS 256U
+#endif
 
 static uint8_t  g_root_pubkey[32];
 static uint8_t  g_prov_cloud_pubkey[32];
 static uint8_t  g_chip_uid[32];
 static size_t   g_chip_uid_len;
 static uint8_t  g_dslc_byte;
+static uint8_t  g_active_otp_limit;
+static uint8_t  g_otp_fault_slot;
 static uint32_t g_otp_counter;
 static uint32_t g_otp_burns;
 static uint32_t g_last_accepted_ts;
+static uint32_t g_initial_kdm_floor;
 static bool     g_tmr_avail;
 
 static boot_status_t cloud_entropy_random(uint8_t *buf, size_t len) {
@@ -53,12 +80,15 @@ static boot_status_t cloud_read_pubkey(uint8_t *out_key, size_t key_len,
     __CPROVER_assert(out_key != NULL && key_len == 32U &&
                          __CPROVER_w_ok(out_key, 32U),
                      "keystore->read_pubkey requires writable 32B buffer");
-    __CPROVER_assert(key_slot == 0U || key_slot == 1U,
-                     "boot_cloud_cmd only queries Root (0) or Cloud (1) slot");
-    if (nondet_bool()) {
+    __CPROVER_assert((uint32_t)key_slot < (uint32_t)CBMC_CLOUD_OTP_SLOTS,
+                     "boot_cloud_cmd OTP pubkey scan stays within [0, TOOB_MAX_OTP_SLOTS)");
+    if (key_slot >= g_active_otp_limit) {
         return BOOT_ERR_NOT_FOUND;
     }
-    memcpy(out_key, (key_slot == 0U) ? g_root_pubkey : g_prov_cloud_pubkey, 32U);
+    if (key_slot == g_otp_fault_slot && nondet_bool()) {
+        return BOOT_ERR_FLASH_HW;
+    }
+    memcpy(out_key, (key_slot == 1U) ? g_prov_cloud_pubkey : g_root_pubkey, 32U);
     return BOOT_OK;
 }
 
@@ -171,6 +201,7 @@ boot_status_t boot_journal_get_tmr(const boot_platform_t *platform,
     }
     CBMC_HAVOC_OBJECT(*out_tmr);
     out_tmr->last_accepted_issued_at = g_last_accepted_ts;
+    out_tmr->kdm_seq_floor           = g_initial_kdm_floor;
     return BOOT_OK;
 }
 
@@ -181,6 +212,8 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
                      "boot_journal_update_tmr new_tmr must be readable");
     __CPROVER_assert(new_tmr->last_accepted_issued_at > g_last_accepted_ts,
                      "accepted cloud command must strictly advance issued_at watermark");
+    __CPROVER_assert(new_tmr->kdm_seq_floor >= g_initial_kdm_floor,
+                     "HIGH-104: kdm_seq_floor must remain non-decreasing in TMR");
     return nondet_bool() ? BOOT_OK : BOOT_ERR_FLASH_HW;
 }
 
@@ -189,17 +222,36 @@ static void init_cloud_cmd_env(flash_hal_t *flash_hal,
                                keystore_hal_t *keystore_hal,
                                entropy_hal_t *entropy_hal,
                                boot_platform_t *platform) {
-    CBMC_HAVOC_OBJECT(g_root_pubkey);
-    CBMC_HAVOC_OBJECT(g_prov_cloud_pubkey);
+    uint8_t rk_fill = nondet_uint8_t();
+    uint8_t ck_fill = nondet_uint8_t();
+    memset(g_root_pubkey, rk_fill, sizeof(g_root_pubkey));
+    memset(g_prov_cloud_pubkey, ck_fill, sizeof(g_prov_cloud_pubkey));
+    if (nondet_bool()) {
+        g_root_pubkey[0] ^= nondet_uint8_t();
+        g_prov_cloud_pubkey[31] ^= nondet_uint8_t();
+    }
     CBMC_HAVOC_OBJECT(g_chip_uid);
 
-    g_chip_uid_len     = nondet_size_t();
-    __CPROVER_assume(g_chip_uid_len <= 40U);
+    uint8_t uid_sel = nondet_uint8_t();
+    if (uid_sel == 0U) {
+        g_chip_uid_len = 0U;
+    } else if (uid_sel == 1U) {
+        g_chip_uid_len = 16U;
+    } else if (uid_sel == 2U) {
+        g_chip_uid_len = 32U;
+    } else {
+        g_chip_uid_len = 40U;
+    }
     g_dslc_byte        = nondet_uint8_t();
+    g_active_otp_limit = nondet_uint8_t();
+    __CPROVER_assume(g_active_otp_limit <= (uint8_t)CBMC_CLOUD_OTP_SLOTS);
+    g_otp_fault_slot   = nondet_uint8_t();
+    __CPROVER_assume(g_otp_fault_slot <= (uint8_t)CBMC_CLOUD_OTP_SLOTS);
     g_otp_counter      = nondet_uint32_t();
     g_otp_burns        = 0U;
-    g_last_accepted_ts = nondet_uint32_t();
-    g_tmr_avail        = nondet_bool();
+    g_last_accepted_ts  = nondet_uint32_t();
+    g_initial_kdm_floor = nondet_uint32_t();
+    g_tmr_avail         = nondet_bool();
 
     *flash_hal = (flash_hal_t){
         .read             = cloud_flash_read,

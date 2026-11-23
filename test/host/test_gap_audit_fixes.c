@@ -5,6 +5,9 @@
  */
 
 #include <assert.h>
+#ifdef _WIN32
+#define __USE_MINGW_SETJMP_NON_SEH
+#endif
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -79,7 +82,9 @@
 #define TOOB_DEVICE_PRODUCT_ID           0x0042U
 #define TOOB_DEVICE_VENDOR_ID            0x0001U
 #define TOOB_DEVICE_HW_REV               1U
+#ifndef TOOB_PQC_ENABLED
 #define TOOB_PQC_ENABLED                 0
+#endif
 
 #define HEATSHRINK_DYNAMIC_ALLOC             0
 #define HEATSHRINK_STATIC_INPUT_BUFFER_SIZE  128
@@ -95,6 +100,7 @@
 #include "toob_mailbox_wire.h"
 
 #include "../../toobloader/core/utils/boot_crc32.c"
+#include "../../toobloader/core/utils/boot_cobs.c"
 #include "../../toobloader/core/utils/boot_delay.c"
 #include "../../toobloader/core/utils/boot_diag.c"
 #include "../../toobloader/core/utils/boot_energy.c"
@@ -199,9 +205,16 @@ static uint8_t s_flash[CHIP_FLASH_TOTAL_SIZE];
 static reset_reason_t s_reset_reason = RESET_REASON_POWER_ON;
 static uint32_t s_hw_active_slot = 0U;
 static uint32_t s_otp_svn = 0U;
+static uint8_t s_dslc_state = 0x00U;
+static uint8_t s_otp_key_count = 1U;
 static bool s_fail_flash_read = false;
 static bool s_fail_sector_size = false;
 static size_t s_override_sector_size = 4096U;
+
+#if TOOB_PQC_ENABLED
+static uint8_t s_pqc_pinned_hash[32];
+static bool s_pqc_enforced_flag = false;
+#endif
 
 static const uint8_t k_tv1_pub[32] = {
     0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe,
@@ -222,9 +235,15 @@ static void sim_format_all(void) {
   s_reset_reason = RESET_REASON_POWER_ON;
   s_hw_active_slot = 0U;
   s_otp_svn = 0U;
+  s_dslc_state = 0x00U;
+  s_otp_key_count = 1U;
   s_fail_flash_read = false;
   s_fail_sector_size = false;
   s_override_sector_size = 4096U;
+#if TOOB_PQC_ENABLED
+  s_pqc_enforced_flag = false;
+  memset(s_pqc_pinned_hash, 0, sizeof(s_pqc_pinned_hash));
+#endif
   sim_reset_globals();
 }
 
@@ -351,7 +370,7 @@ static boot_status_t sim_entropy_random(uint8_t *buf, size_t len) {
 
 static boot_status_t sim_read_pubkey(uint8_t *key, size_t key_len,
                                      uint8_t key_index) {
-  if (!key || key_len != 32U || key_index != 0U) {
+  if (!key || key_len != 32U || key_index >= s_otp_key_count) {
     return BOOT_ERR_NOT_FOUND;
   }
   memcpy(key, k_tv1_pub, 32U);
@@ -362,8 +381,16 @@ static boot_status_t sim_read_dslc(uint8_t *buf, size_t *len) {
   if (!buf || !len || *len == 0U) {
     return BOOT_ERR_INVALID_ARG;
   }
-  buf[0] = 0x01U;
+  buf[0] = s_dslc_state;
   *len = 1U;
+  return BOOT_OK;
+}
+
+static boot_status_t sim_write_dslc(const uint8_t *val, size_t len) {
+  if (!val || len == 0U) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  s_dslc_state |= val[0];
   return BOOT_OK;
 }
 
@@ -385,23 +412,72 @@ static boot_status_t sim_advance_monotonic(void) {
   return BOOT_OK;
 }
 
+static boot_status_t sim_read_device_secret(uint8_t *secret_out, size_t max_len,
+                                            size_t *actual_len) {
+  static const uint8_t k_huk[32] = {
+      0x61U, 0x72U, 0x83U, 0x94U, 0xA5U, 0xB6U, 0xC7U, 0xD8U,
+      0xE9U, 0xFAU, 0x0BU, 0x1CU, 0x2DU, 0x3EU, 0x4FU, 0x50U,
+      0x0FU, 0x1EU, 0x2DU, 0x3CU, 0x4BU, 0x5AU, 0x69U, 0x78U,
+      0x87U, 0x96U, 0xA5U, 0xB4U, 0xC3U, 0xD2U, 0xE1U, 0xF0U
+  };
+  if (!secret_out || !actual_len || max_len < sizeof(k_huk)) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  memcpy(secret_out, k_huk, sizeof(k_huk));
+  *actual_len = sizeof(k_huk);
+  return BOOT_OK;
+}
+
+#if TOOB_PQC_ENABLED
+static boot_status_t sim_verify_pqc(const uint8_t *message, size_t msg_len,
+                                    const uint8_t *sig, size_t sig_len,
+                                    const uint8_t *pubkey, size_t pubkey_len) {
+  if (!message || msg_len == 0U || !sig || sig_len == 0U || !pubkey ||
+      pubkey_len == 0U) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+  return BOOT_OK;
+}
+
+static bool sim_is_pqc_enforced(void) { return s_pqc_enforced_flag; }
+
+static boot_status_t sim_read_pqc_pubkey_hash(uint8_t out_hash[32],
+                                              uint8_t key_index) {
+  if (!out_hash || key_index >= s_otp_key_count) {
+    return BOOT_ERR_NOT_FOUND;
+  }
+  memcpy(out_hash, s_pqc_pinned_hash, 32U);
+  return BOOT_OK;
+}
+#endif
+
 static const crypto_hal_t s_crypto_hal = TOOB_CRYPTO_HAL_V3(
     crypto_monocypher_init, crypto_monocypher_deinit, crypto_sha256_init,
     crypto_sha256_update, crypto_sha256_finish,
     crypto_monocypher_verify_signature, crypto_sha256_get_ctx_size,
     .verify_signature_ph = crypto_monocypher_verify_signature_ph,
+#if TOOB_PQC_ENABLED
+    .verify_pqc = sim_verify_pqc,
+    .is_pqc_enforced = sim_is_pqc_enforced,
+#else
     .verify_pqc = NULL,
     .is_pqc_enforced = NULL,
+#endif
     .has_hw_acceleration = false);
 
 static const entropy_hal_t s_entropy_hal = TOOB_ENTROPY_HAL_V3(
     NULL, NULL, sim_entropy_random, .is_hardware_trng = false);
 
 static const keystore_hal_t s_keystore_hal = TOOB_KEYSTORE_HAL_V3(
-    NULL, NULL, sim_read_pubkey, sim_read_dslc, NULL,
+    NULL, NULL, sim_read_pubkey, sim_read_dslc, sim_write_dslc,
     .read_chip_uid = sim_read_uid,
     .read_monotonic_counter = sim_read_monotonic,
-    .advance_monotonic_counter = sim_advance_monotonic);
+    .advance_monotonic_counter = sim_advance_monotonic,
+    .read_device_secret = sim_read_device_secret,
+#if TOOB_PQC_ENABLED
+    .read_pqc_pubkey_hash = sim_read_pqc_pubkey_hash,
+#endif
+);
 
 static boot_status_t sim_xip_remap_commit(uint32_t phys_addr) {
   if (phys_addr == CHIP_APP_SLOT_ABS_ADDR) {
@@ -483,6 +559,71 @@ static void write_signed_stage1(uint32_t bank_addr, uint32_t entry_off,
   memcpy(&s_flash[bank_addr + sizeof(signed_msg)], sig, sizeof(sig));
 }
 
+static void write_signed_slot_image_ex(uint32_t slot_addr, uint32_t img_size,
+                                       uint32_t entry_off, uint8_t fill_byte,
+                                       uint8_t key_index) {
+  assert(img_size >= (uint32_t)(sizeof(toob_image_header_t) +
+                                sizeof(toob_img_sig_trailer_t)));
+  assert(img_size <= 4096U);
+
+  uint8_t img[4096];
+  memset(img, fill_byte, img_size);
+
+  toob_image_header_t hdr;
+  memset(&hdr, 0, sizeof(hdr));
+  hdr.magic = TOOB_MAGIC_HEADER;
+  hdr.image_size = img_size;
+  hdr.entry_point = entry_off;
+  memcpy(img, &hdr, sizeof(hdr));
+
+  uint32_t signed_len = img_size - (uint32_t)sizeof(toob_img_sig_trailer_t);
+  uint8_t digest[32];
+  uint8_t sha_ctx[256] __attribute__((aligned(8)));
+  size_t dlen = sizeof(digest);
+  assert(crypto_sha256_init(sha_ctx, sizeof(sha_ctx)) == BOOT_OK);
+  assert(crypto_sha256_update(sha_ctx, img, signed_len) == BOOT_OK);
+  assert(crypto_sha256_finish(sha_ctx, digest, &dlen) == BOOT_OK);
+
+  uint8_t sk[64];
+  uint8_t pk[32];
+  crypto_ed25519_key_pair(sk, pk, (uint8_t[32]){
+      0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a,
+      0xf4, 0x92, 0xec, 0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32,
+      0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60});
+
+  toob_img_sig_trailer_t trailer;
+  memset(&trailer, 0, sizeof(trailer));
+  trailer.magic = TOOB_IMG_SIG_MAGIC;
+  trailer.key_index = key_index;
+  trailer.flags = TOOB_IMG_SIG_FLAG_SHA256;
+  trailer.reserved = 0U;
+  crypto_ed25519_sign(trailer.sig_ed25519, sk, digest, sizeof(digest));
+  memcpy(img + signed_len, &trailer, sizeof(trailer));
+
+  memcpy(&s_flash[slot_addr], img, img_size);
+}
+
+static void write_signed_slot_image(uint32_t slot_addr, uint32_t img_size,
+                                    uint32_t entry_off, uint8_t fill_byte,
+                                    uint8_t key_index) {
+  assert(entry_off >= (uint32_t)sizeof(toob_image_header_t) &&
+         entry_off < img_size - (uint32_t)sizeof(toob_img_sig_trailer_t));
+  write_signed_slot_image_ex(slot_addr, img_size, entry_off, fill_byte, key_index);
+}
+
+static void init_wal_factory_to_deployed(uint32_t target_epoch) {
+  s_dslc_state = 0x00U;
+  s_otp_svn = 0U;
+  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  wal_tmr_payload_t tmr;
+  while (s_otp_svn < target_epoch) {
+    s_otp_svn++;
+    assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
+    assert(boot_journal_update_tmr(&s_platform, &tmr) == BOOT_OK);
+  }
+  s_dslc_state = 0x01U;
+}
+
 /* ============================================================================
  * 1. CRIT-29, HIGH-26, HIGH-28, HIGH-30: Stage 0 Security & Quorum Tests
  * ============================================================================ */
@@ -517,7 +658,7 @@ static void test_stage0_security_and_quorum(void) {
   s_fail_flash_read = false;
 
   /* HIGH-28: 2-of-3 WAL TMR quorum resists single-sector high-seq spoof */
-  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  init_wal_factory_to_deployed(0U);
   wal_tmr_payload_t tmr;
   memset(&tmr, 0, sizeof(tmr));
   assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
@@ -566,7 +707,7 @@ static void test_tentative_handoff_and_confirm_sync(void) {
 
   sim_format_all();
   g_platform = &s_platform;
-  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  init_wal_factory_to_deployed(0U);
 
   /* Corrupt CRC in .noinit -> Stage 0 must NOT flip bank even on WATCHDOG reset */
   toob_handoff_state.struct_version = TOOB_HANDOFF_STRUCT_VERSION;
@@ -628,7 +769,7 @@ static void test_multiimage_and_crc32_guards(void) {
   assert(boot_crc32_flash_stream(&s_platform, 0xFFFFFFF8U, 16U, &crc, arena,
                                  sizeof(arena)) == BOOT_ERR_INVALID_ARG);
 
-  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  init_wal_factory_to_deployed(0U);
   boot_component_t bad_comp;
   memset(&bad_comp, 0, sizeof(bad_comp));
   bad_comp.component_id = 32U;
@@ -715,7 +856,7 @@ static void test_core_bounds_and_overflow_guards(void) {
   assert(boot_main(&s_platform, &out_cfg, key) == BOOT_ERR_INVALID_ARG);
   s_flash_hal.max_erase_cycles = 100000U;
 
-  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  init_wal_factory_to_deployed(0U);
   s_flash_hal.max_erase_cycles = 2U;
   wal_tmr_payload_t tmr;
   memset(&tmr, 0, sizeof(tmr));
@@ -743,14 +884,10 @@ static void test_core_bounds_and_overflow_guards(void) {
                           CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE, &txn,
                           arena, sizeof(arena)) == BOOT_ERR_INVALID_ARG);
 
-  /* HIGH-29: boot_main rejects App with entry_point == 0 and entry_point >= image_size! */
+  /* HIGH-29: boot_main rejects TSIG-signed App with entry_point == 0 and entry_point >= image_size! */
   sim_format_all();
-  toob_image_header_t bad_app;
-  memset(&bad_app, 0, sizeof(bad_app));
-  bad_app.magic = TOOB_MAGIC_HEADER;
-  bad_app.image_size = 512U;
-  bad_app.entry_point = 0U;
-  memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], &bad_app, sizeof(bad_app));
+  init_wal_factory_to_deployed(0U);
+  write_signed_slot_image_ex(CHIP_APP_SLOT_ABS_ADDR, 512U, 0U, 0x11U, 0U);
 
   s_expect_panic = true;
   s_last_panic = BOOT_OK;
@@ -761,8 +898,8 @@ static void test_core_bounds_and_overflow_guards(void) {
   assert(s_last_panic == BOOT_ERR_FLASH_BOUNDS);
 
   sim_format_all();
-  bad_app.entry_point = 512U;
-  memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], &bad_app, sizeof(bad_app));
+  init_wal_factory_to_deployed(0U);
+  write_signed_slot_image_ex(CHIP_APP_SLOT_ABS_ADDR, 512U, 512U, 0x11U, 0U);
   s_expect_panic = true;
   s_last_panic = BOOT_OK;
   if (setjmp(s_panic_env) == 0) {
@@ -785,12 +922,10 @@ static void test_stage1_self_update_lifecycle(void) {
   write_signed_stage1(CHIP_STAGE1A_ABS_ADDR, 0x100U, 1U, true, 0x11U);
   write_signed_stage1(CHIP_STAGE1B_ABS_ADDR, 0x100U, 2U, true, 0x22U);
 
-  toob_image_header_t app1 = {.magic = TOOB_MAGIC_HEADER, .image_size = 256U, .entry_point = 0x20U};
-  toob_image_header_t app2 = {.magic = TOOB_MAGIC_HEADER, .image_size = 256U, .entry_point = 0x20U};
-  memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], &app1, sizeof(app1));
-  memcpy(&s_flash[CHIP_STAGING_SLOT_ABS_ADDR], &app2, sizeof(app2));
+  write_signed_slot_image(CHIP_APP_SLOT_ABS_ADDR, 256U, 0x20U, 0x11U, 0U);
+  write_signed_slot_image(CHIP_STAGING_SLOT_ABS_ADDR, 256U, 0x20U, 0x22U, 0U);
 
-  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  init_wal_factory_to_deployed(0U);
   wal_tmr_payload_t tmr;
   memset(&tmr, 0, sizeof(tmr));
   assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
@@ -895,9 +1030,7 @@ static void test_rocq_audit_fixes_w5(void) {
   sim_format_all();
   g_platform = &s_platform;
 
-  toob_image_header_t app0 = {
-      .magic = TOOB_MAGIC_HEADER, .image_size = 256U, .entry_point = 0x20U};
-  memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], &app0, sizeof(app0));
+  write_signed_slot_image(CHIP_APP_SLOT_ABS_ADDR, 256U, 0x20U, 0x11U, 0U);
 
   /* Provision Root-signed KDM into quorum store */
   uint8_t root_sk[64];
@@ -924,7 +1057,7 @@ static void test_rocq_audit_fixes_w5(void) {
   assert(boot_rstore_write(&s_platform, &kdm_rstore_desc, &kdm) == BOOT_OK);
 
   /* Initialize WAL and lock the device */
-  assert(boot_journal_init(&s_platform) == BOOT_OK);
+  init_wal_factory_to_deployed(0U);
   wal_entry_payload_t lock_txn;
   memset(&lock_txn, 0, sizeof(lock_txn));
   lock_txn.magic = WAL_ENTRY_MAGIC;
@@ -1009,15 +1142,39 @@ static void stage_signed_trailer_tbm1(uint32_t slot_base, uint32_t svn,
   app_hdr.entry_point = 0x40U;
   memcpy(img, &app_hdr, sizeof(app_hdr));
 
-  uint8_t chunk_hash[32];
+  uint8_t sk[64];
+  uint8_t pk[32];
+  crypto_ed25519_key_pair(sk, pk, (uint8_t[32]){
+      0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a,
+      0xf4, 0x92, 0xec, 0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32,
+      0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60});
+
+  uint32_t tsig_signed_len =
+      (uint32_t)(sizeof(img) - sizeof(toob_img_sig_trailer_t));
+  uint8_t tsig_digest[32];
   uint8_t sha_ctx[256] __attribute__((aligned(8)));
-  size_t dlen = sizeof(chunk_hash);
+  size_t dlen = sizeof(tsig_digest);
+  assert(crypto_sha256_init(sha_ctx, sizeof(sha_ctx)) == BOOT_OK);
+  assert(crypto_sha256_update(sha_ctx, img, tsig_signed_len) == BOOT_OK);
+  assert(crypto_sha256_finish(sha_ctx, tsig_digest, &dlen) == BOOT_OK);
+
+  toob_img_sig_trailer_t tsig;
+  memset(&tsig, 0, sizeof(tsig));
+  tsig.magic = TOOB_IMG_SIG_MAGIC;
+  tsig.key_index = 0U;
+  tsig.flags = TOOB_IMG_SIG_FLAG_SHA256;
+  tsig.reserved = 0U;
+  crypto_ed25519_sign(tsig.sig_ed25519, sk, tsig_digest, sizeof(tsig_digest));
+  memcpy(img + tsig_signed_len, &tsig, sizeof(tsig));
+
+  uint8_t chunk_hash[32];
+  dlen = sizeof(chunk_hash);
   assert(crypto_sha256_init(sha_ctx, sizeof(sha_ctx)) == BOOT_OK);
   assert(crypto_sha256_update(sha_ctx, img, sizeof(img)) == BOOT_OK);
   assert(crypto_sha256_finish(sha_ctx, chunk_hash, &dlen) == BOOT_OK);
 
   if (corrupt_payload_after_sign) {
-    img[sizeof(img) - 1U] ^= 0xFFU;
+    img[sizeof(toob_image_header_t) + 8U] ^= 0xFFU;
   }
 
   uint8_t tbm1_block[TBM1_FIXED_LEN + 32U + TBM1_SIG_LEN] __attribute__((aligned(8)));
@@ -1064,12 +1221,6 @@ static void stage_signed_trailer_tbm1(uint32_t slot_base, uint32_t svn,
   th->fixed_crc32 = compute_boot_crc32(tbm1_block, TBM1_CRC_LEN);
   memcpy(tbm1_block + TBM1_FIXED_LEN, chunk_hash, 32U);
 
-  uint8_t sk[64];
-  uint8_t pk[32];
-  crypto_ed25519_key_pair(sk, pk, (uint8_t[32]){
-      0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a,
-      0xf4, 0x92, 0xec, 0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32,
-      0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60});
   crypto_ed25519_sign(tbm1_block + TBM1_FIXED_LEN + 32U, sk,
                       tbm1_block, TBM1_FIXED_LEN + 32U);
 
@@ -1091,11 +1242,9 @@ static void test_tdr1_perfection_fixes(void) {
 
   sim_format_all();
   g_platform = &s_platform;
-  s_otp_svn = 1U;
-
-  toob_image_header_t app0 = {
-      .magic = TOOB_MAGIC_HEADER, .image_size = 512U, .entry_point = 0x40U};
-  memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], &app0, sizeof(app0));
+  write_signed_slot_image(CHIP_APP_SLOT_ABS_ADDR, 512U, 0x40U, 0x33U, 0U);
+  init_wal_factory_to_deployed(1U);
+  sim_reset_globals();
 
   boot_target_config_t out_cfg;
   const uint32_t seal_key[4] = {0xA1U, 0xB2U, 0xC3U, 0xD4U};
@@ -1198,6 +1347,427 @@ static void test_tdr1_perfection_fixes(void) {
   printf("      PASS\n");
 }
 
+static uint8_t s_cobs_rx_fifo[128];
+static size_t s_cobs_rx_head = 0U;
+static size_t s_cobs_rx_tail = 0U;
+
+static boot_status_t sim_cobs_console_init(uint32_t baud) {
+  (void)baud;
+  return BOOT_OK;
+}
+static void sim_cobs_console_deinit(void) {}
+static void sim_cobs_console_putchar(char c) { (void)c; }
+static void sim_cobs_console_flush(void) {}
+static boot_status_t sim_cobs_console_getchar(uint8_t *out, uint32_t timeout_ms) {
+  (void)timeout_ms;
+  if (!out || s_cobs_rx_tail >= s_cobs_rx_head) {
+    return BOOT_ERR_TIMEOUT;
+  }
+  *out = s_cobs_rx_fifo[s_cobs_rx_tail++];
+  return BOOT_OK;
+}
+
+static const console_hal_t s_cobs_console_hal = {
+    .abi_version = TOOB_HAL_ABI_V2,
+    .init = sim_cobs_console_init,
+    .deinit = sim_cobs_console_deinit,
+    .putchar = sim_cobs_console_putchar,
+    .getchar = sim_cobs_console_getchar,
+    .flush = sim_cobs_console_flush,
+};
+
+static void test_wave1_wave2_security_regressions(void) {
+  printf("[9/9] Testing Wave-1/Wave-2 security regressions (CRIT-68..71, HIGH-102/114, MED-91, Stage0/TBM1/Delta)...\n");
+  uint8_t arena[BOOT_CRYPTO_ARENA_SIZE] __attribute__((aligned(8)));
+  const uint32_t seal_key[4] = {0xDEADBEEFU, 0xCAFEBABEU, 0x12345678U, 0x9ABCDEF0U};
+
+  /* (a) CRIT-68/71: Unsigned App, Recovery, and Rollback images rejected with BOOT_ERR_VERIFY */
+  {
+    sim_format_all();
+    g_platform = &s_platform;
+    init_wal_factory_to_deployed(0U);
+
+    toob_image_header_t unsigned_hdr;
+    memset(&unsigned_hdr, 0, sizeof(unsigned_hdr));
+    unsigned_hdr.magic = TOOB_MAGIC_HEADER;
+    unsigned_hdr.image_size = 256U;
+    unsigned_hdr.entry_point = 0x20U;
+    memset(&s_flash[CHIP_APP_SLOT_ABS_ADDR], 0x5AU, 256U);
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], &unsigned_hdr, sizeof(unsigned_hdr));
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &unsigned_hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* Undersized image < sizeof(hdr) + sizeof(toob_img_sig_trailer_t) also fails */
+    unsigned_hdr.image_size = 64U;
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], &unsigned_hdr, sizeof(unsigned_hdr));
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &unsigned_hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_INVALID_ARG);
+
+    /* Unsigned Rollback backup in staging slot rejected */
+    unsigned_hdr.image_size = 256U;
+    memset(&s_flash[CHIP_STAGING_SLOT_ABS_ADDR], 0x6BU, 256U);
+    memcpy(&s_flash[CHIP_STAGING_SLOT_ABS_ADDR], &unsigned_hdr, sizeof(unsigned_hdr));
+    assert(boot_verify_slot_image(&s_platform, CHIP_STAGING_SLOT_ABS_ADDR,
+                                  CHIP_STAGING_SLOT_SIZE, &unsigned_hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* Unsigned Recovery OS rejected when falling back from erased App slot */
+    memset(&s_flash[CHIP_APP_SLOT_ABS_ADDR], 0xFF, 256U);
+    memset(&s_flash[CHIP_RECOVERY_OS_ABS_ADDR], 0x7CU, 256U);
+    memcpy(&s_flash[CHIP_RECOVERY_OS_ABS_ADDR], &unsigned_hdr, sizeof(unsigned_hdr));
+    boot_target_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    sim_reset_globals();
+    assert(boot_state_run(&s_platform, &cfg, seal_key, arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+  }
+
+  /* (b) CRIT-68: Tampered TSIG trailer fields, payload, zero sig, and key-index downgrade rejected */
+  {
+    sim_format_all();
+    g_platform = &s_platform;
+    write_signed_slot_image(CHIP_APP_SLOT_ABS_ADDR, 256U, 0x20U, 0x33U, 0U);
+    toob_image_header_t hdr;
+    memcpy(&hdr, &s_flash[CHIP_APP_SLOT_ABS_ADDR], sizeof(hdr));
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &hdr,
+                                  arena, sizeof(arena)) == BOOT_OK);
+
+    const uint32_t tsig_off = hdr.image_size - (uint32_t)sizeof(toob_img_sig_trailer_t);
+    uint8_t saved_img[256];
+    memcpy(saved_img, &s_flash[CHIP_APP_SLOT_ABS_ADDR], sizeof(saved_img));
+
+    /* Tampered signature byte */
+    s_flash[CHIP_APP_SLOT_ABS_ADDR + tsig_off + 8U] ^= 0x01U;
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* Tampered TSIG magic */
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], saved_img, sizeof(saved_img));
+    s_flash[CHIP_APP_SLOT_ABS_ADDR + tsig_off] ^= 0xFFU;
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* Invalid TSIG flags */
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], saved_img, sizeof(saved_img));
+    s_flash[CHIP_APP_SLOT_ABS_ADDR + tsig_off + 5U] = 0x02U;
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* Non-zero TSIG reserved bytes */
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], saved_img, sizeof(saved_img));
+    s_flash[CHIP_APP_SLOT_ABS_ADDR + tsig_off + 6U] = 0x01U;
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* All-zero Ed25519 signature */
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], saved_img, sizeof(saved_img));
+    memset(&s_flash[CHIP_APP_SLOT_ABS_ADDR + tsig_off + 8U], 0, 64U);
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* Tampered signed payload */
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], saved_img, sizeof(saved_img));
+    s_flash[CHIP_APP_SLOT_ABS_ADDR + 32U] ^= 0x80U;
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* Revoked key_index=0 once OTP slot 1 is populated */
+    memcpy(&s_flash[CHIP_APP_SLOT_ABS_ADDR], saved_img, sizeof(saved_img));
+    s_otp_key_count = 2U;
+    assert(boot_verify_slot_image(&s_platform, CHIP_APP_SLOT_ABS_ADDR,
+                                  CHIP_APP_SLOT_SIZE, &hdr,
+                                  arena, sizeof(arena)) == BOOT_ERR_DOWNGRADE);
+    s_otp_key_count = 1U;
+  }
+
+  /* (c) CRIT-70: PQC pubkey hash mismatch rejected when TOOB_PQC_ENABLED */
+  {
+    sim_format_all();
+    g_platform = &s_platform;
+    uint8_t sk[64];
+    uint8_t pk[32];
+    crypto_ed25519_key_pair(sk, pk, (uint8_t[32]){
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a,
+        0xf4, 0x92, 0xec, 0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32,
+        0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60});
+
+    uint8_t man[256];
+    memset(man, 0x21U, sizeof(man));
+#if TOOB_PQC_ENABLED
+    const size_t pqc_pub_off = 64U;
+    const size_t pqc_sig_off = 96U;
+    for (size_t i = 0U; i < 32U; i++) {
+      man[pqc_pub_off + i] = (uint8_t)(0x40U + i);
+      man[pqc_sig_off + i] = (uint8_t)(0x80U + i);
+    }
+    uint8_t ctx[256] __attribute__((aligned(8)));
+    size_t dlen = sizeof(s_pqc_pinned_hash);
+    assert(crypto_sha256_init(ctx, sizeof(ctx)) == BOOT_OK);
+    assert(crypto_sha256_update(ctx, man + pqc_pub_off, 32U) == BOOT_OK);
+    assert(crypto_sha256_finish(ctx, s_pqc_pinned_hash, &dlen) == BOOT_OK);
+    s_pqc_enforced_flag = true;
+#endif
+    memcpy(arena, man, sizeof(man));
+    crypto_ed25519_sign(arena + sizeof(man), sk, man, sizeof(man));
+
+    boot_verify_envelope_t env;
+    memset(&env, 0, sizeof(env));
+    env.manifest_flash_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+    env.manifest_size = sizeof(man);
+    env.signature_ed25519 = arena + sizeof(man);
+    env.key_index = 0U;
+#if TOOB_PQC_ENABLED
+    env.pqc_hybrid_active = true;
+    env.pubkey_pqc = arena + pqc_pub_off;
+    env.pubkey_pqc_len = 32U;
+    env.signature_pqc = arena + pqc_sig_off;
+    env.signature_pqc_len = 32U;
+#endif
+    assert(boot_verify_manifest_envelope(&s_platform, &env, arena, sizeof(arena)) == BOOT_OK);
+
+#if TOOB_PQC_ENABLED
+    /* Attacker substitutes rogue PQC pubkey while holding valid Ed25519 signature */
+    man[pqc_pub_off] ^= 0x01U;
+    memcpy(arena, man, sizeof(man));
+    crypto_ed25519_sign(arena + sizeof(man), sk, man, sizeof(man));
+    assert(boot_verify_manifest_envelope(&s_platform, &env, arena, sizeof(arena)) ==
+           BOOT_ERR_VERIFY);
+#endif
+  }
+
+  /* (d) CRIT-69: Blank WAL on deployed device (dslc != 0 or efuse_epoch > 0) refuses init */
+  {
+    sim_format_all();
+    s_dslc_state = 0x01U;
+    s_otp_svn = 0U;
+    assert(boot_journal_init(&s_platform) == BOOT_ERR_VERIFY);
+
+    sim_format_all();
+    s_dslc_state = 0x00U;
+    s_otp_svn = 1U;
+    assert(boot_journal_init(&s_platform) == BOOT_ERR_VERIFY);
+  }
+
+  /* (e) HIGH-102: Legacy WAL header rejected with BOOT_ERR_ABI_MISMATCH */
+  {
+    sim_format_all();
+    wal_sector_header_v1_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.sector_magic = WAL_ABI_VERSION_MAGIC_LEGACY;
+    legacy.sequence_id = 1U;
+    legacy.erase_count = 1U;
+    legacy.tmr_data.app_svn = 1U;
+    legacy.header_crc32 = compute_boot_crc32(
+        (const uint8_t *)&legacy, offsetof(wal_sector_header_v1_t, header_crc32));
+    memcpy(&s_flash[CHIP_WAL_ABS_ADDR], &legacy, sizeof(legacy));
+    s_dslc_state = 0x01U;
+    assert(boot_journal_init(&s_platform) == BOOT_ERR_ABI_MISMATCH);
+  }
+
+  /* (f) HIGH-114: COBS RX overflow drains until 0x00 delimiter before accepting next frame */
+  {
+    boot_platform_t cobs_plat = s_platform;
+    cobs_plat.console = &s_cobs_console_hal;
+    s_cobs_rx_head = 0U;
+    s_cobs_rx_tail = 0U;
+
+    /* 24-byte overflowing garbage frame (> 16-byte rx_buf) + 0x00 delimiter */
+    for (size_t i = 0U; i < 24U; i++) {
+      s_cobs_rx_fifo[s_cobs_rx_head++] = (uint8_t)(0x41U + (i & 0x0FU));
+    }
+    s_cobs_rx_fifo[s_cobs_rx_head++] = 0x00U;
+    /* Followed immediately by valid COBS-encoded {0x11, 0x22, 0x33} */
+    s_cobs_rx_fifo[s_cobs_rx_head++] = 0x04U;
+    s_cobs_rx_fifo[s_cobs_rx_head++] = 0x11U;
+    s_cobs_rx_fifo[s_cobs_rx_head++] = 0x22U;
+    s_cobs_rx_fifo[s_cobs_rx_head++] = 0x33U;
+    s_cobs_rx_fifo[s_cobs_rx_head++] = 0x00U;
+
+    uint8_t rx_buf[16];
+    memset(rx_buf, 0xCC, sizeof(rx_buf));
+    size_t rx_len = 0U;
+    assert(boot_cobs_recv_frame(&cobs_plat, rx_buf, sizeof(rx_buf), &rx_len) == BOOT_OK);
+    assert(rx_len == 4U);
+    assert(rx_buf[0] == 0x04U && rx_buf[1] == 0x11U && rx_buf[2] == 0x22U && rx_buf[3] == 0x33U);
+    size_t dec_len = 0U;
+    assert(boot_cobs_decode_in_place(rx_buf, rx_len, &dec_len) == BOOT_OK);
+    assert(dec_len == 3U);
+    assert(rx_buf[0] == 0x11U && rx_buf[1] == 0x22U && rx_buf[2] == 0x33U);
+  }
+
+  /* (g) MED-91: Mailbox seq RFC-1982 wrap-around 0xFFFFFFFF -> 0x00000001 (seq=0 invalid) */
+  {
+    assert(mbx_seq_is_newer(1U, 0xFFFFFFFFU) == true);
+    assert(mbx_seq_is_newer(0xFFFFFFFFU, 1U) == false);
+    assert(mbx_seq_is_newer(0U, 0xFFFFFFFFU) == false);
+    assert(mbx_seq_is_newer(0x7FFFFFFEU, 0xFFFFFFFFU) == true);
+
+    sim_format_all();
+    init_wal_factory_to_deployed(0U);
+    wal_tmr_payload_t tmr;
+    assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
+    tmr.last_mbx_request_id = 0xFFFFFFFEU;
+    tmr.active_nonce_lo = 0xCAFE0002U;
+    tmr.active_nonce_hi = 0xCAFE0001U;
+    assert(boot_journal_update_tmr(&s_platform, &tmr) == BOOT_OK);
+
+    toob_mailbox_t mbx0;
+    memset(&mbx0, 0, sizeof(mbx0));
+    mbx0.magic = TOOB_MAILBOX_MAGIC;
+    mbx0.version = TOOB_MAILBOX_VERSION;
+    mbx0.request = TOOB_REQ_UPDATE_PENDING;
+    mbx0.seq = 0xFFFFFFFFU;
+    mbx0.tbm1_addr = CHIP_STAGING_SLOT_ABS_ADDR;
+    mbx0.crc32 = compute_boot_crc32((const uint8_t *)&mbx0, TOOB_MAILBOX_CRC_LEN);
+    memcpy(&s_flash[CHIP_MAILBOX_ABS_ADDR], &mbx0, sizeof(mbx0));
+
+    toob_mailbox_t mbx1;
+    memset(&mbx1, 0, sizeof(mbx1));
+    mbx1.magic = TOOB_MAILBOX_MAGIC;
+    mbx1.version = TOOB_MAILBOX_VERSION;
+    mbx1.request = TOOB_REQ_CONFIRM;
+    mbx1.seq = 1U;
+    mbx1.nonce = 0xCAFE0001CAFE0002ULL;
+    mbx1.crc32 = compute_boot_crc32((const uint8_t *)&mbx1, TOOB_MAILBOX_CRC_LEN);
+    memcpy(&s_flash[CHIP_MAILBOX_ABS_ADDR + CHIP_MAILBOX_SLOT_SIZE], &mbx1, sizeof(mbx1));
+
+    assert(boot_mailbox_consume(&s_platform) == BOOT_OK);
+    assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
+    assert(tmr.last_mbx_request_id == 1U);
+    wal_entry_payload_t rec_txn;
+    memset(&rec_txn, 0, sizeof(rec_txn));
+    assert(boot_journal_reconstruct_txn(&s_platform, &rec_txn, NULL, NULL) == BOOT_OK);
+    assert(rec_txn.intent == (uint32_t)WAL_INTENT_CONFIRM_COMMIT);
+  }
+
+  /* (h) TBM1/delta/rdelta boundary/alignment hardening & Stage-0 non-overlap / efuse_epoch check */
+  {
+    /* TBM1 precheck/region/rdelta alignment & ordering */
+    uint8_t raw_tbm1[1024] __attribute__((aligned(8)));
+    memset(raw_tbm1, 0, sizeof(raw_tbm1));
+    assert(tbm1_precheck(raw_tbm1 + 1U, sizeof(raw_tbm1) - 1U) == TBM1_BAD_ALIGN);
+
+    tbm1_header_t *th = (tbm1_header_t *)raw_tbm1;
+    const uint32_t rdelta_len = (uint32_t)sizeof(tbm1_rdelta_desc_t);
+    th->magic = TBM1_MAGIC;
+    th->version_major = TBM1_VERSION_MAJOR;
+    th->version_minor = TBM1_VERSION_MINOR;
+    th->fixed_len = TBM1_FIXED_LEN;
+    th->total_len = TBM1_FIXED_LEN + 32U + 4U + rdelta_len + TBM1_SIG_LEN;
+    th->vendor_id = TOOB_DEVICE_VENDOR_ID;
+    th->product_id = TOOB_DEVICE_PRODUCT_ID;
+    th->hw_rev_min = 1U;
+    th->hw_rev_max = 1U;
+    th->image_count = 1U;
+    th->regions[0].region_id = TBM1_REGION_CHUNK_HASHES;
+    th->regions[0].off = TBM1_FIXED_LEN;
+    th->regions[0].len = 32U;
+    th->regions[1].region_id = TBM1_REGION_REVERSE_DELTA;
+    th->regions[1].off = TBM1_FIXED_LEN + 32U + 4U; /* Deliberate 4B misalignment */
+    th->regions[1].len = rdelta_len;
+    th->images[0].target_slot = TBM1_SLOT_APP;
+    th->images[0].compression_alg = TBM1_COMP_NONE;
+    th->images[0].delta_alg = TBM1_DELTA_NONE;
+    th->images[0].data_off = 0U;
+    th->images[0].stored_size = 512U;
+    th->images[0].installed_size = 512U;
+    th->images[0].chunk_size = 4096U;
+    th->images[0].num_chunks = 1U;
+    th->fixed_crc32 = compute_boot_crc32(raw_tbm1, TBM1_CRC_LEN);
+
+    uint32_t out_off[TBM1_MAX_IMAGES];
+    assert(tbm1_validate(raw_tbm1, sizeof(raw_tbm1), 65536U, out_off) == TBM1_BAD_REGION_ALIGN);
+
+    /* Align rdelta region to 8 bytes, but test overlapping rdelta->data_off and restored_size==0 */
+    th->regions[1].off = TBM1_FIXED_LEN + 32U;
+    th->total_len = TBM1_FIXED_LEN + 32U + rdelta_len + TBM1_SIG_LEN;
+    tbm1_rdelta_desc_t *rd = (tbm1_rdelta_desc_t *)(raw_tbm1 + th->regions[1].off);
+    rd->target_slot = TBM1_SLOT_APP;
+    rd->delta_alg = TBM1_DELTA_TDS1;
+    rd->data_off = 256U; /* Overlaps images[0] [0..512) */
+    rd->stored_size = 128U;
+    rd->restored_size = 512U;
+    th->fixed_crc32 = compute_boot_crc32(raw_tbm1, TBM1_CRC_LEN);
+    assert(tbm1_validate(raw_tbm1, sizeof(raw_tbm1), 65536U, out_off) == TBM1_BAD_PAYLOAD_LAYOUT);
+
+    rd->data_off = 512U;
+    rd->restored_size = 0U;
+    th->fixed_crc32 = compute_boot_crc32(raw_tbm1, TBM1_CRC_LEN);
+    assert(tbm1_validate(raw_tbm1, sizeof(raw_tbm1), 65536U, out_off) == TBM1_BAD_RDELTA);
+
+    /* Delta boundary hardening: bad literal_block_offset & out-of-bounds expect_lit */
+    sim_format_all();
+    init_wal_factory_to_deployed(0U);
+    toob_tds_header_t bad_tds;
+    memset(&bad_tds, 0, sizeof(bad_tds));
+    bad_tds.magic = TOOB_TDS_MAGIC;
+    bad_tds.base_size = 512U;
+    bad_tds.expected_target_size = 512U;
+    bad_tds.instr_count = 2U;
+    bad_tds.literal_block_offset = 16U; /* Mismatch vs sizeof(hdr) + 2*sizeof(instr) */
+    bad_tds.header_crc32 = compute_boot_crc32(
+        (const uint8_t *)&bad_tds, offsetof(toob_tds_header_t, header_crc32));
+    memcpy(&s_flash[CHIP_STAGING_SLOT_ABS_ADDR], &bad_tds, sizeof(bad_tds));
+    wal_entry_payload_t dtxn;
+    memset(&dtxn, 0, sizeof(dtxn));
+    assert(boot_delta_apply(&s_platform, CHIP_STAGING_SLOT_ABS_ADDR, 256U,
+                            CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_SCRATCH_SLOT_SIZE,
+                            CHIP_APP_SLOT_ABS_ADDR, 512U, &dtxn,
+                            arena, sizeof(arena)) == BOOT_ERR_VERIFY);
+
+    /* expect_lit > delta_max_size -> BOOT_ERR_FLASH_BOUNDS */
+    bad_tds.instr_count = 32U;
+    bad_tds.literal_block_offset =
+        (uint32_t)sizeof(toob_tds_header_t) +
+        (32U * (uint32_t)sizeof(toob_tds_instr_t));
+    bad_tds.header_crc32 = compute_boot_crc32(
+        (const uint8_t *)&bad_tds, offsetof(toob_tds_header_t, header_crc32));
+    memcpy(&s_flash[CHIP_STAGING_SLOT_ABS_ADDR], &bad_tds, sizeof(bad_tds));
+    assert(boot_delta_apply(&s_platform, CHIP_STAGING_SLOT_ABS_ADDR, 128U,
+                            CHIP_SCRATCH_SLOT_ABS_ADDR, CHIP_SCRATCH_SLOT_SIZE,
+                            CHIP_APP_SLOT_ABS_ADDR, 512U, &dtxn,
+                            arena, sizeof(arena)) == BOOT_ERR_FLASH_BOUNDS);
+
+    /* Stage-0 non-overlap copy / RAM range checks & decoupled efuse_epoch vs stage1_svn */
+    assert(stage0_ranges_overlap(0x20001000U, 0x100U, 0x20001080U, 0x100U) == true);
+    assert(stage0_ranges_overlap(0x20001000U, 0x100U, 0x20001100U, 0x100U) == false);
+    assert(stage0_ranges_overlap((uintptr_t)(UINTPTR_MAX - 16U), 32U, 0x1000U, 0x100U) == true);
+    assert(stage0_is_target_ram_safe(0x20000000U, 0U) == false);
+    assert(stage0_is_target_ram_safe(0xFFFFFFF0U, 32U) == false);
+    assert(stage0_is_ram_range_valid(0x20000002U, 16U) == false);
+
+    sim_format_all();
+    init_wal_factory_to_deployed(0U);
+    wal_tmr_payload_t tmr;
+    assert(boot_journal_get_tmr(&s_platform, &tmr) == BOOT_OK);
+    tmr.active_stage1_bank = 0U;
+    tmr.stage1_svn = 2U;
+    assert(boot_journal_update_tmr(&s_platform, &tmr) == BOOT_OK);
+    /* Advancing efuse_epoch (cloud/rescue counter) must NOT brick valid Stage-1 SVN=2 */
+    s_otp_svn = 4U;
+    uint32_t floor_svn = 0U;
+    (void)stage0_read_wal_boot_meta(&s_platform, &floor_svn);
+    assert(floor_svn == 2U);
+    write_signed_stage1(CHIP_STAGE1A_ABS_ADDR, 0x100U, 2U, true, 0x11U);
+    write_signed_stage1(CHIP_STAGE1B_ABS_ADDR, 0x100U, 1U, true, 0x22U);
+    boot_proof_t proof;
+    memset(&proof, 0, sizeof(proof));
+    assert(stage0_try_boot_bank(&s_platform, CHIP_STAGE1A_ABS_ADDR, 0x01U, floor_svn, &proof) == true);
+    assert(proof.svn == 2U);
+    assert(stage0_try_boot_bank(&s_platform, CHIP_STAGE1B_ABS_ADDR, 0x01U, floor_svn, &proof) == false);
+  }
+
+  printf("      PASS\n");
+}
+
 int main(void) {
   setvbuf(stdout, NULL, _IONBF, 0);
   setvbuf(stderr, NULL, _IONBF, 0);
@@ -1210,6 +1780,7 @@ int main(void) {
   test_stage1_self_update_lifecycle();
   test_rocq_audit_fixes_w5();
   test_tdr1_perfection_fixes();
-  printf("=== ALL 8 GAP AUDIT FIX SUITES PASSED! ===\n");
+  test_wave1_wave2_security_regressions();
+  printf("=== ALL 9 GAP AUDIT FIX SUITES PASSED! ===\n");
   return 0;
 }

@@ -31,19 +31,31 @@ if (-not (Test-Path $clangFormat)) {
     if ($cmd) { $clangFormat = $cmd.Source } else { throw 'clang-format not found.' }
 }
 
-$coreDirs = @(
+$coreStage0Dirs = @(
     (Join-Path $repoRoot 'toobloader/stage0'),
     (Join-Path $repoRoot 'toobloader/core')
 )
-$allCAndH = foreach ($d in $coreDirs) {
+$fihScanDirs = @(
+    (Join-Path $repoRoot 'toobloader/stage0'),
+    (Join-Path $repoRoot 'toobloader/core'),
+    (Join-Path $repoRoot 'recovery'),
+    (Join-Path $repoRoot 'sdk/libtoob'),
+    (Join-Path $repoRoot 'sdk/os_client')
+)
+$fihCAndH = @(foreach ($d in $fihScanDirs) {
+    if (Test-Path $d) {
+        Get-ChildItem -Path $d -Recurse -File -Include *.c, *.h
+    }
+})
+$coreCAndH = @(foreach ($d in $coreStage0Dirs) {
     Get-ChildItem -Path $d -Recurse -File -Include *.c, *.h
-}
-$allCFiles = @($allCAndH | Where-Object { $_.Extension -eq '.c' })
+})
+$allCFiles = @($coreCAndH | Where-Object { $_.Extension -eq '.c' })
 
 $failures = New-Object System.Collections.Generic.List[string]
 
 Write-Host '================================================================================'
-Write-Host '  TOOB-LOADER CORE & STAGE-0 SAFETY, MISRA C:2023 & GLITCH/FIH GATE'
+Write-Host '  TOOB-LOADER CORE, STAGE-0, RECOVERY & SDK SAFETY / MISRA C:2023 / FIH GATE'
 Write-Host '================================================================================'
 
 # ---------------------------------------------------------------------------
@@ -51,13 +63,98 @@ Write-Host '====================================================================
 # ---------------------------------------------------------------------------
 Write-Host '[1/4] Checking custom Glitch/FIH & Flash-Firewall invariants (TOOB-FIH-01..05)...'
 
-$secretZeroizeRegex = '\bmemset\s*\(\s*[^,]*\b(key|pubkey|priv|secret|token|digest|sig|signature|nonce|hmac|kdm|arena|handoff|seal_key|hash_ctx)\w*\s*,\s*0\b'
-$rawMemcmpRegex     = '\bmemcmp\s*\('
-$voidSecGateRegex   = '\(\s*void\s*\)\s*([A-Za-z0-9_>-]*\b(verify_signature|stage0_verify_signature|boot_verify_manifest_envelope|boot_merkle_verify_stream|boot_rollback_verify_svn|boot_proof_verify|read_dslc))\s*\('
-$rawFlashMutRegex   = '->\s*(write|erase_sector)\s*\('
-$mmioCastRegex      = '\(\s*volatile\s+(const\s+)?uint(8|16|32|64)_t\s*\*\s*\)\s*0x'
+$zeroMemsetRegex  = '\bmemset\s*\(\s*([^,]+?)\s*,\s*(?:0[uUlL]*|0x0+[uUlL]*|''\\0'')\s*,'
+$rawMemcmpRegex   = '\bmemcmp\s*\('
+$voidSecGateRegex = '\(\s*void\s*\)\s*([A-Za-z0-9_>-]*\b(?:verify_signature|stage0_verify_signature|boot_verify_manifest_envelope|boot_merkle_verify_stream|boot_rollback_verify_svn|boot_proof_verify|read_dslc|boot_random_safe|advance_monotonic_counter|boot_read_monotonic_counter_safe|set_otfdec_mode|lockdown_before_handoff))\s*\('
+$rawFlashMutRegex = '->\s*(write|erase_sector)\s*\('
+$mmioCastRegex    = '\(\s*(?:volatile\s+)?(?:const\s+)?(?:uint(?:8|16|32|64)_t|uintptr_t)\s*\*\s*\)\s*(?:\(\s*uintptr_t\s*\)\s*)?0x[0-9a-fA-F]+'
 
-foreach ($file in $allCAndH) {
+function Test-AllowedZeroMemset {
+    param([string]$RelPath, [string]$DstExpr)
+    $dst = $DstExpr.Trim()
+    if ($dst -match '(?:->|\.)_padding\w*\s*$') { return $true }
+    if ($RelPath -eq 'toobloader/core/boot_delta.c' -and $dst -eq 'w->write_buf + w->write_pos') { return $true }
+    if ($RelPath -eq 'sdk/libtoob/toob_ota.c' -and $dst -eq 'zero_sha') { return $true }
+    if ($RelPath -eq 'sdk/libtoob/toob_diag.c' -and $dst -eq 'out_buf') { return $true }
+    return $false
+}
+
+function Test-InfiniteLoopHasExit {
+    param([string]$Body)
+    $scopeStack = New-Object System.Collections.Generic.Stack[string]
+    $scopeStack.Push('outer')
+    $parenDepth = 0
+    $pendingInnerCtrl = $null
+    $skipNextWhileCtrl = $false
+
+    $tokens = [regex]::Matches($Body, '[A-Za-z_][A-Za-z0-9_]*|[{}();]')
+    foreach ($t in $tokens) {
+        $v = $t.Value
+        switch ($v) {
+            '(' {
+                $parenDepth++
+            }
+            ')' {
+                if ($parenDepth -gt 0) { $parenDepth-- }
+            }
+            '{' {
+                $tag = if ($null -ne $pendingInnerCtrl) { $pendingInnerCtrl } else { 'block' }
+                $pendingInnerCtrl = $null
+                $skipNextWhileCtrl = $false
+                $scopeStack.Push($tag)
+            }
+            '}' {
+                $closed = if ($scopeStack.Count -gt 1) { $scopeStack.Pop() } else { 'outer' }
+                $skipNextWhileCtrl = ($closed -eq 'do')
+                $pendingInnerCtrl = $null
+            }
+            ';' {
+                if ($parenDepth -eq 0) {
+                    $pendingInnerCtrl = $null
+                    $skipNextWhileCtrl = $false
+                }
+            }
+            'do' {
+                $pendingInnerCtrl = 'do'
+                $skipNextWhileCtrl = $false
+            }
+            'for' {
+                $pendingInnerCtrl = 'inner'
+                $skipNextWhileCtrl = $false
+            }
+            'switch' {
+                $pendingInnerCtrl = 'inner'
+                $skipNextWhileCtrl = $false
+            }
+            'while' {
+                if ($skipNextWhileCtrl) {
+                    $skipNextWhileCtrl = $false
+                } else {
+                    $pendingInnerCtrl = 'inner'
+                }
+            }
+            'return' {
+                return $true
+            }
+            'goto' {
+                return $true
+            }
+            'break' {
+                foreach ($s in $scopeStack.ToArray()) {
+                    if ($s -eq 'inner' -or $s -eq 'do') {
+                        break
+                    }
+                    if ($s -eq 'outer') {
+                        return $true
+                    }
+                }
+            }
+        }
+    }
+    return $false
+}
+
+foreach ($file in $fihCAndH) {
     $rel = $file.FullName.Substring($repoRoot.Length + 1).Replace('\', '/')
     $raw = [System.IO.File]::ReadAllText($file.FullName)
 
@@ -73,19 +170,9 @@ foreach ($file in $allCAndH) {
         $ln = $idx + 1
         $line = $lines[$idx]
 
-        # TOOB-FIH-01: Ban standard short-circuiting memcmp() in stage0 & core
+        # TOOB-FIH-01: Ban standard short-circuiting memcmp()
         if ($line -match $rawMemcmpRegex) {
-            $failures.Add("[TOOB-FIH-01] ${rel}:${ln}: Forbidden raw memcmp() in Core/Stage0 (use constant_time_memcmp_glitch_safe): $($line.Trim())")
-        }
-
-        # TOOB-FIH-02: Ban optimizable memset(..., 0, ...) on secret/crypto buffers
-        if ($line -match $secretZeroizeRegex) {
-            $failures.Add("[TOOB-FIH-02] ${rel}:${ln}: Forbidden memset(...,0,...) on sensitive buffer (use boot_secure_zeroize): $($line.Trim())")
-        }
-
-        # TOOB-FIH-04: Never discard critical security verifier return values via (void)
-        if ($line -match $voidSecGateRegex) {
-            $failures.Add("[TOOB-FIH-04] ${rel}:${ln}: Security verifier return value discarded via (void): $($line.Trim())")
+            $failures.Add("[TOOB-FIH-01] ${rel}:${ln}: Forbidden raw memcmp() (use constant-time memcmp): $($line.Trim())")
         }
 
         # TOOB-FW-05a: Direct flash->write / flash->erase_sector outside flash guard implementation
@@ -93,22 +180,70 @@ foreach ($file in $allCAndH) {
             $rel -ne 'toobloader/core/utils/boot_crc32.c' -and
             $rel -ne 'toobloader/core/utils/include/boot_ct_utils.h' -and
             $line -match $rawFlashMutRegex) {
-            # Exclude function-pointer NULL checks (no '(' follows in 'flash->write != NULL', regex requires '(')
             $failures.Add("[TOOB-FW-05] ${rel}:${ln}: Direct flash->write/erase_sector bypasses Stage-0 firewall (use boot_flash_*_guarded): $($line.Trim())")
         }
 
-        # TOOB-FW-05b: Direct MMIO address cast in Core/Stage0
+        # TOOB-FW-05b: Direct MMIO pointer address cast (except documented SCB->AIRCR SYSRESETREQ in recovery_port.c)
         if ($line -match $mmioCastRegex) {
-            $failures.Add("[TOOB-FW-05] ${rel}:${ln}: Direct MMIO address cast in Core/Stage0: $($line.Trim())")
+            if (-not ($rel -eq 'recovery/recovery_port.c' -and $line -match '0xE000ED0CU?')) {
+                $failures.Add("[TOOB-FW-05] ${rel}:${ln}: Direct MMIO address cast: $($line.Trim())")
+            }
         }
     }
 
-    # TOOB-FIH-03: Infinite trap loops while(1)/while(true)/for(;;) must contain a glitch barrier or noreturn halt call
-    $loopMatches = [regex]::Matches($stripped, '(?:while\s*\(\s*(?:1|1U|true)\s*\)|for\s*\(\s*;\s*;\s*\))\s*\{([^{}]*)\}')
-    foreach ($m in $loopMatches) {
-        $body = $m.Groups[1].Value
-        if ($body -notmatch 'BOOT_GLITCH_DELAY|dead_halt|boot_terminal_halt|boot_panic|toob_ecc_trap|enter_sos_loop') {
-            $prefix = $stripped.Substring(0, $m.Index)
+    # TOOB-FIH-02: Ban optimizable memset(..., 0, ...) except explicitly allowlisted non-secret fills
+    foreach ($zm in [regex]::Matches($stripped, $zeroMemsetRegex)) {
+        $dstExpr = $zm.Groups[1].Value
+        if (-not (Test-AllowedZeroMemset -RelPath $rel -DstExpr $dstExpr)) {
+            $prefix = $stripped.Substring(0, $zm.Index)
+            $ln = ($prefix -split "\r?\n").Count
+            $failures.Add("[TOOB-FIH-02] ${rel}:${ln}: Forbidden memset(...,0,...) ($($dstExpr.Trim())) -- use boot_secure_zeroize/toob_secure_zeroize")
+        }
+    }
+
+    # TOOB-FIH-04: Never discard critical security verifier / HAL safety return values via (void)
+    foreach ($vm in [regex]::Matches($stripped, $voidSecGateRegex)) {
+        $prefix = $stripped.Substring(0, $vm.Index)
+        $ln = ($prefix -split "\r?\n").Count
+        $failures.Add("[TOOB-FIH-04] ${rel}:${ln}: Security/HAL gate return value discarded via (void): $($vm.Value)")
+    }
+
+    # TOOB-FIH-03: Infinite trap loops while(1)/while(true)/for(;;) must contain a glitch barrier or halt call
+    $loopSrc = [regex]::Replace($stripped, '"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''', {
+        param($m)
+        return ($m.Value -replace '[^\r\n]', ' ')
+    })
+    $loopHeaders = [regex]::Matches($loopSrc, '(?<![A-Za-z0-9_])(?:while\s*\(\s*(?:1|1U|1u|true)\s*\)|for\s*\(\s*;\s*;\s*\))\s*\{')
+    foreach ($lh in $loopHeaders) {
+        $bodyStart = $lh.Index + $lh.Length
+        $braceDepth = 1
+        $pos = $bodyStart
+        while ($pos -lt $loopSrc.Length -and $braceDepth -gt 0) {
+            $ch = $loopSrc[$pos]
+            if ($ch -eq '{') { $braceDepth++ }
+            elseif ($ch -eq '}') { $braceDepth-- }
+            $pos++
+        }
+        if ($braceDepth -ne 0) {
+            $prefix = $loopSrc.Substring(0, $lh.Index)
+            $ln = ($prefix -split "\r?\n").Count
+            $failures.Add("[TOOB-FIH-03] ${rel}:${ln}: Unbalanced braces inside infinite loop")
+            continue
+        }
+        $body = $loopSrc.Substring($bodyStart, ($pos - 1) - $bodyStart)
+        if (Test-InfiniteLoopHasExit -Body $body) {
+            continue
+        }
+        $haltPattern = 'BOOT_GLITCH_DELAY|dead_halt|boot_terminal_halt|boot_panic|toob_ecc_trap|enter_sos_loop'
+        if ($rel -like 'recovery/*') {
+            $haltPattern += '|TOOB_TRAP|recovery_system_reboot'
+        } elseif ($rel -like 'sdk/libtoob/*') {
+            $haltPattern += '|TOOB_TRAP'
+        } elseif ($rel -like 'sdk/os_client/*') {
+            $haltPattern += '|TOOB_TRAP|k_sleep|vTaskDelay|\bSleep\b|\bsleep\b'
+        }
+        if ($body -notmatch $haltPattern) {
+            $prefix = $loopSrc.Substring(0, $lh.Index)
             $ln = ($prefix -split "\r?\n").Count
             $failures.Add("[TOOB-FIH-03] ${rel}:${ln}: Infinite halt loop lacks BOOT_GLITCH_DELAY() barrier")
         }
@@ -118,8 +253,8 @@ foreach ($file in $allCAndH) {
 # ---------------------------------------------------------------------------
 # Gate 2: UTF-8 No-BOM & English-Only Comments Sanity Check
 # ---------------------------------------------------------------------------
-Write-Host '[2/4] Checking UTF-8 (no BOM) encoding across Stage-0 & Core...'
-foreach ($file in $allCAndH) {
+Write-Host '[2/4] Checking UTF-8 (no BOM) encoding across Stage-0, Core, Recovery & SDK...'
+foreach ($file in $fihCAndH) {
     $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
         $rel = $file.FullName.Substring($repoRoot.Length + 1).Replace('\', '/')
@@ -132,7 +267,7 @@ foreach ($file in $allCAndH) {
 # ---------------------------------------------------------------------------
 if ($CheckFormat) {
     Write-Host '[3/4] Verifying .clang-format compliance...'
-    foreach ($file in $allCAndH) {
+    foreach ($file in $coreCAndH) {
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         $fmtOut = & $clangFormat --dry-run --Werror $file.FullName 2>&1
@@ -206,5 +341,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ''
-Write-Host "PASS: All $($allCAndH.Count) Stage-0 & Core files satisfy MISRA C:2023, CERT C & TOOB-FIH-01..05!" -ForegroundColor Green
+Write-Host "PASS: All $($fihCAndH.Count) Stage-0, Core, Recovery & SDK files satisfy FIH/Safety rules ($($coreCAndH.Count) Stage-0/Core files checked for MISRA/CERT)!" -ForegroundColor Green
 exit 0

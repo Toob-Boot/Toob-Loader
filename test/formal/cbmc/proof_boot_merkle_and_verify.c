@@ -33,12 +33,42 @@ static uint32_t g_merkle_expected_addr;
 static uint32_t g_merkle_bytes_read;
 static uint8_t  g_active_otp_limit;
 static uint8_t  g_otp_slot_keys[4][32];
+static uint8_t  g_pqc_pin_hash[32];
+static uint8_t  g_expected_key_index;
+static bool     g_pqc_pin_queried;
 static bool     g_pqc_policy_enforced;
 static uint32_t g_ed25519_calls;
 static size_t   g_mock_hash_ctx_size = 128U;
 
 static size_t fv02_get_hash_ctx_size(void) {
     return g_mock_hash_ctx_size;
+}
+
+static boot_status_t fv02_slot_flash_read(uint32_t addr, void *buf, size_t len) {
+    cbmc_assert_writable(buf, len, "slot flash->read buffer must be writable");
+    __CPROVER_assert((uint64_t)addr + (uint64_t)len <= (uint64_t)CHIP_FLASH_TOTAL_SIZE,
+                     "boot_verify_slot_image read stays inside physical flash");
+    if (nondet_bool()) {
+        return BOOT_ERR_FLASH_HW;
+    }
+    if (len > 0U) {
+        __CPROVER_havoc_slice(buf, len);
+    }
+    return BOOT_OK;
+}
+
+static boot_status_t fv02_read_pqc_pubkey_hash(uint8_t out_hash[32],
+                                               uint8_t key_index) {
+    __CPROVER_assert(out_hash != NULL && __CPROVER_w_ok(out_hash, 32U),
+                     "read_pqc_pubkey_hash requires writable 32B buffer");
+    __CPROVER_assert(key_index == g_expected_key_index,
+                     "read_pqc_pubkey_hash queries envelope key_index");
+    g_pqc_pin_queried = true;
+    if (nondet_bool()) {
+        return BOOT_ERR_NOT_FOUND;
+    }
+    memcpy(out_hash, g_pqc_pin_hash, 32U);
+    return BOOT_OK;
 }
 
 static boot_status_t fv02_merkle_flash_read(uint32_t addr, void *buf, size_t len) {
@@ -216,19 +246,26 @@ void prove_merkle_stream_bounds_and_coverage(void) {
 /* Entrypoint 2: Envelope signature, OTP revocation & PQC hybrid bounds (boot_verify.c) */
 void prove_verify_manifest_envelope(void) {
     flash_hal_t flash_hal = {
+        .read            = fv02_slot_flash_read,
         .write_align     = CHIP_FLASH_WRITE_ALIGNMENT,
         .max_sector_size = CHIP_FLASH_MAX_SECTOR_SIZE,
         .total_size      = CHIP_FLASH_TOTAL_SIZE,
     };
     crypto_hal_t crypto_hal = {
-        .verify_signature = fv02_verify_ed25519,
+        .hash_init         = cbmc_hash_init,
+        .hash_update       = cbmc_hash_update,
+        .hash_finish       = cbmc_hash_finish,
+        .get_hash_ctx_size = fv02_get_hash_ctx_size,
+        .verify_signature  = fv02_verify_ed25519,
 #if TOOB_PQC_ENABLED
-        .verify_pqc       = fv02_verify_pqc,
-        .is_pqc_enforced  = fv02_is_pqc_enforced,
+        .verify_pqc        = fv02_verify_pqc,
+        .is_pqc_enforced   = fv02_is_pqc_enforced,
 #endif
     };
+    bool provide_pqc_pin_cb = nondet_bool();
     keystore_hal_t keystore_hal = {
-        .read_pubkey = fv02_read_pubkey,
+        .read_pubkey          = fv02_read_pubkey,
+        .read_pqc_pubkey_hash = provide_pqc_pin_cb ? fv02_read_pqc_pubkey_hash : NULL,
     };
     entropy_hal_t entropy_hal = {
         .random = fv02_entropy_random,
@@ -246,9 +283,12 @@ void prove_verify_manifest_envelope(void) {
     CBMC_HAVOC_OBJECT(work_buf);
     CBMC_HAVOC_OBJECT(outside_buf);
     CBMC_HAVOC_OBJECT(g_otp_slot_keys);
+    CBMC_HAVOC_OBJECT(g_pqc_pin_hash);
 
+    g_mock_hash_ctx_size  = 128U;
     g_active_otp_limit    = nondet_uint8_t();
     g_pqc_policy_enforced = nondet_bool();
+    g_pqc_pin_queried     = false;
     g_ed25519_calls       = 0U;
 
     size_t work_len = nondet_size_t();
@@ -256,6 +296,7 @@ void prove_verify_manifest_envelope(void) {
 
     boot_verify_envelope_t env;
     CBMC_HAVOC_OBJECT(env);
+    g_expected_key_index = env.key_index;
 
     /* Explore in-bounds, out-of-bounds, outside-object, and NULL signature pointers */
     uint8_t ptr_mode = nondet_uint8_t();
@@ -295,6 +336,12 @@ void prove_verify_manifest_envelope(void) {
             __CPROVER_assert((uint8_t)(env.key_index + 1U) >= g_active_otp_limit,
                              "Revoked key_index (where key_index + 1 exists) must never return BOOT_OK");
         }
+#if TOOB_PQC_ENABLED
+        if (env.pqc_hybrid_active || g_pqc_policy_enforced) {
+            __CPROVER_assert(provide_pqc_pin_cb && g_pqc_pin_queried,
+                             "CRIT-70: PQC verification must enforce keystore pubkey hash pin");
+        }
+#endif
 #if TOOB_DOUBLE_VERIFY
         __CPROVER_assert(g_ed25519_calls == 2U,
                          "TOOB_DOUBLE_VERIFY requires two agreeing Ed25519 evaluations");
@@ -302,6 +349,29 @@ void prove_verify_manifest_envelope(void) {
         __CPROVER_assert(g_ed25519_calls == 1U,
                          "Single-verify mode executes exactly one Ed25519 evaluation");
 #endif
+    }
+
+    /* Exercise boot_verify_slot_image bounds, trailer offset & TSIG checks */
+    toob_image_header_t slot_hdr;
+    CBMC_HAVOC_OBJECT(slot_hdr);
+    uint32_t slot_addr = nondet_bool() ? CHIP_APP_SLOT_ABS_ADDR : (UINT32_MAX - 64U);
+    uint32_t min_img_sz =
+        (uint32_t)(sizeof(toob_image_header_t) + sizeof(toob_img_sig_trailer_t));
+    __CPROVER_assume(slot_hdr.image_size <= sizeof(work_buf) ||
+                     slot_hdr.image_size < min_img_sz ||
+                     slot_hdr.image_size > CHIP_APP_SLOT_SIZE);
+    size_t slot_arena_len = nondet_size_t();
+    __CPROVER_assume(slot_arena_len <= sizeof(work_buf));
+
+    boot_status_t slot_st = boot_verify_slot_image(
+        &platform, slot_addr, CHIP_APP_SLOT_SIZE, &slot_hdr, work_buf, slot_arena_len);
+    if (slot_hdr.magic != TOOB_MAGIC_HEADER ||
+        slot_hdr.image_size < min_img_sz ||
+        slot_hdr.image_size > CHIP_APP_SLOT_SIZE ||
+        (UINT32_MAX - slot_addr) < slot_hdr.image_size ||
+        slot_arena_len < 256U) {
+        __CPROVER_assert(slot_st != BOOT_OK,
+                         "boot_verify_slot_image rejects invalid header/size/wrap/arena");
     }
 }
 

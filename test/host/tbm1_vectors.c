@@ -116,7 +116,7 @@ static tbm1_reject_t validate_buf(const uint8_t *buf, size_t cap) {
  * ======================================================================== */
 
 static void test_happy_path(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_reject_t rc = validate_buf(buf, sizeof(buf));
@@ -125,7 +125,7 @@ static void test_happy_path(void) {
 }
 
 static void test_bad_magic(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -137,7 +137,7 @@ static void test_bad_magic(void) {
 }
 
 static void test_bad_fixed_len(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -149,7 +149,7 @@ static void test_bad_fixed_len(void) {
 }
 
 static void test_bad_version(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -161,7 +161,7 @@ static void test_bad_version(void) {
 }
 
 static void test_bad_total_len_small(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -173,7 +173,7 @@ static void test_bad_total_len_small(void) {
 }
 
 static void test_bad_total_len_exceeds(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -185,7 +185,7 @@ static void test_bad_total_len_exceeds(void) {
 }
 
 static void test_bad_crc(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -196,7 +196,7 @@ static void test_bad_crc(void) {
 }
 
 static void test_bad_crit_flag(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -208,7 +208,7 @@ static void test_bad_crit_flag(void) {
 }
 
 static void test_bad_reader_version(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -220,7 +220,7 @@ static void test_bad_reader_version(void) {
 }
 
 static void test_bad_image_count(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -232,7 +232,7 @@ static void test_bad_image_count(void) {
 }
 
 static void test_bad_key_index(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -244,7 +244,7 @@ static void test_bad_key_index(void) {
 }
 
 static void test_bad_hw_compat(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -263,7 +263,7 @@ static void test_bad_hw_compat(void) {
 }
 
 static void test_bad_chunk_math(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -275,7 +275,7 @@ static void test_bad_chunk_math(void) {
 }
 
 static void test_bad_region_bounds(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -288,7 +288,7 @@ static void test_bad_region_bounds(void) {
 }
 
 static void test_bad_region_order(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -306,7 +306,7 @@ static void test_bad_region_order(void) {
 }
 
 static void test_bad_region_dup(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -324,7 +324,7 @@ static void test_bad_region_dup(void) {
 }
 
 static void test_bad_chunkhash_len(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -337,7 +337,7 @@ static void test_bad_chunkhash_len(void) {
 }
 
 static void test_bad_region_alignment(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -354,7 +354,7 @@ static void test_bad_region_alignment(void) {
  * ======================================================================== */
 
 static void test_chunkhash_off_by_one(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -367,7 +367,7 @@ static void test_chunkhash_off_by_one(void) {
 }
 
 static void test_bad_payload_layout(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -394,7 +394,7 @@ static void test_bad_payload_layout(void) {
 }
 
 static void test_bad_rdelta(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;
@@ -411,7 +411,7 @@ static void test_bad_rdelta(void) {
 }
 
 static void test_trailer_layout(void) {
-  uint8_t buf[BUF_SIZE] __attribute__((aligned(4)));
+  uint8_t buf[BUF_SIZE] __attribute__((aligned(8)));
   make_valid_header(buf, sizeof(buf));
 
   tbm1_header_t *h = (tbm1_header_t *)buf;

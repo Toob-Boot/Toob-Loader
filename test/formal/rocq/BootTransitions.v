@@ -385,6 +385,8 @@ Definition step3_failure_and_rollback
       if must_revert then
         if negb (hdr_valid (backup_slot slots)) then
           S3_Panic Err_NotFound tmr1
+        else if negb (sig_valid (backup_slot slots)) then
+          S3_Panic Err_Verify tmr1
         else
           let slots' := mkFlashSlots
                           (backup_slot slots)
@@ -478,6 +480,26 @@ Definition set_tmr_nonce (tmr : TMR_Counters) (n : nat) : TMR_Counters :=
     (last_cloud_issued_at tmr)
     (tmr_mac_valid tmr).
 
+(* Wave-1 CRIT-68 / CRIT-71: Explicit seal/handoff & rollback verification gates
+   mirroring boot_verify_slot_image() in boot_state.c:2182 and boot_rollback.c:295. *)
+Definition boot_handoff_seal_gate
+    (target_is_rec rec_hdr_ok rec_tsig_ok : bool)
+    (app_img : SlotImage) (active_key : nat) : option BootErrCode :=
+  if target_is_rec then
+    if negb rec_hdr_ok then Some Err_NotFound
+    else if negb rec_tsig_ok then Some Err_Verify
+    else None
+  else
+    if negb (hdr_valid app_img) then Some Err_NotFound
+    else if negb (slot_tsig_valid app_img active_key) then Some Err_Verify
+    else None.
+
+Definition boot_rollback_verify_slot_before_copy
+    (bkup : SlotImage) (active_key : nat) : option BootErrCode :=
+  if negb (hdr_valid bkup) then Some Err_NotFound
+  else if negb (slot_tsig_valid bkup active_key) then Some Err_Verify
+  else None.
+
 Definition eval_boot_state (cfg : BootConfig) (st : State) : (BootOutcome * State) :=
   let slots0 := st_slots st in
   let wal0   := st_wal st in
@@ -525,18 +547,28 @@ Definition eval_boot_state (cfg : BootConfig) (st : State) : (BootOutcome * Stat
                     let '(slots4, wal4, tmr4, open_i4, upd_was_pending) :=
                       step4_update_pipeline slots3 wal3 tmr3 otp25 open_i3 in
                     (* Step 5: Handoff Preparation *)
+                    let boot_rec4 :=
+                      if upd_was_pending && wal_intent_eqb open_i4 WI_TxnCommit
+                      then false else boot_rec3 in
                     let app_hdr_ok := hdr_valid (app_slot slots4) in
                     let fallback_to_rec :=
-                      negb boot_rec3 &&
+                      negb boot_rec4 &&
                       negb app_hdr_ok &&
                       recovery_rom_valid slots4 &&
                       (recovery_failure_counter tmr4 <=? cfg_max_recovery_retries cfg) in
-                    let boot_rec5 := boot_rec3 || fallback_to_rec in
+                    let boot_rec5 := boot_rec4 || fallback_to_rec in
                     let target_hdr_ok :=
                       if boot_rec5 then recovery_rom_valid slots4 else app_hdr_ok in
+                    let target_tsig_ok :=
+                      if boot_rec5
+                      then recovery_rom_valid slots4
+                      else slot_tsig_valid (app_slot slots4) (otp_active_key_index otp25) in
                     if negb target_hdr_ok then
                       let st_nf := mkState slots4 wal4 tmr4 conf2 otp25 rst0 in
                       (Enter_Recovery_OS (RM_SerialRescue Err_NotFound), st_nf)
+                    else if negb target_tsig_ok then
+                      let st_ver := mkState slots4 wal4 tmr4 conf2 otp25 rst0 in
+                      (Enter_Recovery_OS (RM_SerialRescue Err_Verify), st_ver)
                     else
                       let req_conf := wal_intent_eqb open_i4 WI_TxnCommit in
                       let gen_nonce := if req_conf then cfg_fresh_nonce cfg else 0 in

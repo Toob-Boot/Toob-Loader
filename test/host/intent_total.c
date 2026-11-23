@@ -40,6 +40,9 @@ boot_status_t boot_mailbox_consume(const boot_platform_t *p) { (void)p; return B
 boot_status_t boot_verify_manifest_envelope(const boot_platform_t *p, const boot_verify_envelope_t *e, uint8_t *w, size_t l) {
     (void)p; (void)e; (void)w; (void)l; return BOOT_OK;
 }
+boot_status_t boot_verify_slot_image(const boot_platform_t *p, uint32_t sa, uint32_t ss, const toob_image_header_t *h, uint8_t *a, size_t al) {
+    (void)p; (void)sa; (void)ss; (void)h; (void)a; (void)al; return BOOT_OK;
+}
 boot_status_t boot_rollback_verify_svn(const boot_platform_t *p, uint32_t s, rollback_target_t t) {
     (void)p; (void)s; (void)t; return BOOT_OK;
 }
@@ -76,11 +79,13 @@ boot_status_t boot_transport_reassert(const boot_platform_t *p, uint8_t s) { (vo
 static uint8_t s_flash_mem[CHIP_FLASH_TOTAL_SIZE];
 static uint32_t s_supply_mv = 3300U;
 static uint32_t s_otp_epoch = 0U;
+static uint8_t s_dslc_state = 0x00U;
 
 static void mock_flash_reset(void) {
     memset(s_flash_mem, 0xFF, sizeof(s_flash_mem));
     s_supply_mv = 3300U;
     s_otp_epoch = 0U;
+    s_dslc_state = 0x00U;
     wal_initialized = false;
     tmr_defer_enabled = false;
     tmr_dirty = false;
@@ -188,12 +193,30 @@ static boot_status_t mock_read_chip_uid(uint8_t *uid_out, size_t max_len, size_t
 }
 
 static boot_status_t mock_read_pubkey(uint8_t *pubkey_out, size_t buf_len, uint8_t key_index) {
-    if (!pubkey_out || buf_len < 32U || key_index > 1U) {
+    if (!pubkey_out || buf_len < 32U) {
         return BOOT_ERR_INVALID_ARG;
+    }
+    if (key_index > 1U) {
+        return BOOT_ERR_NOT_FOUND;
     }
     for (size_t i = 0; i < 32U; i++) {
         pubkey_out[i] = (uint8_t)(0xA5U ^ (uint8_t)(i * 7U + key_index));
     }
+    return BOOT_OK;
+}
+
+static boot_status_t mock_read_device_secret(uint8_t *secret_out, size_t max_len, size_t *actual_len) {
+    static const uint8_t k_huk[32] = {
+        0x71U, 0x62U, 0x53U, 0x44U, 0x35U, 0x26U, 0x17U, 0x08U,
+        0x81U, 0x72U, 0x63U, 0x54U, 0x45U, 0x36U, 0x27U, 0x18U,
+        0x91U, 0x82U, 0x73U, 0x64U, 0x55U, 0x46U, 0x37U, 0x28U,
+        0xA1U, 0x92U, 0x83U, 0x74U, 0x65U, 0x56U, 0x47U, 0x38U
+    };
+    if (!secret_out || !actual_len || max_len < sizeof(k_huk)) {
+        return BOOT_ERR_INVALID_ARG;
+    }
+    memcpy(secret_out, k_huk, sizeof(k_huk));
+    *actual_len = sizeof(k_huk);
     return BOOT_OK;
 }
 
@@ -222,14 +245,16 @@ static boot_status_t mock_read_dslc(uint8_t *buffer, size_t *len) {
     if (!buffer || !len || *len < 1U) {
         return BOOT_ERR_INVALID_ARG;
     }
-    buffer[0] = 0x01U;
+    buffer[0] = s_dslc_state;
     *len = 1U;
     return BOOT_OK;
 }
 
 static boot_status_t mock_write_dslc(const uint8_t *value, size_t len) {
-    (void)value;
-    (void)len;
+    if (!value || len < 1U) {
+        return BOOT_ERR_INVALID_ARG;
+    }
+    s_dslc_state = value[0];
     return BOOT_OK;
 }
 
@@ -260,6 +285,7 @@ static const keystore_hal_t s_mock_keystore_hal = {
     .read_dslc = mock_read_dslc,
     .write_dslc = mock_write_dslc,
     .read_monotonic_counter = mock_read_monotonic_counter,
+    .read_device_secret = mock_read_device_secret,
 };
 
 static const boot_platform_t s_mock_platform = {
@@ -498,6 +524,7 @@ void test_journal_chain(void) {
     /* 3. Real K4 cryptographic TMR MAC + security-bearing entry MAC verification */
     mock_flash_reset();
     assert(boot_journal_init(&s_mock_platform) == BOOT_OK);
+    s_dslc_state = 0x01U;
     assert(journal_key_valid == true);
 
     wal_tmr_payload_t tmr;
@@ -556,6 +583,7 @@ void test_journal_chain(void) {
     /* 5. Tamper Test B: Offline SPI TMR quorum forgery WITH valid header CRC32 across all sectors */
     mock_flash_reset();
     assert(boot_journal_init(&s_mock_platform) == BOOT_OK);
+    s_dslc_state = 0x01U;
     memset(&tmr, 0, sizeof(tmr));
     tmr.app_svn = 7U;
     assert(boot_journal_update_tmr(&s_mock_platform, &tmr) == BOOT_OK);
@@ -575,8 +603,9 @@ void test_journal_chain(void) {
 
     /* 6. Tamper Test C: Full flash image replay after >= 2 OTP monotonic counter burns */
     mock_flash_reset();
-    s_otp_epoch = 1U;
     assert(boot_journal_init(&s_mock_platform) == BOOT_OK);
+    s_dslc_state = 0x01U;
+    s_otp_epoch = 1U;
     memset(&tmr, 0, sizeof(tmr));
     tmr.app_svn = 3U;
     assert(boot_journal_update_tmr(&s_mock_platform, &tmr) == BOOT_OK);

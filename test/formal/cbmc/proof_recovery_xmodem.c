@@ -631,8 +631,13 @@ static void run_xmodem_streaming_case(uint8_t stream_mode) {
 
     /* Fully symbolic .noinit handoff (covers corrupt CRC, APP partition, active_slot > 1,
        and valid Recovery OS boots across active_slot in {0, 1}) */
-    CBMC_HAVOC_OBJECT(toob_handoff_state);
-    CBMC_HAVOC_OBJECT(g_toob_ota_resume_state);
+    if (stream_mode >= 2U) {
+        memset(&toob_handoff_state, 0, sizeof(toob_handoff_state));
+        memset(&g_toob_ota_resume_state, 0, sizeof(g_toob_ota_resume_state));
+    } else {
+        CBMC_HAVOC_OBJECT(toob_handoff_state);
+        CBMC_HAVOC_OBJECT(g_toob_ota_resume_state);
+    }
 
     g_expected_active_slot = toob_handoff_state.active_slot;
     g_handoff_valid_boot =
@@ -662,7 +667,8 @@ static void run_xmodem_streaming_case(uint8_t stream_mode) {
         toob_handoff_state.magic            = TOOB_STATE_COMMITTED;
         toob_handoff_state.struct_version   = TOOB_HANDOFF_STRUCT_VERSION;
         toob_handoff_state.booted_partition = TOOB_PARTITION_RECOVERY;
-        __CPROVER_assume(toob_handoff_state.active_slot <= 1U);
+        toob_handoff_state.active_slot      = nondet_bool() ? 0U : 1U;
+        toob_handoff_state.boot_nonce       = nondet_uint64_t();
         g_expected_active_slot = toob_handoff_state.active_slot;
         g_handoff_valid_boot   = true;
         if (stream_mode == 2U) {
