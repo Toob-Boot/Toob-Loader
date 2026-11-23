@@ -1,0 +1,12 @@
+{
+  "name": "@evil/broken_keystore",
+  "version": "1.0.0",
+  "author": "untrusted-vendor",
+  "trait": "keystore",
+  "abi_version": "v3",
+  "headers": ["keystore.h"],
+  "sources": ["keystore.c"],
+  "symbols": {
+    "init": "ks_init"
+  }
+}

@@ -87,7 +87,22 @@ func renderBootConfig(ctx *Context, cfg *ResolvedConfig, l *PartitionLayout) (*c
 	s.definef("TOOB_DEVICE_HW_REV", "%dU", dt.Identity.HwRev)
 
 	s.blank()
-	s.section("BOOTLOADER FEATURE FLAGS (from device.toml features)")
+	s.section("BOOTLOADER SECURITY & FEATURE FLAGS (from device.toml)")
+	isProdProfile := strings.EqualFold(strings.TrimSpace(dt.Build.Profile), "production")
+	if isProdProfile {
+		s.line("#if defined(TOOB_MOCK_TEST) || (defined(TOOB_MOCK_HW) && TOOB_MOCK_HW) || (defined(TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION) && TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION)")
+		s.line(`#error "SECURITY VIOLATION: production profile cannot enable mock or journal key degradation flags"`)
+		s.line("#endif")
+		s.line("#ifndef TOOB_PROFILE_PRODUCTION")
+		s.line("#define TOOB_PROFILE_PRODUCTION 1")
+		s.line("#endif")
+	}
+	s.line("#ifndef TOOB_DOUBLE_VERIFY")
+	s.line("#define TOOB_DOUBLE_VERIFY 1")
+	s.line("#endif")
+	s.line("#ifndef TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION")
+	s.line("#define TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION 0")
+	s.line("#endif")
 	defineLayoutHint(s, "TOOB_FEATURE_CLOUD_COMMANDS", cBool(cfg.FeatureCloudCommands))
 	defineLayoutHint(s, "TOOB_FEATURE_UART_PROVISIONING", cBool(cfg.FeatureUartProvisioning))
 	defineLayoutHint(s, "TOOB_FEATURE_MULTIIMAGE", cBool(cfg.FeatureMultiImage))

@@ -224,3 +224,51 @@ int esp32c6_xip_remap_commit(uint32_t target_addr) {
 		t.Errorf("expected multiple violations in pre-REG-004 snapshot")
 	}
 }
+
+func TestHardenedBypassClosures(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "string literal cannot forge lint-allow suppression",
+			code: "const char *s = \"lint-allow: fake justification\";\nuint32_t x = 0x50000000U;\n",
+		},
+		{
+			name: "inline lint-allow does not spill onto next line",
+			code: "/* lint-allow: approved prescaler value */ uint32_t a = 40000U;\nuint32_t b = 0x50000000U;\n",
+		},
+		{
+			name: "statement macro cannot hide literals in standard mode",
+			code: "#define EVIL_STMT do { uint32_t addr = 0x50000000U; } while (0)\nvoid f(void) {}\n",
+		},
+		{
+			name: "define inside function body cannot hide literals",
+			code: "void f(void) {\n#define IN_FUNC_ADDR 0x50000000U\n    (void)0;\n}\n",
+		},
+		{
+			name: "array init on same line cannot mask out-of-brace literal",
+			code: "void f(void) {\n    uint32_t evil = 0x50000000U; /* 0x01, 0x02, 0x03 */\n    (void)evil;\n}\n",
+		},
+		{
+			name: "arbitrary shift count above 63 is rejected",
+			code: "uint32_t s(void) { return 1U << 0x50000000U; }\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(tmpDir, "bypass.c"), []byte(tc.code), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			rep, err := RunLint(DefaultConfig(tmpDir))
+			if err != nil {
+				t.Fatalf("RunLint failed: %v", err)
+			}
+			if rep.Passed || len(rep.Violations) == 0 {
+				t.Fatalf("expected bypass attempt %q to fail literallint", tc.name)
+			}
+		})
+	}
+}

@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
-	"github.com/toob-boot/toob/internal/ports"
+	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 )
 
@@ -27,6 +27,7 @@ const (
 const (
 	driverManifestFile = "driver_manifest.json"
 	cryptoManifestFile = "crypto_manifest.json"
+	socManifestFile    = "soc_manifest.json"
 )
 
 func firstNonEmpty(candidates ...string) string {
@@ -43,15 +44,32 @@ func fileExists(p string) bool {
 	return err == nil && st.Mode().IsRegular()
 }
 
-func loadOptionalDriverManifest(dir string) (*ports.DriverManifest, error) {
+func isCryptoDisabled(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	return trimmed == "" || strings.EqualFold(trimmed, "none")
+}
+
+func normalizeRecoveryCryptoRef(name string) string {
+	trimmed := strings.TrimSpace(name)
+	switch {
+	case strings.EqualFold(trimmed, "none"):
+		return "none"
+	case strings.EqualFold(trimmed, "rom"):
+		return "rom"
+	default:
+		return trimmed
+	}
+}
+
+func loadOptionalDriverManifest(dir string) (*manifestpkg.DriverManifest, error) {
 	mPath, err := Contain(dir, driverManifestFile)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Lstat(mPath); errors.Is(err, fs.ErrNotExist) {
+	if _, statErr := os.Lstat(mPath); errors.Is(statErr, fs.ErrNotExist) {
 		return nil, nil
 	}
-	var dm ports.DriverManifest
+	var dm manifestpkg.DriverManifest
 	if err := decodeStrictManifestJSON(mPath, &dm); err != nil {
 		return nil, err
 	}
@@ -99,7 +117,7 @@ func loadOptionalDriverManifest(dir string) (*ports.DriverManifest, error) {
 
 // selectPackageSources selects the C/ASM translation units for a driver package,
 // enforcing strict mutual exclusion between real and mock TUs.
-func selectPackageSources(dir string, dm *ports.DriverManifest, mocked bool, fallbackRelFiles []string) ([]string, error) {
+func selectPackageSources(dir string, dm *manifestpkg.DriverManifest, mocked bool, fallbackRelFiles []string) ([]string, error) {
 	if dm != nil && (len(dm.Sources) > 0 || len(dm.MockSources) > 0) {
 		if mocked {
 			if len(dm.MockSources) > 0 {
@@ -193,27 +211,29 @@ func selectPackageSources(dir string, dm *ports.DriverManifest, mocked bool, fal
 	return out, nil
 }
 
-func resolveLocalDriverDir(root string, idx *registry.Index, trait, ref string) (string, bool, error) {
-	halBase := filepath.Join(root, localHalDir)
-	var relCandidates []string
-	if idx != nil {
-		if info, ok := idx.Drivers[ref]; ok && info.Path != "" {
-			relCandidates = append(relCandidates, info.Path)
-		}
-	}
+func resolveLocalDriverDir(in Input, trait, ref string) (string, bool, error) {
+	halBase := localHALRoot(in)
 	slashRef := filepath.ToSlash(ref)
+	var relCandidates []string
 	if strings.HasPrefix(slashRef, "drivers/") {
 		relCandidates = append(relCandidates, slashRef)
 	} else {
+		relCandidates = append(relCandidates, path.Join("drivers", slashRef))
 		if trait != "" {
 			relCandidates = append(relCandidates, path.Join("drivers", trait, slashRef))
 		}
-		relCandidates = append(relCandidates, path.Join("drivers", slashRef))
+	}
+	if in.Index != nil {
+		for _, k := range []string{ref, path.Base(slashRef)} {
+			if info, ok := in.Index.Drivers[k]; ok && info.Path != "" && !slices.Contains(relCandidates, info.Path) {
+				relCandidates = append(relCandidates, info.Path)
+			}
+		}
 	}
 	for _, relCand := range relCandidates {
 		c, err := Contain(halBase, relCand)
 		if err != nil {
-			return "", false, fmt.Errorf("local driver path %q: %w", relCand, err)
+			return "", false, fmt.Errorf("local driver override '%s': %w", ref, err)
 		}
 		ok, err := isDir(c)
 		if err != nil {
@@ -226,16 +246,8 @@ func resolveLocalDriverDir(root string, idx *registry.Index, trait, ref string) 
 	return "", false, nil
 }
 
-func inferTraitFromRelPath(rel string) string {
-	parts := strings.Split(strings.TrimPrefix(filepath.ToSlash(rel), "drivers/"), "/")
-	if len(parts) >= 2 {
-		return parts[0]
-	}
-	return ""
-}
-
-func resolveDriverDirAndManifest(in Input, trait, ref, role string) (string, bool, *ports.DriverManifest, error) {
-	dir, local, err := resolveLocalDriverDir(in.Root, in.Index, trait, ref)
+func resolveDriverDirAndManifest(in Input, trait, ref, role string) (string, bool, *manifestpkg.DriverManifest, error) {
+	dir, local, err := resolveLocalDriverDir(in, trait, ref)
 	if err != nil {
 		return "", false, nil, err
 	}
@@ -254,9 +266,24 @@ func resolveDriverDirAndManifest(in Input, trait, ref, role string) (string, boo
 	return dir, local, dm, nil
 }
 
+func lookupDriverIndexInfo(idx *registry.Index, local bool, ref string) registry.DriverInfo {
+	if idx == nil || local {
+		return registry.DriverInfo{}
+	}
+	if info, ok := idx.Drivers[ref]; ok {
+		return info
+	}
+	if !strings.HasPrefix(ref, "@") {
+		if info, ok := idx.Drivers[path.Base(filepath.ToSlash(ref))]; ok {
+			return info
+		}
+	}
+	return registry.DriverInfo{}
+}
+
 // resolveDriverPackages merges chip hal_bindings, device.toml [drivers] overrides,
-// and legacy sources.drivers, resolving local overrides, trust tiers, and mock/real TUs.
-func resolveDriverPackages(in Input, chip *Chip, mode buildMode) ([]string, []ResolvedDriver, []string, error) {
+// and legacy sources.drivers, filtering bound and "none" traits before legacy resolution.
+func resolveDriverPackages(in Input, chip *Chip, mode buildMode, contract *halContractSpec) ([]string, []ResolvedDriver, []string, error) {
 	bindings := make(map[string]string, len(chip.halBindings)+len(in.Device.Drivers))
 	for _, trait := range slices.Sorted(maps.Keys(chip.halBindings)) {
 		if err := manifestpkg.ValidateName("driver trait", trait); err != nil {
@@ -266,6 +293,7 @@ func resolveDriverPackages(in Input, chip *Chip, mode buildMode) ([]string, []Re
 	}
 
 	replacedDefaults := make(map[string]bool)
+	disabledTraits := make(map[string]bool)
 	for _, trait := range slices.Sorted(maps.Keys(in.Device.Drivers)) {
 		if err := manifestpkg.ValidateName("driver trait", trait); err != nil {
 			return nil, nil, nil, fmt.Errorf("device.toml [drivers]: %w", err)
@@ -277,12 +305,30 @@ func resolveDriverPackages(in Input, chip *Chip, mode buildMode) ([]string, []Re
 		}
 		if ref == "" || strings.EqualFold(ref, "none") {
 			delete(bindings, trait)
+			disabledTraits[strings.ToLower(trait)] = true
 			continue
 		}
 		if err := validatePackageOrRelName("driver", ref); err != nil {
 			return nil, nil, nil, fmt.Errorf("device.toml [drivers.%s]: %w", trait, err)
 		}
 		bindings[trait] = ref
+	}
+
+	isTraitBoundOrDisabled := func(candidateTrait string) bool {
+		if candidateTrait == "" {
+			return false
+		}
+		for boundTrait := range bindings {
+			if contract.traitMatches(boundTrait, candidateTrait) {
+				return true
+			}
+		}
+		for disabledTrait := range disabledTraits {
+			if contract.traitMatches(disabledTrait, candidateTrait) {
+				return true
+			}
+		}
+		return false
 	}
 
 	var dirs []string
@@ -306,25 +352,18 @@ func resolveDriverPackages(in Input, chip *Chip, mode buildMode) ([]string, []Re
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		var idxInfo registry.DriverInfo
-		if in.Index != nil && !local {
-			if info, ok := in.Index.Drivers[ref]; ok {
-				idxInfo = info
-			} else if !strings.HasPrefix(ref, "@") {
-				if info, ok := in.Index.Drivers[path.Base(filepath.ToSlash(ref))]; ok {
-					idxInfo = info
-				}
-			}
-		}
+		idxInfo := lookupDriverIndexInfo(in.Index, local, ref)
 
-		var dmName, dmTrait, dmVer string
+		var dmName, dmTrait, dmVer, dmLicense string
+		var refCtx *manifestpkg.ReferenceBuildContext
 		if dm != nil {
-			dmName, dmTrait, dmVer = dm.Name, dm.Trait, dm.Version
+			dmName, dmTrait, dmVer, dmLicense = dm.Name, dm.Trait, dm.Version, dm.License
+			refCtx = dm.ReferenceBuildContext
 		}
-		if dmTrait != "" && dmTrait != trait {
+		if dmTrait != "" && !contract.traitMatches(trait, dmTrait) {
 			return nil, nil, nil, fmt.Errorf("driver %q declares trait %q in %s, cannot bind to trait %q", ref, dmTrait, driverManifestFile, trait)
 		}
-		if !local && idxInfo.Trait != "" && idxInfo.Trait != trait {
+		if !local && idxInfo.Trait != "" && !contract.traitMatches(trait, idxInfo.Trait) {
 			return nil, nil, nil, fmt.Errorf("driver %q has registry trait %q, cannot bind to trait %q", ref, idxInfo.Trait, trait)
 		}
 		if !local && dmName != "" && idxInfo.Name != "" && dmName != idxInfo.Name {
@@ -345,14 +384,17 @@ func resolveDriverPackages(in Input, chip *Chip, mode buildMode) ([]string, []Re
 		}
 		tier := registry.ClassifyTier(pkgName, idxInfo.Author, idxInfo.Tier, local)
 		pkgs = append(pkgs, ResolvedDriver{
-			Trait:   trait,
-			Name:    pkgName,
-			Dir:     dir,
-			Version: firstNonEmpty(idxInfo.Version, dmVer),
-			Tier:    tier,
-			Local:   local,
-			Mocked:  mocked,
-			Sources: srcs,
+			Trait:                 trait,
+			Name:                  pkgName,
+			Dir:                   dir,
+			Version:               firstNonEmpty(idxInfo.Version, dmVer),
+			Tier:                  tier,
+			Local:                 local,
+			Mocked:                mocked,
+			SHA256:                firstNonEmpty(idxInfo.SHA256, idxInfo.TarballSHA),
+			License:               dmLicense,
+			ReferenceBuildContext: refCtx,
+			Sources:               srcs,
 		})
 		dirs = appendUnique(dirs, dir)
 		allSources = appendUnique(allSources, srcs...)
@@ -414,24 +456,35 @@ func resolveDriverPackages(in Input, chip *Chip, mode buildMode) ([]string, []Re
 			continue
 		}
 
-		dir, local, dm, err := resolveDriverDirAndManifest(in, "", grp.rel, fmt.Sprintf("driver '%s'", grp.rel))
+		preIdx := lookupDriverIndexInfo(in.Index, false, grp.rel)
+		if preIdx.Name == "" {
+			preIdx = lookupDriverIndexInfo(in.Index, false, leaf)
+		}
+		if isTraitBoundOrDisabled(preIdx.Trait) {
+			continue
+		}
+
+		dir, local, dm, err := resolveDriverDirAndManifest(in, preIdx.Trait, grp.rel, fmt.Sprintf("driver '%s'", grp.rel))
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		var idxInfo registry.DriverInfo
-		if in.Index != nil && !local {
-			if info, ok := in.Index.Drivers[leaf]; ok {
-				idxInfo = info
-			}
+		idxInfo := lookupDriverIndexInfo(in.Index, local, grp.rel)
+		if idxInfo.Name == "" && !local {
+			idxInfo = lookupDriverIndexInfo(in.Index, false, leaf)
 		}
-		var dmName, dmTrait, dmVer string
+		var dmName, dmTrait, dmVer, dmLicense string
+		var refCtx *manifestpkg.ReferenceBuildContext
 		if dm != nil {
-			dmName, dmTrait, dmVer = dm.Name, dm.Trait, dm.Version
+			dmName, dmTrait, dmVer, dmLicense = dm.Name, dm.Trait, dm.Version, dm.License
+			refCtx = dm.ReferenceBuildContext
 		}
 		if !local && dmName != "" && idxInfo.Name != "" && dmName != idxInfo.Name {
 			return nil, nil, nil, fmt.Errorf("driver %q manifest name %q does not match registry index name %q", grp.rel, dmName, idxInfo.Name)
 		}
-		effectiveTrait := firstNonEmpty(idxInfo.Trait, dmTrait, inferTraitFromRelPath(grp.rel))
+		effectiveTrait := firstNonEmpty(idxInfo.Trait, dmTrait)
+		if isTraitBoundOrDisabled(effectiveTrait) {
+			continue
+		}
 		mocked := mode.shouldMock(effectiveTrait)
 		srcs, err := selectPackageSources(dir, dm, mocked, grp.files)
 		if err != nil {
@@ -445,14 +498,17 @@ func resolveDriverPackages(in Input, chip *Chip, mode buildMode) ([]string, []Re
 		}
 		tier := registry.ClassifyTier(pkgName, idxInfo.Author, idxInfo.Tier, local)
 		pkgs = append(pkgs, ResolvedDriver{
-			Trait:   effectiveTrait,
-			Name:    pkgName,
-			Dir:     dir,
-			Version: firstNonEmpty(idxInfo.Version, dmVer),
-			Tier:    tier,
-			Local:   local,
-			Mocked:  mocked,
-			Sources: srcs,
+			Trait:                 effectiveTrait,
+			Name:                  pkgName,
+			Dir:                   dir,
+			Version:               firstNonEmpty(idxInfo.Version, dmVer),
+			Tier:                  tier,
+			Local:                 local,
+			Mocked:                mocked,
+			SHA256:                firstNonEmpty(idxInfo.SHA256, idxInfo.TarballSHA),
+			License:               dmLicense,
+			ReferenceBuildContext: refCtx,
+			Sources:               srcs,
 		})
 		dirs = appendUnique(dirs, dir)
 		allSources = appendUnique(allSources, srcs...)
@@ -511,11 +567,10 @@ func resolveChipSources(chip *Chip, mode buildMode) ([]string, error) {
 				if err != nil {
 					return nil, fmt.Errorf("extra real source of chip '%s': %w", chip.Name, err)
 				}
-				if fileExists(cand) {
-					ePath = cand
-				} else {
+				if !fileExists(cand) {
 					continue
 				}
+				ePath = cand
 			}
 		}
 		appendUnique(ePath)
@@ -523,10 +578,10 @@ func resolveChipSources(chip *Chip, mode buildMode) ([]string, error) {
 	return out, nil
 }
 
-// resolveCrypto resolves the backend, hash and pqc slots.
+// resolveCrypto resolves Stage-1 backend, hash, and pqc crypto slots.
 func resolveCrypto(in Input, chip *Chip, coreSDK string) ([]CryptoSlot, error) {
-	var chipCrypto ports.ChipCrypto
-	if chip.Spec.Crypto != nil {
+	var chipCrypto manifestpkg.ChipCrypto
+	if chip.Spec != nil && chip.Spec.Crypto != nil {
 		chipCrypto = *chip.Spec.Crypto
 	}
 	dt := in.Device.Crypto
@@ -539,7 +594,7 @@ func resolveCrypto(in Input, chip *Chip, coreSDK string) ([]CryptoSlot, error) {
 	slots := make([]CryptoSlot, 0, len(selection))
 	emitted := map[string]bool{}
 	for _, s := range selection {
-		if s.name == "" {
+		if isCryptoDisabled(s.name) {
 			slots = append(slots, CryptoSlot{Slot: s.slot})
 			continue
 		}
@@ -604,15 +659,15 @@ func validateCryptoCflag(flag string) error {
 	return fmt.Errorf("disallowed compiler flag %q", flag)
 }
 
-func loadOptionalCryptoManifest(dir string) (*ports.CryptoManifest, error) {
+func loadOptionalCryptoManifest(dir string) (*manifestpkg.CryptoManifest, error) {
 	mPath, err := Contain(dir, cryptoManifestFile)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Lstat(mPath); errors.Is(err, fs.ErrNotExist) {
+	if _, statErr := os.Lstat(mPath); errors.Is(statErr, fs.ErrNotExist) {
 		return nil, nil
 	}
-	var cm ports.CryptoManifest
+	var cm manifestpkg.CryptoManifest
 	if err := decodeStrictManifestJSON(mPath, &cm); err != nil {
 		return nil, err
 	}
@@ -636,8 +691,8 @@ func loadOptionalCryptoManifest(dir string) (*ports.CryptoManifest, error) {
 			return nil, fmt.Errorf("%s: %w", mPath, err)
 		}
 	}
-	if cm.ChipBinding != "" {
-		if err := manifestpkg.ValidateName("crypto chip_binding", cm.ChipBinding); err != nil {
+	for _, binding := range cm.ChipBindings() {
+		if err := manifestpkg.ValidatePackageRef("crypto chip_binding", binding); err != nil {
 			return nil, fmt.Errorf("%s: %w", mPath, err)
 		}
 	}
@@ -658,16 +713,17 @@ func loadOptionalCryptoManifest(dir string) (*ports.CryptoManifest, error) {
 	return &cm, nil
 }
 
-func resolveLocalCryptoDir(root string, idx *registry.Index, slot, name string) (string, bool, error) {
-	halBase := filepath.Join(root, localHalDir)
+func resolveLocalCryptoDir(in Input, slot, name string) (string, bool, error) {
+	halBase := localHALRoot(in)
 	slashName := filepath.ToSlash(name)
 	var relCandidates []string
 	relCandidates = append(relCandidates, path.Join("crypto", slashName))
 	if slot != "" {
-		relCandidates = append(relCandidates, path.Join("crypto", slot, slashName))
+		baseSlot := strings.TrimPrefix(slot, "recovery_")
+		relCandidates = append(relCandidates, path.Join("crypto", baseSlot, slashName))
 	}
-	if idx != nil {
-		if info, ok := idx.Crypto[name]; ok && info.Path != "" && !slices.Contains(relCandidates, info.Path) {
+	if in.Index != nil {
+		if info, ok := in.Index.Crypto[name]; ok && info.Path != "" && !slices.Contains(relCandidates, info.Path) {
 			relCandidates = append(relCandidates, info.Path)
 		}
 	}
@@ -687,12 +743,25 @@ func resolveLocalCryptoDir(root string, idx *registry.Index, slot, name string) 
 	return "", false, nil
 }
 
+func requiredCategoryForSlot(slot string) string {
+	switch strings.ToLower(strings.TrimSpace(slot)) {
+	case slotBackend, "recovery_backend":
+		return slotBackend
+	case slotHash, "recovery_hash":
+		return slotHash
+	case slotPQC:
+		return slotPQC
+	default:
+		return strings.ToLower(strings.TrimSpace(slot))
+	}
+}
+
 func resolveCryptoPackage(in Input, chip *Chip, coreSDK, slot, name string) (CryptoSlot, error) {
 	if err := manifestpkg.ValidatePackageRef("crypto package", name); err != nil {
 		return CryptoSlot{}, fmt.Errorf("crypto slot '%s': %w", slot, err)
 	}
 
-	dir, local, err := resolveLocalCryptoDir(in.Root, in.Index, slot, name)
+	dir, local, err := resolveLocalCryptoDir(in, slot, name)
 	if err != nil {
 		return CryptoSlot{}, err
 	}
@@ -723,7 +792,6 @@ func resolveCryptoPackage(in Input, chip *Chip, coreSDK, slot, name string) (Cry
 	if err != nil {
 		return CryptoSlot{}, err
 	}
-	// build.Load unconditionally requires crypto_manifest.json on disk for local overrides.
 	if local && cm == nil {
 		return CryptoSlot{}, fmt.Errorf("local crypto override '%s' (slot: %s) is missing %s", name, slot, cryptoManifestFile)
 	}
@@ -733,23 +801,30 @@ func resolveCryptoPackage(in Input, chip *Chip, coreSDK, slot, name string) (Cry
 
 	var (
 		minCoreSDK      string
+		categories      []string
 		chipBindings    []string
 		cflags          []string
 		upstreamSources []string
 		includes        []string
 		wrapperRel      string
+		version         string
+		license         string
+		refCtx          *manifestpkg.ReferenceBuildContext
 	)
 	if cm != nil {
 		minCoreSDK = cm.MinCoreSdk
-		if cm.ChipBinding != "" {
-			chipBindings = []string{cm.ChipBinding}
-		}
+		categories = cm.Category
+		chipBindings = cm.ChipBindings()
 		cflags = cm.Cflags
 		upstreamSources = cm.UpstreamSources
 		includes = cm.Includes
 		wrapperRel = cm.Wrapper
+		version = cm.Version
+		license = cm.License
+		refCtx = cm.ReferenceBuildContext
 	} else {
 		minCoreSDK = pkg.MinCoreSdk
+		categories = pkg.Category
 		chipBindings = pkg.ChipBinding
 		cflags = pkg.Cflags
 		upstreamSources = pkg.UpstreamSources
@@ -757,24 +832,54 @@ func resolveCryptoPackage(in Input, chip *Chip, coreSDK, slot, name string) (Cry
 		if pkg.Wrapper != nil {
 			wrapperRel = *pkg.Wrapper
 		}
+		version = pkg.Version
+		license = pkg.License
+	}
+	if len(categories) == 0 && len(pkg.Category) > 0 {
+		categories = pkg.Category
+	}
+	if version == "" {
+		version = pkg.Version
+	}
+	if license == "" {
+		license = pkg.License
 	}
 
-	if err := checkMinCoreSDK(fmt.Sprintf("crypto package '%s'", name), coreSDK, minCoreSDK); err != nil {
-		return CryptoSlot{}, err
+	wantCat := requiredCategoryForSlot(slot)
+	if len(categories) > 0 && !slices.ContainsFunc(categories, func(c string) bool {
+		return strings.EqualFold(strings.TrimSpace(c), wantCat)
+	}) {
+		return CryptoSlot{}, fmt.Errorf("crypto package '%s' declares category %v, cannot satisfy slot '%s'",
+			name, categories, slot)
+	}
+
+	if minErr := checkMinCoreSDK(fmt.Sprintf("crypto package '%s'", name), coreSDK, minCoreSDK); minErr != nil {
+		return CryptoSlot{}, minErr
 	}
 	if len(chipBindings) > 0 && !slices.Contains(chipBindings, chip.Name) {
 		return CryptoSlot{}, fmt.Errorf("crypto package '%s' is chip-bound to %v, but target chip is '%s'",
 			name, chipBindings, chip.Name)
 	}
 	for _, flag := range cflags {
-		if err := validateCryptoCflag(flag); err != nil {
-			return CryptoSlot{}, fmt.Errorf("crypto package '%s' cflags: %w", name, err)
+		if flagErr := validateCryptoCflag(flag); flagErr != nil {
+			return CryptoSlot{}, fmt.Errorf("crypto package '%s' cflags: %w", name, flagErr)
 		}
 	}
 
 	// Never trust self-declared tier or author from inside an untrusted tarball.
 	tier := registry.ClassifyTier(name, pkg.Author, pkg.Tier, local)
-	out := CryptoSlot{Slot: slot, Name: name, Dir: dir, Tier: tier, Local: local, Cflags: cflags}
+	out := CryptoSlot{
+		Slot:                  slot,
+		Name:                  name,
+		Dir:                   dir,
+		Version:               version,
+		Tier:                  tier,
+		Local:                 local,
+		SHA256:                firstNonEmpty(pkg.SHA256, pkg.TarballSHA),
+		License:               license,
+		ReferenceBuildContext: refCtx,
+		Cflags:                cflags,
+	}
 	if out.Sources, err = containAll(dir, upstreamSources); err != nil {
 		return CryptoSlot{}, fmt.Errorf("crypto package '%s' upstream_sources: %w", name, err)
 	}
@@ -789,23 +894,23 @@ func resolveCryptoPackage(in Input, chip *Chip, coreSDK, slot, name string) (Cry
 	return out, nil
 }
 
-func resolveRecoveryWithMode(in Input, chip *Chip, mode buildMode, archDir, socDir string) (Recovery, error) {
+func resolveRecoveryWithMode(in Input, chip *Chip, mode buildMode, archDir, socDir string, contract *halContractSpec) (Recovery, error) {
 	dt := in.Device
-	var chipRecoveryCrypto ports.RecoveryCrypto
+	var chipRecoveryCrypto manifestpkg.RecoveryCrypto
 	if chip.recovery != nil && chip.recovery.Crypto != nil {
 		chipRecoveryCrypto = *chip.recovery.Crypto
 	}
-	var chipCrypto ports.ChipCrypto
-	if chip.Spec.Crypto != nil {
+	var chipCrypto manifestpkg.ChipCrypto
+	if chip.Spec != nil && chip.Spec.Crypto != nil {
 		chipCrypto = *chip.Spec.Crypto
 	}
 
 	rec := Recovery{
-		Backend: firstNonEmpty(dt.Recovery.Crypto.Backend, chipRecoveryCrypto.Backend, dt.Crypto.Backend, chipCrypto.Backend),
-		Hash:    firstNonEmpty(dt.Recovery.Crypto.Hash, chipRecoveryCrypto.Hash, dt.Crypto.Hash, chipCrypto.Hash),
+		Backend: normalizeRecoveryCryptoRef(firstNonEmpty(dt.Recovery.Crypto.Backend, chipRecoveryCrypto.Backend, dt.Crypto.Backend, chipCrypto.Backend)),
+		Hash:    normalizeRecoveryCryptoRef(firstNonEmpty(dt.Recovery.Crypto.Hash, chipRecoveryCrypto.Hash, dt.Crypto.Hash, chipCrypto.Hash)),
 	}
 	for _, c := range []struct{ field, value string }{{"backend", rec.Backend}, {"hash", rec.Hash}} {
-		if c.value == "" {
+		if c.value == "" || c.value == "none" || c.value == "rom" {
 			continue
 		}
 		if err := manifestpkg.ValidatePackageRef("recovery crypto "+c.field, c.value); err != nil {
@@ -813,28 +918,54 @@ func resolveRecoveryWithMode(in Input, chip *Chip, mode buildMode, archDir, socD
 		}
 	}
 
+	devHasRecovery := dt.Recovery.Console != "" || dt.Recovery.Flash != "" ||
+		dt.Recovery.WDT != "" || dt.Recovery.Clock != "" || dt.Recovery.RTC != "" ||
+		dt.Recovery.Crypto.Backend != "" || dt.Recovery.Crypto.Hash != "" ||
+		len(dt.Recovery.Sources) > 0 || len(dt.Recovery.Includes) > 0
+
 	spec := chip.recovery
-	if spec == nil {
+	if spec == nil && !devHasRecovery {
 		return rec, nil
+	}
+	if spec == nil {
+		spec = &manifestpkg.ChipRecovery{}
 	}
 	rec.Declared = true
 
-	console := firstNonEmpty(dt.Recovery.Console, spec.Console)
-	flash := firstNonEmpty(dt.Recovery.Flash, spec.Flash)
-	if console == "" {
-		return Recovery{}, fmt.Errorf("chip '%s' manifest is missing required recovery 'console' driver mapping", chip.Name)
+	cleanRecoveryRef := func(raw string) string {
+		trimmed := strings.TrimSpace(raw)
+		if strings.EqualFold(trimmed, "none") {
+			return ""
+		}
+		return trimmed
 	}
-	if flash == "" {
-		return Recovery{}, fmt.Errorf("chip '%s' manifest is missing required recovery 'flash' driver mapping", chip.Name)
+
+	console := cleanRecoveryRef(firstNonEmpty(dt.Recovery.Console, spec.Console))
+	flash := cleanRecoveryRef(firstNonEmpty(dt.Recovery.Flash, spec.Flash))
+	wdt := cleanRecoveryRef(firstNonEmpty(dt.Recovery.WDT, spec.WDT))
+	clock := cleanRecoveryRef(firstNonEmpty(dt.Recovery.Clock, spec.Clock))
+	confirm := cleanRecoveryRef(firstNonEmpty(dt.Recovery.RTC, spec.RTC))
+
+	hasDriversOrSources := console != "" || flash != "" || wdt != "" || clock != "" || confirm != "" ||
+		len(spec.Sources) > 0 || len(dt.Recovery.Sources) > 0
+	if chip.recovery != nil || hasDriversOrSources {
+		if console == "" {
+			return Recovery{}, fmt.Errorf("chip '%s' manifest is missing required recovery 'console' driver mapping", chip.Name)
+		}
+		if flash == "" {
+			return Recovery{}, fmt.Errorf("chip '%s' manifest is missing required recovery 'flash' driver mapping", chip.Name)
+		}
 	}
+
 	var err error
-	rec.Drivers, rec.DriverSources, err = resolveRecoveryDrivers(in, mode,
-		recoveryRole{"console", console},
-		recoveryRole{"flash", flash},
-		recoveryRole{"wdt", firstNonEmpty(dt.Recovery.WDT, spec.WDT)},
-		recoveryRole{"clock", firstNonEmpty(dt.Recovery.Clock, spec.Clock)},
-		recoveryRole{"rtc", firstNonEmpty(dt.Recovery.RTC, spec.RTC)},
-	)
+	roles := []recoveryRole{
+		{trait: "console", name: console},
+		{trait: "flash", name: flash},
+		{trait: "wdt", name: wdt},
+		{trait: "clock", name: clock},
+		{trait: "confirm", name: confirm},
+	}
+	rec.Drivers, rec.DriverPackages, rec.DriverSources, err = resolveRecoveryDrivers(in, mode, contract, roles...)
 	if err != nil {
 		return Recovery{}, err
 	}
@@ -852,38 +983,79 @@ type recoveryRole struct {
 	name  string
 }
 
-func resolveRecoveryDrivers(in Input, mode buildMode, roles ...recoveryRole) ([]string, []string, error) {
+func resolveRecoveryDrivers(in Input, mode buildMode, contract *halContractSpec, roles ...recoveryRole) ([]string, []ResolvedDriver, []string, error) {
 	var dirs []string
+	var pkgs []ResolvedDriver
 	var drvSources []string
 	for _, role := range roles {
 		if role.name == "" {
 			continue
 		}
 		if err := validatePackageOrRelName("recovery driver", role.name); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		dir, _, dm, err := resolveDriverDirAndManifest(in, role.trait, role.name, fmt.Sprintf("recovery driver '%s'", role.name))
+		dir, local, dm, err := resolveDriverDirAndManifest(in, role.trait, role.name, fmt.Sprintf("recovery driver '%s'", role.name))
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
+		idxInfo := lookupDriverIndexInfo(in.Index, local, role.name)
+
+		var dmName, dmTrait, dmVer, dmLicense string
+		var refCtx *manifestpkg.ReferenceBuildContext
+		if dm != nil {
+			dmName, dmTrait, dmVer, dmLicense = dm.Name, dm.Trait, dm.Version, dm.License
+			refCtx = dm.ReferenceBuildContext
+		}
+		if dmTrait != "" && !contract.traitMatches(role.trait, dmTrait) {
+			return nil, nil, nil, fmt.Errorf("recovery driver %q declares trait %q in %s, cannot bind to recovery trait %q",
+				role.name, dmTrait, driverManifestFile, role.trait)
+		}
+		if !local && idxInfo.Trait != "" && !contract.traitMatches(role.trait, idxInfo.Trait) {
+			return nil, nil, nil, fmt.Errorf("recovery driver %q has registry trait %q, cannot bind to recovery trait %q",
+				role.name, idxInfo.Trait, role.trait)
+		}
+		if !local && dmName != "" && idxInfo.Name != "" && dmName != idxInfo.Name {
+			return nil, nil, nil, fmt.Errorf("recovery driver %q manifest name %q does not match registry index name %q",
+				role.name, dmName, idxInfo.Name)
+		}
+
 		if !slices.Contains(dirs, dir) {
 			dirs = append(dirs, dir)
 		}
-		mocked := mode.shouldMock(role.trait) || (dm != nil && dm.Trait != "" && mode.shouldMock(dm.Trait))
+		mocked := mode.shouldMock(role.trait) || (dmTrait != "" && mode.shouldMock(dmTrait))
 		srcs, err := selectPackageSources(dir, dm, mocked, nil)
 		if err != nil {
-			return nil, nil, fmt.Errorf("recovery driver '%s' sources: %w", role.name, err)
+			return nil, nil, nil, fmt.Errorf("recovery driver '%s' sources: %w", role.name, err)
 		}
 		for _, s := range srcs {
 			if !slices.Contains(drvSources, s) {
 				drvSources = append(drvSources, s)
 			}
 		}
+
+		pkgName := firstNonEmpty(idxInfo.Name, dmName, path.Base(filepath.ToSlash(role.name)))
+		if local {
+			pkgName = firstNonEmpty(dmName, path.Base(filepath.ToSlash(role.name)))
+		}
+		tier := registry.ClassifyTier(pkgName, idxInfo.Author, idxInfo.Tier, local)
+		pkgs = append(pkgs, ResolvedDriver{
+			Trait:                 role.trait,
+			Name:                  pkgName,
+			Dir:                   dir,
+			Version:               firstNonEmpty(idxInfo.Version, dmVer),
+			Tier:                  tier,
+			Local:                 local,
+			Mocked:                mocked,
+			SHA256:                firstNonEmpty(idxInfo.SHA256, idxInfo.TarballSHA),
+			License:               dmLicense,
+			ReferenceBuildContext: refCtx,
+			Sources:               srcs,
+		})
 	}
-	return dirs, drvSources, nil
+	return dirs, pkgs, drvSources, nil
 }
 
-func recoverySources(in Input, chip *Chip, spec *ports.ChipRecovery) ([]string, error) {
+func recoverySources(in Input, chip *Chip, spec *manifestpkg.ChipRecovery) ([]string, error) {
 	fromChip, err := containAll(chip.Dir, spec.Sources)
 	if err != nil {
 		return nil, fmt.Errorf("recovery sources of chip '%s': %w", chip.Name, err)
@@ -895,7 +1067,7 @@ func recoverySources(in Input, chip *Chip, spec *ports.ChipRecovery) ([]string, 
 	return append(fromChip, fromProject...), nil
 }
 
-func recoveryIncludes(in Input, chip *Chip, spec *ports.ChipRecovery, archDir, socDir string) ([]string, error) {
+func recoveryIncludes(in Input, chip *Chip, spec *manifestpkg.ChipRecovery, archDir, socDir string) ([]string, error) {
 	shared, err := chipIncludesWithFallback(in, chip, archDir, socDir)
 	if err != nil {
 		return nil, err
@@ -911,71 +1083,117 @@ func recoveryIncludes(in Input, chip *Chip, spec *ports.ChipRecovery, archDir, s
 	return slices.Concat(shared, fromChip, fromProject), nil
 }
 
-// chipIncludesWithFallback resolves includes of chip_manifest.json. When a chip
-// is spawned locally (<root>/toobloader/hal/chips/<chip>), soc/, arch/, and drivers/
-// entries that were not spawned locally fall back cleanly to the registry cache.
+func resolveHALRoot(in Input, chip *Chip) string {
+	if in.HalRoot != "" {
+		return in.HalRoot
+	}
+	if chip != nil && chip.Local && in.Root != "" {
+		return paths.HALDir(in.Root)
+	}
+	if dirProvider, ok := in.Registry.(interface{ Dir() string }); ok && dirProvider.Dir() != "" {
+		base := dirProvider.Dir()
+		pkgSub := filepath.Join(base, "packages")
+		if st, err := os.Stat(pkgSub); err == nil && st.IsDir() {
+			return pkgSub
+		}
+		return base
+	}
+	if in.Root != "" {
+		hal := paths.HALDir(in.Root)
+		if st, err := os.Stat(hal); err == nil && st.IsDir() {
+			return hal
+		}
+	}
+	return ""
+}
+
+// chipIncludesWithFallback resolves includes of chip_manifest.json explicitly
+// from HalRoot, Arch, SoC, or Registry without relative '..' parent-walking guesses.
 func chipIncludesWithFallback(in Input, chip *Chip, archDir, socDir string) ([]string, error) {
-	halRoot := filepath.Join(chip.Dir, "..", "..")
+	if chip.Spec == nil {
+		return nil, nil
+	}
+	halRoot := resolveHALRoot(in, chip)
+	localHal := ""
+	if in.Root != "" {
+		localHal = paths.HALDir(in.Root)
+	}
+
 	out := make([]string, 0, len(chip.Spec.Includes))
 	for _, inc := range chip.Spec.Includes {
 		isShared := strings.HasPrefix(inc, "soc/") || strings.HasPrefix(inc, "arch/") || strings.HasPrefix(inc, "drivers/")
-		base := chip.Dir
-		if isShared {
-			base = halRoot
+		if !isShared {
+			joined, err := Contain(chip.Dir, inc)
+			if err != nil {
+				return nil, fmt.Errorf("includes of chip '%s': %w", chip.Name, err)
+			}
+			out = append(out, joined)
+			continue
 		}
-		joined, err := Contain(base, inc)
+
+		// Local project override under <root>/toobloader/hal takes precedence when present.
+		if chip.Local && localHal != "" {
+			localCand, err := Contain(localHal, inc)
+			if err != nil {
+				return nil, fmt.Errorf("includes of chip '%s': %w", chip.Name, err)
+			}
+			if _, statErr := os.Stat(localCand); statErr == nil {
+				out = append(out, localCand)
+				continue
+			}
+		}
+
+		resolved, err := resolveSharedInclude(in, chip, inc, halRoot, archDir, socDir)
 		if err != nil {
 			return nil, fmt.Errorf("includes of chip '%s': %w", chip.Name, err)
 		}
-		if chip.Local && isShared {
-			if _, statErr := os.Stat(joined); errors.Is(statErr, fs.ErrNotExist) {
-				if fb, ok := resolveRegistryIncludeFallback(in, inc, archDir, socDir); ok {
-					joined = fb
-				}
-			}
-		}
-		out = append(out, joined)
+		out = append(out, resolved)
 	}
 	return out, nil
 }
 
-func resolveRegistryIncludeFallback(in Input, inc, archDir, socDir string) (string, bool) {
-	if strings.HasPrefix(inc, "soc/") && socDir != "" {
-		if cand, err := Contain(filepath.Dir(socDir), inc); err == nil {
-			if _, statErr := os.Stat(cand); statErr == nil {
-				return cand, true
+func resolveSharedInclude(in Input, chip *Chip, inc, halRoot, archDir, socDir string) (string, error) {
+	switch {
+	case strings.HasPrefix(inc, "soc/"):
+		if socResolver, ok := in.Registry.(interface {
+			ResolveSoCInclude(string) (string, string, string, error)
+		}); ok {
+			_, incDir, _, err := socResolver.ResolveSoCInclude(inc)
+			if err != nil {
+				return "", fmt.Errorf("resolving SoC include %q: %w", inc, err)
 			}
+			return incDir, nil
 		}
-		if sub := strings.TrimPrefix(inc, "soc/"); sub != "" {
-			if cand, err := Contain(socDir, sub); err == nil {
-				if _, statErr := os.Stat(cand); statErr == nil {
-					return cand, true
+		if socDir != "" {
+			if sub := strings.TrimPrefix(inc, "soc/"); sub != "" {
+				if cand, err := Contain(socDir, sub); err == nil {
+					if _, statErr := os.Stat(cand); statErr == nil {
+						return cand, nil
+					}
 				}
 			}
 		}
-	}
-	if strings.HasPrefix(inc, "arch/") && archDir != "" {
-		if cand, err := Contain(filepath.Join(archDir, "..", ".."), inc); err == nil {
-			if _, statErr := os.Stat(cand); statErr == nil {
-				return cand, true
+	case strings.HasPrefix(inc, "arch/") && archDir != "":
+		prefix := "arch/" + chip.Arch + "/"
+		if rel, ok := strings.CutPrefix(inc, prefix); ok && rel != "" {
+			if cand, err := Contain(archDir, rel); err == nil {
+				if _, statErr := os.Stat(cand); statErr == nil {
+					return cand, nil
+				}
 			}
 		}
-	}
-	if strings.HasPrefix(inc, "drivers/") && in.Registry != nil {
+	case strings.HasPrefix(inc, "drivers/") && in.Registry != nil:
 		if drvDir, err := in.Registry.DriverSourcePath(inc); err == nil {
 			if _, statErr := os.Stat(drvDir); statErr == nil {
-				return drvDir, true
-			}
-		}
-		if archDir != "" {
-			if cand, err := Contain(filepath.Join(archDir, "..", ".."), inc); err == nil {
-				if _, statErr := os.Stat(cand); statErr == nil {
-					return cand, true
-				}
+				return drvDir, nil
 			}
 		}
 	}
-	return "", false
+
+	if halRoot == "" {
+		return "", fmt.Errorf("cannot resolve shared include %q: HAL root is not configured", inc)
+	}
+	return Contain(halRoot, inc)
 }
 
 func containAll(base string, rels []string) ([]string, error) {

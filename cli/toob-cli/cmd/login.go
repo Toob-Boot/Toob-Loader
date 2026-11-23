@@ -2,158 +2,206 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os/exec"
-	"runtime"
+	"io"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
 	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/oidc"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-// loginTimeout is how long a person has to finish in the browser before the command gives up. Long
-// enough to find a password manager and a second factor; short enough that a forgotten terminal
-// stops holding a loopback port open.
-const loginTimeout = 5 * time.Minute
+type authFlowOptions struct {
+	device     bool
+	noBrowser  bool
+	stepUp     bool
+	stepUpACR  string
+	stepMaxAge time.Duration
+	tokenStdin bool
+	token      string
+}
 
-var loginCmd = &cobra.Command{
-	Use:   "login",
-	Short: "Sign in to the Toob Registry",
-	Long: `Signs in through the Toob identity provider.
+func newLoginCmd() *cobra.Command {
+	var opts authFlowOptions
 
-The registry is asked who issues the tokens it accepts, so nothing about a particular
-environment is configured here: pointing the CLI at another registry signs you in to
-that registry's identity provider.
+	c := &cobra.Command{
+		Use:   "login",
+		Short: "Authenticate with the Toob Registry",
+		Long:  "Sign in to the Toob Registry via interactive browser OIDC (PKCE) or device authorization flow.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			timeout := stepUpCmdTimeout
+			if opts.token != "" || opts.tokenStdin {
+				timeout = defaultCmdTimeout
+			}
 
-A browser opens by default. On a machine without one — a server over SSH, a container —
-pass --device and finish the sign-in on a device that has one.
+			client := apiclient.New()
+			profile, err := authenticateInteractive(cmd, client, timeout, opts)
+			if err != nil {
+				return err
+			}
 
-Your session is stored in ~/.toob/credentials.json and refreshed automatically. CI uses a
-personal token ('toob tokens create') or, in GitHub Actions, 'toob tokens exchange'.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		force, _ := cmd.Flags().GetBool("force")
-		device, _ := cmd.Flags().GetBool("device")
-
-		client := apiclient.New()
-		ctx, cancel := context.WithTimeout(cmd.Context(), loginTimeout)
-		defer cancel()
-
-		if apiclient.HasSession() && !force {
-			ui.Info("Already signed in. Use --force to sign in again.")
+			ui.Success("Signed in as %s", sanitizeDisplay(profile.Username))
 			return nil
-		}
+		},
+	}
 
-		// Where to sign in, asked of the registry being signed in to.
-		config, err := client.FetchAuthConfig(ctx)
-		if err != nil {
-			return err
-		}
-		provider, err := oidc.Discover(ctx, config.Issuer)
-		if err != nil {
-			return err
-		}
-
-		ui.Header("Sign in to " + config.Issuer)
-
-		var token *oidc.Token
-		if device {
-			token, err = deviceSignIn(ctx, provider, config)
-		} else {
-			token, err = browserSignIn(ctx, provider, config)
-		}
-		if err != nil {
-			return err
-		}
-
-		if err := apiclient.SaveIdentity(&apiclient.IdentityCredentials{
-			Issuer:   config.Issuer,
-			ClientID: config.ClientID,
-			Token:    token,
-		}, ""); err != nil {
-			return fmt.Errorf("failed to store the session: %w", err)
-		}
-
-		// Ask the registry who it thinks we are. This is the only step that proves the whole chain —
-		// that the token was issued for this registry's audience and that it accepts it — and doing it
-		// here means a misconfigured deployment is reported at sign-in rather than at the first
-		// publish.
-		return reportWhoTheRegistrySees(ctx, client)
-	},
+	c.Flags().BoolVar(&opts.device, "device", false, "Use OAuth 2.0 device authorization flow")
+	c.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Use device flow instead of opening a browser")
+	c.Flags().StringVar(&opts.token, "token", "", "Authenticate non-interactively with an existing Toob token")
+	c.Flags().BoolVar(&opts.tokenStdin, "token-stdin", false, "Read authentication token from stdin")
+	c.MarkFlagsMutuallyExclusive("device", "token", "token-stdin")
+	return c
 }
 
-// browserSignIn runs the authorization code flow with PKCE against a loopback redirect.
-func browserSignIn(ctx context.Context, provider *oidc.Provider, config *apiclient.AuthConfig) (*oidc.Token, error) {
-	login, err := oidc.StartBrowserLogin(provider, config.ClientID, config.Audience, config.Scopes)
-	if err != nil {
-		return nil, err
+func authenticateInteractive(cmd *cobra.Command, client *apiclient.Client, timeout time.Duration, opts authFlowOptions) (*apiclient.Profile, error) {
+	if opts.tokenStdin {
+		raw, err := io.ReadAll(io.LimitReader(os.Stdin, 4096))
+		if err != nil {
+			return nil, fmt.Errorf("read token from stdin: %w", err)
+		}
+		opts.token = strings.TrimSpace(string(raw))
 	}
-	defer login.Close()
 
-	if err := openBrowser(login.AuthorizationURL); err != nil {
-		ui.Warn("Could not open a browser: %v", err)
+	if opts.token != "" {
+		cred, profile, err := verifyTokenProfile(cmd, timeout, client.BaseURL, &oidc.Token{AccessToken: opts.token}, "", "")
+		if err != nil {
+			return nil, err
+		}
+		if saveErr := apiclient.SaveIdentity(cred, profile.Username); saveErr != nil {
+			return nil, fmt.Errorf("save credentials: %w", saveErr)
+		}
+		client.Token = opts.token
+		return profile, nil
 	}
-	ui.Info("Open this address if a browser did not:")
-	fmt.Println("  " + login.AuthorizationURL)
-	ui.Step("Waiting for the sign-in to finish...")
 
-	return login.Wait(ctx)
-}
-
-// deviceSignIn runs the device authorization grant, for a machine with no browser of its own.
-func deviceSignIn(ctx context.Context, provider *oidc.Provider, config *apiclient.AuthConfig) (*oidc.Token, error) {
-	login, err := oidc.StartDeviceLogin(ctx, provider, config.ClientID, config.Audience, config.Scopes)
+	authCfg, disc, err := discoverAuthProvider(cmd, client, timeout)
 	if err != nil {
 		return nil, err
 	}
 
-	if login.VerificationURIComplete != "" {
-		ui.Info("On any device with a browser, open:")
-		fmt.Println("  " + login.VerificationURIComplete)
-		ui.Info("It already carries the code below; check that it matches before approving.")
+	var tok *oidc.Token
+	useDevice := opts.device || opts.noBrowser || !ui.IsInteractive()
+	if useDevice {
+		tok, err = runDeviceLoginFlow(cmd, timeout, disc, authCfg)
 	} else {
-		ui.Info("On any device with a browser, open:")
-		fmt.Println("  " + login.VerificationURI)
+		tok, err = runBrowserLoginFlow(cmd, timeout, disc, authCfg, opts)
 	}
-	fmt.Printf("  Code: %s\n", login.UserCode)
-	ui.Step("Waiting for the sign-in to be approved...")
-
-	return login.Wait(ctx)
-}
-
-// reportWhoTheRegistrySees confirms the stored session against the registry.
-func reportWhoTheRegistrySees(ctx context.Context, client *apiclient.Client) error {
-	profile, err := client.Whoami(ctx)
 	if err != nil {
-		return fmt.Errorf("signed in, but %s did not accept the token: %w", client.BaseURL, err)
+		return nil, err
 	}
 
-	if profile.Username != "" {
-		ui.Success("Signed in as %s", profile.Username)
+	cred, profile, err := verifyTokenProfile(cmd, timeout, client.BaseURL, tok, authCfg.Issuer, authCfg.ClientID)
+	if err != nil {
+		return nil, err
+	}
+	if saveErr := apiclient.SaveIdentity(cred, profile.Username); saveErr != nil {
+		return nil, fmt.Errorf("save credentials: %w", saveErr)
+	}
+	client.Token = tok.AccessToken
+	return profile, nil
+}
+
+func discoverAuthProvider(cmd *cobra.Command, client *apiclient.Client, timeout time.Duration) (*apiclient.AuthConfig, *oidc.Provider, error) {
+	ctx, cancel := commandContext(cmd, timeout)
+	defer cancel()
+
+	authCfg, err := client.FetchAuthConfig(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("fetch registry auth config: %w", err)
+	}
+	disc, err := oidc.Discover(ctx, authCfg.Issuer)
+	if err != nil {
+		return nil, nil, fmt.Errorf("discover OIDC endpoints: %w", err)
+	}
+	return authCfg, disc, nil
+}
+
+func runDeviceLoginFlow(cmd *cobra.Command, timeout time.Duration, disc *oidc.Provider, authCfg *apiclient.AuthConfig) (*oidc.Token, error) {
+	ctx, cancel := commandContext(cmd, timeout)
+	defer cancel()
+
+	dev, err := oidc.StartDeviceLogin(ctx, disc, authCfg.ClientID, authCfg.Audience, authCfg.Scopes)
+	if err != nil {
+		return nil, fmt.Errorf("start device login: %w", err)
+	}
+	displayURI := dev.VerificationURI
+	if dev.VerificationURIComplete != "" {
+		displayURI = dev.VerificationURIComplete
+	}
+	ui.Step("Open %s and enter code: %s", sanitizeDisplay(displayURI), sanitizeDisplay(dev.UserCode))
+
+	tok, err := dev.Wait(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("device login: %w", err)
+	}
+	return tok, nil
+}
+
+func runBrowserLoginFlow(cmd *cobra.Command, timeout time.Duration, disc *oidc.Provider, authCfg *apiclient.AuthConfig, opts authFlowOptions) (*oidc.Token, error) {
+	var browser *oidc.BrowserLogin
+	var err error
+	if opts.stepUp {
+		browser, err = oidc.StartBrowserStepUp(disc, authCfg.ClientID, authCfg.Audience, authCfg.Scopes, oidc.StepUp{
+			ACRValues: opts.stepUpACR,
+			MaxAge:    opts.stepMaxAge,
+		})
 	} else {
-		ui.Success("Signed in")
+		browser, err = oidc.StartBrowserLogin(disc, authCfg.ClientID, authCfg.Audience, authCfg.Scopes)
 	}
-	ui.Tip("Your session is stored in ~/.toob/credentials.json and refreshed automatically.")
-	ui.Tip("For CI, make a token with 'toob tokens create' and pass it as %s.", apiclient.TokenEnv)
+	if err != nil {
+		return nil, fmt.Errorf("start browser OIDC flow: %w", err)
+	}
+	defer browser.Close()
 
-	return nil
+	ctx, cancel := commandContext(cmd, timeout)
+	defer cancel()
+
+	ui.Step("Opening browser for authentication...")
+	if openErr := openBrowserSafe(ctx, browser.AuthorizationURL); openErr != nil {
+		ui.Warn("Could not launch browser automatically: %v", openErr)
+		ui.Info("Open this URL manually: %s", sanitizeDisplay(browser.AuthorizationURL))
+	}
+	tok, err := browser.Wait(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("browser authentication: %w", err)
+	}
+	return tok, nil
 }
 
-// openBrowser opens a URL in the platform's default browser.
-func openBrowser(url string) error {
-	switch runtime.GOOS {
-	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
-	case "darwin":
-		return exec.Command("open", url).Start()
-	default:
-		return exec.Command("xdg-open", url).Start()
-	}
+func verifyTokenProfile(cmd *cobra.Command, timeout time.Duration, registryURL string, tok *oidc.Token, issuer, clientID string) (*apiclient.IdentityCredentials, *apiclient.Profile, error) {
+	ctx, cancel := commandContext(cmd, timeout)
+	defer cancel()
+	return verifyTokenWithCtx(ctx, registryURL, tok, issuer, clientID)
 }
 
-func init() {
-	loginCmd.Flags().Bool("force", false, "Sign in again even if a session is already stored")
-	loginCmd.Flags().Bool("device", false, "Sign in on another device (for machines without a browser)")
-	rootCmd.AddCommand(loginCmd)
+func verifyTokenWithCtx(ctx context.Context, registryURL string, tok *oidc.Token, issuer, clientID string) (*apiclient.IdentityCredentials, *apiclient.Profile, error) {
+	if tok == nil || strings.TrimSpace(tok.AccessToken) == "" {
+		return nil, nil, errors.New("authentication succeeded without an access token")
+	}
+
+	verifyClient := apiclient.NewForBaseURL(registryURL, defaultCmdTimeout)
+	verifyClient.Token = tok.AccessToken
+
+	profile, err := verifyClient.Whoami(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("verify credentials with registry: %w", err)
+	}
+	if profile == nil || profile.ID == "" || profile.Username == "" {
+		return nil, nil, errors.New("registry returned incomplete identity profile")
+	}
+
+	cred := &apiclient.IdentityCredentials{
+		RegistryURL: registryURL,
+		Issuer:      issuer,
+		ClientID:    clientID,
+		Subject:     profile.ID,
+		Token:       tok,
+	}
+	return cred, profile, nil
 }

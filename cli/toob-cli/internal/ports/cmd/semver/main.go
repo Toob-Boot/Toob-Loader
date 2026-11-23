@@ -2,172 +2,235 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io"
 	"os"
+	"path/filepath"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 )
 
+// FieldMeta captures the parsed ABI signature and serialization tags of a contract field.
 type FieldMeta struct {
 	Name        string
 	Type        string
 	Tag         string // "required" or "optional"
-	JsonTag     string // Wire-format key from `json:"..."` tag
-	JsonTagFull string // The complete json tag including options like omitempty
+	JSONTag     string
+	JSONTagFull string
+	TOMLTag     string
+	TOMLTagFull string
 }
 
+// InterfaceInfo captures exported contracts parsed from a ports.go file.
 type InterfaceInfo struct {
 	ProtocolVersion int
 	Structs         map[string]map[string]FieldMeta
-	Constants       map[string]string // Name -> Type+Value
-	TypeAliases     map[string]string // Name -> UnderlyingType
+	Constants       map[string]string
+	TypeAliases     map[string]string
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <old_ports.go> <new_ports.go>\n", os.Args[0])
-		os.Exit(1)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func writef(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
+}
+
+func writeln(w io.Writer, line string) {
+	_, _ = fmt.Fprintln(w, line)
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("semver", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	initial := fs.Bool("initial", false, "allow missing or empty old_ports.go when establishing an initial contract")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if fs.NArg() != 2 {
+		writeln(stderr, "Usage: semver [--initial] <old_ports.go> <new_ports.go>")
+		return 1
 	}
 
-	oldFile, newFile := os.Args[1], os.Args[2]
+	oldFile, newFile := fs.Arg(0), fs.Arg(1)
 
-	oldInfo, err := parseInterface(oldFile)
+	oldInfo, err := parseInterface(oldFile, *initial)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse old file: %v\n", err)
-		os.Exit(1)
+		writef(stderr, "Failed to parse old file %q: %v\n", oldFile, err)
+		return 1
 	}
 
-	newInfo, err := parseInterface(newFile)
+	newInfo, err := parseInterface(newFile, false)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse new file: %v\n", err)
-		os.Exit(1)
+		writef(stderr, "Failed to parse new file %q: %v\n", newFile, err)
+		return 1
 	}
 
+	if oldInfo.ProtocolVersion != -1 && newInfo.ProtocolVersion == -1 {
+		writeln(stderr, "[FATAL] ProtocolVersion constant was removed from ports.go.")
+		return 1
+	}
+
+	bump, messages := diffInterfaces(oldInfo, newInfo)
+
+	if bump == "MAJOR" && newInfo.ProtocolVersion != -1 && oldInfo.ProtocolVersion != -1 {
+		if newInfo.ProtocolVersion <= oldInfo.ProtocolVersion {
+			writeln(stderr, "[FATAL] BREAKING changes detected, but ProtocolVersion in ports.go was not incremented!")
+			writef(stderr, "        Current version: %d. You must increase it to at least %d.\n",
+				newInfo.ProtocolVersion, oldInfo.ProtocolVersion+1)
+			for _, msg := range messages {
+				writeln(stderr, msg)
+			}
+			return 1
+		}
+	}
+
+	for _, msg := range messages {
+		writeln(stderr, msg)
+	}
+	writeln(stdout, bump)
+	return 0
+}
+
+func diffInterfaces(oldInfo, newInfo InterfaceInfo) (string, []string) {
 	bump := "PATCH"
 	var messages []string
 
-	// 1. Check Structs
-	for name, oldFields := range oldInfo.Structs {
+	promote := func(level string) {
+		switch level {
+		case "MAJOR":
+			bump = "MAJOR"
+		case "MINOR":
+			if bump == "PATCH" {
+				bump = "MINOR"
+			}
+		}
+	}
+
+	for _, name := range sortedMapKeys(oldInfo.Structs) {
+		oldFields := oldInfo.Structs[name]
 		newFields, exists := newInfo.Structs[name]
 		if !exists {
-			bump = "MAJOR"
+			promote("MAJOR")
 			messages = append(messages, fmt.Sprintf("[MAJOR] Struct %q was removed.", name))
 			continue
 		}
 
-		// Check for removed or modified fields
-		for fieldName, oldField := range oldFields {
+		for _, fieldName := range sortedMapKeys(oldFields) {
+			oldField := oldFields[fieldName]
 			newField, fieldExists := newFields[fieldName]
 			if !fieldExists {
-				if oldField.Tag == "optional" {
-					if bump == "PATCH" {
-						bump = "MINOR"
-					}
-					messages = append(messages, fmt.Sprintf("[MINOR] Optional field %q was removed from struct %q.", fieldName, name))
-				} else {
-					bump = "MAJOR"
-					messages = append(messages, fmt.Sprintf("[MAJOR] Required field %q was removed from struct %q.", fieldName, name))
-				}
+				promote("MAJOR")
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q (%s) was removed from struct %q.",
+					fieldName, oldField.Tag, name))
 				continue
 			}
 
 			if oldField.Type != newField.Type {
-				bump = "MAJOR"
-				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed type from %s to %s.", fieldName, name, oldField.Type, newField.Type))
+				promote("MAJOR")
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed type from %s to %s.",
+					fieldName, name, oldField.Type, newField.Type))
 			}
 
-			if oldField.Tag == "optional" && newField.Tag == "required" {
-				bump = "MAJOR"
-				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed from optional to required.", fieldName, name))
+			if oldField.Tag != newField.Tag {
+				promote("MAJOR")
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed contract requirement from %q to %q.",
+					fieldName, name, oldField.Tag, newField.Tag))
 			}
 
-			// Wire-format breaking: renaming or removing a JSON key changes the serialized contract
-			oldWireName := oldField.JsonTag
-			if oldWireName == "" {
-				oldWireName = fieldName
+			oldJSON := wireOrField(oldField.JSONTag, fieldName)
+			newJSON := wireOrField(newField.JSONTag, fieldName)
+			if oldJSON != newJSON {
+				promote("MAJOR")
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed json wire name from %q to %q.",
+					fieldName, name, oldJSON, newJSON))
+			} else if oldField.JSONTagFull != newField.JSONTagFull {
+				promote("MAJOR")
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed json serialization options (%q -> %q).",
+					fieldName, name, oldField.JSONTagFull, newField.JSONTagFull))
 			}
-			newWireName := newField.JsonTag
-			if newWireName == "" {
-				newWireName = fieldName
-			}
-			if oldWireName != newWireName {
-				bump = "MAJOR"
-				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed wire-format name from %q to %q.", fieldName, name, oldWireName, newWireName))
-			} else if oldField.JsonTagFull != newField.JsonTagFull {
-				bump = "MAJOR"
-				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed json serialization options (e.g. omitempty).", fieldName, name))
+
+			if oldField.TOMLTag != newField.TOMLTag {
+				promote("MAJOR")
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed toml key from %q to %q.",
+					fieldName, name, oldField.TOMLTag, newField.TOMLTag))
+			} else if oldField.TOMLTagFull != newField.TOMLTagFull {
+				promote("MAJOR")
+				messages = append(messages, fmt.Sprintf("[MAJOR] Field %q in struct %q changed toml serialization options (%q -> %q).",
+					fieldName, name, oldField.TOMLTagFull, newField.TOMLTagFull))
 			}
 		}
 
-		// Check for newly added fields
-		for fieldName, newField := range newFields {
+		for _, fieldName := range sortedMapKeys(newFields) {
+			newField := newFields[fieldName]
 			if _, oldExists := oldFields[fieldName]; !oldExists {
 				if newField.Tag == "required" {
-					bump = "MAJOR"
-					messages = append(messages, fmt.Sprintf("[MAJOR] Required field %q was added to struct %q (breaks old clients).", fieldName, name))
+					promote("MAJOR")
+					messages = append(messages, fmt.Sprintf("[MAJOR] Required field %q was added to struct %q (breaks old clients).",
+						fieldName, name))
 				} else {
-					if bump == "PATCH" {
-						bump = "MINOR"
-					}
-					messages = append(messages, fmt.Sprintf("[MINOR] Optional field %q was added to struct %q.", fieldName, name))
+					promote("MINOR")
+					messages = append(messages, fmt.Sprintf("[MINOR] Optional field %q was added to struct %q.",
+						fieldName, name))
 				}
 			}
 		}
 	}
 
-	for name := range newInfo.Structs {
+	for _, name := range sortedMapKeys(newInfo.Structs) {
 		if _, exists := oldInfo.Structs[name]; !exists {
-			if bump == "PATCH" {
-				bump = "MINOR"
-			}
+			promote("MINOR")
 			messages = append(messages, fmt.Sprintf("[MINOR] Struct %q was added.", name))
 		}
 	}
 
-	// 2. Check Constants (Enums)
-	for name, oldVal := range oldInfo.Constants {
+	for _, name := range sortedMapKeys(oldInfo.Constants) {
+		oldVal := oldInfo.Constants[name]
 		newVal, exists := newInfo.Constants[name]
 		if !exists {
-			bump = "MAJOR"
+			promote("MAJOR")
 			messages = append(messages, fmt.Sprintf("[MAJOR] Exported constant %q was removed.", name))
 			continue
 		}
 		if oldVal != newVal {
-			bump = "MAJOR"
-			messages = append(messages, fmt.Sprintf("[MAJOR] Exported constant %q value/type changed from %q to %q.", name, oldVal, newVal))
+			promote("MAJOR")
+			messages = append(messages, fmt.Sprintf("[MAJOR] Exported constant %q value/type changed from %q to %q.",
+				name, oldVal, newVal))
 		}
 	}
-	for name := range newInfo.Constants {
+	for _, name := range sortedMapKeys(newInfo.Constants) {
 		if _, exists := oldInfo.Constants[name]; !exists {
-			if bump == "PATCH" {
-				bump = "MINOR"
-			}
+			promote("MINOR")
 			messages = append(messages, fmt.Sprintf("[MINOR] Exported constant %q was added.", name))
 		}
 	}
 
-	// 3. Check Type Aliases
-	for name, oldType := range oldInfo.TypeAliases {
+	for _, name := range sortedMapKeys(oldInfo.TypeAliases) {
+		oldType := oldInfo.TypeAliases[name]
 		newType, exists := newInfo.TypeAliases[name]
 		if !exists {
-			bump = "MAJOR"
+			promote("MAJOR")
 			messages = append(messages, fmt.Sprintf("[MAJOR] Exported type alias %q was removed.", name))
 			continue
 		}
 		if oldType != newType {
-			bump = "MAJOR"
-			messages = append(messages, fmt.Sprintf("[MAJOR] Exported type alias %q underlying type changed from %q to %q.", name, oldType, newType))
+			promote("MAJOR")
+			messages = append(messages, fmt.Sprintf("[MAJOR] Exported type alias %q underlying type changed from %q to %q.",
+				name, oldType, newType))
 		}
 	}
-	for name := range newInfo.TypeAliases {
+	for _, name := range sortedMapKeys(newInfo.TypeAliases) {
 		if _, exists := oldInfo.TypeAliases[name]; !exists {
-			if bump == "PATCH" {
-				bump = "MINOR"
-			}
+			promote("MINOR")
 			messages = append(messages, fmt.Sprintf("[MINOR] Exported type alias %q was added.", name))
 		}
 	}
@@ -176,29 +239,26 @@ func main() {
 		messages = append(messages, "[PATCH] No structural ABI changes detected.")
 	}
 
-	if bump == "MAJOR" && newInfo.ProtocolVersion != -1 && oldInfo.ProtocolVersion != -1 {
-		if newInfo.ProtocolVersion <= oldInfo.ProtocolVersion {
-			fmt.Fprintf(os.Stderr, "[FATAL] BREAKING changes detected, but ProtocolVersion in ports.go was not incremented!\n")
-			fmt.Fprintf(os.Stderr, "        Current version: %d. You must increase it to at least %d.\n", newInfo.ProtocolVersion, oldInfo.ProtocolVersion+1)
-
-			for _, msg := range messages {
-				fmt.Fprintln(os.Stderr, msg)
-			}
-
-			os.Exit(1)
-		}
-	}
-
-	// Output messages to stderr for logging
-	for _, msg := range messages {
-		fmt.Fprintln(os.Stderr, msg)
-	}
-
-	// Output the final verdict to stdout
-	fmt.Println(bump)
+	return bump, messages
 }
 
-func parseInterface(filename string) (InterfaceInfo, error) {
+func wireOrField(tagName, fieldName string) string {
+	if tagName == "" {
+		return fieldName
+	}
+	return tagName
+}
+
+func sortedMapKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func parseInterface(filename string, allowMissingOrEmpty bool) (InterfaceInfo, error) {
 	info := InterfaceInfo{
 		ProtocolVersion: -1,
 		Structs:         make(map[string]map[string]FieldMeta),
@@ -206,16 +266,25 @@ func parseInterface(filename string) (InterfaceInfo, error) {
 		TypeAliases:     make(map[string]string),
 	}
 
-	raw, err := os.ReadFile(filename)
-	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
-		// Empty or missing file
-		return info, nil
+	cleanPath := filepath.Clean(filename)
+	raw, readErr := os.ReadFile(cleanPath)
+	if readErr != nil {
+		if os.IsNotExist(readErr) && allowMissingOrEmpty {
+			return info, nil
+		}
+		return info, readErr
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		if allowMissingOrEmpty {
+			return info, nil
+		}
+		return info, fmt.Errorf("contract file %q is empty", filename)
 	}
 
 	fset := token.NewFileSet()
-	node, err := parser.ParseFile(fset, filename, nil, 0)
-	if err != nil {
-		return info, err
+	node, parseErr := parser.ParseFile(fset, cleanPath, raw, 0)
+	if parseErr != nil {
+		return info, parseErr
 	}
 
 	for _, decl := range node.Decls {
@@ -224,104 +293,248 @@ func parseInterface(filename string) (InterfaceInfo, error) {
 			continue
 		}
 
-		// Parse Constants
-		if genDecl.Tok == token.CONST {
-			for _, spec := range genDecl.Specs {
-				valSpec, ok := spec.(*ast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for i, name := range valSpec.Names {
-					if !name.IsExported() {
-						continue
-					}
-
-					if name.Name == "ProtocolVersion" {
-						if len(valSpec.Values) > i {
-							if basicLit, ok := valSpec.Values[i].(*ast.BasicLit); ok {
-								fmt.Sscanf(basicLit.Value, "%d", &info.ProtocolVersion)
-							}
-						}
-						continue
-					}
-
-					var valStr string
-					if len(valSpec.Values) > i {
-						var buf bytes.Buffer
-						printer.Fprint(&buf, fset, valSpec.Values[i])
-						valStr = buf.String()
-					} else {
-						valStr = "implicit(iota)"
-					}
-
-					typeStr := ""
-					if valSpec.Type != nil {
-						var buf bytes.Buffer
-						printer.Fprint(&buf, fset, valSpec.Type)
-						typeStr = buf.String() + " "
-					}
-
-					info.Constants[name.Name] = typeStr + valStr
-				}
+		switch genDecl.Tok {
+		case token.CONST:
+			if constErr := parseConstDecl(fset, genDecl, &info); constErr != nil {
+				return info, constErr
 			}
-			continue
-		}
-
-		// Parse Types
-		if genDecl.Tok == token.TYPE {
-			for _, spec := range genDecl.Specs {
-				typeSpec, ok := spec.(*ast.TypeSpec)
-				if !ok || !typeSpec.Name.IsExported() {
-					continue
-				}
-
-				if structType, ok := typeSpec.Type.(*ast.StructType); ok {
-					fields := make(map[string]FieldMeta)
-					for _, field := range structType.Fields.List {
-						if len(field.Names) == 0 || !field.Names[0].IsExported() {
-							continue
-						}
-						name := field.Names[0].Name
-
-						var typeBuf bytes.Buffer
-						printer.Fprint(&typeBuf, fset, field.Type)
-						fieldType := typeBuf.String()
-
-						if field.Tag == nil {
-							return info, fmt.Errorf("field %q in struct %q has no struct tag (must have port:\"required\" or port:\"optional\")",
-								name, typeSpec.Name.Name)
-						}
-						tagStr := field.Tag.Value[1 : len(field.Tag.Value)-1]
-						parsedTag := reflect.StructTag(tagStr)
-						tagValue := parsedTag.Get("port")
-						if tagValue == "" {
-							return info, fmt.Errorf("field %q in struct %q is missing port tag",
-								name, typeSpec.Name.Name)
-						}
-						if tagValue != "required" && tagValue != "optional" {
-							return info, fmt.Errorf("field %q in struct %q has invalid port tag %q (must be \"required\" or \"optional\")",
-								name, typeSpec.Name.Name, tagValue)
-						}
-
-						// Extract wire-format JSON key for contract diffing
-						jsonTagFull := parsedTag.Get("json")
-						jsonTag := jsonTagFull
-						if idx := strings.Index(jsonTag, ","); idx != -1 {
-							jsonTag = jsonTag[:idx]
-						}
-
-						fields[name] = FieldMeta{Name: name, Type: fieldType, Tag: tagValue, JsonTag: jsonTag, JsonTagFull: jsonTagFull}
-					}
-					info.Structs[typeSpec.Name.Name] = fields
-				} else {
-					// Type Alias / Basic Type Definition
-					var buf bytes.Buffer
-					printer.Fprint(&buf, fset, typeSpec.Type)
-					info.TypeAliases[typeSpec.Name.Name] = buf.String()
-				}
+		case token.TYPE:
+			if typeErr := parseTypeDecl(fset, genDecl, &info); typeErr != nil {
+				return info, typeErr
 			}
+		default:
 		}
 	}
 
 	return info, nil
+}
+
+func parseConstDecl(fset *token.FileSet, genDecl *ast.GenDecl, info *InterfaceInfo) error {
+	for _, spec := range genDecl.Specs {
+		valSpec, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for i, name := range valSpec.Names {
+			if !name.IsExported() {
+				continue
+			}
+
+			if name.Name == "ProtocolVersion" {
+				if len(valSpec.Values) <= i {
+					return errors.New("ProtocolVersion constant is missing a literal value")
+				}
+				basicLit, isLit := valSpec.Values[i].(*ast.BasicLit)
+				if !isLit || basicLit.Kind != token.INT {
+					return errors.New("ProtocolVersion must be an integer literal")
+				}
+				ver, convErr := strconv.Atoi(basicLit.Value)
+				if convErr != nil {
+					return fmt.Errorf("invalid ProtocolVersion %q: %w", basicLit.Value, convErr)
+				}
+				info.ProtocolVersion = ver
+				continue
+			}
+
+			var valStr string
+			if len(valSpec.Values) > i {
+				rendered, printErr := renderAST(fset, valSpec.Values[i])
+				if printErr != nil {
+					return printErr
+				}
+				valStr = rendered
+			} else {
+				valStr = "implicit(iota)"
+			}
+
+			typeStr := ""
+			if valSpec.Type != nil {
+				renderedType, printErr := renderAST(fset, valSpec.Type)
+				if printErr != nil {
+					return printErr
+				}
+				typeStr = renderedType + " "
+			}
+
+			info.Constants[name.Name] = typeStr + valStr
+		}
+	}
+	return nil
+}
+
+func parseTypeDecl(fset *token.FileSet, genDecl *ast.GenDecl, info *InterfaceInfo) error {
+	for _, spec := range genDecl.Specs {
+		typeSpec, ok := spec.(*ast.TypeSpec)
+		if !ok || !typeSpec.Name.IsExported() {
+			continue
+		}
+
+		if structType, isStruct := typeSpec.Type.(*ast.StructType); isStruct {
+			if parseErr := parseStructFields(fset, typeSpec.Name.Name, structType, info); parseErr != nil {
+				return parseErr
+			}
+			continue
+		}
+
+		rendered, printErr := renderAST(fset, typeSpec.Type)
+		if printErr != nil {
+			return printErr
+		}
+		info.TypeAliases[typeSpec.Name.Name] = rendered
+	}
+	return nil
+}
+
+func parseStructFields(fset *token.FileSet, structName string, st *ast.StructType, info *InterfaceInfo) error {
+	fields := make(map[string]FieldMeta)
+
+	for _, field := range st.Fields.List {
+		if len(field.Names) == 0 {
+			continue
+		}
+
+		for _, ident := range field.Names {
+			if !ident.IsExported() {
+				continue
+			}
+			name := ident.Name
+
+			fieldType, printErr := renderFieldType(fset, structName, name, field.Type)
+			if printErr != nil {
+				return printErr
+			}
+
+			if field.Tag == nil {
+				return fmt.Errorf("field %q in struct %q has no struct tag (must have port:\"required\" or port:\"optional\")",
+					name, structName)
+			}
+			rawTag := field.Tag.Value
+			if len(rawTag) < 2 {
+				return fmt.Errorf("field %q in struct %q has malformed struct tag", name, structName)
+			}
+			parsedTag := reflect.StructTag(rawTag[1 : len(rawTag)-1])
+
+			tagValue := parsedTag.Get("port")
+			if tagValue == "" {
+				return fmt.Errorf("field %q in struct %q is missing port tag", name, structName)
+			}
+			if tagValue != "required" && tagValue != "optional" {
+				return fmt.Errorf("field %q in struct %q has invalid port tag %q (must be \"required\" or \"optional\")",
+					name, structName, tagValue)
+			}
+
+			jsonTagFull := parsedTag.Get("json")
+			jsonTag, _, _ := strings.Cut(jsonTagFull, ",")
+
+			tomlTagFull := parsedTag.Get("toml")
+			tomlTag, _, _ := strings.Cut(tomlTagFull, ",")
+
+			fields[name] = FieldMeta{
+				Name:        name,
+				Type:        fieldType,
+				Tag:         tagValue,
+				JSONTag:     jsonTag,
+				JSONTagFull: jsonTagFull,
+				TOMLTag:     tomlTag,
+				TOMLTagFull: tomlTagFull,
+			}
+
+			if nestedErr := parseNestedInlineStructs(fset, structName+"."+name, field.Type, info); nestedErr != nil {
+				return nestedErr
+			}
+		}
+	}
+
+	info.Structs[structName] = fields
+	return nil
+}
+
+func renderFieldType(fset *token.FileSet, structName, fieldName string, expr ast.Expr) (string, error) {
+	// Normalize anonymous inline structs to a deterministic wrapper signature so
+	// optional additions inside an inline struct stay MINOR rather than triggering
+	// a spurious type-string mismatch on the enclosing field.
+	if hasInlineStruct(expr) {
+		return formatWrappedType(fset, structName+"."+fieldName, expr)
+	}
+	return renderAST(fset, expr)
+}
+
+func hasInlineStruct(expr ast.Expr) bool {
+	switch node := expr.(type) {
+	case *ast.StructType:
+		return true
+	case *ast.StarExpr:
+		return hasInlineStruct(node.X)
+	case *ast.ArrayType:
+		return hasInlineStruct(node.Elt)
+	case *ast.MapType:
+		return hasInlineStruct(node.Key) || hasInlineStruct(node.Value)
+	default:
+		return false
+	}
+}
+
+func formatWrappedType(fset *token.FileSet, prefix string, expr ast.Expr) (string, error) {
+	switch node := expr.(type) {
+	case *ast.StructType:
+		return "struct<" + prefix + ">", nil
+	case *ast.StarExpr:
+		inner, err := formatWrappedType(fset, prefix, node.X)
+		if err != nil {
+			return "", err
+		}
+		return "*" + inner, nil
+	case *ast.ArrayType:
+		lenStr := ""
+		if node.Len != nil {
+			rendered, err := renderAST(fset, node.Len)
+			if err != nil {
+				return "", err
+			}
+			lenStr = rendered
+		}
+		inner, err := formatWrappedType(fset, prefix, node.Elt)
+		if err != nil {
+			return "", err
+		}
+		return "[" + lenStr + "]" + inner, nil
+	case *ast.MapType:
+		keyStr, err := formatWrappedType(fset, prefix+".key", node.Key)
+		if err != nil {
+			return "", err
+		}
+		valStr, err := formatWrappedType(fset, prefix+".val", node.Value)
+		if err != nil {
+			return "", err
+		}
+		return "map[" + keyStr + "]" + valStr, nil
+	default:
+		return renderAST(fset, expr)
+	}
+}
+
+func parseNestedInlineStructs(fset *token.FileSet, prefix string, expr ast.Expr, info *InterfaceInfo) error {
+	switch node := expr.(type) {
+	case *ast.StructType:
+		return parseStructFields(fset, prefix, node, info)
+	case *ast.StarExpr:
+		return parseNestedInlineStructs(fset, prefix, node.X, info)
+	case *ast.ArrayType:
+		return parseNestedInlineStructs(fset, prefix, node.Elt, info)
+	case *ast.MapType:
+		if err := parseNestedInlineStructs(fset, prefix+".key", node.Key, info); err != nil {
+			return err
+		}
+		return parseNestedInlineStructs(fset, prefix+".val", node.Value, info)
+	default:
+		return nil
+	}
+}
+
+func renderAST(fset *token.FileSet, node any) (string, error) {
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, fset, node); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }

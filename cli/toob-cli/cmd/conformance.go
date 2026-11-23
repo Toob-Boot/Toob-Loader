@@ -5,57 +5,80 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+
 	"github.com/toob-boot/toob/internal/conformance"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-var conformanceCmd = &cobra.Command{
-	Use:   "conformance [path]",
-	Short: "Audit a package for HAL trait conformance and Mock/Real equivalence",
-	Long: `Audits a driver or chip package directory against HAL trait contracts and Mock vs Real implementation parity.
+func newConformanceCmd() *cobra.Command {
+	var (
+		jsonPath     string
+		mdPath       string
+		contractPath string
+	)
 
-Generates conformance_report.json and conformance_report.md (CRA Annex-I Evidence).`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		pkgPath := "."
-		if len(args) > 0 {
-			pkgPath = args[0]
-		}
-		absDir, err := filepath.Abs(pkgPath)
-		if err != nil {
-			return fmt.Errorf("invalid path: %w", err)
-		}
-
-		ui.Header(fmt.Sprintf("HAL Conformance Harness: %s", filepath.Base(absDir)))
-
-		report, err := conformance.AuditPackage(absDir)
-		if err != nil {
-			return fmt.Errorf("conformance audit failed: %w", err)
-		}
-
-		jsonPath := filepath.Join(absDir, "conformance_report.json")
-		mdPath := filepath.Join(absDir, "conformance_report.md")
-
-		_ = conformance.ExportReportJSON(report, jsonPath)
-		_ = conformance.ExportReportMarkdown(report, mdPath)
-
-		for _, chk := range report.Checks {
-			if chk.Passed {
-				ui.Success("%s: %s", chk.Name, chk.Details)
-			} else {
-				ui.Error("%s: %s", chk.Name, chk.Details)
+	c := &cobra.Command{
+		Use:   "conformance [package-dir]",
+		Short: "Run HAL & package conformance audit on a local package directory",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			targetDir := "."
+			if len(args) == 1 {
+				targetDir = args[0]
 			}
-		}
+			absDir, err := filepath.Abs(targetDir)
+			if err != nil {
+				return fmt.Errorf("resolve directory %q: %w", targetDir, err)
+			}
 
-		if !report.Passed {
-			return fmt.Errorf("FATAL [CONFORMANCE_FAIL]: Package failed HAL conformance audit!")
-		}
+			var report *conformance.ConformanceReport
+			if contractPath != "" {
+				report, err = conformance.AuditPackageWithOptions(absDir, conformance.AuditOptions{ContractPath: contractPath})
+			} else {
+				report, err = conformance.AuditPackage(absDir)
+			}
+			if err != nil {
+				return fmt.Errorf("conformance audit failed: %w", err)
+			}
 
-		ui.Success("HAL Conformance audit PASSED cleanly. Exported reports to %s and %s", jsonPath, mdPath)
-		return nil
-	},
+			if jsonPath != "" {
+				if expErr := conformance.ExportReportJSON(report, jsonPath); expErr != nil {
+					return fmt.Errorf("export conformance JSON report: %w", expErr)
+				}
+			}
+			if mdPath != "" {
+				if expErr := conformance.ExportReportMarkdown(report, mdPath); expErr != nil {
+					return fmt.Errorf("export conformance Markdown report: %w", expErr)
+				}
+			}
+
+			if !report.Passed {
+				return fmt.Errorf("conformance audit failed with %d failed check(s)", countFailedConformanceChecks(report))
+			}
+
+			ui.Success("Conformance audit passed for %s", absDir)
+			return nil
+		},
+	}
+
+	c.Flags().StringVar(&jsonPath, "json", "", "Write JSON conformance report to path")
+	c.Flags().StringVar(&mdPath, "md", "", "Write Markdown conformance report to path")
+	c.Flags().StringVar(&contractPath, "contract", "", "Optional override path to hal_contract.json")
+	return c
 }
 
-func init() {
-	rootCmd.AddCommand(conformanceCmd)
+func countFailedConformanceChecks(report *conformance.ConformanceReport) int {
+	if report == nil {
+		return 1
+	}
+	failed := 0
+	for _, chk := range report.Checks {
+		if !chk.Passed {
+			failed++
+		}
+	}
+	if failed == 0 && !report.Passed {
+		return 1
+	}
+	return failed
 }

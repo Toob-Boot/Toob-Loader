@@ -29,7 +29,7 @@ func sanitizeCMakeVar(name string) string {
 	}
 	var b strings.Builder
 	b.Grow(len(name) + 1)
-	for i := 0; i < len(name); i++ {
+	for i := range len(name) {
 		c := name[i]
 		valid := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || (i > 0 && c >= '0' && c <= '9')
 		if valid {
@@ -88,17 +88,44 @@ func (p *Plan) RenderConfig(sdk SDKPaths, cliPath string) string {
 	f.set("TOOB_ARCH", p.Chip.Arch)
 	f.set("TOOB_CHIP", p.Chip.Name)
 	f.set("TOOLCHAIN_PREFIX", p.Chip.Prefix)
+	if p.Toolchain.CompilerBinary != "" {
+		f.set("TOOB_COMPILER_BINARY", p.Toolchain.CompilerBinary)
+	}
 	f.setPath("TOOB_CORE_DIR", sdk.Core)
 	f.setPath("TOOB_STAGE0_DIR", sdk.Stage0)
+	if p.HalRoot != "" {
+		f.setPath("TOOB_HAL_ROOT", p.HalRoot)
+	}
 	f.setPath("TOOB_HAL_CHIP_DIR", p.Chip.Dir)
 	f.setPath("TOOB_HAL_ARCH_DIR", p.Arch.Dir)
+	if p.SoCDir != "" {
+		f.setPath("TOOB_SOC_DIR", p.SoCDir)
+	}
 	f.setPath("TOOB_SDK_DIR", sdk.SDK)
 	f.setPath("TOOB_CLI_PATH", cliPath)
-	f.setPath("TOOB_CRYPTO_DIR", filepath.Join(sdk.Bootloader, "crypto"))
 	f.setBool("TOOB_FEATURE_PQC_HYBRID", p.PQCEnabled())
 	if p.Profile != "" {
 		f.set("TOOB_PROFILE", p.Profile)
 		f.setBool("TOOB_MOCK_HW", p.MockHW)
+	}
+	if p.ChipStartup != "" {
+		f.setPath("TOOB_CHIP_STARTUP", p.ChipStartup)
+	}
+	if p.ChipLinker != "" {
+		f.setPath("TOOB_CHIP_LINKER", p.ChipLinker)
+	}
+	for _, flagList := range []struct {
+		name  string
+		items []string
+	}{
+		{"TOOB_CHIP_ARCH_FLAGS", p.ArchFlags},
+		{"TOOB_CHIP_C_FLAGS", p.ChipCFlags},
+		{"TOOB_CHIP_ASM_FLAGS", p.ChipAsmFlags},
+		{"TOOB_CHIP_LD_FLAGS", p.ChipLDFlags},
+	} {
+		if len(flagList.items) > 0 {
+			f.setList(flagList.name, flagList.items, false)
+		}
 	}
 	for _, dir := range p.Drivers {
 		f.appendPath("TOOB_DRIVERS", dir)
@@ -118,13 +145,13 @@ func (p *Plan) RenderConfig(sdk SDKPaths, cliPath string) string {
 	}
 
 	f.comment("--- Dynamic Crypto Configuration ---")
-	for _, slot := range p.Crypto {
-		slot.render(&f)
+	for i := range p.Crypto {
+		p.Crypto[i].render(&f)
 	}
 
 	f.comment("--- Dynamic Recovery Configuration ---")
-	f.set("TOOB_RECOVERY_CRYPTO_BACKEND", p.Recovery.Backend)
-	f.set("TOOB_RECOVERY_CRYPTO_HASH", p.Recovery.Hash)
+	f.set("TOOB_RECOVERY_CRYPTO_BACKEND", normalizeRecoveryCryptoRef(p.Recovery.Backend))
+	f.set("TOOB_RECOVERY_CRYPTO_HASH", normalizeRecoveryCryptoRef(p.Recovery.Hash))
 	renderRecoveryCryptoSlot(&f, "TOOB_RECOVERY_CRYPTO_BACKEND", p.Recovery.BackendSlot)
 	renderRecoveryCryptoSlot(&f, "TOOB_RECOVERY_CRYPTO_HASH", p.Recovery.HashSlot)
 	for _, list := range []struct {

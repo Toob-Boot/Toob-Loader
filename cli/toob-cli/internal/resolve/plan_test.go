@@ -3,6 +3,7 @@ package resolve
 import (
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/toob-boot/toob/internal/lockfile"
@@ -74,16 +75,28 @@ func TestResolveSoCIsOptional(t *testing.T) {
 		}
 	})
 
-	t.Run("missing SoC source on disk does not fail resolution", func(t *testing.T) {
+	t.Run("missing SoC source on disk propagates error fail-fast (HIGH-89)", func(t *testing.T) {
 		fx := newFixture(t)
 		fx.reg.socOK = false
 		fx.index.SoCs = map[string]registry.SoCInfo{
 			"soc": {Name: "soc", Path: "soc", Chips: []string{testChip}},
 		}
+		_, err := fx.resolve()
+		requireErr(t, err, "failed to resolve SoC package")
+	})
+
+	t.Run("local SoC override resolves without registry", func(t *testing.T) {
+		fx := newFixture(t)
+		localSoCDir := filepath.Join(fx.root, localHalDir, "soc", "esp")
+		fx.writeJSON(filepath.Join(localSoCDir, socManifestFile), map[string]any{
+			"name":    "esp",
+			"version": "1.0.0",
+			"chips":   []string{testChip},
+		})
 		plan, err := fx.resolve()
 		requireNoErr(t, err)
-		if plan.SoCDir != "" {
-			t.Fatalf("SoCDir = %q, want empty when unavailable", plan.SoCDir)
+		if plan.SoCDir != localSoCDir || plan.SoCName != "esp" || plan.SoCSource != "local" {
+			t.Fatalf("unexpected local SoC resolution: dir=%q name=%q source=%q", plan.SoCDir, plan.SoCName, plan.SoCSource)
 		}
 	})
 }
@@ -160,6 +173,95 @@ func TestCryptoDirs(t *testing.T) {
 	if got := planWithReuseAndPQC.CryptoDirs(); !slices.Equal(got, wantDedup) {
 		t.Fatalf("CryptoDirs() with reuse/pqc = %v, want %v", got, wantDedup)
 	}
+
+	// Stage-1 CryptoDirs MUST isolate out Recovery crypto slots (CRIT-62).
+	isolated := &Plan{
+		Crypto: []CryptoSlot{
+			{Slot: slotBackend, Name: "monocypher", Dir: "/pkg/crypto/backend/monocypher"},
+			{Slot: slotHash, Name: "sha256_sw", Dir: "/pkg/crypto/hash/sha256_sw"},
+		},
+		Recovery: Recovery{
+			Backend:     "rec_crypto",
+			Hash:        "rec_hash",
+			BackendSlot: &CryptoSlot{Slot: "recovery_backend", Name: "rec_crypto", Dir: "/pkg/crypto/rec_crypto"},
+			HashSlot:    &CryptoSlot{Slot: "recovery_hash", Name: "rec_hash", Dir: "/pkg/crypto/rec_hash"},
+			Drivers:     []string{"/pkg/drivers/rec_uart", "/pkg/drivers/rec_flash"},
+		},
+	}
+	if got := isolated.CryptoDirs(); !slices.Equal(got, want) {
+		t.Fatalf("Stage-1 CryptoDirs() leaked recovery crypto: got %v, want %v", got, want)
+	}
+	wantRecCrypto := []string{"/pkg/crypto/rec_crypto", "/pkg/crypto/rec_hash"}
+	if got := isolated.RecoveryCryptoDirs(); !slices.Equal(got, wantRecCrypto) {
+		t.Fatalf("RecoveryCryptoDirs() = %v, want %v", got, wantRecCrypto)
+	}
+	wantRecDrv := []string{"/pkg/drivers/rec_uart", "/pkg/drivers/rec_flash"}
+	if got := isolated.RecoveryDriverDirs(); !slices.Equal(got, wantRecDrv) {
+		t.Fatalf("RecoveryDriverDirs() = %v, want %v", got, wantRecDrv)
+	}
+}
+
+func TestToLockfileV2AndStrictLockedMode(t *testing.T) {
+	fx := newFixture(t)
+	shaChip := strings.Repeat("a", 64)
+	shaArch := strings.Repeat("b", 64)
+	shaUart := strings.Repeat("c", 64)
+	shaFlash := strings.Repeat("d", 64)
+	shaMono := strings.Repeat("e", 64)
+	shaHash := strings.Repeat("f", 64)
+	shaSDK := strings.Repeat("1", 64)
+	shaTC := strings.Repeat("2", 64)
+
+	fx.index.Chips[testChip] = registry.ChipInfo{Name: testChip, Version: "2.0.0", SHA256: shaChip}
+	fx.index.Archs = map[string]registry.ArchInfo{
+		"riscv": {Name: "riscv", Version: "1.1.0", SHA256: shaArch},
+	}
+	fx.index.Drivers = map[string]registry.DriverInfo{
+		"esp_uart_v1": {Name: "esp_uart_v1", Trait: "console", Version: "1.0.0", SHA256: shaUart},
+		"esp_flash":   {Name: "esp_flash", Trait: "flash", Version: "1.0.0", SHA256: shaFlash},
+	}
+	fx.index.Toolchains[testToolchain] = registry.ToolchainInfo{
+		Version: "1.2.3",
+		Sha256:  map[string]string{"linux_amd64": shaTC},
+	}
+	fx.setCrypto("monocypher", func(c *registry.CryptoInfo) { c.SHA256 = shaMono })
+	fx.setCrypto("sha256_sw", func(c *registry.CryptoInfo) { c.SHA256 = shaHash })
+
+	plan, err := fx.resolve()
+	requireNoErr(t, err)
+
+	lf, err := plan.ToLockfile(nil, nil, "https://registry.example.com", "42", strings.Repeat("9", 64), shaSDK, "sha256:"+strings.Repeat("8", 64))
+	requireNoErr(t, err)
+	if lf.FormatVersion != lockfile.FormatVersionV2 {
+		t.Fatalf("FormatVersion = %d, want 2", lf.FormatVersion)
+	}
+	if _, ok := lf.Targets[testChip]; !ok {
+		t.Fatalf("missing [targets.%s] in generated lockfile", testChip)
+	}
+
+	// Strict --locked round-trip succeeds against the generated Lockfile v2.
+	in := fx.input()
+	in.Lock = lf
+	in.Locked = true
+	lockedPlan, err := Resolve(in)
+	requireNoErr(t, err)
+	if lockedPlan.Chip.Version != "2.0.0" {
+		t.Fatalf("locked Chip.Version = %q, want 2.0.0", lockedPlan.Chip.Version)
+	}
+
+	// Reject unlocked [build] compiler override in device.toml.
+	in.Device.Build.Compiler = "v9.9.9"
+	_, err = Resolve(in)
+	requireErr(t, err, "rejects unlocked")
+	in.Device.Build.Compiler = ""
+
+	// Reject toolchain per-platform SHA256 drift.
+	fx.index.Toolchains[testToolchain] = registry.ToolchainInfo{
+		Version: "1.2.3",
+		Sha256:  map[string]string{"linux_amd64": strings.Repeat("0", 64)},
+	}
+	_, err = Resolve(in)
+	requireErr(t, err, "sha256")
 }
 
 func TestEnforceLockedChip(t *testing.T) {

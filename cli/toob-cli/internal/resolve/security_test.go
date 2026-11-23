@@ -11,22 +11,21 @@ import (
 
 	"github.com/toob-boot/toob/internal/lockfile"
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
-	"github.com/toob-boot/toob/internal/ports"
 	"github.com/toob-boot/toob/internal/registry"
 )
 
 func makeDirLink(t *testing.T, target, link string) {
 	t.Helper()
-	if err := os.Symlink(target, link); err == nil {
+	err := os.Symlink(target, link)
+	if err == nil {
 		return
-	} else if runtime.GOOS == "windows" {
-		if out, jErr := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); jErr == nil {
-			return
-		} else {
-			t.Skipf("cannot create directory symlink (%v) or junction (%v: %s)", err, jErr, out)
-		}
-	} else {
+	}
+	if runtime.GOOS != "windows" {
 		t.Skipf("cannot create symlink: %v", err)
+	}
+	out, jErr := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
+	if jErr != nil {
+		t.Skipf("cannot create directory symlink (%v) or junction (%v: %s)", err, jErr, out)
 	}
 }
 
@@ -123,7 +122,7 @@ func TestSecurityTraversalAndSymlinkEscapes(t *testing.T) {
 
 	t.Run("chip_manifest.json hal_bindings trait traversal rejected", func(t *testing.T) {
 		fx := newFixture(t)
-		fx.setSpec(func(s *ports.ChipManifest) {
+		fx.setSpec(func(s *manifestpkg.ChipManifest) {
 			s.HalBindings = map[string]string{"../../outside": "esp_uart_v1"}
 		})
 		if _, err := fx.resolve(); err == nil {
@@ -136,7 +135,7 @@ func TestSecurityTraversalAndSymlinkEscapes(t *testing.T) {
 		fx.index.Drivers = map[string]registry.DriverInfo{
 			"esp_efuse": {Name: "esp_efuse", Path: "../../../outside", Trait: "keystore"},
 		}
-		fx.setSpec(func(s *ports.ChipManifest) {
+		fx.setSpec(func(s *manifestpkg.ChipManifest) {
 			s.HalBindings = map[string]string{"keystore": "esp_efuse"}
 		})
 		if _, err := fx.resolve(); err == nil {
@@ -145,11 +144,13 @@ func TestSecurityTraversalAndSymlinkEscapes(t *testing.T) {
 	})
 
 	t.Run("chip_manifest.json startup/linker/extra traversal rejected", func(t *testing.T) {
-		for _, mutate := range []func(*ports.ChipManifest){
-			func(s *ports.ChipManifest) { s.Sources = &ports.ChipSources{Startup: "../escape.S"} },
-			func(s *ports.ChipManifest) { s.Sources = &ports.ChipSources{Linker: "../escape.ld"} },
-			func(s *ports.ChipManifest) { s.Sources = &ports.ChipSources{Hardware: "../escape.json"} },
-			func(s *ports.ChipManifest) { s.Sources = &ports.ChipSources{Extra: []string{"../escape.c"}} },
+		for _, mutate := range []func(*manifestpkg.ChipManifest){
+			func(s *manifestpkg.ChipManifest) { s.Sources = &manifestpkg.ChipSources{Startup: "../escape.S"} },
+			func(s *manifestpkg.ChipManifest) { s.Sources = &manifestpkg.ChipSources{Linker: "../escape.ld"} },
+			func(s *manifestpkg.ChipManifest) { s.Sources = &manifestpkg.ChipSources{Hardware: "../escape.json"} },
+			func(s *manifestpkg.ChipManifest) {
+				s.Sources = &manifestpkg.ChipSources{Extra: []string{"../escape.c"}}
+			},
 		} {
 			fx := newFixture(t)
 			fx.setSpec(mutate)
@@ -169,7 +170,7 @@ func TestSecurityTraversalAndSymlinkEscapes(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(drvDir, "driver_manifest.json"), []byte(dupManifest), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		fx.setSpec(func(s *ports.ChipManifest) {
+		fx.setSpec(func(s *manifestpkg.ChipManifest) {
 			s.HalBindings = map[string]string{"keystore": "esp_efuse"}
 		})
 		if _, err := fx.resolve(); err == nil || !strings.Contains(err.Error(), "duplicate JSON key") {
@@ -210,8 +211,8 @@ func TestSecurityScopedPackagesAndRealESP32C6Plan(t *testing.T) {
 		t.Fatal(err)
 	}
 	var idx registry.Index
-	if err := json.Unmarshal(rawIdx, &idx); err != nil {
-		t.Fatalf("json.Unmarshal(registry.json) failed: %v", err)
+	if idxErr := json.Unmarshal(rawIdx, &idx); idxErr != nil {
+		t.Fatalf("json.Unmarshal(registry.json) failed: %v", idxErr)
 	}
 
 	// Add scoped partner/community crypto & driver packages to verify @scope/name support end-to-end.
@@ -221,30 +222,31 @@ func TestSecurityScopedPackagesAndRealESP32C6Plan(t *testing.T) {
 	idx.Crypto["@partner/ed25519_hw"] = registry.CryptoInfo{
 		Name:            "@partner/ed25519_hw",
 		Tier:            "partner",
+		Category:        []string{"backend"},
 		UpstreamSources: []string{"ed25519_hw.c"},
 		Cflags:          []string{"-O2"},
 	}
 
-	fake := &fakeSource{base: t.TempDir(), fail: map[string]bool{}}
+	fake := &fakeSource{base: t.TempDir(), socOK: true, fail: map[string]bool{}}
 	// Copy real ESP32-C6 chip manifest & hardware.json into fake registry chip dir alongside dummy TUs.
 	targetChipDir := filepath.Join(fake.base, "chips", "esp32c6")
-	if err := os.MkdirAll(filepath.Join(targetChipDir, "recovery"), 0o755); err != nil {
-		t.Fatal(err)
+	if mkErr := os.MkdirAll(filepath.Join(targetChipDir, "recovery"), 0o755); mkErr != nil {
+		t.Fatal(mkErr)
 	}
 	for _, fn := range []string{"hardware.json", "chip_manifest.json"} {
-		raw, err := os.ReadFile(filepath.Join(espChipDir, fn))
-		if err != nil {
-			t.Fatal(err)
+		raw, readErr := os.ReadFile(filepath.Join(espChipDir, fn))
+		if readErr != nil {
+			t.Fatal(readErr)
 		}
-		if err := os.WriteFile(filepath.Join(targetChipDir, fn), raw, 0o644); err != nil {
-			t.Fatal(err)
+		if wrErr := os.WriteFile(filepath.Join(targetChipDir, fn), raw, 0o644); wrErr != nil {
+			t.Fatal(wrErr)
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(fake.base, "toolchains", "riscv32-esp-elf"), 0o755); err != nil {
-		t.Fatal(err)
+	if tcMkErr := os.MkdirAll(filepath.Join(fake.base, "toolchains", "riscv32-esp-elf"), 0o755); tcMkErr != nil {
+		t.Fatal(tcMkErr)
 	}
-	if err := os.WriteFile(filepath.Join(fake.base, "toolchains", "riscv32-esp-elf", "toolchain.cmake"), []byte("# ok\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if tcWrErr := os.WriteFile(filepath.Join(fake.base, "toolchains", "riscv32-esp-elf", "toolchain.cmake"), []byte("# ok\n"), 0o644); tcWrErr != nil {
+		t.Fatal(tcWrErr)
 	}
 
 	dev := &manifestpkg.DeviceToml{}

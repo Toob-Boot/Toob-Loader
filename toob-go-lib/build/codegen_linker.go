@@ -501,18 +501,19 @@ func renderStage0LDForContext(ctx *Context, hw *HardwareJson) *cSource {
 	s.blank()
 	s.line("    .toob_mock_section : ALIGN(4) {")
 	s.line("        KEEP(*(.toob_mock_section))")
+	s.line("        KEEP(*(.toob_mock_section.*))")
 	s.linef("    } > %s", outRegion)
 	s.blank()
 	s.line("    _stack_top = ORIGIN(S0_RAM) + LENGTH(S0_RAM);")
-	s.linef("    ASSERT(_stack_top >= _ebss + 0x%X, \"Stage 0: insufficient stack space (< %d bytes)\");", minLinkerStackBytes, minLinkerStackBytes)
+	s.linef("    ASSERT(_stack_top >= _ebss + 0x%X, \"Stage 0: insufficient stack space (< %d bytes)\")", minLinkerStackBytes, minLinkerStackBytes)
 	if isRAMExec {
 		if harvardRAMExec {
-			s.line("    ASSERT((SIZEOF(.text) + SIZEOF(.data)) <= LENGTH(S0_ROM), \"Stage 0 RAM-exec image exceeds Stage 0 flash partition budget\");")
+			s.line("    ASSERT((SIZEOF(.text) + SIZEOF(.data)) <= LENGTH(S0_ROM), \"Stage 0 RAM-exec image exceeds Stage 0 flash partition budget\")")
 		} else {
-			s.line("    ASSERT((SIZEOF(.text) + SIZEOF(.rodata) + SIZEOF(.data)) <= LENGTH(S0_ROM), \"Stage 0 RAM-exec image exceeds Stage 0 flash partition budget\");")
+			s.line("    ASSERT((SIZEOF(.text) + SIZEOF(.rodata) + SIZEOF(.data)) <= LENGTH(S0_ROM), \"Stage 0 RAM-exec image exceeds Stage 0 flash partition budget\")")
 		}
 	} else {
-		s.line("    ASSERT((LOADADDR(.data) + SIZEOF(.data)) <= (ORIGIN(S0_ROM) + LENGTH(S0_ROM)), \"Stage 0 XIP image exceeds Stage 0 flash partition budget\");")
+		s.line("    ASSERT((LOADADDR(.data) + SIZEOF(.data)) <= (ORIGIN(S0_ROM) + LENGTH(S0_ROM)), \"Stage 0 XIP image exceeds Stage 0 flash partition budget\")")
 	}
 	s.line("}")
 	return s
@@ -692,23 +693,25 @@ func renderSlotExecLD(ctx *Context, cfg *ResolvedConfig, l *PartitionLayout, tit
 		s.line("    _mock_lma = ALIGN(LOADADDR(.data) + SIZEOF(.data), 4);")
 		s.line("    .toob_mock_section (_mock_lma) : AT(_mock_lma) ALIGN(4) {")
 		s.line("        KEEP(*(.toob_mock_section))")
+		s.line("        KEEP(*(.toob_mock_section.*))")
 		s.line("    } > flash")
 	} else {
 		s.line("    .toob_mock_section : ALIGN(4) {")
 		s.line("        KEEP(*(.toob_mock_section))")
+		s.line("        KEEP(*(.toob_mock_section.*))")
 		s.line("    } > flash")
 	}
 	s.blank()
 	s.line("    _stack_top = ORIGIN(ram) + LENGTH(ram);")
-	s.linef("    ASSERT(_stack_top >= _ebss + 0x%X, \"Insufficient stack space (< %d bytes)\");", minLinkerStackBytes, minLinkerStackBytes)
+	s.linef("    ASSERT(_stack_top >= _ebss + 0x%X, \"Insufficient stack space (< %d bytes)\")", minLinkerStackBytes, minLinkerStackBytes)
 	lmaExpr := "LOADADDR(.data)"
 	if hasSeparateDrom {
 		lmaExpr = "_data_lma"
 	}
 	if isStage1 {
-		s.linef("    ASSERT(LENGTH(flash) >= 0x54 && (%s + SIZEOF(.data)) <= (ORIGIN(flash) + LENGTH(flash) - 0x40), \"Stage 1 image + 64-byte signature exceeds Stage 1 partition budget\");", lmaExpr)
+		s.linef("    ASSERT(LENGTH(flash) >= 0x54 && (%s + SIZEOF(.data)) <= (ORIGIN(flash) + LENGTH(flash) - 0x40), \"Stage 1 image + 64-byte signature exceeds Stage 1 partition budget\")", lmaExpr)
 	} else {
-		s.linef("    ASSERT((%s + SIZEOF(.data)) <= (ORIGIN(flash) + LENGTH(flash)), \"Image exceeds flash partition budget\");", lmaExpr)
+		s.linef("    ASSERT((%s + SIZEOF(.data)) <= (ORIGIN(flash) + LENGTH(flash)), \"Image exceeds flash partition budget\")", lmaExpr)
 	}
 	s.line("}")
 	return s

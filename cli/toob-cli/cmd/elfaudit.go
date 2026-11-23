@@ -1,119 +1,179 @@
 package cmd
 
 import (
-	"encoding/json"
+	"cmp"
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	build "github.com/Toob-Boot/Toob-Loader/toob-go-lib/build"
+
 	"github.com/toob-boot/toob/internal/elfaudit"
-	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-var elfauditProfile string
-var elfauditHardware string
-var elfauditBudget uint64
+func newELFAuditCmd() *cobra.Command {
+	var (
+		elfPath        string
+		profile        string
+		hardwarePath   string
+		budget         string
+		mapPath        string
+		sramBase       string
+		sramSize       string
+		flashBase      string
+		flashSize      string
+		stage1MaxBytes string
+		reportPath     string
+	)
 
-var elfauditCmd = &cobra.Command{
-	Use:   "elfaudit [path/to/target.elf]",
-	Short: "Post-link ELF audit: mock poison-pill, memory overlap, budget check",
-	Long: `Inspects a linked ELF binary for:
-  (a) Mock Poison-Pill  — no *_mock symbols in production profile
-  (b) Memory Overlap    — sections vs. reserved_ram_regions from hardware.json
-  (c) Budget Footprint  — loadable content vs. stage1_size budget`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		elfPath, err := filepath.Abs(args[0])
-		if err != nil {
-			return fmt.Errorf("invalid ELF path: %w", err)
-		}
-
-		if _, err := os.Stat(elfPath); os.IsNotExist(err) {
-			return fmt.Errorf("ELF binary not found: %s", elfPath)
-		}
-
-		config := elfaudit.ELFAuditConfig{
-			Profile:        elfauditProfile,
-			Stage1MaxBytes: elfauditBudget,
-		}
-
-		// Load reserved regions from hardware.json if provided
-		if elfauditHardware != "" {
-			absHW, err := filepath.Abs(elfauditHardware)
-			if err != nil {
-				return fmt.Errorf("invalid hardware.json path: %w", err)
+	c := &cobra.Command{
+		Use:    "elfaudit [elf-path]",
+		Short:  "Audit ELF sections, entrypoints, and memory placement against target limits",
+		Hidden: true,
+		Args:   cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			targetELF := strings.TrimSpace(elfPath)
+			if targetELF == "" && len(args) > 0 {
+				targetELF = strings.TrimSpace(args[0])
 			}
-			hj, err := manifest.ParseHardwareJSON(absHW)
-			if err != nil {
-				return fmt.Errorf("failed to parse hardware.json: %w", err)
+			if targetELF == "" {
+				return errors.New("ELF path is required via --elf or positional argument")
 			}
-			for _, r := range hj.ReservedRamRegions {
-				base, err := parseCLiteralU64(r.Base)
-				if err != nil {
-					return fmt.Errorf("invalid base address '%s' for reserved region '%s': %w", r.Base, r.Name, err)
-				}
-				config.ReservedRegions = append(config.ReservedRegions, elfaudit.MemoryRegion{
-					Name: r.Name,
-					Base: base,
-					Size: uint64(r.Size),
+
+			var auditProfile string
+			switch strings.ToLower(strings.TrimSpace(profile)) {
+			case elfaudit.ProfileProduction:
+				auditProfile = elfaudit.ProfileProduction
+			case elfaudit.ProfileDev:
+				auditProfile = elfaudit.ProfileDev
+			default:
+				return fmt.Errorf("invalid --profile %q: must be %q or %q", profile, elfaudit.ProfileDev, elfaudit.ProfileProduction)
+			}
+
+			sBase, err := parseAuditRegionU64(sramBase, "sram-base")
+			if err != nil {
+				return err
+			}
+			sSize, err := parseAuditRegionU64(sramSize, "sram-size")
+			if err != nil {
+				return err
+			}
+			fBase, err := parseAuditRegionU64(flashBase, "flash-base")
+			if err != nil {
+				return err
+			}
+			fSize, err := parseAuditRegionU64(flashSize, "flash-size")
+			if err != nil {
+				return err
+			}
+			budgetRaw := cmp.Or(strings.TrimSpace(stage1MaxBytes), strings.TrimSpace(budget))
+			maxBytes, err := parseAuditRegionU64(budgetRaw, "budget")
+			if err != nil {
+				return err
+			}
+
+			cfg := elfaudit.ELFAuditConfig{
+				Profile:              auditProfile,
+				Stage1MaxBytes:       maxBytes,
+				AllowRecoveryRuntime: strings.Contains(strings.ToLower(filepath.Base(targetELF)), "recovery"),
+			}
+			if strings.TrimSpace(mapPath) != "" {
+				cfg.MapPath = filepath.Clean(mapPath)
+			}
+			if fSize > 0 {
+				cfg.FlashBounds = &elfaudit.MemoryRegion{Name: "flash", Base: fBase, Size: fSize}
+			}
+			if sSize > 0 {
+				cfg.ReservedRegions = append(cfg.ReservedRegions, elfaudit.MemoryRegion{
+					Name: "sram-reserved",
+					Base: sBase,
+					Size: sSize,
 				})
 			}
-		}
-
-		ui.Header(fmt.Sprintf("ELF Audit: %s [profile=%s]", filepath.Base(elfPath), config.Profile))
-
-		report, err := elfaudit.AuditELF(elfPath, config)
-		if err != nil {
-			return fmt.Errorf("ELF audit failed: %w", err)
-		}
-
-		for _, chk := range report.Checks {
-			if chk.Passed {
-				ui.Success("%s: %s", chk.Name, chk.Details)
-			} else {
-				ui.Error("%s: %s", chk.Name, chk.Details)
+			if strings.TrimSpace(hardwarePath) != "" {
+				hw, hwErr := build.ParseHardwareJSON(filepath.Clean(hardwarePath))
+				if hwErr != nil {
+					return fmt.Errorf("parse --hardware %s: %w", sanitizeDisplay(hardwarePath), hwErr)
+				}
+				for _, r := range hw.ReservedRamRegions {
+					rBase, baseErr := build.ParseU64Literal(r.Base)
+					if baseErr != nil {
+						return fmt.Errorf("parse reserved RAM region %q base %q: %w", r.Name, r.Base, baseErr)
+					}
+					cfg.ReservedRegions = append(cfg.ReservedRegions, elfaudit.MemoryRegion{
+						Name: r.Name,
+						Base: rBase,
+						Size: uint64(r.Size),
+					})
+				}
+				if hw.BootromImage != nil &&
+					strings.EqualFold(strings.TrimSpace(hw.BootromImage.Layout), build.BootromLayoutSegmented) &&
+					strings.Contains(strings.ToLower(filepath.Base(targetELF)), "stage0") {
+					cfg.SegmentedBootrom = true
+				}
 			}
-		}
 
-		// Export JSON report next to the ELF
-		reportPath := elfPath + ".audit.json"
-		reportData, _ := json.MarshalIndent(report, "", "  ")
-		_ = os.WriteFile(reportPath, reportData, 0o644)
+			report, err := elfaudit.AuditELF(targetELF, cfg)
+			if err != nil {
+				return fmt.Errorf("ELF audit execution failed: %w", err)
+			}
 
-		if !report.Passed {
-			return fmt.Errorf("FATAL [ELF_AUDIT_FAIL]: Binary failed post-link audit!")
-		}
+			if reportPath != "" {
+				if expErr := elfaudit.ExportReportJSON(report, reportPath); expErr != nil {
+					return fmt.Errorf("write ELF audit report %s: %w", reportPath, expErr)
+				}
+			}
 
-		ui.Success("ELF audit PASSED cleanly. Report: %s", reportPath)
-		return nil
-	},
+			if !report.Passed {
+				var details []string
+				for _, v := range report.Violations {
+					details = append(details, fmt.Sprintf("%s (%s)", v.Name, v.Details))
+				}
+				if len(details) == 0 {
+					for _, chk := range report.Checks {
+						if !chk.Passed {
+							details = append(details, fmt.Sprintf("%s (%s)", chk.Name, chk.Details))
+						}
+					}
+				}
+				if len(details) > 0 {
+					return fmt.Errorf("ELF security audit failed for %s: %s", sanitizeDisplay(targetELF), sanitizeDisplay(strings.Join(details, "; ")))
+				}
+				return fmt.Errorf("ELF security audit failed for %s", sanitizeDisplay(targetELF))
+			}
+
+			ui.Success("ELF security audit passed (%s, profile=%s)", sanitizeDisplay(targetELF), auditProfile)
+			return nil
+		},
+	}
+
+	c.Flags().StringVar(&elfPath, "elf", "", "Path to compiled ELF binary")
+	c.Flags().StringVar(&profile, "profile", elfaudit.ProfileProduction, "Audit profile (dev or production)")
+	c.Flags().StringVar(&hardwarePath, "hardware", "", "Path to chip hardware.json for reserved RAM and layout rules")
+	c.Flags().StringVar(&budget, "budget", "", "Maximum loadable flash partition footprint budget")
+	c.Flags().StringVar(&mapPath, "map", "", "Optional GNU ld linker .map path for symbol ownership verification")
+	c.Flags().StringVar(&sramBase, "sram-base", "", "Reserved SRAM base address literal")
+	c.Flags().StringVar(&sramSize, "sram-size", "", "Reserved SRAM size literal")
+	c.Flags().StringVar(&flashBase, "flash-base", "", "Flash base address literal")
+	c.Flags().StringVar(&flashSize, "flash-size", "", "Flash size literal")
+	c.Flags().StringVar(&stage1MaxBytes, "stage1-max-bytes", "", "Maximum loadable Stage-1 footprint budget")
+	c.Flags().StringVar(&reportPath, "report", "", "Write JSON audit report to path")
+	return c
 }
 
-func parseCLiteralU64(raw string) (uint64, error) {
-	trimmed := raw
-	for len(trimmed) > 0 {
-		last := trimmed[len(trimmed)-1]
-		if last == 'u' || last == 'U' || last == 'l' || last == 'L' {
-			trimmed = trimmed[:len(trimmed)-1]
-		} else {
-			break
-		}
+func parseAuditRegionU64(raw, field string) (uint64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
 	}
-	digits, base := trimmed, 10
-	if len(trimmed) > 2 && (trimmed[:2] == "0x" || trimmed[:2] == "0X") {
-		digits, base = trimmed[2:], 16
-	} else if len(trimmed) > 1 && trimmed[0] == '0' {
-		return 0, fmt.Errorf("literal %q has a leading zero (octal ambiguity)", raw)
+	trimmed = strings.TrimRight(trimmed, "uUlL")
+	val, err := build.ParseU64Literal(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --%s %q: %w", field, raw, err)
 	}
-	return strconv.ParseUint(digits, base, 64)
-}
-
-func init() {
-	elfauditCmd.Flags().StringVar(&elfauditProfile, "profile", "production", "Build profile (production|sandbox)")
-	elfauditCmd.Flags().StringVar(&elfauditHardware, "hardware", "", "Path to hardware.json for reserved region checks")
-	elfauditCmd.Flags().Uint64Var(&elfauditBudget, "budget", 0, "Stage1 size budget in bytes (0 = skip budget check)")
-	rootCmd.AddCommand(elfauditCmd)
+	return val, nil
 }

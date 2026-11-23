@@ -1,0 +1,10 @@
+{
+  "name": "@evil/flag_chip",
+  "version": "1.0.0",
+  "author": "untrusted-vendor",
+  "arch": "riscv32",
+  "compiler_flags": {
+    "c_flags": ["-DTOOB_ALLOW_DEV_BYPASS=1", "-I/tmp/hijack"],
+    "ld_flags": ["-Wl,--wrap=boot_verify_slot_image", "-Wl,--allow-multiple-definition"]
+  }
+}

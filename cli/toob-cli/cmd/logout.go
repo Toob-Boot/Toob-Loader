@@ -1,41 +1,44 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
+
 	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-var logoutCmd = &cobra.Command{
-	Use:   "logout",
-	Short: "Log out from the Toob Registry",
-	Long: `Signs out of the Toob Registry on this machine.
+func newLogoutCmd() *cobra.Command {
+	var all bool
 
-Removes the stored session from ~/.toob/credentials.json. Personal tokens stay valid —
-'toob tokens revoke' withdraws one.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		// Local only. The server call this used to make went to /api/v1/auth/logout, which the
-		// registry does not serve; and a session is a token the identity provider issued, so there is
-		// nothing for the registry to invalidate. Removing it here is what ends the session for this
-		// machine, which is what "log out" means on a command line.
-		//
-		// Tokens are left alone: signing out of a terminal must not revoke what CI publishes with.
-		if !apiclient.HasSession() {
-			ui.Info("Not currently signed in.")
+	c := &cobra.Command{
+		Use:   "logout",
+		Short: "Revoke the active registry session and clear local credentials",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, cancel := commandContext(cmd, defaultCmdTimeout)
+			defer cancel()
+
+			client := apiclient.New()
+			_ = all
+
+			if err := client.Logout(ctx); err != nil {
+				if !errors.Is(err, apiclient.ErrNoSession) && !errors.Is(err, apiclient.ErrNotSignedIn) {
+					return fmt.Errorf("logout failed: %w", err)
+				}
+			}
+
+			if err := apiclient.ClearOrganization(); err != nil && !errors.Is(err, apiclient.ErrNoSession) && !errors.Is(err, apiclient.ErrNotSignedIn) {
+				return fmt.Errorf("clear selected organization: %w", err)
+			}
+
+			ui.Success("Signed out and cleared local registry credentials.")
 			return nil
-		}
+		},
+	}
 
-		if err := apiclient.DeleteIdentity(); err != nil {
-			return fmt.Errorf("failed to remove the local session: %w", err)
-		}
-
-		ui.Success("Signed out.")
-		return nil
-	},
-}
-
-func init() {
-	rootCmd.AddCommand(logoutCmd)
+	c.Flags().BoolVar(&all, "all", false, "Revoke active session and clear local organization context")
+	return c
 }

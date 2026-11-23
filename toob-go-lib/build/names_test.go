@@ -70,3 +70,62 @@ func TestValidateDisplayText(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCompilerFlagAllowlist(t *testing.T) {
+	allowed := []struct {
+		kind string
+		flag string
+	}{
+		{"c_flags", "-Os"},
+		{"c_flags", "-O3"},
+		{"c_flags", "-mcpu=cortex-m55"},
+		{"c_flags", "-mthumb"},
+		{"c_flags", "-mfloat-abi=soft"},
+		{"c_flags", "-march=rv32imac_zicsr_zifencei"},
+		{"c_flags", "-mabi=ilp32"},
+		{"c_flags", "-mlongcalls"},
+		{"c_flags", "-mtext-section-literals"},
+		{"c_flags", "-fno-strict-aliasing"},
+		{"c_flags", "-fstack-protector-strong"},
+		{"c_flags", "-fstack-usage"},
+		{"ld_flags", "-nostdlib"},
+		{"ld_flags", "--specs=nano.specs"},
+		{"ld_flags", "-Wl,--gc-sections"},
+	}
+	for _, tc := range allowed {
+		if err := ValidateCompilerFlag(tc.kind, tc.flag); err != nil {
+			t.Errorf("ValidateCompilerFlag(%q, %q) unexpectedly rejected: %v", tc.kind, tc.flag, err)
+		}
+	}
+
+	rejected := []struct {
+		kind string
+		flag string
+	}{
+		{"c_flags", "-DTOOB_ALLOW_DEV_BYPASS=1"},
+		{"c_flags", "-UTOOB_DOUBLE_VERIFY"},
+		{"c_flags", "-I/tmp/evil"},
+		{"c_flags", "-isystem/tmp/evil"},
+		{"c_flags", "-include/tmp/evil.h"},
+		{"c_flags", "-imacros/tmp/evil.h"},
+		{"c_flags", "-Wp,-DPOISON=1"},
+		{"c_flags", "-Wa,--defsym,x=1"},
+		{"c_flags", "-fplugin=/tmp/evil.so"},
+		{"c_flags", "-fsanitize=address"},
+		{"c_flags", "@response.rsp"},
+		{"c_flags", "-nostdlib"},
+		{"ld_flags", "-Wl,--wrap=boot_verify_slot_image"},
+		{"ld_flags", "-Wl,--defsym=boot_verify_slot_image=0"},
+		{"ld_flags", "-Wl,--allow-multiple-definition"},
+		{"ld_flags", "-Wl,-T/tmp/evil.ld"},
+		{"ld_flags", "-T/tmp/evil.ld"},
+		{"ld_flags", "-Wl,-Map=override.map"},
+		{"c_flags", "-O2;evil"},
+		{"c_flags", "-D$(cmd)"},
+	}
+	for _, tc := range rejected {
+		if err := ValidateCompilerFlag(tc.kind, tc.flag); err == nil {
+			t.Errorf("ValidateCompilerFlag(%q, %q) must reject dangerous override", tc.kind, tc.flag)
+		}
+	}
+}

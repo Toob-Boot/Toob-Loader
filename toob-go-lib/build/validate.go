@@ -337,6 +337,10 @@ func checkBootConfig(ctx *Context) error {
 	if prof := ctx.Device.Build.Profile; prof != "" && prof != "dev" && prof != "production" {
 		return fmt.Errorf("FATAL: build.profile = %q must be 'dev' or 'production'", prof)
 	}
+	if strings.EqualFold(strings.TrimSpace(ctx.Device.Build.Profile), "production") && len(ctx.Device.Build.Mock) > 0 {
+		return fmt.Errorf("FATAL: build.profile = %q cannot be combined with build.mock = %v",
+			ctx.Device.Build.Profile, ctx.Device.Build.Mock)
+	}
 	return nil
 }
 

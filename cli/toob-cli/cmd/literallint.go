@@ -7,99 +7,64 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+
 	"github.com/toob-boot/toob/internal/literallint"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-var (
-	literallintDeep     bool
-	literallintIncludes []string
-	literallintJSON     string
-)
+func newLiteralLintCmd() *cobra.Command {
+	var (
+		jsonPath string
+		deepMode bool
+	)
 
-var literallintCmd = &cobra.Command{
-	Use:   "literallint [paths...]",
-	Short: "Literal-Bann-Lint for chips/ and drivers/ codebases",
-	Long: `Audits C/H source files for unallowed numeric literals (hardcoded addresses, register offsets, magic numbers).
-Every hardware constant must originate from generated_boot_config.h or chip_config.h.
-
-Uses a regex scanner by default, and optional AST inspection via clang-query when --deep is specified.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		paths := args
-		if len(paths) == 0 {
-			// Default paths
-			paths = []string{
-				"toob-registry/registry/chips",
-				"toob-registry/registry/drivers",
+	c := &cobra.Command{
+		Use:   "literallint [dir]",
+		Short: "Scan C HAL sources for REG-040 literal safety violations",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			targetDir := "."
+			if len(args) == 1 {
+				targetDir = args[0]
 			}
-		}
-
-		var absPaths []string
-		for _, p := range paths {
-			abs, err := filepath.Abs(p)
+			absDir, err := filepath.Abs(targetDir)
 			if err != nil {
-				return fmt.Errorf("invalid path %s: %w", p, err)
+				return fmt.Errorf("resolve directory %q: %w", targetDir, err)
 			}
-			if _, err := os.Stat(abs); err == nil {
-				absPaths = append(absPaths, abs)
+
+			cfg := literallint.DefaultConfig(absDir)
+			cfg.DeepMode = deepMode
+
+			report, err := literallint.RunLint(cfg)
+			if err != nil {
+				return fmt.Errorf("literallint scan failed: %w", err)
 			}
-		}
 
-		if len(absPaths) == 0 {
-			return fmt.Errorf("no valid scanning paths found among: %v", paths)
-		}
-
-		cfg := literallint.LintConfig{
-			Paths:        absPaths,
-			Extensions:   []string{".c", ".h"},
-			IncludePaths: literallintIncludes,
-			DeepMode:     literallintDeep,
-		}
-
-		ui.Header(fmt.Sprintf("Literal-Bann-Lint: Scanning %d path(s)", len(absPaths)))
-
-		report, err := literallint.RunLint(cfg)
-		if err != nil {
-			return fmt.Errorf("literal lint failed: %w", err)
-		}
-
-		ui.Info("Mode: %s", report.Mode)
-		ui.Info("Files scanned: %d, Lines scanned: %d, Suppressed: %d",
-			report.Stats.FilesScanned, report.Stats.LinesScanned, report.Stats.Suppressed)
-
-		if len(report.Violations) > 0 {
-			ui.Error("Found %d numeric literal violation(s):", len(report.Violations))
-			for _, v := range report.Violations {
-				relPath, _ := filepath.Rel(".", v.File)
-				if relPath == "" {
-					relPath = v.File
+			if jsonPath != "" {
+				data, encErr := json.MarshalIndent(report, "", "  ")
+				if encErr != nil {
+					return fmt.Errorf("marshal literallint report: %w", encErr)
 				}
-				ui.Error("  %s:%d:%d: literal '%s' [%s]\n    Line: %s",
-					relPath, v.Line, v.Column, v.Literal, v.Source, v.Context)
+				if writeErr := os.WriteFile(filepath.Clean(jsonPath), data, 0o600); writeErr != nil {
+					return fmt.Errorf("write literallint report %s: %w", jsonPath, writeErr)
+				}
 			}
-		}
 
-		if literallintJSON != "" {
-			data, _ := json.MarshalIndent(report, "", "  ")
-			if err := os.WriteFile(literallintJSON, data, 0o644); err != nil {
-				ui.Error("Failed to write JSON report to %s: %v", literallintJSON, err)
-			} else {
-				ui.Success("Exported JSON report to %s", literallintJSON)
+			for _, v := range report.Violations {
+				ui.Warn("%s:%d:%d: [%s] banned literal %q",
+					sanitizeDisplay(v.File), v.Line, v.Column, sanitizeDisplay(v.Source), sanitizeDisplay(v.Literal))
 			}
-		}
 
-		if !report.Passed {
-			return fmt.Errorf("FATAL [LITERAL_LINT_FAIL]: Found %d banned numeric literal(s)!", len(report.Violations))
-		}
+			if !report.Passed || len(report.Violations) > 0 {
+				return fmt.Errorf("literallint failed: %d violation(s)", len(report.Violations))
+			}
 
-		ui.Success("Literal-Bann-Lint PASSED cleanly. No unauthorized numeric literals found.")
-		return nil
-	},
-}
+			ui.Success("literallint passed (%d files scanned, 0 violations)", report.Stats.FilesScanned)
+			return nil
+		},
+	}
 
-func init() {
-	literallintCmd.Flags().BoolVar(&literallintDeep, "deep", false, "Enable clang-query AST hybrid scanning")
-	literallintCmd.Flags().StringSliceVar(&literallintIncludes, "include", nil, "Header include paths for clang-query")
-	literallintCmd.Flags().StringVar(&literallintJSON, "json", "", "Export report as JSON to specified file path")
-	rootCmd.AddCommand(literallintCmd)
+	c.Flags().StringVar(&jsonPath, "json", "", "Write JSON lint report to path")
+	c.Flags().BoolVar(&deepMode, "deep", false, "Enable clang-query AST literal inspection")
+	return c
 }

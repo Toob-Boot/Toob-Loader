@@ -1,0 +1,10 @@
+{
+  "stage": "stage1a",
+  "flash_bounds": { "name": "Stage1A", "base": "0x08008000", "size": "0x8000" },
+  "forbidden_flash_regions": [
+    { "name": "Stage0", "base": "0x08000000", "size": "0x8000" },
+    { "name": "WAL", "base": "0x08010000", "size": "0x4000" }
+  ],
+  "bad_segment_lma": "0x08010000",
+  "bad_segment_size": "0x1000"
+}

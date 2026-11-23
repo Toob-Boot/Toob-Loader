@@ -259,7 +259,9 @@
         { "field": "burn_pubkey",               "source": "driver", "key": "burn_pubkey",             "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" },
         { "field": "set_protection_bits",       "source": "driver", "key": "set_protection_bits",     "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" },
         { "field": "enable_secure_boot",        "source": "driver", "key": "enable_secure_boot",      "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" },
-        { "field": "enable_flash_encryption",   "source": "driver", "key": "enable_flash_encryption", "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" }
+        { "field": "enable_flash_encryption",   "source": "driver", "key": "enable_flash_encryption", "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" },
+        { "field": "read_device_secret",        "source": "driver", "key": "read_device_secret",      "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" },
+        { "field": "read_pqc_pubkey_hash",      "source": "driver", "key": "read_pqc_pubkey_hash",    "required": false, "guard": "!defined(TOOB_STAGE0_BUILD)" }
       ]
     }
   ],

@@ -1,0 +1,19 @@
+{
+  "name": "@test/baseline_entropy",
+  "version": "1.0.0",
+  "author": "vendor-clean",
+  "trait": "entropy",
+  "abi_version": "v3",
+  "license": "MIT",
+  "compiler_flags": {
+    "c_flags": ["-Os", "-mcpu=cortex-m4", "-mthumb"],
+    "ld_flags": ["-nostdlib"]
+  },
+  "headers": ["entropy.h"],
+  "sources": ["entropy.c"],
+  "symbols": {
+    "init": "clean_entropy_init",
+    "deinit": "clean_entropy_deinit",
+    "random": "clean_entropy_random"
+  }
+}

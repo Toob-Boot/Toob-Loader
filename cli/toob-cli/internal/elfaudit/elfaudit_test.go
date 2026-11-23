@@ -30,6 +30,7 @@ type testSymbol struct {
 
 type testProg struct {
 	typ    uint32
+	flags  uint32
 	vaddr  uint64
 	paddr  uint64
 	filesz uint64
@@ -110,7 +111,7 @@ func (b *testELFBuilder) writeELF(path string) error {
 		binary.LittleEndian.PutUint32(ph[12:], uint32(p.paddr))
 		binary.LittleEndian.PutUint32(ph[16:], uint32(p.filesz))
 		binary.LittleEndian.PutUint32(ph[20:], uint32(p.memsz))
-		binary.LittleEndian.PutUint32(ph[24:], 0)
+		binary.LittleEndian.PutUint32(ph[24:], p.flags)
 		binary.LittleEndian.PutUint32(ph[28:], 0)
 		_, _ = f.Write(ph[:])
 	}
@@ -665,4 +666,303 @@ func TestExportReportJSON_PropagatesWriteError(t *testing.T) {
 	if err := ExportReportJSON(nil, validOut); err == nil || !strings.Contains(err.Error(), "nil") {
 		t.Fatalf("expected nil report error, got %v", err)
 	}
+}
+
+func TestHardenedELFSecurityGates(t *testing.T) {
+	t.Run("rejects .init_array and .fini_array constructor sections", func(t *testing.T) {
+		for _, sec := range []string{".init_array", ".init_array.0", ".preinit_array", ".fini_array"} {
+			elfPath := filepath.Join(t.TempDir(), "ctor.elf")
+			b := &testELFBuilder{
+				sections: []testSection{
+					{name: ".text", addr: 0x08008000, size: 512, flags: 0x6, typ: 1},
+					{name: sec, addr: 0x08008200, size: 4, flags: 0x3, typ: 14},
+				},
+				symbols: []testSymbol{{name: "boot_main"}},
+			}
+			if err := b.writeELF(elfPath); err != nil {
+				t.Fatal(err)
+			}
+			rep, err := AuditELF(elfPath, ELFAuditConfig{Profile: ProfileProduction})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rep.Passed {
+				t.Fatalf("expected section %s to fail AuditELF", sec)
+			}
+		}
+	})
+
+	t.Run("rejects PT_LOAD with both PF_W and PF_X (W^X)", func(t *testing.T) {
+		elfPath := filepath.Join(t.TempDir(), "wx.elf")
+		b := &testELFBuilder{
+			sections: []testSection{{name: ".text", addr: 0x08008000, size: 256, flags: 0x6, typ: 1}},
+			progs:    []testProg{{typ: uint32(elf.PT_LOAD), flags: uint32(elf.PF_R | elf.PF_W | elf.PF_X), vaddr: 0x08008000, paddr: 0x08008000, filesz: 256, memsz: 256}},
+			symbols:  []testSymbol{{name: "boot_main"}},
+		}
+		if err := b.writeELF(elfPath); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := AuditELF(elfPath, ELFAuditConfig{Profile: ProfileProduction})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.Passed {
+			t.Fatal("expected W^X PF_W|PF_X segment to fail AuditELF")
+		}
+	})
+
+	t.Run("rejects banned heap symbols", func(t *testing.T) {
+		for _, fn := range []string{"malloc", "calloc", "realloc", "free"} {
+			elfPath := filepath.Join(t.TempDir(), fn+".elf")
+			b := &testELFBuilder{
+				sections: []testSection{{name: ".text", addr: 0x08008000, size: 256, flags: 0x6, typ: 1}},
+				symbols:  []testSymbol{{name: "boot_main"}, {name: fn}},
+			}
+			if err := b.writeELF(elfPath); err != nil {
+				t.Fatal(err)
+			}
+			rep, err := AuditELF(elfPath, ELFAuditConfig{Profile: ProfileProduction})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rep.Passed {
+				t.Fatalf("expected banned heap symbol %q to fail AuditELF", fn)
+			}
+		}
+	})
+
+	t.Run("rejects ForbiddenFlashRegions overlap", func(t *testing.T) {
+		elfPath := filepath.Join(t.TempDir(), "flash_overlap.elf")
+		b := &testELFBuilder{
+			sections: []testSection{{name: ".text", addr: 0x08010000, size: 1024, flags: 0x6, typ: 1}},
+			progs:    []testProg{{typ: uint32(elf.PT_LOAD), flags: uint32(elf.PF_R | elf.PF_X), vaddr: 0x08010000, paddr: 0x08010000, filesz: 1024, memsz: 1024}},
+			symbols:  []testSymbol{{name: "boot_main"}},
+		}
+		if err := b.writeELF(elfPath); err != nil {
+			t.Fatal(err)
+		}
+		rep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile: ProfileProduction,
+			ForbiddenFlashRegions: []MemoryRegion{
+				{Name: "WAL", Base: 0x08010000, Size: 0x2000},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.Passed {
+			t.Fatal("expected overlap with ForbiddenFlashRegions to fail AuditELF")
+		}
+	})
+
+	t.Run("verifies .map TU ownership, SSP __stack_chk_fail, and .su budgets", func(t *testing.T) {
+		dir := t.TempDir()
+		elfPath := filepath.Join(dir, "valid.elf")
+		b := &testELFBuilder{
+			sections: []testSection{{name: ".text", addr: 0x08008000, size: 512, flags: 0x6, typ: 1}},
+			progs:    []testProg{{typ: uint32(elf.PT_LOAD), flags: uint32(elf.PF_R | elf.PF_X), vaddr: 0x08008000, paddr: 0x08008000, filesz: 512, memsz: 512}},
+			symbols:  []testSymbol{{name: "boot_main"}, {name: "__stack_chk_fail"}},
+		}
+		if err := b.writeELF(elfPath); err != nil {
+			t.Fatal(err)
+		}
+
+		goodMap := filepath.Join(dir, "good.map")
+		_ = os.WriteFile(goodMap, []byte("Linker script and memory map\n.text.boot_verify_slot_image\n  0x08008000 0x100 libtoob_core.a(boot_verify.c.obj)\n  0x08008000  boot_verify_slot_image\n"), 0o644)
+		badMap := filepath.Join(dir, "bad.map")
+		_ = os.WriteFile(badMap, []byte("Linker script and memory map\n.text.boot_verify_slot_image\n  0x08008000 0x100 libtoob_chip.a(evil_driver.c.obj)\n  0x08008000  boot_verify_slot_image\n"), 0o644)
+
+		suDir := filepath.Join(dir, "su")
+		_ = os.MkdirAll(suDir, 0o755)
+		_ = os.WriteFile(filepath.Join(suDir, "boot_verify.su"), []byte("boot_verify.c:12:1:boot_verify_slot_image\t512\tstatic\n"), 0o644)
+
+		goodRep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile:        ProfileProduction,
+			MapPath:        goodMap,
+			RequireSSP:     true,
+			StackUsageDirs: []string{suDir},
+			MaxStackBytes:  1024,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !goodRep.Passed {
+			t.Fatalf("expected valid ELF with good .map, SSP, and within-budget .su to pass, checks: %+v", goodRep.Checks)
+		}
+
+		badMapRep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile: ProfileProduction,
+			MapPath: badMap,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if badMapRep.Passed {
+			t.Fatal("expected hijacked core symbol in .map to fail AuditELF")
+		}
+
+		_ = os.WriteFile(filepath.Join(suDir, "blowup.su"), []byte("evil.c:9:1:blowup_fn\t8192\tstatic\n"), 0o644)
+		badSURep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile:        ProfileProduction,
+			StackUsageDirs: []string{suDir},
+			MaxStackBytes:  2048,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if badSURep.Passed {
+			t.Fatal("expected oversized .su stack frame to fail AuditELF")
+		}
+
+		noSSPPath := filepath.Join(dir, "nossp.elf")
+		bNoSSP := &testELFBuilder{
+			sections: []testSection{{name: ".text", addr: 0x08008000, size: 512, flags: 0x6, typ: 1}},
+			symbols:  []testSymbol{{name: "boot_main"}},
+		}
+		if wErr := bNoSSP.writeELF(noSSPPath); wErr != nil {
+			t.Fatal(wErr)
+		}
+		noSSPRep, err := AuditELF(noSSPPath, ELFAuditConfig{
+			Profile:    ProfileProduction,
+			RequireSSP: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if noSSPRep.Passed {
+			t.Fatal("expected missing __stack_chk_fail when RequireSSP=true to fail AuditELF")
+		}
+	})
+
+	t.Run("scopes .su audit to active memory map and ELF functions when MapPath is set", func(t *testing.T) {
+		dir := t.TempDir()
+		elfPath := filepath.Join(dir, "scoped.elf")
+		b := &testELFBuilder{
+			sections: []testSection{{name: ".text", addr: 0x08008000, size: 512, flags: 0x6, typ: 1}},
+			progs:    []testProg{{typ: uint32(elf.PT_LOAD), flags: uint32(elf.PF_R | elf.PF_X), vaddr: 0x08008000, paddr: 0x08008000, filesz: 512, memsz: 512}},
+			symbols:  []testSymbol{{name: "stage0_main"}, {name: "__stack_chk_fail"}},
+		}
+		if err := b.writeELF(elfPath); err != nil {
+			t.Fatal(err)
+		}
+
+		scopedMap := filepath.Join(dir, "scoped.map")
+		mapText := strings.Join([]string{
+			"Discarded input sections",
+			" .text.crypto_argon2",
+			"                0x00000000      0x498 libtoob_crypto_upstream.a(monocypher.c.obj)",
+			"Linker script and memory map",
+			" .text.stage0_main",
+			"                0x08008000       0x80 CMakeFiles/toob_stage0.dir/stage0_main.c.obj",
+			"                0x08008000                stage0_main",
+			" .text.helper_in_map.isra.0",
+			"                0x08008080       0x40 CMakeFiles/toob_stage0.dir/stage0_main.c.obj",
+		}, "\n") + "\n"
+		if err := os.WriteFile(scopedMap, []byte(mapText), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		suDir := filepath.Join(dir, "su")
+		if err := os.MkdirAll(suDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(suDir, "stage0_main.c.su"), []byte(
+			"C:/src/stage0_main.c:10:1:stage0_main\t512\tstatic\n"+
+				"C:/src/stage0_main.c:20:1:helper_in_map.isra\t256\tstatic\n"+
+				"C:/src/monocypher.c:750:6:crypto_argon2\t3304\tstatic\n",
+		), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		rep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile:        ProfileProduction,
+			MapPath:        scopedMap,
+			RequireSSP:     true,
+			StackUsageDirs: []string{suDir},
+			MaxStackBytes:  1024,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !rep.Passed {
+			t.Fatalf("expected discarded crypto_argon2 .su entry to be ignored when MapPath is set, checks: %+v", rep.Checks)
+		}
+
+		if wErr := os.WriteFile(filepath.Join(suDir, "linked_blowup.su"), []byte(
+			"C:/src/stage0_main.c:30:1:helper_in_map.isra\t2048\tstatic\n",
+		), 0o600); wErr != nil {
+			t.Fatal(wErr)
+		}
+		failRep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile:        ProfileProduction,
+			MapPath:        scopedMap,
+			RequireSSP:     true,
+			StackUsageDirs: []string{suDir},
+			MaxStackBytes:  1024,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if failRep.Passed {
+			t.Fatal("expected oversized linked .isra function present in memory map to fail .su budget")
+		}
+	})
+
+	t.Run("allows recovery_port.c runtime hooks only when AllowRecoveryRuntime is true", func(t *testing.T) {
+		dir := t.TempDir()
+		elfPath := filepath.Join(dir, "recovery.elf")
+		b := &testELFBuilder{
+			sections: []testSection{{name: ".text", addr: 0x08008000, size: 512, flags: 0x6, typ: 1}},
+			progs:    []testProg{{typ: uint32(elf.PT_LOAD), flags: uint32(elf.PF_R | elf.PF_X), vaddr: 0x08008000, paddr: 0x08008000, filesz: 512, memsz: 512}},
+			symbols:  []testSymbol{{name: "boot_main"}, {name: "__stack_chk_fail"}},
+		}
+		if err := b.writeELF(elfPath); err != nil {
+			t.Fatal(err)
+		}
+
+		recMap := filepath.Join(dir, "rec.map")
+		if err := os.WriteFile(recMap, []byte("Linker script and memory map\n.text.boot_main\n  0x08008000 0x40 CMakeFiles/toob_recovery.dir/recovery/recovery_port.c.obj\n  0x08008000  boot_main\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		disallowedRep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile:              ProfileProduction,
+			MapPath:              recMap,
+			AllowRecoveryRuntime: false,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if disallowedRep.Passed {
+			t.Fatal("expected recovery_port.c boot_main to be rejected when AllowRecoveryRuntime=false")
+		}
+
+		allowedRep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile:              ProfileProduction,
+			MapPath:              recMap,
+			AllowRecoveryRuntime: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !allowedRep.Passed {
+			t.Fatalf("expected recovery_port.c boot_main to pass when AllowRecoveryRuntime=true, checks: %+v", allowedRep.Checks)
+		}
+
+		evilHALMap := filepath.Join(dir, "evil_hal.map")
+		if wErr := os.WriteFile(evilHALMap, []byte("Linker script and memory map\n.text.boot_main\n  0x08008000 0x40 libtoob_chip.a(evil_driver.c.obj)\n  0x08008000  boot_main\n"), 0o600); wErr != nil {
+			t.Fatal(wErr)
+		}
+		halRep, err := AuditELF(elfPath, ELFAuditConfig{
+			Profile:              ProfileProduction,
+			MapPath:              evilHALMap,
+			AllowRecoveryRuntime: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if halRep.Passed {
+			t.Fatal("expected HAL TU defining boot_main to still fail even with AllowRecoveryRuntime=true")
+		}
+	})
 }

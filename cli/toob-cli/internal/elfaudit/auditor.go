@@ -37,11 +37,18 @@ func AuditELF(elfPath string, config ELFAuditConfig) (*ELFAuditReport, error) {
 	}
 
 	auditPoisonPill(f, config, report)
+	auditInitFiniSections(f, report)
+	auditWritableExecutableSegments(f, report)
+	auditBannedHeapSymbols(f, report)
 	auditMemoryOverlap(f, config, report)
 	if config.FlashBounds != nil && config.FlashBounds.Size > 0 {
 		auditFlashBounds(f, *config.FlashBounds, report)
 	}
+	auditForbiddenFlashRegions(f, config.ForbiddenFlashRegions, report)
 	auditBudgetFootprint(f, config, report)
+	linkedFuncs := auditSymbolOwnership(config.MapPath, config.AllowRecoveryRuntime, report)
+	auditSSP(f, config, report)
+	auditStackUsage(f, config, linkedFuncs, report)
 
 	return report, nil
 }
@@ -296,4 +303,128 @@ func addCheck(report *ELFAuditReport, name string, passed bool, details string) 
 		report.Passed = false
 		report.Violations = append(report.Violations, chk)
 	}
+}
+
+func auditInitFiniSections(f *elf.File, report *ELFAuditReport) {
+	var badSections []string
+	for _, sec := range f.Sections {
+		if sec == nil {
+			continue
+		}
+		name := sec.Name
+		for _, banned := range []string{".init_array", ".preinit_array", ".fini_array", ".ctors", ".dtors"} {
+			if name == banned || strings.HasPrefix(name, banned+".") {
+				badSections = append(badSections, fmt.Sprintf("%s (%d bytes)", name, sec.Size))
+				break
+			}
+		}
+	}
+	if len(badSections) > 0 {
+		addCheck(report, "Init/Fini Constructor Sections", false,
+			"Forbidden ELF constructor/destructor section(s): "+strings.Join(badSections, ", "))
+		return
+	}
+	addCheck(report, "Init/Fini Constructor Sections", true, "No .init_array/.preinit_array/.fini_array sections present")
+}
+
+func auditWritableExecutableSegments(f *elf.File, report *ELFAuditReport) {
+	var violations []string
+	for idx, prog := range f.Progs {
+		if prog == nil || prog.Type != elf.PT_LOAD {
+			continue
+		}
+		if (prog.Flags & (elf.PF_W | elf.PF_X)) == (elf.PF_W | elf.PF_X) {
+			violations = append(violations, fmt.Sprintf("PT_LOAD[%d] VMA 0x%08X has both PF_W and PF_X (W^X violation)", idx, prog.Vaddr))
+		}
+	}
+	for _, sec := range f.Sections {
+		if sec == nil || sec.Size == 0 {
+			continue
+		}
+		if (sec.Flags & (elf.SHF_WRITE | elf.SHF_EXECINSTR)) == (elf.SHF_WRITE | elf.SHF_EXECINSTR) {
+			violations = append(violations, fmt.Sprintf("section %q at 0x%08X is both SHF_WRITE and SHF_EXECINSTR (W^X violation)", sec.Name, sec.Addr))
+		}
+	}
+	if len(violations) > 0 {
+		addCheck(report, "W^X Segment Protection", false, strings.Join(violations, "; "))
+		return
+	}
+	addCheck(report, "W^X Segment Protection", true, "All PT_LOAD segments and sections enforce W^X separation")
+}
+
+func auditBannedHeapSymbols(f *elf.File, report *ELFAuditReport) {
+	syms, err := f.Symbols()
+	if err != nil {
+		if errors.Is(err, elf.ErrNoSymbols) {
+			addCheck(report, "Zero-Allocation Heap Ban", true, "No symbol table present to scan for heap symbols")
+			return
+		}
+		addCheck(report, "Zero-Allocation Heap Ban", false, fmt.Sprintf("Cannot inspect symbol table for heap allocation ban: %v", err))
+		return
+	}
+	banned := map[string]bool{
+		"malloc":       true,
+		"calloc":       true,
+		"realloc":      true,
+		"free":         true,
+		"_malloc_r":    true,
+		"_calloc_r":    true,
+		"_realloc_r":   true,
+		"_free_r":      true,
+		"pvPortMalloc": true,
+		"vPortFree":    true,
+	}
+	var found []string
+	seen := make(map[string]bool)
+	for _, sym := range syms {
+		if elf.ST_TYPE(sym.Info) == elf.STT_FILE || sym.Name == "" {
+			continue
+		}
+		if banned[sym.Name] && !seen[sym.Name] {
+			seen[sym.Name] = true
+			found = append(found, sym.Name)
+		}
+	}
+	if len(found) > 0 {
+		addCheck(report, "Zero-Allocation Heap Ban", false,
+			"Forbidden heap allocation symbol(s) found: "+strings.Join(found, ", "))
+		return
+	}
+	addCheck(report, "Zero-Allocation Heap Ban", true, "No dynamic heap allocation symbols present")
+}
+
+func auditForbiddenFlashRegions(f *elf.File, forbidden []MemoryRegion, report *ELFAuditReport) {
+	if len(forbidden) == 0 {
+		addCheck(report, "Forbidden Flash Regions", true, "No forbidden flash regions configured — check skipped")
+		return
+	}
+	var overlaps []string
+	for idx, prog := range f.Progs {
+		if prog == nil || prog.Type != elf.PT_LOAD || prog.Filesz == 0 {
+			continue
+		}
+		if prog.Filesz > math.MaxUint64-prog.Paddr {
+			overlaps = append(overlaps, fmt.Sprintf("PT_LOAD[%d] LMA [0x%X + 0x%X) overflows uint64", idx, prog.Paddr, prog.Filesz))
+			continue
+		}
+		segLMA := MemoryRegion{
+			Name: fmt.Sprintf("PT_LOAD[%d]", idx),
+			Base: prog.Paddr,
+			Size: prog.Filesz,
+		}
+		for _, fb := range forbidden {
+			if segLMA.Overlaps(fb) {
+				overlaps = append(overlaps, fmt.Sprintf(
+					"PT_LOAD[%d] LMA [0x%08X..0x%08X) overlaps forbidden flash region '%s' [0x%08X..0x%08X)",
+					idx, segLMA.Base, segLMA.End(), fb.Name, fb.Base, fb.End(),
+				))
+			}
+		}
+	}
+	if len(overlaps) > 0 {
+		addCheck(report, "Forbidden Flash Regions", false, strings.Join(overlaps, "; "))
+		return
+	}
+	addCheck(report, "Forbidden Flash Regions", true,
+		fmt.Sprintf("All loadable segments clear of %d forbidden flash region(s)", len(forbidden)))
 }

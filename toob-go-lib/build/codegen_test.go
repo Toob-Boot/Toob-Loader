@@ -527,6 +527,7 @@ func TestRenderPlatformWiring(t *testing.T) {
 			".write_dslc = tc_keystore_write_dslc,",
 			"#if !defined(TOOB_STAGE0_BUILD) && !defined(TOOB_RECOVERY_BUILD)\n    .slot_caps = &tc_slot_caps,\n#endif",
 			"#if defined(TOOB_ENABLE_ED25519_PH) && !defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)\n    .verify_signature_ph = crypto_monocypher_verify_signature_ph,",
+			"#if !defined(TOOB_RECOVERY_CRYPTO_NONE) && !defined(TOOB_RECOVERY_CRYPTO_ROM)\n    { BOOT_HAL_KIND_CRYPTO, true, SITE_BRINGUP_CRYPTO },\n#endif",
 			"arch_riscv_disable_interrupts();",
 			"return &g_platform_instance;",
 		} {
@@ -1096,5 +1097,60 @@ func forEachIdentifier(src []byte, visit func(ident []byte)) {
 		default:
 			i++
 		}
+	}
+}
+
+func TestSecurityMacrosAndAuditPackageMacros(t *testing.T) {
+	ctx := testContext(t)
+	ctx.Device.Build.Profile = "production"
+	cfg, layout := testLayout(t, ctx)
+
+	src, err := renderBootConfig(ctx, cfg, layout)
+	if err != nil {
+		t.Fatalf("renderBootConfig: %v", err)
+	}
+	hdrBytes, err := src.finish()
+	if err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	hdr := string(hdrBytes)
+	for _, want := range []string{
+		"#define TOOB_PROFILE_PRODUCTION 1",
+		"#define TOOB_DOUBLE_VERIFY 1",
+		"#define TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION 0",
+		"TOOB_MOCK_TEST",
+	} {
+		if !strings.Contains(hdr, want) {
+			t.Errorf("generated_boot_config.h missing %q:\n%s", want, hdr)
+		}
+	}
+
+	// Production profile combined with mock list must fail validation.
+	ctxMockProd := testContext(t)
+	ctxMockProd.Device.Build.Profile = "production"
+	ctxMockProd.Device.Build.Mock = []string{"flash"}
+	if err := validateContext(ctxMockProd); err == nil {
+		t.Fatal("expected production profile with build.mock to fail validation")
+	}
+
+	// AuditPackageMacros checks (#undef, protected macro override, header collisions).
+	pkgA := filepath.Join(t.TempDir(), "pkgA")
+	pkgB := filepath.Join(t.TempDir(), "pkgB")
+	writeTempFile(t, pkgA, "a.h", "#ifndef PKG_A_H\n#define PKG_A_H\n#define SHARED_SYM 1\n#endif\n")
+	writeTempFile(t, pkgB, "b.h", "#ifndef PKG_B_H\n#define PKG_B_H\n#define SHARED_SYM 1\n#endif\n")
+	if err := AuditPackageMacros([]string{pkgA, pkgB}, nil); err == nil || !strings.Contains(err.Error(), "colliding header") {
+		t.Fatalf("expected header collision error, got %v", err)
+	}
+
+	undefPkg := filepath.Join(t.TempDir(), "undefPkg")
+	writeTempFile(t, undefPkg, "evil.c", "#undef BOOT_SECURE_REQUIRE\n#define BOOT_SECURE_REQUIRE(c,a)\n")
+	if err := AuditPackageMacros([]string{undefPkg}, nil); err == nil || !strings.Contains(err.Error(), "#undef") {
+		t.Fatalf("expected #undef error, got %v", err)
+	}
+
+	redefPkg := filepath.Join(t.TempDir(), "redefPkg")
+	writeTempFile(t, redefPkg, "evil.c", "#ifndef BOOT_SECURE_REQUIRE\n#define BOOT_SECURE_REQUIRE(c,a)\n#endif\n")
+	if err := AuditPackageMacros([]string{redefPkg}, nil); err == nil || !strings.Contains(err.Error(), "core security macro") {
+		t.Fatalf("expected core security macro redefinition error, got %v", err)
 	}
 }

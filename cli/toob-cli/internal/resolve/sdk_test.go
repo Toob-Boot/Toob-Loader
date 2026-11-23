@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/toob-boot/toob/internal/lockfile"
-	"github.com/toob-boot/toob/internal/ports"
+	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/registry"
 )
 
@@ -16,19 +16,23 @@ func TestResolveCoreSDK(t *testing.T) {
 		device     string
 		pinned     string
 		minSDK     string
+		locked     bool
 		noRegistry bool
 		want       string
 		wantOrigin string
 		wantErr    string
 	}{
 		{name: "device version", device: "core/v1.1.0", want: "core/v1.1.0", wantOrigin: originDevice},
-		{name: "lockfile wins", device: "core/v1.0.0", pinned: "core/v1.1.0", want: "core/v1.1.0", wantOrigin: originLockfile},
+		{name: "device overrides stale lockfile when unlocked (CRIT-64)", device: "core/v1.0.0", pinned: "core/v1.1.0", want: "core/v1.0.0", wantOrigin: originDevice},
+		{name: "lockfile used when device unset", pinned: "core/v1.1.0", want: "core/v1.1.0", wantOrigin: originLockfile},
+		{name: "locked rejects conflicting device core_sdk", device: "core/v1.0.0", pinned: "core/v1.1.0", locked: true, wantErr: "conflicts with locked version"},
+		{name: "locked requires lockfile core_sdk", locked: true, wantErr: "requires [environment].core_sdk"},
 		{name: "unset resolves latest", want: "core/v1.2.0", wantOrigin: originAuto},
 		{name: "latest keyword", device: "latest", want: "core/v1.2.0", wantOrigin: originAuto},
 		{name: "toob-boot keyword", device: "toob-boot", want: "core/v1.2.0", wantOrigin: originAuto},
 		{name: "latest also overrides pin keyword", pinned: "latest", want: "core/v1.2.0", wantOrigin: originAuto},
-		{name: "no registry falls back to chip minimum", noRegistry: true, minSDK: "v1.0.0", want: "v1.0.0", wantOrigin: originFallback},
-		{name: "no registry and no minimum falls back to main", noRegistry: true, want: "main", wantOrigin: originFallback},
+		{name: "no registry fails fast instead of silent fallback", noRegistry: true, minSDK: "v1.0.0", wantErr: "cannot auto-resolve Core SDK version"},
+		{name: "no registry and no minimum fails fast instead of silent main", noRegistry: true, wantErr: "cannot auto-resolve Core SDK version"},
 		{name: "main passes any minimum", device: "main", minSDK: "v9.0.0", want: "main", wantOrigin: originDevice},
 		{name: "dev passes any minimum", device: "dev", minSDK: "v9.0.0", want: "dev", wantOrigin: originDevice},
 		{name: "below minimum", device: "core/v1.2.0", minSDK: "v1.3.0", wantErr: "requires Core SDK >= v1.3.0"},
@@ -41,12 +45,13 @@ func TestResolveCoreSDK(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := newFixture(t)
 			in := fx.input()
+			in.Locked = tc.locked
 			if tc.noRegistry {
 				in.Index = &registry.Index{}
 			}
 			in.Device.Build.CoreSDK = tc.device
 			in.Lock.Environment.CoreSDK = tc.pinned
-			chip := &Chip{Name: testChip, Spec: &ports.ChipManifest{MinCoreSDK: tc.minSDK}}
+			chip := &Chip{Name: testChip, Spec: &manifestpkg.ChipManifest{MinCoreSDK: tc.minSDK}}
 
 			got, err := resolveCoreSDK(in, chip)
 			if tc.wantErr != "" {
@@ -171,7 +176,7 @@ func TestLocateSDK(t *testing.T) {
 
 func TestMinCompilerEnforcement(t *testing.T) {
 	fx := newFixture(t)
-	fx.setSpec(func(s *ports.ChipManifest) { s.MinCompiler = "14.0.0" })
+	fx.setSpec(func(s *manifestpkg.ChipManifest) { s.MinCompiler = "14.0.0" })
 	if _, err := resolveToolchain(fx.input(), fx.chip()); err == nil {
 		t.Fatal("expected toolchain 1.2.3 below min_compiler 14.0.0 to fail")
 	}

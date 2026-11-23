@@ -1,0 +1,11 @@
+{
+  "name": "evil_tc",
+  "version": "1.0.0",
+  "author": "untrusted-vendor",
+  "urls": {
+    "linux_amd64": "https://example.com/toolchain.tar.gz"
+  },
+  "sha256": {
+    "linux_amd64": "5be906a5194c3173e145a58048e5607ffff947773237802b93e55e23c415f1b6"
+  }
+}

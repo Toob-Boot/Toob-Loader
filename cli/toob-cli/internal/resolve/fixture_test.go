@@ -10,7 +10,6 @@ import (
 
 	"github.com/toob-boot/toob/internal/lockfile"
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
-	"github.com/toob-boot/toob/internal/ports"
 	"github.com/toob-boot/toob/internal/registry"
 )
 
@@ -28,6 +27,8 @@ type fakeSource struct {
 	calls []string
 }
 
+func (f *fakeSource) Dir() string { return f.base }
+
 func (f *fakeSource) lookup(kind, name string) (string, error) {
 	f.calls = append(f.calls, kind+":"+name)
 	if f.fail[kind+":"+name] {
@@ -41,9 +42,11 @@ func (f *fakeSource) ArchSourcePath(name string) (string, error) { return f.look
 func (f *fakeSource) DriverSourcePath(name string) (string, error) {
 	return f.lookup("drivers", name)
 }
+
 func (f *fakeSource) CryptoSourcePath(name string) (string, error) {
 	return f.lookup("crypto", name)
 }
+
 func (f *fakeSource) ToolchainConfigPath(name string) (string, error) {
 	return f.lookup("toolchains", name)
 }
@@ -69,7 +72,7 @@ type fixture struct {
 	t     *testing.T
 	root  string
 	reg   *fakeSource
-	spec  ports.ChipManifest
+	spec  manifestpkg.ChipManifest
 	dev   *manifestpkg.DeviceToml
 	lock  *lockfile.Lockfile
 	index *registry.Index
@@ -82,22 +85,22 @@ func newFixture(t *testing.T) *fixture {
 		t:    t,
 		root: t.TempDir(),
 		reg:  &fakeSource{base: t.TempDir(), fail: map[string]bool{}},
-		spec: ports.ChipManifest{
+		spec: manifestpkg.ChipManifest{
 			Arch:           "riscv",
 			CompilerPrefix: testToolchain + "-",
 			Version:        "2.0.0",
 			MinCoreSDK:     "v1.0.0",
-			Sources: &ports.ChipSources{Drivers: []string{
+			Sources: &manifestpkg.ChipSources{Drivers: []string{
 				"drivers/uart/esp_uart_v1/console.c",
 				"drivers/uart/esp_uart_v1/extra.c",
 				"drivers/flash/esp_flash/flash.c",
 			}},
 			Includes: []string{"soc/esp/include", "include"},
-			Crypto:   &ports.ChipCrypto{Backend: "monocypher", Hash: "sha256_sw"},
-			Recovery: &ports.ChipRecovery{
+			Crypto:   &manifestpkg.ChipCrypto{Backend: "monocypher", Hash: "sha256_sw"},
+			Recovery: &manifestpkg.ChipRecovery{
 				Console:  "uart/esp_uart_v1",
 				Flash:    "flash/esp_flash",
-				Crypto:   &ports.RecoveryCrypto{Backend: "none"},
+				Crypto:   &manifestpkg.RecoveryCrypto{Backend: "none"},
 				Sources:  []string{"recovery/main.c"},
 				Includes: []string{"recovery/inc"},
 			},
@@ -112,13 +115,19 @@ func newFixture(t *testing.T) *fixture {
 			},
 			Crypto: map[string]registry.CryptoInfo{
 				"monocypher": {
+					Version:         "1.0.0",
+					Category:        []string{"backend"},
 					MinCoreSdk:      "v1.0.0",
 					UpstreamSources: []string{"src/a.c", "src/b.c"},
 					Includes:        []string{"inc"},
 					Cflags:          []string{"-DX=1"},
 					Wrapper:         &wrapper,
 				},
-				"sha256_sw": {UpstreamSources: []string{"sha.c"}},
+				"sha256_sw": {
+					Version:         "1.0.0",
+					Category:        []string{"hash"},
+					UpstreamSources: []string{"sha.c"},
+				},
 			},
 		},
 	}
@@ -169,7 +178,7 @@ func (fx *fixture) writeRaw(file, content string) error {
 }
 
 // writeChip writes hardware.json and the manifest of spec into dir.
-func (fx *fixture) writeChip(dir string, spec ports.ChipManifest) {
+func (fx *fixture) writeChip(dir string, spec manifestpkg.ChipManifest) {
 	fx.t.Helper()
 	data, err := json.Marshal(spec)
 	if err != nil {
@@ -182,7 +191,7 @@ func (fx *fixture) writeChip(dir string, spec ports.ChipManifest) {
 }
 
 // setSpec mutates the registry chip manifest and rewrites it.
-func (fx *fixture) setSpec(mutate func(*ports.ChipManifest)) {
+func (fx *fixture) setSpec(mutate func(*manifestpkg.ChipManifest)) {
 	fx.t.Helper()
 	mutate(&fx.spec)
 	fx.writeChip(fx.registryChipDir(), fx.spec)

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Toob-Boot/Toob-Loader/toob-go-lib/build"
 	"github.com/toob-boot/toob/internal/literallint"
 	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/paths"
@@ -410,6 +411,12 @@ func auditDriverPackage(pkgRoot *os.Root, packagePath string, data []byte, hc *h
 
 	recordMockEquivalence(report, verifyMockEquivalence(pkgRoot, dm.Sources, dm.MockSources))
 
+	flagsOK, flagsDetails := verifyCompilerFlagsCheck("driver", dm.CompilerFlags, dm.Cflags)
+	addCheck(report, "Driver Manifest: Compiler Flags", flagsOK, flagsDetails)
+
+	rawOK, rawDetails := verifyRawCSourcesSecurity(pkgRoot, append(append([]string(nil), dm.Sources...), dm.MockSources...), isOfficialToobPackage(dm.Author, dm.Tier), false)
+	addCheck(report, "Driver Security: Raw C Attributes & Sections", rawOK, rawDetails)
+
 	langPassed, langDetails := verifyLanguagePolicyRoot(pkgRoot, nil)
 	addCheck(report, "Language Policy: English Comments", langPassed, langDetails)
 
@@ -534,6 +541,12 @@ func auditArchPackage(pkgRoot *os.Root, packagePath string, data []byte, hc *hal
 				fmt.Sprintf("Verified %d required macro identifier(s)", len(am.RequiredMacros)))
 		}
 	}
+
+	flagsOK, flagsDetails := verifyCompilerFlagsCheck("arch", am.CompilerFlags, am.Cflags)
+	addCheck(report, "Arch Manifest: Compiler Flags", flagsOK, flagsDetails)
+
+	rawOK, rawDetails := verifyRawCSourcesSecurity(pkgRoot, append(append([]string(nil), am.Headers...), am.Sources...), isOfficialToobPackage(am.Author, am.Tier), false)
+	addCheck(report, "Arch Security: Raw C Attributes & Sections", rawOK, rawDetails)
 
 	langPassed, langDetails := verifyLanguagePolicyRoot(pkgRoot, nil)
 	addCheck(report, "Language Policy: English Comments", langPassed, langDetails)
@@ -683,6 +696,12 @@ func auditChipPackage(pkgRoot *os.Root, packagePath string, data []byte, _ *halC
 	}
 
 	recordMockEquivalence(report, verifyMockEquivalence(pkgRoot, nil, nil))
+
+	flagsOK, flagsDetails := verifyCompilerFlagsCheck("chip", cm.CompilerFlags, cm.Cflags)
+	addCheck(report, "Chip Manifest: Compiler Flags", flagsOK, flagsDetails)
+
+	rawOK, rawDetails := verifyRawCSourcesSecurity(pkgRoot, nil, isOfficialToobPackage(cm.Author, cm.Tier), false)
+	addCheck(report, "Chip Security: Raw C Attributes & Sections", rawOK, rawDetails)
 
 	langPassed, langDetails := verifyLanguagePolicyRoot(pkgRoot, nil)
 	addCheck(report, "Language Policy: English Comments", langPassed, langDetails)
@@ -867,6 +886,12 @@ func auditCryptoPackage(pkgRoot *os.Root, packagePath, manifestRel string, data 
 		wrapperLintPaths = append(wrapperLintPaths, filepath.Join(packagePath, filepath.FromSlash(hr)))
 	}
 
+	flagsOK, flagsDetails := verifyCompilerFlagsCheck("crypto", cm.CompilerFlags, cm.Cflags)
+	addCheck(report, "Crypto Manifest: Compiler Flags", flagsOK, flagsDetails)
+
+	rawOK, rawDetails := verifyRawCSourcesSecurity(pkgRoot, append(append([]string(nil), cSourceRels...), headerRels...), isOfficialToobPackage(cm.Author, cm.Tier), false)
+	addCheck(report, "Crypto Security: Raw C Attributes & Sections", rawOK, rawDetails)
+
 	langPassed, langDetails := verifyLanguagePolicyRoot(pkgRoot, firstPartyLangRels)
 	addCheck(report, "Language Policy: English Comments", langPassed, langDetails)
 
@@ -942,6 +967,12 @@ func auditSoCPackage(pkgRoot *os.Root, packagePath string, data []byte) (*Confor
 	} else {
 		addCheck(report, "SoC Manifest: Files", true, "Verified SoC package files and containment")
 	}
+
+	flagsOK, flagsDetails := verifyCompilerFlagsCheck("soc", sm.CompilerFlags, sm.Cflags)
+	addCheck(report, "SoC Manifest: Compiler Flags", flagsOK, flagsDetails)
+
+	rawOK, rawDetails := verifyRawCSourcesSecurity(pkgRoot, append(append([]string(nil), sm.Headers...), sm.Sources...), isOfficialToobPackage(sm.Author, sm.Tier), false)
+	addCheck(report, "SoC Security: Raw C Attributes & Sections", rawOK, rawDetails)
 
 	langPassed, langDetails := verifyLanguagePolicyRoot(pkgRoot, nil)
 	addCheck(report, "Language Policy: English Comments", langPassed, langDetails)
@@ -1031,6 +1062,15 @@ func auditIntegrationPackage(pkgRoot *os.Root, packagePath string, data []byte) 
 		}
 	}
 
+	flagsOK, flagsDetails := verifyCompilerFlagsCheck("integration", im.CompilerFlags, im.Cflags)
+	addCheck(report, "Integration Manifest: Compiler Flags", flagsOK, flagsDetails)
+
+	rawOK, rawDetails := verifyRawCSourcesSecurity(pkgRoot, im.Files, isOfficialToobPackage(im.Author, im.Tier), true)
+	addCheck(report, "Integration Security: Raw C Attributes & Sections", rawOK, rawDetails)
+
+	cmakeOK, cmakeDetails := verifyIntegrationCMakeFiles(pkgRoot, im.Files)
+	addCheck(report, "Integration Security: CMake Scripts", cmakeOK, cmakeDetails)
+
 	langPassed, langDetails := verifyLanguagePolicyRoot(pkgRoot, nil)
 	addCheck(report, "Language Policy: English Comments", langPassed, langDetails)
 
@@ -1099,11 +1139,41 @@ func auditToolchainPackage(pkgRoot *os.Root, packagePath string, data []byte) (*
 	}
 
 	tcFile := cmp.Or(strings.TrimSpace(tm.ToolchainFile), "toolchain.cmake")
-	if _, rErr := readRootRegularFile(pkgRoot, tcFile, maxSourceFileBytes); rErr != nil {
+	if tcData, rErr := readRootRegularFile(pkgRoot, tcFile, maxSourceFileBytes); rErr != nil {
 		addCheck(report, "Toolchain Manifest: CMake File", false, fmt.Sprintf("Missing or invalid %q", tcFile))
 	} else {
-		addCheck(report, "Toolchain Manifest: CMake File", true, fmt.Sprintf("Verified '%s'", tcFile))
+		cmakeIssues := validateCMakeSecurityScript(tcFile, string(tcData), true)
+		if len(cmakeIssues) > 0 {
+			addCheck(report, "Toolchain Manifest: CMake File", false, strings.Join(cmakeIssues, "; "))
+		} else {
+			addCheck(report, "Toolchain Manifest: CMake File", true, fmt.Sprintf("Verified '%s' content and compiler settings", tcFile))
+		}
 	}
+
+	var metaIssues []string
+	if tm.CompilerPrefix != "" {
+		if valErr := manifest.ValidateName("toolchain compiler_prefix", tm.CompilerPrefix); valErr != nil {
+			metaIssues = append(metaIssues, valErr.Error())
+		}
+	}
+	if tm.CompilerBinary != "" {
+		if valErr := manifest.ValidateName("toolchain compiler_binary", tm.CompilerBinary); valErr != nil {
+			metaIssues = append(metaIssues, valErr.Error())
+		}
+	}
+	for plat := range tm.SHA256 {
+		if _, ok := tm.URLs[plat]; !ok {
+			metaIssues = append(metaIssues, fmt.Sprintf("sha256 entry %q has no matching url", plat))
+		}
+	}
+	if len(metaIssues) > 0 {
+		addCheck(report, "Toolchain Manifest: Compiler Metadata", false, strings.Join(metaIssues, "; "))
+	} else {
+		addCheck(report, "Toolchain Manifest: Compiler Metadata", true, "Verified toolchain prefix/binary identifiers and digest keys")
+	}
+
+	flagsOK, flagsDetails := verifyCompilerFlagsCheck("toolchain", tm.CompilerFlags, tm.Cflags)
+	addCheck(report, "Toolchain Manifest: Compiler Flags", flagsOK, flagsDetails)
 
 	langPassed, langDetails := verifyLanguagePolicyRoot(pkgRoot, nil)
 	addCheck(report, "Language Policy: English Comments", langPassed, langDetails)
@@ -1144,6 +1214,23 @@ func auditPortPackage(pkgRoot *os.Root, packagePath string, data []byte) (*Confo
 	}
 
 	var fileIssues []string
+	var sourceRels []string
+	if len(pm.Headers) == 0 {
+		fileIssues = append(fileIssues, "port_manifest.json must declare at least one header in 'headers'")
+	}
+	if len(pm.Sources) == 0 {
+		fileIssues = append(fileIssues, "port_manifest.json must declare at least one source file in 'sources'")
+	}
+	if pm.Chip != "" {
+		if valErr := manifest.ValidateName("port chip", pm.Chip); valErr != nil {
+			fileIssues = append(fileIssues, valErr.Error())
+		}
+	}
+	if pm.Arch != "" {
+		if valErr := manifest.ValidateName("port arch", pm.Arch); valErr != nil {
+			fileIssues = append(fileIssues, valErr.Error())
+		}
+	}
 	for _, h := range pm.Headers {
 		if _, ok := resolveRootHeader(pkgRoot, h); !ok {
 			fileIssues = append(fileIssues, fmt.Sprintf("missing/invalid header %q", h))
@@ -1152,6 +1239,8 @@ func auditPortPackage(pkgRoot *os.Root, packagePath string, data []byte) (*Confo
 	for _, src := range pm.Sources {
 		if _, rErr := readRootRegularFile(pkgRoot, src, maxSourceFileBytes); rErr != nil {
 			fileIssues = append(fileIssues, fmt.Sprintf("missing/invalid source %q", src))
+		} else {
+			sourceRels = append(sourceRels, filepath.ToSlash(src))
 		}
 	}
 	for _, inc := range pm.Includes {
@@ -1166,11 +1255,17 @@ func auditPortPackage(pkgRoot *os.Root, packagePath string, data []byte) (*Confo
 	}
 
 	if len(pm.Symbols) > 0 {
+		strippedPortCode := readStrippedCSourcesRoot(pkgRoot, sourceRels)
 		var badSyms []string
 		for _, k := range slices.Sorted(maps.Keys(pm.Symbols)) {
 			sym := pm.Symbols[k]
-			if err := manifest.ValidateName("port symbol key", k); err != nil || !isValidCSymbol(sym) {
+			if valErr := manifest.ValidateName("port symbol key", k); valErr != nil || !isValidCSymbol(sym) {
 				badSyms = append(badSyms, fmt.Sprintf("%s=%q", k, sym))
+				continue
+			}
+			symRe := regexp.MustCompile(`\b` + regexp.QuoteMeta(sym) + `\b`)
+			if len(sourceRels) > 0 && !symRe.MatchString(strippedPortCode) {
+				badSyms = append(badSyms, fmt.Sprintf("symbol %q (for %q) not found in declared port sources", sym, k))
 			}
 		}
 		if len(badSyms) > 0 {
@@ -1181,6 +1276,12 @@ func auditPortPackage(pkgRoot *os.Root, packagePath string, data []byte) (*Confo
 	}
 
 	recordMockEquivalence(report, verifyMockEquivalence(pkgRoot, pm.Sources, pm.MockSources))
+
+	flagsOK, flagsDetails := verifyCompilerFlagsCheck("port", pm.CompilerFlags, pm.Cflags)
+	addCheck(report, "Port Manifest: Compiler Flags", flagsOK, flagsDetails)
+
+	rawOK, rawDetails := verifyRawCSourcesSecurity(pkgRoot, append(append([]string(nil), pm.Headers...), pm.Sources...), isOfficialToobPackage(pm.Author, pm.Tier), false)
+	addCheck(report, "Port Security: Raw C Attributes & Sections", rawOK, rawDetails)
 
 	langPassed, langDetails := verifyLanguagePolicyRoot(pkgRoot, nil)
 	addCheck(report, "Language Policy: English Comments", langPassed, langDetails)
@@ -1663,4 +1764,182 @@ func verifyLiteralLintCheck(packagePath string) (bool, string) {
 		return false, fmt.Sprintf("Found %d unauthorized numeric literal(s): %s", len(report.Violations), strings.Join(details, ", "))
 	}
 	return true, "All C/H files contain no unauthorized numeric literals (REG-040 clean)"
+}
+
+func isOfficialToobPackage(author, tier string) bool {
+	return strings.EqualFold(strings.TrimSpace(author), "toob-core-team") ||
+		strings.EqualFold(strings.TrimSpace(tier), "official")
+}
+
+func verifyCompilerFlagsCheck(pkgKind string, cf *compilerFlagsSpec, cflags []string) (bool, string) {
+	var issues []string
+	for _, f := range cflags {
+		if flagErr := build.ValidateCompilerFlag(pkgKind+".cflags", f); flagErr != nil {
+			issues = append(issues, flagErr.Error())
+		}
+	}
+	if cf != nil {
+		for _, f := range cf.CFlags {
+			if flagErr := build.ValidateCompilerFlag(pkgKind+".c_flags", f); flagErr != nil {
+				issues = append(issues, flagErr.Error())
+			}
+		}
+		for _, f := range cf.AsmFlags {
+			if flagErr := build.ValidateCompilerFlag(pkgKind+".asm_flags", f); flagErr != nil {
+				issues = append(issues, flagErr.Error())
+			}
+		}
+		for _, f := range cf.LdFlags {
+			if flagErr := build.ValidateCompilerFlag(pkgKind+".ld_flags", f); flagErr != nil {
+				issues = append(issues, flagErr.Error())
+			}
+		}
+	}
+	if len(issues) > 0 {
+		return false, strings.Join(issues, "; ")
+	}
+	return true, "Compiler/linker flags conform to allowlist"
+}
+
+func verifyRawCSourcesSecurity(pkgRoot *os.Root, declaredRels []string, allowOfficialWeak, isIntegration bool) (bool, string) {
+	seen := make(map[string]bool)
+	var rels []string
+	addRel := func(rel string) {
+		trimmed := strings.TrimSpace(rel)
+		if trimmed == "" {
+			return
+		}
+		slash, _, err := validateContainedRelPath(trimmed)
+		if err != nil {
+			return
+		}
+		ext := strings.ToLower(filepath.Ext(slash))
+		if ext != ".c" && ext != ".h" {
+			return
+		}
+		if !seen[slash] {
+			seen[slash] = true
+			rels = append(rels, slash)
+		}
+	}
+	for _, r := range declaredRels {
+		addRel(r)
+	}
+	_ = fs.WalkDir(pkgRoot.FS(), ".", func(relPath string, d fs.DirEntry, err error) error {
+		if err != nil || relPath == "." {
+			return err
+		}
+		if d.IsDir() {
+			base := d.Name()
+			if base == ".git" || base == "build" || base == "builds" || base == ".toob" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		addRel(relPath)
+		return nil
+	})
+	slices.Sort(rels)
+
+	var issues []string
+	for _, rel := range rels {
+		data, rErr := readRootRegularFile(pkgRoot, rel, maxSourceFileBytes)
+		if rErr != nil {
+			continue
+		}
+		issues = append(issues, scanRawCForForbiddenConstructs(rel, string(data), allowOfficialWeak, isIntegration)...)
+	}
+	if len(issues) > 0 {
+		return false, strings.Join(issues, "; ")
+	}
+	return true, fmt.Sprintf("Verified %d C/H file(s) free of forbidden constructors, init/fini sections, aliases, and unauthorized weak linkage", len(rels))
+}
+
+var (
+	cmakeDangerousCmdRe  = regexp.MustCompile(`(?i)\b(execute_process|FetchContent_[A-Za-z0-9_]+|ExternalProject_[A-Za-z0-9_]+|install)\s*\(`)
+	cmakeDangerousFileRe = regexp.MustCompile(`(?i)\bfile\s*\(\s*(WRITE|APPEND|COPY|DOWNLOAD|UPLOAD|REMOVE|REMOVE_RECURSE|MAKE_DIRECTORY|RENAME|CREATE_LINK)\b`)
+	cmakeToolchainMutRe  = regexp.MustCompile(`(?i)\b(add_compile_definitions|add_compile_options|add_link_options|link_libraries)\s*\(`)
+	cmakeFlagInjectionRe = regexp.MustCompile(`(?i)(-Wl,--wrap|-Wl,-wrap|-Wl,--defsym|-Wl,-defsym|-Wl,--allow-multiple-definition|-DTOOB_ALLOW_DEV_BYPASS|-DTOOB_MOCK_|-DTOOB_DOUBLE_VERIFY=0|-DTOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION=1|-fplugin|-imacros|-Wp,)`)
+	cmakeIncludePathRe   = regexp.MustCompile(`(?i)\binclude\s*\(([^)]+)\)`)
+)
+
+func validateCMakeSecurityScript(relPath, content string, strictToolchain bool) []string {
+	var issues []string
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	for idx, rawLine := range lines {
+		ln := idx + 1
+		// Strip CMake comments outside obvious quoted strings cleanly.
+		line := rawLine
+		if hashIdx := strings.IndexByte(line, '#'); hashIdx >= 0 {
+			line = line[:hashIdx]
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if m := cmakeDangerousCmdRe.FindString(trimmed); m != "" {
+			issues = append(issues, fmt.Sprintf("%s:L%d: forbidden CMake command %q", relPath, ln, strings.TrimSuffix(m, "(")))
+		}
+		if m := cmakeDangerousFileRe.FindString(trimmed); m != "" {
+			issues = append(issues, fmt.Sprintf("%s:L%d: forbidden CMake file side-effect %q", relPath, ln, m))
+		}
+		if m := cmakeFlagInjectionRe.FindString(trimmed); m != "" {
+			issues = append(issues, fmt.Sprintf("%s:L%d: forbidden compiler/linker override %q", relPath, ln, m))
+		}
+		if incMatch := cmakeIncludePathRe.FindStringSubmatch(trimmed); len(incMatch) >= 2 && strings.Contains(incMatch[1], "..") {
+			issues = append(issues, fmt.Sprintf("%s:L%d: forbidden path traversal '..' in include()", relPath, ln))
+		}
+		if strictToolchain {
+			if m := cmakeToolchainMutRe.FindString(trimmed); m != "" {
+				issues = append(issues, fmt.Sprintf("%s:L%d: toolchain.cmake must not inject global target command %q", relPath, ln, strings.TrimSuffix(m, "(")))
+			}
+		}
+	}
+	return issues
+}
+
+func verifyIntegrationCMakeFiles(pkgRoot *os.Root, declaredFiles []string) (bool, string) {
+	seen := make(map[string]bool)
+	var cmakeRels []string
+	checkAdd := func(rel string) {
+		slash, _, err := validateContainedRelPath(rel)
+		if err != nil {
+			return
+		}
+		base := filepath.Base(slash)
+		ext := strings.ToLower(filepath.Ext(slash))
+		if base == "CMakeLists.txt" || ext == ".cmake" || strings.HasSuffix(base, ".cmake") {
+			if !seen[slash] {
+				seen[slash] = true
+				cmakeRels = append(cmakeRels, slash)
+			}
+		}
+	}
+	for _, f := range declaredFiles {
+		checkAdd(f)
+	}
+	_ = fs.WalkDir(pkgRoot.FS(), ".", func(relPath string, d fs.DirEntry, err error) error {
+		if err != nil || relPath == "." {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		checkAdd(relPath)
+		return nil
+	})
+	slices.Sort(cmakeRels)
+
+	var issues []string
+	for _, rel := range cmakeRels {
+		data, rErr := readRootRegularFile(pkgRoot, rel, maxSourceFileBytes)
+		if rErr != nil {
+			continue
+		}
+		issues = append(issues, validateCMakeSecurityScript(rel, string(data), false)...)
+	}
+	if len(issues) > 0 {
+		return false, strings.Join(issues, "; ")
+	}
+	return true, fmt.Sprintf("Verified %d CMake file(s) in integration package", len(cmakeRels))
 }

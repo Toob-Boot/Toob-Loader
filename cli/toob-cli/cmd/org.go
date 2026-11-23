@@ -2,230 +2,325 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
+
 	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-var orgCmd = &cobra.Command{
-	Use:   "org",
-	Short: "Manage the organizations you belong to",
-	Long: `Lists, creates and leaves organizations, and invites people to them.
+func newOrgCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "org",
+		Short: "Manage Toob Registry organizations and package namespaces",
+	}
 
-Organizations are managed by the Toob identity service; the registry says where it is.
-Every command acts as the person signed in with 'toob login' — an API key does not reach them.`,
+	c.AddCommand(
+		newOrgListCmd(),
+		newOrgCreateCmd(),
+		newOrgUseCmd(),
+		newOrgInviteCmd(),
+		newOrgAcceptInviteCmd(),
+		newOrgLeaveCmd(),
+		newOrgNamespaceCmd(),
+	)
+	return c
 }
 
-var orgListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List your organizations with your role and their plan",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		organizations, err := apiclient.New().Organizations(cmd_defaultCtx())
-		if err != nil {
-			return err
-		}
+func newOrgListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List organizations you belong to",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, cancel := commandContext(cmd, defaultCmdTimeout)
+			defer cancel()
 
-		chosen, err := apiclient.ChosenOrganization()
-		if err != nil {
-			return err
-		}
-
-		ui.Header("Organizations")
-		if len(organizations.Tenants) == 0 {
-			ui.Muted("You belong to no organization yet. Create one with 'toob org create <name>'.")
-		}
-		for _, organization := range organizations.Tenants {
-			name := organization.Name
-			if chosen != nil && chosen.ID == organization.ID {
-				name += " (in use)"
+			client := apiclient.New()
+			orgs, err := client.Organizations(ctx)
+			if err != nil {
+				return fmt.Errorf("list organizations: %w", err)
 			}
-			ui.KeyValue(name, fmt.Sprintf("%s · %s plan · %s", organization.Role, organization.Plan, ui.Gray(organization.ID)))
-		}
-		ui.Muted("%d of %d organizations created by you.", organizations.Created, organizations.CreateLimit)
-		return nil
-	},
+
+			chosen, _ := apiclient.ChosenOrganization()
+			if orgs == nil || len(orgs.Tenants) == 0 {
+				ui.Info("You do not belong to any organizations.")
+				return nil
+			}
+
+			for _, org := range orgs.Tenants {
+				marker := " "
+				if chosen != nil && (org.ID == chosen.ID || strings.EqualFold(org.Name, chosen.Name)) {
+					marker = "*"
+				}
+				ui.Info("%s %-12s %-24s (role=%s, plan=%s)",
+					marker,
+					shortID(sanitizeDisplay(org.ID), 12),
+					sanitizeDisplay(org.Name),
+					sanitizeDisplay(org.Role),
+					sanitizeDisplay(org.Plan))
+			}
+			return nil
+		},
+	}
 }
 
-var orgCreateCmd = &cobra.Command{
-	Use:   "create <name>",
-	Short: "Create an organization of your own",
-	Long: `Creates an organization and makes you its owner. The name is lowercase letters, digits
-and single hyphens. An account may create five; TOOB support sets up more.`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		created, err := apiclient.New().CreateOrganization(cmd_defaultCtx(), args[0])
-		if err != nil {
-			return err
-		}
-		ui.Success("Created %s (%s). You are its owner.", ui.Bold(created.Name), created.ID)
-		return nil
-	},
+func newOrgCreateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "create <name>",
+		Short: "Create a new organization and reserve its default package namespace",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := strings.TrimSpace(args[0])
+			if name == "" {
+				return errors.New("organization name must not be empty")
+			}
+
+			client := apiclient.New()
+			var created *apiclient.Organization
+			if err := withStepUp(cmd, client, func(ctx context.Context) error {
+				var err error
+				created, err = client.CreateOrganization(ctx, name)
+				if err != nil {
+					return err
+				}
+				if _, nsErr := client.ReserveNamespace(ctx, name, created.ID); nsErr != nil {
+					return fmt.Errorf("organization %q created, but reserve default namespace failed: %w", name, nsErr)
+				}
+				return nil
+			}); err != nil {
+				return fmt.Errorf("create organization: %w", err)
+			}
+
+			ui.Success("Created organization %s and reserved namespace @%s", sanitizeDisplay(created.Name), sanitizeDisplay(name))
+			return nil
+		},
+	}
 }
 
-var orgUseCmd = &cobra.Command{
-	Use:   "use [organization]",
-	Short: "Choose the organization your organization commands act on",
-	Long: `Remembers an organization, by name or id, for the account signed in; commands that act on
-an organization use it when none is named. --personal forgets it. Another account keeps its own.
-It grants nothing: identity checks your membership on every request.`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		personal, _ := cmd.Flags().GetBool("personal")
-		switch {
-		case personal && len(args) == 0:
-			if err := apiclient.ClearOrganization(); err != nil {
+func newOrgUseCmd() *cobra.Command {
+	var personal bool
+
+	c := &cobra.Command{
+		Use:   "use [<org-id-or-name>]",
+		Short: "Switch active registry organization context (or --personal)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := apiclient.New()
+			ctx, cancel := commandContext(cmd, defaultCmdTimeout)
+			defer cancel()
+
+			if personal {
+				if len(args) > 0 {
+					return errors.New("cannot specify an organization alongside --personal")
+				}
+				if !apiclient.HasSession() {
+					return errors.New("not signed in (run 'toob login' first)")
+				}
+				if _, err := client.Whoami(ctx); err != nil {
+					return fmt.Errorf("active session required for personal context: %w", err)
+				}
+				if err := apiclient.ClearOrganization(); err != nil {
+					return fmt.Errorf("switch to personal account: %w", err)
+				}
+				ui.Success("Switched active context to personal account")
+				return nil
+			}
+
+			if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+				return errors.New("organization name or ID is required unless --personal is set")
+			}
+			target := strings.TrimSpace(args[0])
+
+			orgs, err := client.Organizations(ctx)
+			if err != nil {
+				return fmt.Errorf("lookup organizations: %w", err)
+			}
+			var matched *apiclient.Organization
+			for i := range orgs.Tenants {
+				t := &orgs.Tenants[i]
+				if t.ID == target || strings.EqualFold(t.Name, target) {
+					matched = t
+					break
+				}
+			}
+			if matched == nil {
+				return fmt.Errorf("organization %q not found among your memberships", target)
+			}
+
+			if err := apiclient.ChooseOrganization(matched.ID, matched.Name); err != nil {
+				return fmt.Errorf("select organization %q: %w", matched.Name, err)
+			}
+			ui.Success("Switched active organization to %s (%s)", sanitizeDisplay(matched.Name), sanitizeDisplay(matched.ID))
+			return nil
+		},
+	}
+
+	c.Flags().BoolVar(&personal, "personal", false, "Clear organization selection and use personal account")
+	return c
+}
+
+func newOrgInviteCmd() *cobra.Command {
+	var role string
+
+	c := &cobra.Command{
+		Use:   "invite <tenant-id> <email>",
+		Short: "Invite a collaborator to an organization",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tenantID := strings.TrimSpace(args[0])
+			email := strings.TrimSpace(args[1])
+
+			client := apiclient.New()
+			var inv *apiclient.Invitation
+			if err := withStepUp(cmd, client, func(ctx context.Context) error {
+				var err error
+				inv, err = client.Invite(ctx, tenantID, email, role)
+				return err
+			}); err != nil {
+				return fmt.Errorf("invite collaborator: %w", err)
+			}
+
+			ui.Success("Sent %s invitation to %s (id=%s)", sanitizeDisplay(inv.Role), sanitizeDisplay(inv.Email), shortID(sanitizeDisplay(inv.ID), 12))
+			return nil
+		},
+	}
+
+	c.Flags().StringVar(&role, "role", "member", "Organization role (owner, maintainer, member)")
+	return c
+}
+
+func newOrgAcceptInviteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "accept-invite <token>",
+		Short: "Accept an organization invitation token",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			token := strings.TrimSpace(args[0])
+			if token == "" {
+				return errors.New("invitation token must not be empty")
+			}
+
+			ctx, cancel := commandContext(cmd, defaultCmdTimeout)
+			defer cancel()
+
+			client := apiclient.New()
+			res, err := client.AcceptInvitation(ctx, token)
+			if err != nil {
+				return fmt.Errorf("accept invitation: %w", err)
+			}
+
+			ui.Success("Joined organization %s (role=%s)", sanitizeDisplay(res.Organization.Name), sanitizeDisplay(res.Organization.Role))
+			return nil
+		},
+	}
+}
+
+func newOrgLeaveCmd() *cobra.Command {
+	var yes bool
+
+	c := &cobra.Command{
+		Use:   "leave <tenant-id>",
+		Short: "Leave an organization",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tenantID := strings.TrimSpace(args[0])
+			if tenantID == "" {
+				return errors.New("organization ID must not be empty")
+			}
+
+			if err := confirmIrreversible(yes, fmt.Sprintf("Leave organization %q? This cannot be undone without a new invite.", tenantID)); err != nil {
 				return err
 			}
-			ui.Success("No organization is in use; commands act on the one they name.")
-			return nil
-		case personal || len(args) == 0:
-			return fmt.Errorf("name an organization, or pass --personal to forget the one in use")
-		}
 
-		organization, err := resolveOrganization(cmd_defaultCtx(), apiclient.New(), args[0])
-		if err != nil {
-			return err
-		}
-		if err := apiclient.ChooseOrganization(organization.ID, organization.Name); err != nil {
-			return err
-		}
-		ui.Success("Organization commands now act on %s, where you are %s.", ui.Bold(organization.Name), organization.Role)
-		return nil
-	},
-}
+			ctx, cancel := commandContext(cmd, defaultCmdTimeout)
+			defer cancel()
 
-var orgCurrentCmd = &cobra.Command{
-	Use:   "current",
-	Short: "Show the organization your organization commands act on",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		chosen, err := apiclient.ChosenOrganization()
-		if err != nil {
-			return err
-		}
-		if chosen == nil {
-			ui.Muted("None. Choose one with 'toob org use <organization>'.")
-			return nil
-		}
-		ui.KeyValue(chosen.Name, ui.Gray(chosen.ID))
-		return nil
-	},
-}
-
-var orgInviteCmd = &cobra.Command{
-	Use:   "invite [organization] <email>",
-	Short: "Invite somebody by e-mail",
-	Long: `Sends an invitation link to the address. It is accepted by an account whose verified
-address this is, once, within 72 hours. The role is at most your own. Without an organization
-named, the one --org names or 'toob org use' chose is the one invited to.`,
-	Args: cobra.RangeArgs(1, 2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		role, _ := cmd.Flags().GetString("role")
-		client := apiclient.New()
-		ctx := cmd_defaultCtx()
-
-		organization, err := organizationOf(ctx, cmd, client, args[:len(args)-1])
-		if err != nil {
-			return err
-		}
-		invitation, err := client.Invite(ctx, organization.ID, args[len(args)-1], role)
-		if err != nil {
-			return err
-		}
-		ui.Success("Invited %s to %s as %s. The link is valid until %s.",
-			invitation.Email, ui.Bold(organization.Name), invitation.Role, invitation.ExpiresAt)
-		return nil
-	},
-}
-
-var orgLeaveCmd = &cobra.Command{
-	Use:   "leave [organization]",
-	Short: "Leave an organization",
-	Long:  `Leaves the organization named, or the one --org names or 'toob org use' chose.`,
-	Args:  cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		client := apiclient.New()
-		ctx := cmd_defaultCtx()
-
-		organization, err := organizationOf(ctx, cmd, client, args)
-		if err != nil {
-			return err
-		}
-		if err := client.LeaveOrganization(ctx, organization.ID); err != nil {
-			return err
-		}
-		// An organization left is not the one in use any more.
-		chosen, err := apiclient.ChosenOrganization()
-		if err != nil {
-			return err
-		}
-		if chosen != nil && chosen.ID == organization.ID {
-			if err := apiclient.ClearOrganization(); err != nil {
-				return err
+			client := apiclient.New()
+			if err := client.LeaveOrganization(ctx, tenantID); err != nil {
+				return fmt.Errorf("leave organization: %w", err)
 			}
-		}
-		ui.Success("You left %s.", ui.Bold(organization.Name))
-		return nil
-	},
+
+			ui.Success("Left organization %s", sanitizeDisplay(tenantID))
+			return nil
+		},
+	}
+
+	c.Flags().BoolVarP(&yes, "yes", "y", false, "Skip interactive confirmation prompt")
+	return c
 }
 
-// organizationOf is the organization a command acts on: the one named, else --org, else the one
-// 'toob org use' chose. The last is looked up like the others, so a membership that ended is
-// reported rather than acted on.
-func organizationOf(ctx context.Context, cmd *cobra.Command, client *apiclient.Client, named []string) (apiclient.Organization, error) {
-	if len(named) == 1 {
-		return resolveOrganization(ctx, client, named[0])
+func newOrgNamespaceCmd() *cobra.Command {
+	nsCmd := &cobra.Command{
+		Use:   "namespace",
+		Short: "Manage reserved package namespaces (@scope)",
 	}
-	if flag, _ := cmd.Flags().GetString("org"); flag != "" {
-		return resolveOrganization(ctx, client, flag)
-	}
-	chosen, err := apiclient.ChosenOrganization()
-	if err != nil {
-		return apiclient.Organization{}, err
-	}
-	if chosen == nil {
-		return apiclient.Organization{}, fmt.Errorf("name an organization, pass --org, or choose one with 'toob org use <organization>'")
-	}
-	organization, err := resolveOrganization(ctx, client, chosen.ID)
-	if err != nil {
-		return apiclient.Organization{}, fmt.Errorf("the organization in use, %s, is not one of yours any more; choose another with 'toob org use': %w", chosen.Name, err)
-	}
-	return organization, nil
+
+	nsCmd.AddCommand(
+		newOrgNamespaceListCmd(),
+		newOrgNamespaceReserveCmd(),
+	)
+	return nsCmd
 }
 
-// resolveOrganization finds one of the person's organizations by id or by name.
-func resolveOrganization(ctx context.Context, client *apiclient.Client, reference string) (apiclient.Organization, error) {
-	organizations, err := client.Organizations(ctx)
-	if err != nil {
-		return apiclient.Organization{}, err
-	}
-	var named []apiclient.Organization
-	for _, organization := range organizations.Tenants {
-		if organization.ID == reference {
-			return organization, nil
-		}
-		if strings.EqualFold(organization.Name, reference) {
-			named = append(named, organization)
-		}
-	}
-	switch len(named) {
-	case 1:
-		return named[0], nil
-	case 0:
-		return apiclient.Organization{}, fmt.Errorf("you belong to no organization %q; 'toob org list' shows yours", reference)
-	default:
-		return apiclient.Organization{}, fmt.Errorf("%d of your organizations are called %q; name one by its id ('toob org list')", len(named), reference)
+func newOrgNamespaceListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List package namespaces you can publish into",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, cancel := commandContext(cmd, defaultCmdTimeout)
+			defer cancel()
+
+			client := apiclient.New()
+			list, err := client.ListNamespaces(ctx)
+			if err != nil {
+				return fmt.Errorf("list namespaces: %w", err)
+			}
+
+			if len(list) == 0 {
+				ui.Info("No namespaces found.")
+				return nil
+			}
+			for _, ns := range list {
+				ui.Info("@%-24s id=%s role=%s", sanitizeDisplay(ns.Name), shortID(sanitizeDisplay(ns.ID), 12), sanitizeDisplay(ns.Role))
+			}
+			return nil
+		},
 	}
 }
 
-func init() {
-	orgInviteCmd.Flags().String("role", "member", "The role the invitation grants: member, admin or owner")
-	orgUseCmd.Flags().Bool("personal", false, "Forget the organization in use")
-	orgCmd.PersistentFlags().String("org", "", "The organization to act on, by name or id, instead of the one in use")
-	orgCmd.AddCommand(orgListCmd, orgCreateCmd, orgUseCmd, orgCurrentCmd, orgInviteCmd, orgLeaveCmd)
-	rootCmd.AddCommand(orgCmd)
+func newOrgNamespaceReserveCmd() *cobra.Command {
+	var tenantID string
+
+	c := &cobra.Command{
+		Use:   "reserve <namespace>",
+		Short: "Reserve a new package namespace",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			nsName := strings.TrimPrefix(strings.TrimSpace(args[0]), "@")
+			if nsName == "" {
+				return errors.New("namespace name must not be empty")
+			}
+
+			client := apiclient.New()
+			var reserved *apiclient.Namespace
+			if err := withStepUp(cmd, client, func(ctx context.Context) error {
+				var err error
+				reserved, err = client.ReserveNamespace(ctx, nsName, tenantID)
+				return err
+			}); err != nil {
+				return fmt.Errorf("reserve namespace: %w", err)
+			}
+
+			ui.Success("Reserved namespace @%s", sanitizeDisplay(reserved.Name))
+			return nil
+		},
+	}
+
+	c.Flags().StringVar(&tenantID, "org", "", "Target organization tenant ID (optional)")
+	return c
 }

@@ -5,135 +5,125 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
+	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/toob-boot/toob/internal/httputil"
 )
 
-func TestDecompressArchive_Zip(t *testing.T) {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
+func TestUpdateDevBuildRequiresExplicitVersion(t *testing.T) {
+	orig := Version
+	Version = "dev"
+	defer func() { Version = orig }()
 
-	// Create dummy files
-	files := map[string]string{
-		"readme.txt": "some documentation",
-		"toob":       "dummy-executable-binary-content",
-	}
-
-	for name, content := range files {
-		f, err := zw.Create(name)
-		if err != nil {
-			t.Fatalf("failed to create zip entry: %v", err)
-		}
-		if _, err := f.Write([]byte(content)); err != nil {
-			t.Fatalf("failed to write zip entry: %v", err)
-		}
-	}
-
-	if err := zw.Close(); err != nil {
-		t.Fatalf("failed to close zip writer: %v", err)
-	}
-
-	decompressed, err := decompressArchive(buf.Bytes(), "toob-windows-amd64.zip")
-	if err != nil {
-		t.Fatalf("failed to decompress zip: %v", err)
-	}
-
-	expected := "dummy-executable-binary-content"
-	if string(decompressed) != expected {
-		t.Errorf("expected %q, got %q", expected, string(decompressed))
-	}
-}
-
-func TestDecompressArchive_TarGz(t *testing.T) {
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
-
-	// Create dummy files
-	files := map[string]string{
-		"readme.txt": "some documentation",
-		"toob":       "dummy-executable-binary-content-tar",
-	}
-
-	for name, content := range files {
-		hdr := &tar.Header{
-			Name: name,
-			Mode: 0o755,
-			Size: int64(len(content)),
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			t.Fatalf("failed to write tar header: %v", err)
-		}
-		if _, err := tw.Write([]byte(content)); err != nil {
-			t.Fatalf("failed to write tar content: %v", err)
-		}
-	}
-
-	if err := tw.Close(); err != nil {
-		t.Fatalf("failed to close tar writer: %v", err)
-	}
-	if err := gw.Close(); err != nil {
-		t.Fatalf("failed to close gzip writer: %v", err)
-	}
-
-	decompressed, err := decompressArchive(buf.Bytes(), "toob-linux-amd64.tar.gz")
-	if err != nil {
-		t.Fatalf("failed to decompress tar.gz: %v", err)
-	}
-
-	expected := "dummy-executable-binary-content-tar"
-	if string(decompressed) != expected {
-		t.Errorf("expected %q, got %q", expected, string(decompressed))
-	}
-}
-
-func TestDecompressArchive_NotFound(t *testing.T) {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-
-	f, err := zw.Create("not-toob")
-	if err != nil {
-		t.Fatalf("failed to create zip entry: %v", err)
-	}
-	if _, err := f.Write([]byte("not matching")); err != nil {
-		t.Fatalf("failed to write zip entry: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("failed to close zip writer: %v", err)
-	}
-
-	_, err = decompressArchive(buf.Bytes(), "toob-windows-amd64.zip")
+	root := NewRootCmd()
+	root.SetArgs([]string{"update", "--check"})
+	err := root.Execute()
 	if err == nil {
-		t.Fatal("expected error, got nil")
+		t.Fatalf("expected error running update without --version on dev build")
+	}
+	if !strings.Contains(err.Error(), "dev") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+
+	// Verify --insecure flag was completely removed.
+	badRoot := NewRootCmd()
+	badRoot.SetArgs([]string{"update", "--insecure"})
+	if badErr := badRoot.Execute(); badErr == nil {
+		t.Fatalf("expected unknown flag error for removed --insecure flag")
 	}
 }
 
-func TestEd25519SignatureVerification(t *testing.T) {
-	// Generate testing keypair
-	pubKey, privKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("failed to generate testing keys: %v", err)
+func TestExtractVerifiedBinaryFailClosedOnUnknownFormats(t *testing.T) {
+	payload := []byte("ELF-FAKE-RAW-BINARY")
+	if _, err := extractVerifiedBinary("https://example.com/toob-linux-amd64", payload); err == nil {
+		t.Fatalf("expected fail-closed error for unknown binary extension")
+	}
+	if _, err := extractVerifiedBinary("https://example.com/toob.exe", payload); err == nil {
+		t.Fatalf("expected fail-closed error for raw .exe extension")
 	}
 
-	// Set temporary environment variable
-	pubKeyHex := hex.EncodeToString(pubKey)
-	t.Setenv("TOOB_REGISTRY_PUBKEY", pubKeyHex)
-
-	dummyArchiveContent := []byte("dummy-archive-data-for-signing")
-	hash := sha256.Sum256(dummyArchiveContent)
-	sigBytes := ed25519.Sign(privKey, hash[:])
-	sigStr := hex.EncodeToString(sigBytes)
-
-	// Verify using standard library to check our integration assumptions
-	decodedSig, err := hex.DecodeString(sigStr)
-	if err != nil {
-		t.Fatalf("failed to decode signature: %v", err)
+	targetName := "toob"
+	if runtime.GOOS == "windows" {
+		targetName = "toob.exe"
 	}
 
-	if !ed25519.Verify(pubKey, hash[:], decodedSig) {
-		t.Fatal("expected signature to be valid")
+	// Build valid tar.gz containing a symlink (ignored) and a regular binary entry.
+	var tarBuf bytes.Buffer
+	gzw := gzip.NewWriter(&tarBuf)
+	tw := tar.NewWriter(gzw)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     targetName,
+		Typeflag: tar.TypeSymlink,
+		Linkname: "/etc/passwd",
+		Mode:     0o777,
+	}); err != nil {
+		t.Fatalf("write symlink header: %v", err)
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "bin/" + targetName,
+		Typeflag: tar.TypeReg,
+		Size:     int64(len(payload)),
+		Mode:     0o755,
+	}); err != nil {
+		t.Fatalf("write reg header: %v", err)
+	}
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	_ = tw.Close()
+	_ = gzw.Close()
+
+	got, err := extractVerifiedBinary("https://example.com/toob.tar.gz", tarBuf.Bytes())
+	if err != nil {
+		t.Fatalf("extractVerifiedBinary(.tar.gz) failed: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("extracted tar.gz payload mismatch")
+	}
+
+	// Build valid zip archive.
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	zf, err := zw.Create(targetName)
+	if err != nil {
+		t.Fatalf("create zip entry: %v", err)
+	}
+	if _, writeErr := zf.Write(payload); writeErr != nil {
+		t.Fatalf("write zip entry: %v", writeErr)
+	}
+	_ = zw.Close()
+
+	gotZip, err := extractVerifiedBinary("https://example.com/toob.zip", zipBuf.Bytes())
+	if err != nil {
+		t.Fatalf("extractVerifiedBinary(.zip) failed: %v", err)
+	}
+	if !bytes.Equal(gotZip, payload) {
+		t.Fatalf("extracted zip payload mismatch")
+	}
+}
+
+func TestFetchUpdateAssetHandles410Gone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Toob-Warning", "recalled security advisory TOOB-2026-01")
+		w.WriteHeader(http.StatusGone)
+		_, _ = w.Write([]byte("release yanked due to vulnerability"))
+	}))
+	defer srv.Close()
+
+	client, err := httputil.NewClient(defaultCmdTimeout)
+	if err != nil {
+		t.Fatalf("httputil.NewClient failed: %v", err)
+	}
+
+	_, fetchErr := fetchUpdateAsset(t.Context(), client, srv.URL+"/release.tar.gz", 1024)
+	if fetchErr == nil {
+		t.Fatalf("expected error on HTTP 410 Gone")
+	}
+	if !strings.Contains(fetchErr.Error(), "410 Gone") {
+		t.Fatalf("expected 410 Gone in error message, got: %v", fetchErr)
 	}
 }

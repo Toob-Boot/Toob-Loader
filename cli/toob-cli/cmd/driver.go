@@ -1,162 +1,160 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
-	"maps"
-	"os"
 	"slices"
-	"strings"
 
 	"github.com/spf13/cobra"
+
 	"github.com/toob-boot/toob/internal/installer"
-	"github.com/toob-boot/toob/internal/paths"
-	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-func formatTierBadge(tier string) string {
-	switch strings.ToLower(tier) {
-	case "official":
-		return ui.Green("official")
-	case "partner":
-		return ui.Cyan("partner")
-	case "local":
-		return ui.Yellow("local")
-	default:
-		return ui.Gray("community")
+func newDriverCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "driver",
+		Short: "Manage HAL driver packages in the current Toob project",
 	}
+
+	c.AddCommand(
+		newDriverListCmd(),
+		newDriverInfoCmd(),
+		newDriverAddCmd(),
+		newDriverSpawnCmd(),
+		newDriverRemoveCmd(),
+	)
+	return c
 }
 
-var (
-	flagDriverTrait string
-	flagDriverTier  string
-)
+func newDriverListCmd() *cobra.Command {
+	var dev bool
 
-var driverCmd = &cobra.Command{
-	Use:   "driver",
-	Short: "Discover, inspect, and spawn HAL driver packages",
-}
-
-var driverListCmd = &cobra.Command{
-	Use:   "list [query]",
-	Short: "List driver packages in the registry (official, partner, and community)",
-	Args:  cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		query := ""
-		if len(args) > 0 {
-			query = strings.ToLower(args[0])
-		}
-		traitFilter := strings.ToLower(strings.TrimSpace(flagDriverTrait))
-		tierFilter := strings.ToLower(strings.TrimSpace(flagDriverTier))
-
-		cache := registry.NewCache("")
-		idx, err := cache.LoadIndex()
-		if err != nil {
-			return err
-		}
-		if len(idx.Drivers) == 0 {
-			ui.Muted("No driver packages available in registry.")
-			return nil
-		}
-
-		ui.Header("Driver Registry")
-
-		headers := []string{"Driver", "Version", "Trait", "Tier", "Description"}
-		var rows [][]string
-		for _, key := range slices.Sorted(maps.Keys(idx.Drivers)) {
-			di := idx.Drivers[key]
-			trait := di.Trait
-			if trait == "" {
-				trait = di.Category
+	c := &cobra.Command{
+		Use:   "list",
+		Short: "List installed driver packages",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			inst, err := openProjectInstaller(dev)
+			if err != nil {
+				return err
 			}
-			tier := registry.ClassifyTier(di.Name, di.Author, di.Tier, false)
-			if query != "" && !strings.Contains(strings.ToLower(di.Name), query) && !strings.Contains(strings.ToLower(di.Description), query) {
-				continue
+			pkgs, err := inst.List("driver")
+			if err != nil {
+				return fmt.Errorf("list driver packages: %w", err)
 			}
-			if traitFilter != "" && strings.ToLower(trait) != traitFilter && strings.ToLower(di.Category) != traitFilter {
-				continue
+			if len(pkgs) == 0 {
+				ui.Info("No driver packages configured.")
+				return nil
 			}
-			if tierFilter != "" && strings.ToLower(tier) != tierFilter {
-				continue
-			}
-			rows = append(rows, []string{
-				ui.Bold(di.Name),
-				ui.Brand(di.Version),
-				ui.Cyan(trait),
-				formatTierBadge(tier),
-				di.Description,
+			slices.SortFunc(pkgs, func(a, b installer.InstalledPackage) int {
+				return cmp.Compare(a.Name, b.Name)
 			})
-		}
-
-		if len(rows) == 0 {
-			ui.Warn("No driver packages matched your filter.")
+			for i := range pkgs {
+				p := &pkgs[i]
+				ui.Info("%-28s %-14s %s", sanitizeDisplay(p.Name), sanitizeDisplay(p.Version), sanitizeDisplay(p.Source))
+			}
 			return nil
-		}
+		},
+	}
 
-		ui.Table(headers, rows)
-		ui.Muted("%d driver package(s) available.", len(rows))
-		return nil
-	},
+	c.Flags().BoolVar(&dev, "dev", false, "Use local development registry paths")
+	return c
 }
 
-var driverInfoCmd = &cobra.Command{
-	Use:   "info [name]",
-	Short: "Show detailed metadata and trust tier of a driver package",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cache := registry.NewCache("")
-		di, err := cache.GetDriver(args[0])
-		if err != nil {
-			return err
-		}
+func newDriverInfoCmd() *cobra.Command {
+	var dev bool
 
-		tier := registry.ClassifyTier(di.Name, di.Author, di.Tier, false)
-		trait := di.Trait
-		if trait == "" {
-			trait = di.Category
-		}
+	c := &cobra.Command{
+		Use:   "info <driver[@version]>",
+		Short: "Show metadata for a driver package",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			inst, err := openProjectInstaller(dev)
+			if err != nil {
+				return err
+			}
+			details, err := inst.Info("driver", args[0])
+			if err != nil {
+				return err
+			}
+			printPackageDetails(details)
+			return nil
+		},
+	}
 
-		ui.Header(fmt.Sprintf("Driver: %s", di.Name))
-		fmt.Fprintln(os.Stderr)
-		ui.KeyValue("Version", ui.BoldBrand(di.Version))
-		ui.KeyValue("Trust Tier", formatTierBadge(tier))
-		ui.KeyValue("Trait", ui.Cyan(trait))
-		if di.Category != "" {
-			ui.KeyValue("Category", di.Category)
-		}
-		if di.Author != "" {
-			ui.KeyValue("Author", di.Author)
-		}
-		ui.KeyValue("Registry Path", ui.Gray(di.Path))
-		if di.Description != "" {
-			ui.KeyValue("Description", di.Description)
-		}
-		ui.Divider()
-		return nil
-	},
+	c.Flags().BoolVar(&dev, "dev", false, "Use local development registry paths")
+	return c
 }
 
-var driverSpawnCmd = &cobra.Command{
-	Use:   "spawn [name]",
-	Short: "Copy a driver package into toobloader/hal/drivers/ as locally editable",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		root, err := paths.FindProjectRoot("")
-		if err != nil {
-			return err
-		}
-		cache := registry.NewCache("")
-		inst := installer.New(root, cache)
-		return inst.SpawnDriver(args[0])
-	},
+func newDriverAddCmd() *cobra.Command {
+	var dev bool
+
+	c := &cobra.Command{
+		Use:   "add <driver[@version]>",
+		Short: "Add a driver package dependency to the project",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			inst, err := openProjectInstaller(dev)
+			if err != nil {
+				return err
+			}
+			if err := inst.AddDriver(args[0]); err != nil {
+				return err
+			}
+			ui.Success("Added driver package %s", sanitizeDisplay(args[0]))
+			return nil
+		},
+	}
+
+	c.Flags().BoolVar(&dev, "dev", false, "Use local development registry paths")
+	return c
 }
 
-func init() {
-	driverListCmd.Flags().StringVar(&flagDriverTrait, "trait", "", "Filter drivers by HAL trait (e.g. keystore, flash, wdt, entropy)")
-	driverListCmd.Flags().StringVar(&flagDriverTier, "tier", "", "Filter drivers by trust tier (official, partner, community)")
+func newDriverSpawnCmd() *cobra.Command {
+	var dev bool
 
-	driverCmd.AddCommand(driverListCmd)
-	driverCmd.AddCommand(driverInfoCmd)
-	driverCmd.AddCommand(driverSpawnCmd)
+	c := &cobra.Command{
+		Use:   "spawn <driver[@version]>",
+		Short: "Vendor a driver package locally into the project workspace",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			inst, err := openProjectInstaller(dev)
+			if err != nil {
+				return err
+			}
+			if err := inst.SpawnDriver(args[0]); err != nil {
+				return err
+			}
+			ui.Success("Spawned driver package %s", sanitizeDisplay(args[0]))
+			return nil
+		},
+	}
+
+	c.Flags().BoolVar(&dev, "dev", false, "Use local development registry paths")
+	return c
 }
 
+func newDriverRemoveCmd() *cobra.Command {
+	var dev bool
+
+	c := &cobra.Command{
+		Use:   "remove <driver>",
+		Short: "Remove a driver package from the project",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			inst, err := openProjectInstaller(dev)
+			if err != nil {
+				return err
+			}
+			if err := inst.RemoveDriver(args[0]); err != nil {
+				return err
+			}
+			ui.Success("Removed driver package %s", sanitizeDisplay(args[0]))
+			return nil
+		},
+	}
+
+	c.Flags().BoolVar(&dev, "dev", false, "Use local development registry paths")
+	return c
+}

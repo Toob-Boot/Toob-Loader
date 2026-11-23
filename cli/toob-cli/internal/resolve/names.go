@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/toob-boot/toob/internal/archiveutil"
 	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 )
 
@@ -55,7 +56,7 @@ func isCSymbol(s string) bool {
 }
 
 // validateRelName validates a '/'-separated registry name segment by segment,
-// so that neither separators nor traversal can leave the registry root.
+// delegating individual token validation to manifestpkg.ValidateName.
 func validateRelName(kind, name string) error {
 	if name == "" {
 		return fmt.Errorf("%s name must not be empty", kind)
@@ -91,98 +92,75 @@ func validatePackageOrRelName(kind, ref string) error {
 	return validateRelName(kind, ref)
 }
 
-func isWithinDir(base, candidate string) bool {
-	rel, err := filepath.Rel(base, candidate)
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
-}
-
-func resolveLinkOrPath(path string) (string, error) {
-	cur := path
-	for range 40 {
-		fi, err := os.Lstat(cur)
-		if err != nil {
-			return "", err
-		}
-		if fi.Mode()&fs.ModeSymlink != 0 {
-			return filepath.EvalSymlinks(cur)
-		}
-		if target, rlErr := os.Readlink(cur); rlErr == nil {
-			target = strings.TrimPrefix(target, `\??\`)
-			target = strings.TrimPrefix(target, `\\?\`)
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(filepath.Dir(cur), target)
-			}
-			cur = filepath.Clean(target)
-			continue
-		}
-		return filepath.EvalSymlinks(cur)
-	}
-	return "", fmt.Errorf("too many link indirections at %s", path)
-}
-
-// Contain joins rel onto base and rejects absolute paths, drive/stream colons,
-// lexical traversal outside base, and symbolic links (or junctions) escaping base on disk.
+// Contain joins rel onto base and rejects empty paths, control/NUL bytes,
+// drive/ADS colons, Windows reserved device stems, trailing dots/spaces, lexical
+// '..' traversal outside base, and symlink/junction escapes on disk via os.Root.
 func Contain(base, rel string) (string, error) {
-	if rel == "" {
-		return "", errors.New("path must not be empty")
-	}
-	if strings.ContainsRune(rel, 0) || strings.Contains(rel, ":") {
-		return "", fmt.Errorf("path %q contains forbidden characters", rel)
-	}
-	if filepath.IsAbs(rel) || filepath.VolumeName(rel) != "" || strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, `\`) {
-		return "", fmt.Errorf("path %q must be relative", rel)
-	}
-	cleanBase := filepath.Clean(base)
-	joined := filepath.Join(base, rel)
-	if !isWithinDir(cleanBase, joined) {
-		return "", fmt.Errorf("path %q escapes %s", rel, base)
-	}
-
-	if _, err := os.Lstat(cleanBase); err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", fmt.Errorf("cannot stat base directory %s: %w", base, err)
-		}
-		return joined, nil
-	}
-
-	realBase, err := resolveLinkOrPath(cleanBase)
+	joined, relOS, err := archiveutil.SafeRelPath(base, rel)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve base directory %s: %w", base, err)
+		return "", fmt.Errorf("path %q escapes %s: %w", rel, base, err)
 	}
-	cur := realBase
+
+	cleanBase := preserveExtendedUNCPrefix(filepath.Clean(base), base)
+	if _, statErr := os.Lstat(cleanBase); statErr != nil {
+		if errors.Is(statErr, fs.ErrNotExist) {
+			return joined, nil
+		}
+		return "", fmt.Errorf("cannot stat base directory %s: %w", base, statErr)
+	}
+
+	root, openErr := os.OpenRoot(cleanBase)
+	if openErr != nil {
+		return "", fmt.Errorf("cannot open base directory %s: %w", base, openErr)
+	}
+	defer func() { _ = root.Close() }()
+
+	// Validate intermediate anchors before '..' collapses them so a symlink like
+	// "a/../b" where "a" escapes root cannot cancel out before os.Root inspects it.
 	norm := strings.ReplaceAll(rel, `\`, "/")
+	var built []string
 	for _, part := range strings.Split(norm, "/") {
 		if part == "" || part == "." {
 			continue
 		}
 		if part == ".." {
-			cur = filepath.Dir(cur)
-			if !isWithinDir(realBase, cur) {
-				return "", fmt.Errorf("path %q escapes %s", rel, base)
+			if len(built) > 0 {
+				if statErr := checkRootPathContained(root, strings.Join(built, string(os.PathSeparator)), rel, base); statErr != nil {
+					return "", statErr
+				}
+				built = built[:len(built)-1]
 			}
 			continue
 		}
-		next := filepath.Join(cur, part)
-		if _, err := os.Lstat(next); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				cur = next
-				continue
-			}
-			return "", fmt.Errorf("path %q: %w", rel, err)
+		built = append(built, part)
+		if statErr := checkRootPathContained(root, strings.Join(built, string(os.PathSeparator)), rel, base); statErr != nil {
+			return "", statErr
 		}
-		resolvedNext, err := resolveLinkOrPath(next)
-		if err != nil {
-			return "", fmt.Errorf("path %q traverses broken symlink: %w", rel, err)
-		}
-		if !isWithinDir(realBase, resolvedNext) {
-			return "", fmt.Errorf("path %q escapes %s via symlink", rel, base)
-		}
-		cur = resolvedNext
+	}
+
+	if statErr := checkRootPathContained(root, relOS, rel, base); statErr != nil {
+		return "", statErr
 	}
 	return joined, nil
+}
+
+func checkRootPathContained(root *os.Root, relOS, rawRel, base string) error {
+	if relOS == "" || relOS == "." {
+		return nil
+	}
+	if _, err := root.Stat(relOS); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("path %q escapes %s via symlink: %w", rawRel, base, err)
+	}
+	return nil
+}
+
+func preserveExtendedUNCPrefix(cleaned, orig string) string {
+	// Retain Windows NT \??\UNC\ prefix when callers explicitly supply it.
+	if strings.HasPrefix(orig, `\??\UNC\`) && !strings.HasPrefix(cleaned, `\??\UNC\`) {
+		trimmed := strings.TrimPrefix(cleaned, `\`)
+		return `\??\UNC\` + strings.TrimPrefix(trimmed, `??\UNC\`)
+	}
+	return cleaned
 }
 
 func readBoundedManifest(path string) ([]byte, error) {
@@ -196,8 +174,7 @@ func readBoundedManifest(path string) ([]byte, error) {
 	if info.Size() > maxManifestBytes {
 		return nil, fmt.Errorf("%s exceeds maximum manifest size (%d > %d bytes)", path, info.Size(), maxManifestBytes)
 	}
-	// #nosec G304 -- path is resolved via Contain() and verified as a bounded regular file above.
-	f, err := os.Open(path)
+	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +248,9 @@ func walkJSONValue(dec *json.Decoder, depth int) error {
 	}
 	switch delim {
 	case '{':
-		seen := make(map[string]struct{})
+		// Reject case-colliding keys as well (CWE-436): encoding/json matches
+		// struct fields case-insensitively when no exact match exists.
+		seen := make(map[string]string)
 		for dec.More() {
 			kTok, err := dec.Token()
 			if err != nil {
@@ -281,10 +260,11 @@ func walkJSONValue(dec *json.Decoder, depth int) error {
 			if !ok {
 				return fmt.Errorf("expected string object key, got %T", kTok)
 			}
-			if _, dup := seen[key]; dup {
-				return fmt.Errorf("duplicate JSON key %q", key)
+			folded := strings.ToLower(key)
+			if prev, dup := seen[folded]; dup {
+				return fmt.Errorf("duplicate JSON key %q (conflicts with %q)", key, prev)
 			}
-			seen[key] = struct{}{}
+			seen[folded] = key
 			if err := walkJSONValue(dec, depth+1); err != nil {
 				return err
 			}

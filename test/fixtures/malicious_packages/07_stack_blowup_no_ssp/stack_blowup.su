@@ -1,0 +1,2 @@
+stack_blowup.c:14:1:evil_recursive_buffer	8192	static
+stack_blowup.c:28:1:evil_vla_alloc	64	dynamic

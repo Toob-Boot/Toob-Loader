@@ -726,3 +726,77 @@ func TestAuditRealRegistryPackagesAcrossCategories(t *testing.T) {
 		})
 	}
 }
+
+func TestConformance_RawCAttributesWeakAndScriptSecurity(t *testing.T) {
+	t.Run("rejects vendor constructor, init_array, alias, and weak", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			code string
+		}{
+			{"constructor", "void __attribute__((constructor)) evil_init(void) {}\nvoid drv_init(void) {}\n"},
+			{"destructor", "void __attribute__((destructor)) evil_fini(void) {}\nvoid drv_init(void) {}\n"},
+			{"init_array", "typedef void (*fn_t)(void);\nstatic void evil(void) {}\n__attribute__((section(\".init_array\"))) fn_t p = evil;\nvoid drv_init(void) {}\n"},
+			{"alias", "void drv_init(void) {}\nvoid boot_verify_slot_image(void) __attribute__((alias(\"drv_init\")));\n"},
+			{"vendor weak", "void __attribute__((weak)) drv_init(void) {}\n"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				_ = os.WriteFile(filepath.Join(dir, "drv.h"), []byte("#ifndef DRV_H\n#define DRV_H\nvoid drv_init(void);\n#endif\n"), 0o644)
+				_ = os.WriteFile(filepath.Join(dir, "drv.c"), []byte(tc.code), 0o644)
+				_ = os.WriteFile(filepath.Join(dir, "driver_manifest.json"), []byte(`{
+					"name": "@vendor/evil_drv",
+					"version": "1.0.0",
+					"author": "untrusted-vendor",
+					"trait": "entropy",
+					"abi_version": "v3",
+					"headers": ["drv.h"],
+					"sources": ["drv.c"],
+					"symbols": {"random": "drv_init"}
+				}`), 0o644)
+				rep, err := AuditPackage(dir)
+				if err != nil {
+					t.Fatalf("AuditPackage error: %v", err)
+				}
+				if rep.Passed {
+					t.Fatalf("expected vendor package with %s to fail conformance", tc.name)
+				}
+			})
+		}
+	})
+
+	t.Run("rejects malicious toolchain.cmake and broken port symbols", func(t *testing.T) {
+		tcDir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(tcDir, "toolchain.cmake"), []byte("execute_process(COMMAND id)\nset(CMAKE_SYSTEM_NAME Generic)\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(tcDir, "toolchain_manifest.json"), []byte(`{
+			"name": "bad_tc",
+			"version": "1.0.0",
+			"urls": {"linux_amd64": "https://example.com/tc.tar.gz"},
+			"sha256": {"linux_amd64": "5be906a5194c3173e145a58048e5607ffff947773237802b93e55e23c415f1b6"}
+		}`), 0o644)
+		rep, err := AuditPackage(tcDir)
+		if err != nil {
+			t.Fatalf("AuditPackage toolchain error: %v", err)
+		}
+		if rep.Passed {
+			t.Fatal("expected malicious toolchain.cmake to fail conformance")
+		}
+
+		portDir := t.TempDir()
+		_ = os.WriteFile(filepath.Join(portDir, "port.h"), []byte("#ifndef PORT_H\n#define PORT_H\n#endif\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(portDir, "port.c"), []byte("void other_fn(void) {}\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(portDir, "port_manifest.json"), []byte(`{
+			"name": "@vendor/bad_port",
+			"version": "1.0.0",
+			"headers": ["port.h"],
+			"sources": ["port.c"],
+			"symbols": {"entry": "missing_port_entry"}
+		}`), 0o644)
+		portRep, err := AuditPackage(portDir)
+		if err != nil {
+			t.Fatalf("AuditPackage port error: %v", err)
+		}
+		if portRep.Passed {
+			t.Fatal("expected port manifest with missing C symbol implementation to fail conformance")
+		}
+	})
+}

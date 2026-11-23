@@ -1,166 +1,191 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/toob-boot/toob/internal/buildrunner"
 	"github.com/toob-boot/toob/internal/lockfile"
+	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
+	"github.com/toob-boot/toob/internal/resolve"
 	"github.com/toob-boot/toob/internal/toolchain"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-var installCmd = &cobra.Command{
-	Use:   "install",
-	Short: "Install all toolchains and dependencies defined in toob.lock",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		root, err := paths.FindProjectRoot("")
-		if err != nil {
-			return fmt.Errorf("not in a Toob project: %w", err)
-		}
+func newInstallCmd() *cobra.Command {
+	var (
+		manifestPath  string
+		profile       string
+		locked        bool
+		dev           bool
+		registrySpec  string
+		toolchainPath string
+		noLock        bool
+	)
 
-		lfPath := paths.LockfilePath(root)
-		lf, err := lockfile.Load(lfPath)
-		if err != nil || len(lf.Chips) == 0 {
-			ui.Info("No dependencies found in toob.lock. Try 'toob chip add' first.")
+	c := &cobra.Command{
+		Use:   "install",
+		Short: "Resolve, fetch, and verify all Core SDK, HAL packages, and cross-compiler toolchains",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, cancel := commandContext(cmd, 10*defaultCmdTimeout)
+			defer cancel()
+
+			root, mPath, err := buildrunner.ResolveWorkspaceAndManifest(manifestPath)
+			if err != nil {
+				return fmt.Errorf("resolve workspace: %w", err)
+			}
+
+			dt, err := manifest.ParseToml(mPath)
+			if err != nil {
+				return fmt.Errorf("parse manifest %s: %w", mPath, err)
+			}
+
+			lockPath := paths.LockfilePath(root)
+			lf, lockErr := lockfile.Load(lockPath)
+			if lockErr != nil {
+				if locked || !os.IsNotExist(lockErr) {
+					return fmt.Errorf("load lockfile %s: %w", lockPath, lockErr)
+				}
+				lf = nil
+			}
+
+			devMode := dev || paths.IsDevMode()
+			remoteURL, localReg, err := buildrunner.ResolveRegistryOverride(registrySpec, root, devMode)
+			if err != nil {
+				return err
+			}
+
+			var cache *registry.Cache
+			if localReg != "" {
+				cache, err = registry.OpenForProject(localReg, true)
+			} else {
+				cache, err = registry.OpenForProject(root, devMode)
+			}
+			if err != nil {
+				return fmt.Errorf("open registry: %w", err)
+			}
+
+			if !locked && !devMode {
+				if syncErr := cache.Sync(false, false); syncErr != nil {
+					return fmt.Errorf("sync registry index: %w", syncErr)
+				}
+			}
+
+			idx, err := cache.LoadIndex()
+			if err != nil {
+				return fmt.Errorf("load registry index: %w", err)
+			}
+
+			sdkVer, err := buildrunner.SelectCoreSDKVersion(dt, lf, idx, locked)
+			if err != nil {
+				return fmt.Errorf("select Core SDK version: %w", err)
+			}
+			coreDir, coreSHA, err := buildrunner.EnsureCoreSDK(ctx, buildrunner.CoreSDKOptions{
+				ProjectRoot: root,
+				Version:     sdkVer,
+				RegistryURL: remoteURL,
+				Index:       idx,
+				Lock:        lf,
+				DevMode:     devMode,
+				Locked:      locked,
+			})
+			if err != nil {
+				return fmt.Errorf("ensure Core SDK: %w", err)
+			}
+
+			plan, err := resolve.Resolve(resolve.Input{
+				Root:     root,
+				Device:   dt,
+				Lock:     lf,
+				Index:    idx,
+				Registry: cache,
+				Profile:  profile,
+				CoreDir:  coreDir,
+				Locked:   locked,
+			})
+			if err != nil {
+				return fmt.Errorf("resolve dependencies: %w", err)
+			}
+
+			if err := verifyPlanPackageDirs(plan); err != nil {
+				return err
+			}
+
+			var compilerDigest string
+			if toolchainPath == "" && plan.Toolchain.Name != "" {
+				tcDir, tcErr := toolchain.EnsureToolchain(
+					ctx,
+					plan.Toolchain.Name,
+					plan.Toolchain.Prefix,
+					plan.Toolchain.CompilerBinary,
+					plan.Toolchain.ExpectedVersion,
+					cache.Dir(),
+				)
+				if tcErr != nil {
+					return fmt.Errorf("ensure toolchain %s: %w", plan.Toolchain.Name, tcErr)
+				}
+				compilerDigest = tcDir
+			}
+
+			if !locked && !noLock {
+				nextLF, lockGenErr := plan.ToLockfile(cache, lf, remoteURL, "", "", coreSHA, compilerDigest)
+				if lockGenErr != nil {
+					return fmt.Errorf("build lockfile: %w", lockGenErr)
+				}
+				if saveErr := nextLF.Save(lockPath); saveErr != nil {
+					return fmt.Errorf("save lockfile %s: %w", lockPath, saveErr)
+				}
+			}
+
+			ui.Success("All project dependencies, Core SDK, and toolchains verified and ready.")
 			return nil
+		},
+	}
+
+	c.Flags().StringVarP(&manifestPath, "manifest", "m", "", "Path to device.toml or toob.toml")
+	c.Flags().StringVarP(&profile, "profile", "p", "dev", "Build profile (dev or production)")
+	c.Flags().BoolVar(&locked, "locked", false, "Require strict lockfile parity without mutating toob.lock")
+	c.Flags().BoolVar(&dev, "dev", false, "Use local development registry paths")
+	c.Flags().StringVar(&registrySpec, "registry", "", "Override registry URL or local directory")
+	c.Flags().StringVar(&toolchainPath, "toolchain-path", "", "Skip automatic toolchain download using host bin directory")
+	c.Flags().BoolVar(&noLock, "no-lock", false, "Do not update toob.lock")
+	return c
+}
+
+func verifyPlanPackageDirs(plan *resolve.Plan) error {
+	var pathsToCheck []string
+	if plan.Chip.Dir != "" {
+		pathsToCheck = append(pathsToCheck, plan.Chip.Dir)
+	}
+	if plan.Arch.Dir != "" {
+		pathsToCheck = append(pathsToCheck, plan.Arch.Dir)
+	}
+	if plan.SoCDir != "" {
+		pathsToCheck = append(pathsToCheck, plan.SoCDir)
+	}
+	for i := range plan.DriverPackages {
+		drv := &plan.DriverPackages[i]
+		if drv.Dir != "" {
+			pathsToCheck = append(pathsToCheck, drv.Dir)
 		}
+	}
+	pathsToCheck = append(pathsToCheck, plan.RecoveryDriverDirs()...)
+	pathsToCheck = append(pathsToCheck, plan.CryptoDirs()...)
+	pathsToCheck = append(pathsToCheck, plan.RecoveryCryptoDirs()...)
 
-		ui.Header("Install")
-
-		cache := registry.NewCache("")
-		if !cache.IsInitialized() {
-			ui.Step("Registry not initialized. Auto-syncing...")
-			if err := cache.Sync(false, false); err != nil {
-				return fmt.Errorf("registry sync failed: %w", err)
-			}
+	for _, dir := range pathsToCheck {
+		info, err := os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("missing resolved package directory %s: %w", dir, err)
 		}
-
-		// Ensure we are using the registry version defined in lockfile
-		if lf.Registry.Commit != "" {
-			if err := cache.SwitchVersion(lf.Registry.Commit); err != nil {
-				return fmt.Errorf("failed to checkout locked registry commit %s: %w", lf.Registry.Commit, err)
-			}
+		if !info.IsDir() {
+			return fmt.Errorf("resolved package path %s is not a directory", dir)
 		}
-
-		installedCount := 0
-		for _, chip := range lf.Chips {
-			// 1. Pre-fetch Chip Package
-			ui.Step("Pre-fetching chip package '%s'...", chip.Name)
-			chipDir, err := cache.ChipSourcePath(chip.Name)
-			if err != nil {
-				return fmt.Errorf("failed to pre-fetch chip package '%s': %w", chip.Name, err)
-			}
-
-			// 2. Parse chip_manifest.json to resolve drivers & other dependencies
-			var chipManifest struct {
-				Arch        string            `json:"arch"`
-				Toolchain   string            `json:"toolchain"`
-				MinCoreSDK  string            `json:"min_core_sdk"`
-				HalBindings map[string]string `json:"hal_bindings"`
-				Drivers     []string          `json:"drivers"`
-				Sources     *struct {
-					Drivers []string `json:"drivers"`
-				} `json:"sources"`
-				Includes []string `json:"includes"`
-			}
-			manifestPath := filepath.Join(chipDir, "chip_manifest.json")
-			if manifestData, err := os.ReadFile(manifestPath); err == nil {
-				if err := json.Unmarshal(manifestData, &chipManifest); err == nil {
-					// Pre-fetch Architecture
-					if chipManifest.Arch != "" {
-						ui.Step("Pre-fetching architecture '%s'...", chipManifest.Arch)
-						if _, err := cache.ArchSourcePath(chipManifest.Arch); err != nil {
-							ui.Warn("Failed to pre-fetch architecture '%s': %v", chipManifest.Arch, err)
-						}
-					}
-					// Pre-fetch HAL Trait-Bound Drivers & Legacy Drivers
-					seenDrv := make(map[string]bool)
-					for _, drv := range chipManifest.HalBindings {
-						if drv == "" || seenDrv[drv] {
-							continue
-						}
-						seenDrv[drv] = true
-						ui.Step("Pre-fetching driver '%s'...", drv)
-						if _, err := cache.DriverSourcePath(drv); err != nil {
-							ui.Warn("Failed to pre-fetch driver '%s': %v", drv, err)
-						}
-					}
-					drvFiles := chipManifest.Drivers
-					if chipManifest.Sources != nil {
-						drvFiles = append(drvFiles, chipManifest.Sources.Drivers...)
-					}
-					for _, drvFile := range drvFiles {
-						drvDir := filepath.ToSlash(filepath.Dir(drvFile))
-						if drvDir == "." {
-							drvDir = drvFile
-						}
-						if seenDrv[drvDir] || seenDrv[filepath.Base(drvDir)] {
-							continue
-						}
-						seenDrv[drvDir] = true
-						ui.Step("Pre-fetching driver '%s'...", drvDir)
-						if _, err := cache.DriverSourcePath(drvDir); err != nil {
-							ui.Warn("Failed to pre-fetch driver '%s': %v", drvDir, err)
-						}
-					}
-					// Pre-fetch SoC package if needed
-					if len(chipManifest.Includes) > 0 {
-						ui.Step("Pre-fetching SoC includes...")
-						if _, err := cache.SoCSourcePath("soc"); err != nil {
-							ui.Warn("Failed to pre-fetch SoC package: %v", err)
-						}
-					}
-				}
-			}
-
-			// 3. Pre-fetch Crypto Packages
-			for _, cryptoPkg := range []string{chip.CryptoBackend, chip.CryptoHash, chip.CryptoPqc} {
-				if cryptoPkg != "" {
-					ui.Step("Pre-fetching crypto package '%s'...", cryptoPkg)
-					if _, err := cache.CryptoSourcePath(cryptoPkg); err != nil {
-						ui.Warn("Failed to pre-fetch crypto package '%s': %v", cryptoPkg, err)
-					}
-				}
-			}
-
-			if chip.Toolchain == "" {
-				continue
-			}
-
-			// 4. Pre-fetch Toolchain configuration (toolchain.cmake)
-			tcName := strings.TrimSuffix(chip.Toolchain, "-")
-			ui.Step("Pre-fetching toolchain config for '%s'...", tcName)
-			if _, err := cache.ToolchainConfigPath(tcName); err != nil {
-				ui.Warn("Failed to pre-fetch toolchain config '%s': %v", tcName, err)
-			}
-
-			// Resolve expected version. Fallback to registry if lockfile is missing it.
-			expectedVersion := chip.ToolchainVersion
-			if expectedVersion == "" {
-				expectedVersion = toolchain.GetExpectedVersion(chip.Toolchain, cache.Dir())
-			}
-
-			ui.Step("Ensuring toolchain %s (v%s) for chip %s", chip.Toolchain, expectedVersion, chip.Name)
-
-			_, err = toolchain.EnsureAvailable(chip.Toolchain, expectedVersion, cache.Dir())
-			if err != nil {
-				return fmt.Errorf("failed to install toolchain %s: %w", chip.Toolchain, err)
-			}
-			installedCount++
-		}
-
-		if installedCount > 0 {
-			ui.Success("Successfully installed %d toolchain(s). Native builds are ready!", installedCount)
-		} else {
-			ui.Info("All dependencies are already satisfied.")
-		}
-
-		return nil
-	},
+	}
+	return nil
 }

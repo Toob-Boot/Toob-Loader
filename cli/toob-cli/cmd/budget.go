@@ -4,42 +4,43 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
 	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-type budgetOptions struct {
-	toml  string
-	bin   string
-	stage string
-}
-
 func newBudgetCmd() *cobra.Command {
-	var opts budgetOptions
+	var (
+		tomlPath string
+		binPath  string
+		stage    string
+	)
+
 	c := &cobra.Command{
 		Use:    "budget",
-		Short:  "Check if a compiled binary fits into its TOML budget",
+		Short:  "Verify binary footprint fits within the declarative flash budget for a stage",
 		Hidden: true,
 		Args:   cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			rep, err := manifest.CheckBudget(opts.toml, opts.bin, opts.stage)
+		RunE: func(_ *cobra.Command, _ []string) error {
+			report, err := manifest.CheckBudget(tomlPath, binPath, stage)
 			if err != nil {
-				return fmt.Errorf("budget check failed: %w", err)
+				return fmt.Errorf("budget check (%s): %w", sanitizeDisplay(stage), err)
 			}
-			ui.Success("BUDGET SUCCESS: %s (%d bytes) fits into budget (%d bytes).", rep.Stage, rep.Size, rep.Budget)
+			pct := 0.0
+			if report.Budget > 0 {
+				pct = (float64(report.Size) / float64(report.Budget)) * 100.0
+			}
+			ui.Success("Flash budget OK [%s]: %d / %d bytes (%.1f%%)",
+				sanitizeDisplay(stage), report.Size, report.Budget, pct)
 			return nil
 		},
 	}
-	c.Flags().StringVar(&opts.toml, "toml", "device.toml", "Path to device.toml")
-	c.Flags().StringVar(&opts.bin, "bin", "", "Path to compiled .bin")
-	c.Flags().StringVar(&opts.stage, "stage", "", "Which stage to check (stage0, stage1, recovery, app, or netcore)")
+
+	c.Flags().StringVar(&tomlPath, "toml", "", "Path to device.toml (required)")
+	c.Flags().StringVar(&binPath, "bin", "", "Path to compiled binary image (required)")
+	c.Flags().StringVar(&stage, "stage", "", "Target bootloader stage (stage0, stage1, stage1b, recovery) (required)")
+	_ = c.MarkFlagRequired("toml")
 	_ = c.MarkFlagRequired("bin")
 	_ = c.MarkFlagRequired("stage")
 	return c
-}
-
-var budgetCmd = newBudgetCmd()
-
-func init() {
-	rootCmd.AddCommand(budgetCmd)
 }

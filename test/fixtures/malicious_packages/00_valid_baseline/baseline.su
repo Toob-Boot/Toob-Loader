@@ -1,0 +1,2 @@
+entropy.c:5:5:clean_entropy_random	64	static
+boot_verify.c:42:1:boot_verify_slot_image	512	static

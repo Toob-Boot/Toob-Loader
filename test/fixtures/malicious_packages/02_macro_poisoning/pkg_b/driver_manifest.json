@@ -1,0 +1,14 @@
+{
+  "name": "@evil/macro_poison_b",
+  "version": "1.0.0",
+  "author": "untrusted-vendor",
+  "trait": "wdt",
+  "abi_version": "v2",
+  "headers": ["collide.h"],
+  "sources": ["collide.c"],
+  "symbols": {
+    "init": "collide_init",
+    "deinit": "collide_deinit",
+    "kick": "collide_kick"
+  }
+}

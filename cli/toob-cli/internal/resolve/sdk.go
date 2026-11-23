@@ -3,14 +3,15 @@ package resolve
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
 
-	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/registry"
 )
 
@@ -19,7 +20,6 @@ const (
 	originLockfile = "lockfile-pinned"
 	originDevice   = "device.toml"
 	originAuto     = "auto-resolved"
-	originFallback = "fallback"
 )
 
 var (
@@ -90,56 +90,90 @@ func CheckMinCompiler(subject, currentRaw, minRaw string) error {
 	return nil
 }
 
-// resolveCoreSDK picks the Core SDK version: the lockfile pin wins over
-// device.toml, and an unset or symbolic version resolves to the newest
-// registry release. The result must satisfy the chip's minimum.
+// resolveCoreSDK selects the Core SDK version fail-fast (no silent "main" fallback).
+// Under Locked == true, the lockfile pin is mandatory and device.toml conflicts fail.
+// Under Locked == false, explicit device.toml [build].core_sdk overrides a stale pin (CRIT-64).
 func resolveCoreSDK(in Input, chip *Chip) (CoreSDK, error) {
 	if in.Device == nil {
 		return CoreSDK{}, errors.New("device.toml input is nil")
 	}
-	version, origin := in.Device.Build.CoreSDK, originDevice
+
+	devSDK := strings.TrimSpace(in.Device.Build.CoreSDK)
+	lockedSDK := ""
+	lockedSHA := ""
 	if in.Lock != nil {
-		if pinned := in.Lock.Environment.CoreSDK; pinned != "" {
-			version, origin = pinned, originLockfile
+		lockedSDK = strings.TrimSpace(in.Lock.Environment.CoreSDK)
+		lockedSHA = strings.TrimSpace(in.Lock.Environment.CoreSDKSHA256)
+	}
+
+	var version, origin string
+	if in.Locked {
+		if in.Lock == nil || lockedSDK == "" {
+			return CoreSDK{}, errors.New("--locked build requires [environment].core_sdk in toob.lock")
+		}
+		if devSDK != "" && devSDK != "latest" && devSDK != "toob-boot" && devSDK != lockedSDK {
+			return CoreSDK{}, fmt.Errorf("device.toml [build] core_sdk %q conflicts with locked version %q in toob.lock",
+				devSDK, lockedSDK)
+		}
+		version, origin = lockedSDK, originLockfile
+	} else {
+		switch {
+		case devSDK == "latest" || devSDK == "toob-boot":
+			tag, err := latestCoreSDK(in.Index)
+			if err != nil {
+				return CoreSDK{}, fmt.Errorf("cannot resolve Core SDK %q: %w", devSDK, err)
+			}
+			version, origin = tag, originAuto
+		case devSDK != "":
+			version, origin = devSDK, originDevice
+		case lockedSDK != "" && lockedSDK != "latest" && lockedSDK != "toob-boot":
+			version, origin = lockedSDK, originLockfile
+		default:
+			tag, err := latestCoreSDK(in.Index)
+			if err != nil {
+				return CoreSDK{}, fmt.Errorf("cannot auto-resolve Core SDK version: %w; set [build].core_sdk in device.toml", err)
+			}
+			version, origin = tag, originAuto
 		}
 	}
 
-	if version == "" || version == "latest" || version == "toob-boot" {
-		version, origin = resolveLatestCoreSDK(in.Index, chip)
-	}
 	if err := validateRelName("Core SDK version", version); err != nil {
 		return CoreSDK{}, err
 	}
 	if err := checkMinCoreSDK(fmt.Sprintf("chip '%s'", chip.Name), version, chip.Spec.MinCoreSDK); err != nil {
 		return CoreSDK{}, err
 	}
-	return CoreSDK{Version: version, Origin: origin}, nil
+
+	idxSHA := ""
+	if in.Index != nil && in.Index.Ecosystem != nil && len(in.Index.Ecosystem.CoreSDKSha256) > 0 {
+		idxSHA = strings.TrimSpace(in.Index.Ecosystem.CoreSDKSha256[version])
+	}
+	if in.Locked && lockedSHA != "" && idxSHA != "" && lockedSHA != idxSHA {
+		return CoreSDK{}, fmt.Errorf("locked Core SDK %q sha256 %s does not match registry ecosystem sha256 %s",
+			version, lockedSHA, idxSHA)
+	}
+
+	return CoreSDK{
+		Version: version,
+		Origin:  origin,
+		SHA256:  firstNonEmpty(lockedSHA, idxSHA),
+	}, nil
 }
 
-func resolveLatestCoreSDK(idx *registry.Index, chip *Chip) (string, string) {
-	if tag, err := latestCoreSDK(idx); err == nil {
-		return tag, originAuto
-	}
-	if chip.Spec.MinCoreSDK != "" {
-		return chip.Spec.MinCoreSDK, originFallback
-	}
-	return "main", originFallback
-}
-
-func checkMinCoreSDK(subject, current, min string) error {
-	if min == "" || isBranchRef(current) {
+func checkMinCoreSDK(subject, current, minSDK string) error {
+	if minSDK == "" || isBranchRef(current) {
 		return nil
 	}
 	vCurrent, err := parseCoreSDKVersion(current)
 	if err != nil {
 		return fmt.Errorf("cannot check %s against Core SDK '%s': %w", subject, current, err)
 	}
-	vMin, err := parseCoreSDKVersion(min)
+	vMin, err := parseCoreSDKVersion(minSDK)
 	if err != nil {
-		return fmt.Errorf("%s declares an invalid min_core_sdk '%s': %w", subject, min, err)
+		return fmt.Errorf("%s declares an invalid min_core_sdk '%s': %w", subject, minSDK, err)
 	}
 	if vCurrent.LessThan(vMin) {
-		return fmt.Errorf("%s requires Core SDK >= %s, but the resolved version is %s", subject, min, current)
+		return fmt.Errorf("%s requires Core SDK >= %s, but the resolved version is %s", subject, minSDK, current)
 	}
 	return nil
 }
@@ -212,9 +246,62 @@ func LocateSDK(root, compilerRoot string) SDKPaths {
 	}
 }
 
+func selectToolchainName(in Input, chip *Chip) (string, error) {
+	if chip.Prefix != "" {
+		name := strings.TrimSuffix(chip.Prefix, "-")
+		if name == "" {
+			return "", fmt.Errorf("invalid toolchain name %q", chip.Prefix)
+		}
+		if err := validatePackageOrRelName("toolchain", name); err != nil {
+			return "", err
+		}
+		return name, nil
+	}
+
+	// Empty compiler_prefix selects Clang/LLVM toolchains.
+	if in.Lock != nil {
+		if tLock, ok := in.Lock.Targets[chip.Name]; ok && tLock.Toolchain != "" {
+			tName, _ := splitLockedRef(tLock.Toolchain)
+			if isClangToolchainName(tName) {
+				return tName, nil
+			}
+		}
+		for _, k := range slices.Sorted(maps.Keys(in.Lock.Toolchains)) {
+			if isClangToolchainName(k) {
+				if in.Index == nil {
+					return k, nil
+				}
+				if _, exists := in.Index.Toolchains[k]; exists {
+					return k, nil
+				}
+			}
+		}
+	}
+
+	if in.Index != nil {
+		for _, k := range slices.Sorted(maps.Keys(in.Index.Toolchains)) {
+			tcInfo := in.Index.Toolchains[k]
+			bin := strings.ToLower(strings.TrimSpace(tcInfo.CompilerBinary))
+			if bin == "clang" || strings.HasSuffix(bin, "/clang") || isClangToolchainName(k) {
+				if err := validatePackageOrRelName("toolchain", k); err != nil {
+					return "", err
+				}
+				return k, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("chip '%s' has empty compiler_prefix (Clang/LLVM), but no Clang/LLVM toolchain was found in registry index", chip.Name)
+}
+
+func isClangToolchainName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return strings.Contains(lower, "clang") || strings.Contains(lower, "llvm")
+}
+
 func resolveToolchain(in Input, chip *Chip) (Toolchain, error) {
-	name := strings.TrimSuffix(chip.Prefix, "-")
-	if err := manifestpkg.ValidateName("toolchain", name); err != nil {
+	name, err := selectToolchainName(in, chip)
+	if err != nil {
 		return Toolchain{}, err
 	}
 	if in.Registry == nil {
@@ -228,17 +315,23 @@ func resolveToolchain(in Input, chip *Chip) (Toolchain, error) {
 	if err != nil {
 		return Toolchain{}, fmt.Errorf("registry toolchain '%s': %w", name, err)
 	}
-	if st, err := os.Lstat(file); err != nil {
-		return Toolchain{}, fmt.Errorf("registry toolchain missing: %w", err)
+	if st, statErr := os.Lstat(file); statErr != nil {
+		return Toolchain{}, fmt.Errorf("registry toolchain missing: %w", statErr)
 	} else if !st.Mode().IsRegular() {
 		return Toolchain{}, fmt.Errorf("registry toolchain %s must be a regular file", file)
 	}
 
-	var expectedVer, upstreamVer string
+	var expectedVer, upstreamVer, compilerBin string
+	var idxSHA map[string]string
 	if in.Index != nil {
-		tcInfo := in.Index.Toolchains[name]
-		expectedVer = tcInfo.Version
-		upstreamVer = tcInfo.UpstreamVersion
+		if tcInfo, ok := in.Index.Toolchains[name]; ok {
+			expectedVer = tcInfo.Version
+			upstreamVer = tcInfo.UpstreamVersion
+			compilerBin = tcInfo.CompilerBinary
+			if len(tcInfo.Sha256) > 0 {
+				idxSHA = maps.Clone(tcInfo.Sha256)
+			}
+		}
 	}
 	if expectedVer != "" {
 		if err := validateToolchainVersion("toolchain version", expectedVer); err != nil {
@@ -263,6 +356,8 @@ func resolveToolchain(in Input, chip *Chip) (Toolchain, error) {
 		ExpectedVersion: expectedVer,
 		UpstreamVersion: upstreamVer,
 		MinCompiler:     minCompiler,
+		CompilerBinary:  compilerBin,
+		SHA256:          idxSHA,
 	}
 
 	pinnedFromLock := false
@@ -270,6 +365,19 @@ func resolveToolchain(in Input, chip *Chip) (Toolchain, error) {
 		if pinned, ok := in.Lock.Toolchains[name]; ok && pinned.Version != "" {
 			if err := validateToolchainVersion("locked toolchain version", pinned.Version); err != nil {
 				return Toolchain{}, err
+			}
+			if in.Locked && len(pinned.SHA256) > 0 && len(tc.SHA256) > 0 {
+				for _, plat := range slices.Sorted(maps.Keys(pinned.SHA256)) {
+					wantSum := pinned.SHA256[plat]
+					gotSum, exists := tc.SHA256[plat]
+					if !exists || gotSum != wantSum {
+						return Toolchain{}, fmt.Errorf("locked toolchain %q platform %s sha256 %q does not match registry sha256 %q",
+							name, plat, wantSum, gotSum)
+					}
+				}
+			}
+			if len(pinned.SHA256) > 0 && len(tc.SHA256) == 0 {
+				tc.SHA256 = maps.Clone(pinned.SHA256)
 			}
 			tc.ExpectedVersion = pinned.Version
 			pinnedFromLock = true
@@ -280,6 +388,10 @@ func resolveToolchain(in Input, chip *Chip) (Toolchain, error) {
 			tc.ExpectedVersion = lc.ToolchainVersion
 			pinnedFromLock = true
 		}
+	}
+
+	if in.Locked && !pinnedFromLock {
+		return Toolchain{}, fmt.Errorf("--locked build requires toolchain %q in toob.lock [toolchains]", name)
 	}
 
 	if minCompiler != "" {

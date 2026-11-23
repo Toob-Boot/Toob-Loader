@@ -942,8 +942,23 @@ func renderPlatformAndBringup(
 		if step.Mandatory {
 			mandLit = "true"
 		}
+		initGuard := ""
+		for _, f := range rt.fields {
+			if f.field == "init" {
+				initGuard = f.guard
+				break
+			}
+		}
+		stepGuard := rt.contract.Guard
+		switch {
+		case initGuard == "":
+		case stepGuard == "", stepGuard == initGuard:
+			stepGuard = initGuard
+		default:
+			stepGuard = fmt.Sprintf("(%s) && (%s)", stepGuard, initGuard)
+		}
 		steps = append(steps, renderedStep{
-			guard: rt.contract.Guard,
+			guard: stepGuard,
 			line:  fmt.Sprintf("    { %s, %s, %s },", step.KindEnum, mandLit, step.PanicSite),
 		})
 	}

@@ -1,0 +1,23 @@
+name = "evil-prod-mock"
+version = "1.0.0"
+
+[identity]
+vendor_id = 0x1234
+product_id = 0x5678
+hw_rev = 1
+
+[device]
+chip = "esp32c6"
+
+[build]
+profile = "production"
+mock = ["flash"]
+
+[partitions]
+stage0_size = 32768
+stage1_size = 65536
+app_size = 524288
+wal_sectors = 4
+
+[boot_config]
+max_retries = 3

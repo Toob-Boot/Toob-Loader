@@ -95,9 +95,11 @@ func ValidatePackageRef(kind, ref string) error {
 	return ValidateName(kind, ref)
 }
 
-// ValidateCompilerFlag rejects compiler/assembler/linker flags that could
-// inject CMake list separators (';'), variable expansions ('$'), quotes,
-// whitespace/newlines, shell metacharacters, or path traversal ('..') (HIGH-87).
+// ValidateCompilerFlag enforces a strict allowlist on compiler/assembler/linker
+// flags so manifests cannot inject CMake list separators (';'), variable
+// expansions ('$'), macro/include overrides (-D/-I/-include/-imacros/-Wp),
+// linker symbol hijacks (-Wl,--wrap/--defsym/--allow-multiple-definition), or
+// response files (CRIT-72, HIGH-87).
 func ValidateCompilerFlag(kind, flag string) error {
 	if flag == "" {
 		return fmt.Errorf("%s entry must not be empty", kind)
@@ -114,11 +116,98 @@ func ValidateCompilerFlag(kind, flag string) error {
 			return fmt.Errorf("invalid %s %q: contains whitespace or control byte 0x%02X", kind, flag, c)
 		}
 		switch c {
-		case ';', '$', '"', '\'', '`', '\\', '|', '&', '<', '>', '(', ')', '{', '}', '!':
+		case ';', '$', '"', '\'', '`', '\\', '|', '&', '<', '>', '(', ')', '{', '}', '!', '*', '?':
 			return fmt.Errorf("invalid %s %q: contains forbidden metacharacter %q", kind, flag, c)
 		}
 	}
+
+	if err := rejectDangerousFlagOverride(kind, flag); err != nil {
+		return err
+	}
+	if !isAllowlistedCompilerFlag(kind, flag) {
+		return fmt.Errorf("invalid %s %q: flag is outside the permitted compiler/linker allowlist", kind, flag)
+	}
 	return nil
+}
+
+func rejectDangerousFlagOverride(kind, flag string) error {
+	for _, bannedPrefix := range []string{
+		"-D", "-U", "-I", "-isystem", "-idirafter", "-iprefix", "-iwithprefix",
+		"-include", "-imacros", "-Wp,", "-Wa,", "-Xpreprocessor", "-Xassembler",
+		"-Xlinker", "-fplugin", "-fsanitize", "-T", "-L", "-l", "-e", "--entry",
+		"-Wl,--wrap", "-Wl,-wrap", "-Wl,--defsym", "-Wl,-defsym",
+		"-Wl,--allow-multiple-definition", "-Wl,-T", "-Wl,--script",
+		"-Wl,-Map", "-Wl,-init", "-Wl,-fini", "-Wl,--shared", "-shared",
+	} {
+		if flag == bannedPrefix || strings.HasPrefix(flag, bannedPrefix) {
+			return fmt.Errorf("invalid %s %q: forbidden compiler/linker override %q", kind, flag, bannedPrefix)
+		}
+	}
+	return nil
+}
+
+func isAllowlistedCompilerFlag(kind, flag string) bool {
+	switch flag {
+	case "-Os", "-Oz", "-O0", "-O1", "-O2", "-O3", "-Og",
+		"-ffunction-sections", "-fdata-sections", "-fno-common", "-fno-builtin",
+		"-fno-strict-aliasing", "-fstrict-aliasing", "-fno-short-enums", "-fshort-enums",
+		"-fno-omit-frame-pointer", "-fomit-frame-pointer", "-ffreestanding",
+		"-fno-exceptions", "-fno-unwind-tables", "-fno-asynchronous-unwind-tables",
+		"-fstack-protector-strong", "-fstack-usage", "-fno-lto", "-flto",
+		"-fno-tree-vectorize", "-fno-delete-null-pointer-checks", "-fvisibility=hidden",
+		"-Wall", "-Wextra", "-Werror", "-Wshadow", "-Wconversion", "-Wformat=2",
+		"-Wstrict-prototypes", "-Wmissing-prototypes", "-Wundef", "-Wpointer-arith",
+		"-std=c99", "-std=c11", "-std=c17", "-std=gnu99", "-std=gnu11", "-std=gnu17",
+		"-g", "-g0", "-g1", "-g2", "-g3", "-ggdb", "-gdwarf-4", "-gdwarf-5":
+		return true
+	}
+	if strings.HasPrefix(flag, "-m") && len(flag) > 2 {
+		return isSafeFlagToken(flag[2:])
+	}
+	if strings.HasPrefix(flag, "-Wno-") && len(flag) > 5 {
+		return isSafeFlagToken(flag[5:])
+	}
+	if strings.HasPrefix(flag, "-falign-") && isSafeAlignFlag(flag) {
+		return true
+	}
+	if strings.Contains(strings.ToLower(kind), "ld") {
+		switch flag {
+		case "-nostdlib", "--specs=nano.specs", "--specs=nosys.specs",
+			"-specs=nano.specs", "-specs=nosys.specs",
+			"-Wl,--gc-sections", "-Wl,--no-relax", "-Wl,--relax",
+			"-Wl,--fix-cortex-m3-ldrd", "-Wl,-z,noexecstack":
+			return true
+		}
+	}
+	return false
+}
+
+func isSafeFlagToken(rest string) bool {
+	for i := range len(rest) {
+		c := rest[i]
+		isAlphaNum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		switch {
+		case isAlphaNum, c == '_', c == '-', c == '=', c == '+', c == '.', c == ',', c == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeAlignFlag(flag string) bool {
+	for _, p := range []string{"-falign-functions=", "-falign-loops=", "-falign-jumps="} {
+		if strings.HasPrefix(flag, p) && len(flag) > len(p) {
+			num := flag[len(p):]
+			for i := range len(num) {
+				if num[i] < '0' || num[i] > '9' {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateCompilerFlags validates optional C, ASM, and LD flag slices on a manifest.

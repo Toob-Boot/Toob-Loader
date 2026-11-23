@@ -68,6 +68,9 @@ func Generate(ctx *Context) (*Result, error) {
 	if err := auditMacroUsage(out.auditMacros, ctx.SourceDirs, ctx.OutDir); err != nil {
 		return nil, err
 	}
+	if err := auditComposedSourceMacroHygiene(ctx, out.auditMacros); err != nil {
+		return nil, err
+	}
 	log.Success("All generated macros are perfectly synchronized with the C code!")
 
 	if err := writeArtifacts(ctx.OutDir, out.artifacts); err != nil {

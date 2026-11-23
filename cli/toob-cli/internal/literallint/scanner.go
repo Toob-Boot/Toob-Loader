@@ -16,8 +16,8 @@ import (
 )
 
 var (
-	lintAllowRe = regexp.MustCompile(`lint-allow:\s*\S+`)
-	arrayInitRe = regexp.MustCompile(`(0[xX][0-9a-fA-F]{1,2}[uUlL]*\s*,\s*){2,}`)
+	lintAllowTagRe = regexp.MustCompile(`lint-allow:(.*)$`)
+	lintWordRe     = regexp.MustCompile(`[A-Za-z][A-Za-z0-9_/-]{1,}`)
 )
 
 var standardAllowedDecimals = map[string]bool{
@@ -198,12 +198,13 @@ const (
 )
 
 type cToken struct {
-	kind    cTokenKind
-	text    string
-	line    int
-	col     int
-	preproc bool
-	fnMacro bool
+	kind      cTokenKind
+	text      string
+	line      int
+	col       int
+	preproc   bool
+	fnMacro   bool
+	stmtMacro bool
 }
 
 func isIdentStart(b byte) bool {
@@ -326,7 +327,11 @@ func tokenizeC(stream []posChar) []cToken {
 			for i < n {
 				cur := stream[i].ch
 				if cur == '\\' {
-					i += 2 // consume escape backslash AND escaped char (handles '\\', '\"', '\'')
+					if i+1 < n && stream[i+1].ch != '\n' {
+						i += 2 // consume escape backslash AND escaped char on same logical line
+					} else {
+						i++
+					}
 					continue
 				}
 				if cur == quote || cur == '\n' {
@@ -517,17 +522,215 @@ func isAllowedNumericLiteral(raw string, deep bool) bool {
 	return standardAllowedDecimals[core]
 }
 
-func computeLineSuppression(physLines []string) ([]bool, int) {
-	suppressed := make([]bool, len(physLines)+1) // 1-based line index
+func isStmtMacroKeyword(id string) bool {
+	switch id {
+	case "do", "while", "for", "switch", "return", "goto", "if":
+		return true
+	default:
+		return false
+	}
+}
+
+func markStatementMacros(tokens []cToken) {
+	lineStart := 0
+	for i := 0; i <= len(tokens); i++ {
+		if i < len(tokens) && tokens[i].kind != tokNewline {
+			continue
+		}
+		if lineStart < i && tokens[lineStart].preproc {
+			isStmt := false
+			for k := lineStart; k < i; k++ {
+				t := tokens[k]
+				if (t.kind == tokPunct && (t.text == "{" || t.text == "}" || t.text == ";")) ||
+					(t.kind == tokIdent && isStmtMacroKeyword(t.text)) {
+					isStmt = true
+					break
+				}
+			}
+			if isStmt {
+				for k := lineStart; k < i; k++ {
+					tokens[k].stmtMacro = true
+				}
+			}
+		}
+		lineStart = i + 1
+	}
+}
+
+func isValidLintAllowComment(commentBody string) bool {
+	m := lintAllowTagRe.FindStringSubmatch(commentBody)
+	if len(m) < 2 {
+		return false
+	}
+	reason := strings.TrimSpace(m[1])
+	return len(reason) >= 4 && lintWordRe.MatchString(reason)
+}
+
+// computeCommentLineSuppression extracts genuine C comments containing a valid
+// `lint-allow: <reason>` tag (ignoring string/char literals!) and distinguishes
+// standalone comment lines (suppressing the next non-empty physical line) from
+// inline trailing comments (suppressing only their own line).
+func computeCommentLineSuppression(stream []posChar, physLines []string, tokens []cToken) ([]bool, int) {
+	hasCodeOnLine := make([]bool, len(physLines)+1)
+	for _, t := range tokens {
+		if t.kind != tokNewline && t.line >= 1 && t.line < len(hasCodeOnLine) {
+			hasCodeOnLine[t.line] = true
+		}
+	}
+
+	commentAllowLines := make([]bool, len(physLines)+1)
+	n := len(stream)
+	for i := 0; i < n; {
+		c := stream[i].ch
+		if c == '/' && i+1 < n && stream[i+1].ch == '/' {
+			ln := stream[i].line
+			i += 2
+			var sb strings.Builder
+			for i < n && stream[i].ch != '\n' {
+				sb.WriteByte(stream[i].ch)
+				i++
+			}
+			if ln >= 1 && ln < len(commentAllowLines) && isValidLintAllowComment(sb.String()) {
+				commentAllowLines[ln] = true
+			}
+			continue
+		}
+		if c == '/' && i+1 < n && stream[i+1].ch == '*' {
+			startLine := stream[i].line
+			i += 2
+			var sb strings.Builder
+			for i < n {
+				if stream[i].ch == '*' && i+1 < n && stream[i+1].ch == '/' {
+					i += 2
+					break
+				}
+				sb.WriteByte(stream[i].ch)
+				i++
+			}
+			if startLine >= 1 && startLine < len(commentAllowLines) && isValidLintAllowComment(sb.String()) {
+				commentAllowLines[startLine] = true
+			}
+			continue
+		}
+		if prefixLen, quote := isStringOrCharPrefix(stream, i); prefixLen >= 0 {
+			i += prefixLen + 1
+			for i < n {
+				cur := stream[i].ch
+				if cur == '\\' {
+					if i+1 < n && stream[i+1].ch != '\n' {
+						i += 2
+					} else {
+						i++
+					}
+					continue
+				}
+				if cur == quote || cur == '\n' {
+					if cur == quote {
+						i++
+					}
+					break
+				}
+				i++
+			}
+			continue
+		}
+		i++
+	}
+
+	suppressed := make([]bool, len(physLines)+1)
 	count := 0
-	for idx, line := range physLines {
-		lineNum := idx + 1
-		if lintAllowRe.MatchString(line) || (idx > 0 && lintAllowRe.MatchString(physLines[idx-1])) {
+	mark := func(lineNum int) {
+		if lineNum >= 1 && lineNum < len(suppressed) && !suppressed[lineNum] {
 			suppressed[lineNum] = true
 			count++
 		}
 	}
+	for ln := 1; ln <= len(physLines); ln++ {
+		if !commentAllowLines[ln] {
+			continue
+		}
+		mark(ln)
+		if !hasCodeOnLine[ln] && ln+1 <= len(physLines) && strings.TrimSpace(physLines[ln]) != "" {
+			mark(ln + 1)
+		}
+	}
 	return suppressed, count
+}
+
+func isByteHexLiteral(raw string) bool {
+	clean := strings.ReplaceAll(raw, "'", "")
+	core, ok := stripValidCIntegerSuffix(clean)
+	if !ok {
+		return false
+	}
+	if !strings.HasPrefix(core, "0x") && !strings.HasPrefix(core, "0X") {
+		return false
+	}
+	digits := core[2:]
+	if len(digits) == 0 || len(digits) > 2 {
+		return false
+	}
+	for i := range len(digits) {
+		if !isHexDigit(digits[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// computeByteArrayInitTokens marks byte-sized hex literal tokens (0x00..0xFF)
+// strictly inside `{ 0xAA, 0xBB, ... }` initializer lists (>= 2 byte elements,
+// no wider magic constants mixed inside the same brace block).
+func computeByteArrayInitTokens(tokens []cToken) []bool {
+	exempt := make([]bool, len(tokens))
+	type braceState struct {
+		elemTokens []int
+		byteCount  int
+		invalid    bool
+	}
+	var stack []braceState
+	for i, tok := range tokens {
+		if tok.kind == tokNewline {
+			continue
+		}
+		if tok.kind == tokPunct && tok.text == "{" {
+			stack = append(stack, braceState{})
+			continue
+		}
+		if len(stack) == 0 {
+			continue
+		}
+		top := &stack[len(stack)-1]
+		if tok.kind == tokPunct && tok.text == "}" {
+			if !top.invalid && top.byteCount >= 2 {
+				for _, idx := range top.elemTokens {
+					exempt[idx] = true
+				}
+			}
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		if tok.kind == tokPunct && tok.text == "," {
+			continue
+		}
+		if tok.kind == tokNumber && isByteHexLiteral(tok.text) {
+			top.elemTokens = append(top.elemTokens, i)
+			top.byteCount++
+			continue
+		}
+		top.invalid = true
+	}
+	return exempt
+}
+
+func isValidShiftCountLiteral(raw string) bool {
+	clean := strings.ReplaceAll(raw, "'", "")
+	core, ok := stripValidCIntegerSuffix(clean)
+	if !ok {
+		return false
+	}
+	val, parseErr := strconv.ParseUint(core, 0, 64)
+	return parseErr == nil && val <= 63
 }
 
 func scanFileLexer(path string, deep bool) ([]LintViolation, int, int, error) {
@@ -538,11 +741,14 @@ func scanFileLexer(path string, deep bool) ([]LintViolation, int, int, error) {
 	}
 
 	stream, physLines := buildLogicalStream(data)
-	suppressedLine, suppressedCount := computeLineSuppression(physLines)
 	tokens := tokenizeC(stream)
+	markStatementMacros(tokens)
+	suppressedLine, suppressedCount := computeCommentLineSuppression(stream, physLines, tokens)
+	byteArrayInit := computeByteArrayInitTokens(tokens)
 
 	var violations []LintViolation
 	parenDepth := 0
+	braceDepth := 0
 	exemptCallDepth := -1
 
 	for idx, tok := range tokens {
@@ -552,14 +758,23 @@ func scanFileLexer(path string, deep bool) ([]LintViolation, int, int, error) {
 			continue
 		}
 
-		// Track _Static_assert(...) / static_assert(...) / sizeof(...) scopes in standard mode.
-		if !deep && tok.kind == tokIdent && (tok.text == "_Static_assert" || tok.text == "static_assert" || tok.text == "sizeof") {
+		// Track _Static_assert(...) / static_assert(...) / sizeof(...) scopes in standard mode,
+		// and function brace nesting depth across lines so #define inside functions is never hidden.
+		if !deep && !tok.preproc && tok.kind == tokIdent && (tok.text == "_Static_assert" || tok.text == "static_assert" || tok.text == "sizeof") {
 			if idx+1 < len(tokens) && tokens[idx+1].kind == tokPunct && tokens[idx+1].text == "(" && exemptCallDepth < 0 {
 				exemptCallDepth = parenDepth
 			}
 		}
 		if tok.kind == tokPunct {
 			switch tok.text {
+			case "{":
+				if !tok.preproc {
+					braceDepth++
+				}
+			case "}":
+				if !tok.preproc && braceDepth > 0 {
+					braceDepth--
+				}
 			case "(":
 				parenDepth++
 			case ")":
@@ -577,10 +792,10 @@ func scanFileLexer(path string, deep bool) ([]LintViolation, int, int, error) {
 		}
 
 		// Preprocessor handling:
-		// - Standard mode skips all # directives.
-		// - Deep mode skips object-like #define CONST 0x... (named constants) and #include/#if,
-		//   but inspects function-like #define FN(x) ... bodies where executable magic numbers hide!
-		if tok.preproc && (!deep || !tok.fnMacro) {
+		// - Statement/control-flow macros and #define inside function bodies are NEVER exempt.
+		// - Standard mode skips simple file-scope #define constants and #if/#include.
+		// - Deep mode also inspects function-like #define FN(x) ... macro bodies.
+		if tok.preproc && !tok.stmtMacro && braceDepth == 0 && (!deep || !tok.fnMacro) {
 			continue
 		}
 
@@ -592,12 +807,7 @@ func scanFileLexer(path string, deep bool) ([]LintViolation, int, int, error) {
 			continue
 		}
 
-		physContext := ""
-		if tok.line >= 1 && tok.line <= len(physLines) {
-			physContext = physLines[tok.line-1]
-		}
-
-		if !deep && arrayInitRe.MatchString(physContext) {
+		if !deep && byteArrayInit[idx] {
 			continue
 		}
 
@@ -605,9 +815,16 @@ func scanFileLexer(path string, deep bool) ([]LintViolation, int, int, error) {
 			continue
 		}
 
-		// Shift-count idiom (e.g. 1U << 30 or val >> 16) is allowed in standard mode, flagged in deep mode.
-		if !deep && idx > 0 && tokens[idx-1].kind == tokPunct && (tokens[idx-1].text == "<<" || tokens[idx-1].text == ">>") {
+		// Bounded bit-shift counts (0..63) are permitted in standard mode, flagged in deep mode.
+		if !deep && idx > 0 && tokens[idx-1].kind == tokPunct &&
+			(tokens[idx-1].text == "<<" || tokens[idx-1].text == ">>") &&
+			isValidShiftCountLiteral(tok.text) {
 			continue
+		}
+
+		physContext := ""
+		if tok.line >= 1 && tok.line <= len(physLines) {
+			physContext = physLines[tok.line-1]
 		}
 
 		violations = append(violations, LintViolation{
@@ -650,7 +867,9 @@ func scanFileClangQuery(path string, includePaths, physLines []string, existing 
 		return nil
 	}
 
-	suppressed, _ := computeLineSuppression(physLines)
+	stream, _ := buildLogicalStream([]byte(strings.Join(physLines, "\n")))
+	tokens := tokenizeC(stream)
+	suppressed, _ := computeCommentLineSuppression(stream, physLines, tokens)
 	seen := make(map[[2]int]bool, len(existing))
 	for _, v := range existing {
 		seen[[2]int{v.Line, v.Column}] = true

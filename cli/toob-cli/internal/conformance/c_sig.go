@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 )
@@ -120,6 +121,266 @@ func extractExportedCFunctionSigs(contents []string) map[string]string {
 		}
 	}
 	return funcs
+}
+
+type rawCTokKind int
+
+const (
+	rawTokIdent rawCTokKind = iota
+	rawTokString
+	rawTokPunct
+	rawTokHash
+	rawTokNewline
+)
+
+type rawCTok struct {
+	kind rawCTokKind
+	text string
+	line int
+}
+
+// tokenizeRawCForAttrScan tokenizes raw C BEFORE attribute stripping, stripping
+// comments while retaining preprocessor lines, __attribute__ lists, asm strings,
+// and exact 1-based line numbers so forbidden attributes/sections cannot hide.
+func tokenizeRawCForAttrScan(raw string) []rawCTok {
+	normalized := strings.ReplaceAll(raw, "\r\n", "\n")
+	type lc struct {
+		ch   byte
+		line int
+	}
+	stream := make([]lc, 0, len(normalized))
+	line := 1
+	for i := 0; i < len(normalized); i++ {
+		c := normalized[i]
+		if c == '\\' && i+1 < len(normalized) && normalized[i+1] == '\n' {
+			i++
+			line++
+			continue
+		}
+		stream = append(stream, lc{ch: c, line: line})
+		if c == '\n' {
+			line++
+		}
+	}
+
+	var toks []rawCTok
+	n := len(stream)
+	atLineStart := true
+	for i := 0; i < n; {
+		c := stream[i].ch
+		ln := stream[i].line
+		switch {
+		case c == '\n':
+			toks = append(toks, rawCTok{kind: rawTokNewline, text: "\n", line: ln})
+			atLineStart = true
+			i++
+		case c == ' ' || c == '\t' || c == '\v' || c == '\f' || c == '\r':
+			i++
+		case c == '/' && i+1 < n && stream[i+1].ch == '/':
+			i += 2
+			for i < n && stream[i].ch != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && stream[i+1].ch == '*':
+			i += 2
+			for i < n {
+				if stream[i].ch == '*' && i+1 < n && stream[i+1].ch == '/' {
+					i += 2
+					break
+				}
+				i++
+			}
+		case atLineStart && c == '#':
+			toks = append(toks, rawCTok{kind: rawTokHash, text: "#", line: ln})
+			atLineStart = false
+			i++
+		case c == '"' || c == '\'':
+			atLineStart = false
+			quote := c
+			i++
+			var sb strings.Builder
+			for i < n {
+				cur := stream[i].ch
+				if cur == '\\' && i+1 < n {
+					sb.WriteByte(cur)
+					sb.WriteByte(stream[i+1].ch)
+					i += 2
+					continue
+				}
+				if cur == quote || cur == '\n' {
+					if cur == quote {
+						i++
+					}
+					break
+				}
+				sb.WriteByte(cur)
+				i++
+			}
+			toks = append(toks, rawCTok{kind: rawTokString, text: sb.String(), line: ln})
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_':
+			atLineStart = false
+			var sb strings.Builder
+			for i < n {
+				ch := stream[i].ch
+				if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' {
+					sb.WriteByte(ch)
+					i++
+					continue
+				}
+				break
+			}
+			toks = append(toks, rawCTok{kind: rawTokIdent, text: sb.String(), line: ln})
+		default:
+			atLineStart = false
+			toks = append(toks, rawCTok{kind: rawTokPunct, text: string(c), line: ln})
+			i++
+		}
+	}
+	return toks
+}
+
+func isForbiddenInitSectionName(sec string) bool {
+	lower := strings.ToLower(sec)
+	for _, pat := range []string{".init_array", ".preinit_array", ".fini_array", ".ctors", ".dtors"} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+func isOfficialWeakAllowed(toks []rawCTok, weakTokIdx, endDeclSearch int, isIntegration bool) bool {
+	// Scan backward to statement/line start for `extern` or protected symbol names,
+	// and forward across the declaration for approved symbol names.
+	stmtStart := 0
+	for k := weakTokIdx - 1; k >= 0; k-- {
+		if toks[k].kind == rawTokPunct && (toks[k].text == ";" || toks[k].text == "{" || toks[k].text == "}") {
+			stmtStart = k + 1
+			break
+		}
+		if toks[k].kind == rawTokHash {
+			stmtStart = k
+			break
+		}
+	}
+	// Collect identifiers in this declaration header (before '{' or ';').
+	hasExtern := false
+	hasBootPrefix := false
+	hasApprovedSym := false
+	for k := stmtStart; k < len(toks) && k <= endDeclSearch; k++ {
+		if toks[k].kind == rawTokPunct && (toks[k].text == ";" || toks[k].text == "{") {
+			break
+		}
+		if toks[k].kind != rawTokIdent {
+			continue
+		}
+		id := toks[k].text
+		if id == "extern" {
+			hasExtern = true
+		}
+		if strings.HasPrefix(id, "boot_") {
+			hasBootPrefix = true
+		}
+		switch id {
+		case "__stack_chk_guard", "NMI_Handler", "HardFault_Handler", "MemManage_Handler", "BusFault_Handler":
+			hasApprovedSym = true
+		}
+		if isIntegration && (strings.HasPrefix(id, "toob_") || strings.HasPrefix(id, "rtos_") ||
+			strings.HasPrefix(id, "TOOB_") && strings.HasSuffix(id, "_WEAK")) {
+			hasApprovedSym = true
+		}
+	}
+	if hasBootPrefix {
+		return false
+	}
+	return hasExtern || hasApprovedSym
+}
+
+// scanRawCForForbiddenConstructs inspects raw C/H code BEFORE attribute
+// stripping to reject constructors, destructors, init/fini arrays, symbol
+// aliases, and unauthorized weak linkage (CRIT-72).
+func scanRawCForForbiddenConstructs(relPath, raw string, allowOfficialWeak, isIntegration bool) []string {
+	toks := tokenizeRawCForAttrScan(raw)
+	var issues []string
+	inAsmStmt := false
+
+	for i := 0; i < len(toks); i++ {
+		tok := toks[i]
+		switch tok.kind {
+		case rawTokHash:
+			if i+1 < len(toks) && toks[i+1].kind == rawTokIdent && toks[i+1].text == "pragma" {
+				if i+2 < len(toks) && toks[i+2].kind == rawTokIdent {
+					switch toks[i+2].text {
+					case "weak", "init", "fini":
+						issues = append(issues, fmt.Sprintf("%s:L%d: forbidden '#pragma %s'", relPath, tok.line, toks[i+2].text))
+					}
+				}
+			}
+		case rawTokIdent:
+			switch tok.text {
+			case "asm", "__asm", "__asm__":
+				inAsmStmt = true
+			case "__weak":
+				if !allowOfficialWeak || !isOfficialWeakAllowed(toks, i, min(len(toks)-1, i+24), isIntegration) {
+					issues = append(issues, fmt.Sprintf("%s:L%d: forbidden '__weak' symbol qualifier in package", relPath, tok.line))
+				}
+			case "__attribute__", "__attribute":
+				if i+1 >= len(toks) || toks[i+1].kind != rawTokPunct || toks[i+1].text != "(" {
+					continue
+				}
+				depth := 0
+				endAttr := i + 1
+				for endAttr < len(toks) {
+					if toks[endAttr].kind == rawTokPunct {
+						if toks[endAttr].text == "(" {
+							depth++
+						} else if toks[endAttr].text == ")" {
+							depth--
+							if depth == 0 {
+								break
+							}
+						}
+					}
+					endAttr++
+				}
+				for k := i + 2; k < endAttr; k++ {
+					if toks[k].kind != rawTokIdent {
+						continue
+					}
+					attr := toks[k].text
+					switch attr {
+					case "constructor", "__constructor__", "destructor", "__destructor__":
+						issues = append(issues, fmt.Sprintf("%s:L%d: forbidden __attribute__((%s))", relPath, toks[k].line, attr))
+					case "alias", "__alias__":
+						if k+1 < endAttr && toks[k+1].kind == rawTokPunct && toks[k+1].text == "(" {
+							issues = append(issues, fmt.Sprintf("%s:L%d: forbidden __attribute__((%s(...)))", relPath, toks[k].line, attr))
+						}
+					case "section", "__section__":
+						if k+2 < endAttr && toks[k+1].kind == rawTokPunct && toks[k+1].text == "(" && toks[k+2].kind == rawTokString {
+							if isForbiddenInitSectionName(toks[k+2].text) {
+								issues = append(issues, fmt.Sprintf("%s:L%d: forbidden ELF init/fini section %q", relPath, toks[k].line, toks[k+2].text))
+							}
+						}
+					case "weak", "__weak__":
+						if !allowOfficialWeak || !isOfficialWeakAllowed(toks, i, min(len(toks)-1, endAttr+24), isIntegration) {
+							issues = append(issues, fmt.Sprintf("%s:L%d: forbidden __attribute__((%s)) in package", relPath, toks[k].line, attr))
+						}
+					}
+				}
+				i = endAttr
+			}
+		case rawTokString:
+			if inAsmStmt && isForbiddenInitSectionName(tok.text) {
+				issues = append(issues, fmt.Sprintf("%s:L%d: forbidden init/fini section in asm directive", relPath, tok.line))
+			}
+		case rawTokPunct:
+			if tok.text == ";" {
+				inAsmStmt = false
+			}
+		case rawTokNewline:
+		}
+	}
+	return issues
 }
 
 func parseFunctionDefinitionHeader(header string) (fnName, canonicalSig string, ok bool) {

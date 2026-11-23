@@ -1,0 +1,7 @@
+Linker script and memory map
+.text.boot_verify_slot_image
+                0x08008100       0x100 libtoob_core.a(boot_verify.c.obj)
+                0x08008100                boot_verify_slot_image
+.text.clean_entropy_random
+                0x08008200        0x40 libtoob_chip.a(entropy.c.obj)
+                0x08008200                clean_entropy_random

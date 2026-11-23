@@ -3,13 +3,31 @@ package resolve
 import (
 	"strings"
 	"testing"
+
+	manifestpkg "github.com/toob-boot/toob/internal/manifest"
 )
 
 func testPlan() *Plan {
 	return &Plan{
-		Chip:    Chip{Name: "chip", Arch: "riscv", Prefix: "riscv32-esp-elf-", Dir: "/hal/chips/chip"},
-		Arch:    Arch{Name: "riscv", Dir: "/hal/arch/riscv"},
-		Drivers: []string{"/hal/drivers/a", "/hal/drivers/b"},
+		HalRoot: "/hal",
+		Chip: Chip{
+			Name: "chip", Arch: "riscv", Prefix: "riscv32-esp-elf-", Dir: "/hal/chips/chip",
+			Spec: &manifestpkg.ChipManifest{
+				CompilerFlags: &manifestpkg.CompilerFlags{
+					CFlags: []string{"-march=rv32imac"},
+				},
+			},
+		},
+		Arch:         Arch{Name: "riscv", Dir: "/hal/arch/riscv"},
+		Toolchain:    Toolchain{Name: "riscv32-esp-elf", CompilerBinary: "riscv32-esp-elf-gcc"},
+		SoCDir:       "/hal/soc/esp",
+		ArchFlags:    []string{"-mabi=ilp32", "-march=rv32imac"},
+		ChipCFlags:   []string{"-mabi=ilp32", "-march=rv32imac"},
+		ChipAsmFlags: []string{"-mabi=ilp32"},
+		ChipLDFlags:  []string{"-nostdlib"},
+		ChipStartup:  "/hal/chips/chip/startup.c",
+		ChipLinker:   "/hal/chips/chip/link.ld",
+		Drivers:      []string{"/hal/drivers/a", "/hal/drivers/b"},
 		Crypto: []CryptoSlot{
 			{
 				Slot: slotBackend, Name: "mono", Dir: "/crypto/mono",
@@ -52,11 +70,19 @@ func TestRenderConfig(t *testing.T) {
 		`set(TOOLCHAIN_PREFIX "riscv32-esp-elf-")`,
 		`set(TOOB_CORE_DIR "/sdk/toobloader/core")`,
 		`set(TOOB_STAGE0_DIR "/sdk/toobloader/stage0")`,
+		`set(TOOB_HAL_ROOT "/hal")`,
 		`set(TOOB_HAL_CHIP_DIR "/hal/chips/chip")`,
 		`set(TOOB_HAL_ARCH_DIR "/hal/arch/riscv")`,
+		`set(TOOB_SOC_DIR "/hal/soc/esp")`,
+		`set(TOOB_COMPILER_BINARY "riscv32-esp-elf-gcc")`,
+		`set(TOOB_CHIP_ARCH_FLAGS "-mabi=ilp32;-march=rv32imac")`,
+		`set(TOOB_CHIP_C_FLAGS "-mabi=ilp32;-march=rv32imac")`,
+		`set(TOOB_CHIP_ASM_FLAGS "-mabi=ilp32")`,
+		`set(TOOB_CHIP_LD_FLAGS "-nostdlib")`,
+		`set(TOOB_CHIP_STARTUP "/hal/chips/chip/startup.c")`,
+		`set(TOOB_CHIP_LINKER "/hal/chips/chip/link.ld")`,
 		`set(TOOB_SDK_DIR "/sdk/sdk")`,
 		`set(TOOB_CLI_PATH "/bin/toob")`,
-		`set(TOOB_CRYPTO_DIR "/sdk/toobloader/crypto")`,
 		`set(TOOB_FEATURE_PQC_HYBRID OFF)`,
 		"list(APPEND TOOB_DRIVERS \"/hal/drivers/a\")\nlist(APPEND TOOB_DRIVERS \"/hal/drivers/b\")\n",
 		`set(TOOB_CRYPTO_BACKEND_ENABLED ON)`,
@@ -83,7 +109,7 @@ func TestRenderConfig(t *testing.T) {
 		}
 	}
 
-	absent := []string{"TOOB_CRYPTO_HASH_SOURCES", "TOOB_CRYPTO_PQC_NAME", "TOOB_CRYPTO_PQC_DIR"}
+	absent := []string{"TOOB_CRYPTO_DIR", "TOOB_CRYPTO_HASH_SOURCES", "TOOB_CRYPTO_PQC_NAME", "TOOB_CRYPTO_PQC_DIR"}
 	for _, name := range absent {
 		if strings.Contains(out, name) {
 			t.Errorf("output must not contain %q\n%s", name, out)

@@ -10,6 +10,11 @@ const (
 	ProfileProduction = "production"
 	// ProfileDev permits mock symbols/sections for development builds.
 	ProfileDev = "dev"
+
+	// DefaultMaxStackBytesProduction is the default per-function GCC -fstack-usage budget for production builds.
+	DefaultMaxStackBytesProduction uint64 = 2048
+	// DefaultMaxStackBytesDev is the default per-function GCC -fstack-usage budget for dev builds.
+	DefaultMaxStackBytesDev uint64 = 4096
 )
 
 // ELFAuditReport captures the full outcome of a post-link ELF binary audit.
@@ -66,9 +71,15 @@ func (r MemoryRegion) Overlaps(other MemoryRegion) bool {
 
 // ELFAuditConfig supplies all external parameters the auditor needs.
 type ELFAuditConfig struct {
-	Profile          string         // "production" or "dev" (validated fail-closed)
-	ReservedRegions  []MemoryRegion // from hardware.json reserved_ram_regions
-	FlashBounds      *MemoryRegion  // optional target flash/partition LMA window
-	Stage1MaxBytes   uint64         // maximum loadable flash footprint budget (0 = skip check)
-	SegmentedBootrom bool           // true only for multi-segment RAM BootROM Stage-0 ELFs
+	Profile               string         // "production" or "dev" (validated fail-closed)
+	ReservedRegions       []MemoryRegion // from hardware.json reserved_ram_regions
+	FlashBounds           *MemoryRegion  // optional target flash/partition LMA window
+	ForbiddenFlashRegions []MemoryRegion // optional forbidden/foreign flash windows that must not overlap
+	Stage1MaxBytes        uint64         // maximum loadable flash footprint budget (0 = skip check)
+	SegmentedBootrom      bool           // true only for multi-segment RAM BootROM Stage-0 ELFs
+	AllowRecoveryRuntime  bool           // true only when auditing standalone Recovery OS ELFs
+	MapPath               string         // optional GNU ld linker .map path for TU symbol ownership verification
+	RequireSSP            bool           // when true, require __stack_chk_fail symbol in ELF symtab
+	StackUsageDirs        []string       // optional directories containing GCC -fstack-usage (.su) files
+	MaxStackBytes         uint64         // per-function stack budget (0 uses per-profile default when StackUsageDirs is set)
 }

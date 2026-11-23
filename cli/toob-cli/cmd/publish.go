@@ -3,685 +3,378 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"syscall"
 
+	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
+
 	"github.com/toob-boot/toob/internal/apiclient"
 	"github.com/toob-boot/toob/internal/conformance"
+	"github.com/toob-boot/toob/internal/installer"
+	"github.com/toob-boot/toob/internal/literallint"
 	"github.com/toob-boot/toob/internal/paths"
 	"github.com/toob-boot/toob/internal/registry"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-// --- toob registry publish ---
+func newPublishCmd() *cobra.Command {
+	var notes string
 
-var registryPublishCmd = &cobra.Command{
-	Use:   "publish [path]",
-	Short: "Publish a package to the Toob Registry",
-	Long: `Packages the specified directory into a tarball and uploads it to the registry.
-
-The package directory must contain a valid manifest file (e.g., driver_manifest.json).
-Files matching .toobignore, .gitignore, or built-in defaults are excluded.
-
-Examples:
-  toob registry publish .
-  toob registry publish ./my-driver --promote
-  toob registry publish ./my-driver --skip-git-check`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		client := apiclient.NewWithTimeout(apiclient.UploadTimeout)
-		if !client.HasToken() {
-			return fmt.Errorf("not logged in — run 'toob login' first")
-		}
-
-		srcDir := "."
-		if len(args) > 0 {
-			srcDir = args[0]
-		}
-
-		absDir, err := filepath.Abs(srcDir)
-		if err != nil {
-			return fmt.Errorf("invalid path: %w", err)
-		}
-
-		if _, err := os.Stat(absDir); err != nil {
-			return fmt.Errorf("directory does not exist: %s", absDir)
-		}
-
-		// Dirty-tree warning (Gap 25)
-		skipGitCheck, _ := cmd.Flags().GetBool("skip-git-check")
-		if !skipGitCheck {
-			if err := warnIfDirtyGit(absDir); err != nil {
-				return err
+	c := &cobra.Command{
+		Use:   "publish [package-dir]",
+		Short: "Validate, package, and publish a Toob package to the registry",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := "."
+			if len(args) == 1 {
+				dir = args[0]
 			}
-		}
-
-		// Check manifest dependencies (Gap 18)
-		if err := checkManifestDependencies(cmd_defaultCtx(), absDir, client); err != nil {
-			return err
-		}
-
-		// Mandatory HAL Conformance Gate (REG-042)
-		ui.Step("Running HAL Conformance Gate...")
-		confReport, confErr := conformance.AuditPackage(absDir)
-		if confErr != nil || confReport == nil || !confReport.Passed {
-			return fmt.Errorf("FATAL [CONFORMANCE_FAIL]: package failed HAL conformance audit; run 'toob conformance %s' for details", absDir)
-		}
-		jsonPath := filepath.Join(absDir, "conformance_report.json")
-		mdPath := filepath.Join(absDir, "conformance_report.md")
-		_ = conformance.ExportReportJSON(confReport, jsonPath)
-		_ = conformance.ExportReportMarkdown(confReport, mdPath)
-		ui.Success("HAL Conformance audit PASSED cleanly. Generated CRA compliance reports.")
-		// Name collision pre-check (Gap 14)
-		manifestName := detectPackageName(absDir)
-		if manifestName != "" {
-			checkResp, err := client.CheckNameAvailable(cmd_defaultCtx(), manifestName)
-			if err == nil && checkResp != nil && !checkResp.Available {
-				ui.Warn("Name '%s' is already claimed in staging/stable by another publisher.", manifestName)
-				ui.Info("You can still publish to dev for testing, but promotion may be blocked.")
+			absDir, err := filepath.Abs(dir)
+			if err != nil {
+				return fmt.Errorf("resolve package directory %q: %w", dir, err)
 			}
-		}
 
-		ui.Header("Package Publish")
-		ui.Step("Packing %s ...", ui.Bold(filepath.Base(absDir)))
-
-		// Create tarball in memory with signal handling (Gap 41)
-		ctx, cancel := signal.NotifyContext(cmd_defaultCtx(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
-
-		var buf bytes.Buffer
-		mpw := multipart.NewWriter(&buf)
-
-		fw, err := mpw.CreateFormFile("tarball", filepath.Base(absDir)+".tar.gz")
-		if err != nil {
-			return fmt.Errorf("failed to create multipart form: %w", err)
-		}
-
-		if err := registry.CreateTarball(absDir, fw); err != nil {
-			return fmt.Errorf("failed to create tarball: %w", err)
-		}
-		if err := mpw.Close(); err != nil {
-			return fmt.Errorf("failed to finalize multipart form: %w", err)
-		}
-
-		ui.Success("Tarball created (%d bytes)", buf.Len())
-
-		// Upload. The body is kept as bytes rather than handed over as the buffer, because a
-		// step-up challenge means uploading it a second time after the person has signed in again,
-		// and a buffer is spent by the first attempt.
-		payload := buf.Bytes()
-		var resp *apiclient.PublishResponse
-		err = withStepUp(ctx, client, func() error {
-			spinner := ui.NewSpinner("Uploading to registry...")
-			spinner.Start()
-			defer spinner.Stop()
-
-			resp, err = client.Publish(ctx, bytes.NewReader(payload), mpw.FormDataContentType())
-			return err
-		})
-		if err != nil {
-			return fmt.Errorf("publish failed: %w", err)
-		}
-
-		ui.Success("Published %s@%s (ID: %s)", resp.Name, resp.Version, resp.ID[:8])
-		ui.KeyValue("Category", resp.Category)
-		ui.KeyValue("Stage", ui.Cyan(resp.Stage))
-		ui.KeyValue("SHA256", ui.Gray(resp.TarballSHA))
-
-		if len(resp.IngestionWarnings) > 0 {
-			ui.Divider()
-			ui.Warn("Ingestion warnings:")
-			for _, w := range resp.IngestionWarnings {
-				ui.Info("  • %s", w)
+			cat, tgzBytes, fileCount, err := buildAndValidatePackageTarball(absDir)
+			if err != nil {
+				return fmt.Errorf("package validation failed: %w", err)
 			}
-		}
 
-		// Auto-promote if requested (Gap 12 tie-in)
-		promote, _ := cmd.Flags().GetBool("promote")
-		if promote {
-			return doPromote(client, resp.Name, resp.Version)
-		}
+			report, err := conformance.AuditPackage(absDir)
+			if err != nil {
+				return fmt.Errorf("conformance audit failed: %w", err)
+			}
+			if !report.Passed {
+				return fmt.Errorf("conformance audit failed with %d failed check(s)", countFailedConformanceChecks(report))
+			}
 
-		ui.Divider()
-		ui.Tip("Run 'toob registry promote %s@%s' to start compile validation.", resp.Name, resp.Version)
-		return nil
-	},
-}
+			if isHALSourceCategory(cat) {
+				lintReport, lintErr := literallint.RunLint(literallint.DefaultConfig(absDir))
+				if lintErr != nil {
+					return fmt.Errorf("literallint check failed: %w", lintErr)
+				}
+				if !lintReport.Passed || len(lintReport.Violations) > 0 {
+					return fmt.Errorf("literallint rejected HAL package: %d violation(s)", len(lintReport.Violations))
+				}
+			}
 
-// --- toob registry unpublish ---
+			if depErr := checkManifestDependencies(absDir, cat); depErr != nil {
+				return depErr
+			}
 
-var registryUnpublishCmd = &cobra.Command{
-	Use:   "unpublish <name>@<version>",
-	Short: "Remove a dev-stage package from the registry",
-	Long:  `Deletes a package that is still in the 'dev' stage. Packages in testing/staging/stable cannot be unpublished.`,
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		client := apiclient.New()
-		if !client.HasToken() {
-			return fmt.Errorf("not logged in — run 'toob login' first")
-		}
+			mpBody, contentType, err := buildPublishMultipart(absDir, cat, tgzBytes, notes)
+			if err != nil {
+				return fmt.Errorf("encode upload body: %w", err)
+			}
 
-		name, version, err := parseNameVersion(args[0])
-		if err != nil {
-			return err
-		}
+			client := apiclient.New()
+			var pubResp *apiclient.PublishResponse
+			if err := withStepUp(cmd, client, func(ctx context.Context) error {
+				var pubErr error
+				pubResp, pubErr = client.Publish(ctx, bytes.NewReader(mpBody), contentType)
+				return pubErr
+			}); err != nil {
+				return fmt.Errorf("publish package: %w", err)
+			}
 
-		confirmed, err := ui.Confirm(fmt.Sprintf("Unpublish %s@%s?", name, version), false)
-		if err != nil || !confirmed {
-			ui.Info("Aborted.")
+			ui.Success("Published %s@%s (%s: %d files, %d bytes) [id=%s stage=%s]",
+				sanitizeDisplay(pubResp.Name),
+				sanitizeDisplay(pubResp.Version),
+				cat,
+				fileCount,
+				len(tgzBytes),
+				shortID(sanitizeDisplay(pubResp.ID), 12),
+				sanitizeDisplay(pubResp.Stage))
+			for _, w := range pubResp.IngestionWarnings {
+				ui.Warn("Ingestion notice: %s", sanitizeDisplay(w))
+			}
 			return nil
-		}
+		},
+	}
 
-		ui.Step("Unpublishing %s@%s...", name, version)
-		resp, err := client.Unpublish(cmd_defaultCtx(), name, version)
-		if err != nil {
-			return fmt.Errorf("unpublish failed: %w", err)
-		}
+	c.Flags().StringVar(&notes, "notes", "", "Optional release notes")
 
-		ui.Success("Unpublished %s@%s (%s)", resp.Name, resp.Version, resp.Status)
-		return nil
-	},
+	c.AddCommand(
+		newPublishStatusCmd(),
+		newPublishSearchCmd(),
+		newPublishPromoteCmd(),
+		newPublishUnpublishCmd(),
+	)
+	return c
 }
 
-// --- toob registry promote ---
+func buildPublishMultipart(absDir, cat string, tgzBytes []byte, notes string) ([]byte, string, error) {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
 
-var registryPromoteCmd = &cobra.Command{
-	Use:   "promote <name>@<version>",
-	Short: "Promote a dev package to compile validation (testing)",
-	Long:  `Promotes a package from the 'dev' stage to 'testing', triggering automated compile validation in a Firecracker VM.`,
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		client := apiclient.New()
-		if !client.HasToken() {
-			return fmt.Errorf("not logged in — run 'toob login' first")
-		}
-
-		name, version, err := parseNameVersion(args[0])
-		if err != nil {
-			return err
-		}
-
-		return doPromote(client, name, version)
-	},
-}
-
-// doPromote is the shared logic for promoting a package.
-func doPromote(client *apiclient.Client, name, version string) error {
-	ui.Step("Promoting %s@%s to testing...", name, version)
-
-	spinner := ui.NewSpinner("Requesting compile validation...")
-	spinner.Start()
-
-	resp, err := client.Promote(cmd_defaultCtx(), name, version)
-	spinner.Stop()
-
+	part, err := mw.CreateFormFile("tarball", filepath.Base(absDir)+".tar.gz")
 	if err != nil {
-		return fmt.Errorf("promotion failed: %w", err)
+		return nil, "", err
 	}
-
-	ui.Success("Promoted to %s", resp.Status)
-	ui.KeyValue("Job ID", resp.JobID)
-	if resp.Warning != "" {
-		ui.Warn("%s", resp.Warning)
+	if _, err := part.Write(tgzBytes); err != nil {
+		return nil, "", err
 	}
-	ui.Tip("Track progress with 'toob registry mine'.")
-	return nil
-}
-
-// --- toob registry mine ---
-
-var registryMineCmd = &cobra.Command{
-	Use:   "mine",
-	Short: "List your published packages",
-	Long:  `Shows all packages owned by the authenticated publisher, including their stage, status, and feedback.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		client := apiclient.New()
-		if !client.HasToken() {
-			return fmt.Errorf("not logged in — run 'toob login' first")
+	if cat != "" {
+		if err := mw.WriteField("category", cat); err != nil {
+			return nil, "", err
 		}
-
-		resp, err := client.MyPackages(cmd_defaultCtx())
-		if err != nil {
-			return fmt.Errorf("failed to list packages: %w", err)
-		}
-
-		if resp.Count == 0 {
-			ui.Info("No packages found. Publish one with 'toob registry publish'.")
-			return nil
-		}
-
-		ui.Header("My Packages")
-
-		headers := []string{"ID", "NAME", "VERSION", "CATEGORY", "STAGE", "STATUS", "CREATED"}
-		var rows [][]string
-		for _, p := range resp.Packages {
-			stage := formatStage(p.Stage)
-			status := formatStatus(p.StagingStatus, p.StagingFeedback)
-			rows = append(rows, []string{
-				p.ID[:8],
-				p.Name,
-				p.Version,
-				p.Category,
-				stage,
-				status,
-				p.CreatedAt,
-			})
-		}
-
-		ui.Table(headers, rows)
-		ui.Divider()
-
-		// Quota display (Gap 11): count packages per stage
-		devCount, testingCount := 0, 0
-		for _, p := range resp.Packages {
-			switch p.Stage {
-			case "dev":
-				devCount++
-			case "testing":
-				testingCount++
-			}
-		}
-		if devCount > 0 || testingCount > 0 {
-			ui.KeyValue("Dev Quota", fmt.Sprintf("%d package(s)", devCount))
-			ui.KeyValue("Testing Quota", fmt.Sprintf("%d package(s)", testingCount))
-		}
-		ui.Info("Total: %d package(s)", resp.Count)
-		return nil
-	},
-}
-
-// --- toob registry search ---
-
-var registrySearchCmd = &cobra.Command{
-	Use:   "search [query]",
-	Short: "Search for packages in the registry",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		client := apiclient.New()
-		query := args[0]
-
-		resp, err := client.Search(cmd_defaultCtx(), query)
-		if err != nil {
-			return fmt.Errorf("search failed: %w", err)
-		}
-
-		if resp.Count == 0 {
-			ui.Info("No packages found for '%s'.", query)
-			return nil
-		}
-
-		ui.Header("Search Results")
-		headers := []string{"NAME", "VERSION", "CATEGORY", "DESCRIPTION"}
-		var rows [][]string
-		for _, r := range resp.Results {
-			desc := r.Description
-			if len(desc) > 50 {
-				desc = desc[:47] + "..."
-			}
-			rows = append(rows, []string{r.Name, r.Version, r.Category, desc})
-		}
-		ui.Table(headers, rows)
-		ui.Info("%d result(s) found.", resp.Count)
-		return nil
-	},
-}
-
-// --- toob registry check ---
-
-var registryCheckCmd = &cobra.Command{
-	Use:   "check [path]",
-	Short: "Run local pre-flight validation on a package",
-	Long:  `Validates a package directory locally before uploading. Checks file extensions, manifest syntax, and file sizes.`,
-	Args:  cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		srcDir := "."
-		if len(args) > 0 {
-			srcDir = args[0]
-		}
-
-		absDir, err := filepath.Abs(srcDir)
-		if err != nil {
-			return err
-		}
-
-		ui.Header("Pre-flight Check")
-		passed := true
-
-		// Check 1: Directory exists
-		info, err := os.Stat(absDir)
-		if err != nil || !info.IsDir() {
-			ui.CheckItem(false, false, "Directory", fmt.Sprintf("%s does not exist or is not a directory", absDir))
-			return fmt.Errorf("pre-flight failed")
-		}
-		ui.CheckItem(true, false, "Directory", absDir)
-
-		// Check 2: Manifest exists
-		manifestFound := false
-		for _, mf := range []string{"driver_manifest.json", "crypto_manifest.json", "chip_manifest.json", "arch_manifest.json", "toolchain_manifest.json", "integration_manifest.json"} {
-			if _, err := os.Stat(filepath.Join(absDir, mf)); err == nil {
-				ui.CheckItem(true, false, "Manifest", mf)
-				manifestFound = true
-				break
-			}
-		}
-		if !manifestFound {
-			ui.CheckItem(false, false, "Manifest", "No recognized manifest file found")
-			passed = false
-		}
-
-		// Check 3: No oversized files (> 1 MB warning, > 5 MB error)
-		var oversized []string
-		if walkErr := filepath.WalkDir(absDir, func(path string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
-				return nil
-			}
-			fi, infoErr := d.Info()
-			if infoErr != nil {
-				return nil
-			}
-			if fi.Size() > 5<<20 {
-				rel, _ := filepath.Rel(absDir, path)
-				oversized = append(oversized, fmt.Sprintf("%s (%d bytes)", rel, fi.Size()))
-			}
-			return nil
-		}); walkErr != nil {
-			ui.CheckItem(false, false, "File Sizes", fmt.Sprintf("Failed to walk package directory: %v", walkErr))
-			passed = false
-		} else if len(oversized) > 0 {
-			ui.CheckItem(false, false, "File Sizes", fmt.Sprintf("%d file(s) exceed 5 MB", len(oversized)))
-			for _, f := range oversized {
-				ui.Muted("  %s", f)
-			}
-			passed = false
-		} else {
-			ui.CheckItem(true, false, "File Sizes", "All files within limits")
-		}
-
-		ui.Divider()
-		if passed {
-			ui.Success("Pre-flight checks passed.")
-		} else {
-			ui.Error("Pre-flight checks failed. Fix the issues above before publishing.")
-		}
-		return nil
-	},
-}
-
-// --- toob registry clean ---
-
-var registryCleanCmd = &cobra.Command{
-	Use:   "clean",
-	Short: "Remove the local registry cache",
-	Long:  `Purges the local registry cache (~/.toob/registry) and forces a fresh sync on the next operation.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		dir, err := paths.RegistryDir()
-		if err != nil {
-			return err
-		}
-
-		ui.Step("Removing registry cache at %s...", dir)
-		if err := os.RemoveAll(dir); err != nil {
-			return fmt.Errorf("failed to clean cache: %w", err)
-		}
-
-		ui.Success("Registry cache cleaned. Run 'toob registry sync' to re-initialize.")
-		return nil
-	},
-}
-
-// --- Helpers ---
-
-// parseNameVersion splits "name@version" into its components.
-func parseNameVersion(input string) (string, string, error) {
-	// Handle scoped packages: @scope/name@version
-	lastAt := strings.LastIndex(input, "@")
-	if lastAt <= 0 {
-		return "", "", fmt.Errorf("invalid format: expected <name>@<version> (e.g., uart-driver@1.0.0)")
 	}
-
-	name := input[:lastAt]
-	version := input[lastAt+1:]
-
-	if name == "" || version == "" {
-		return "", "", fmt.Errorf("invalid format: expected <name>@<version>")
+	if strings.TrimSpace(notes) != "" {
+		if err := mw.WriteField("notes", notes); err != nil {
+			return nil, "", err
+		}
 	}
-
-	return name, version, nil
+	if err := mw.Close(); err != nil {
+		return nil, "", err
+	}
+	return body.Bytes(), mw.FormDataContentType(), nil
 }
 
-// formatStage colors the stage string for table display.
-func formatStage(stage string) string {
-	switch stage {
-	case "dev":
-		return ui.Gray(stage)
-	case "testing":
-		return ui.Yellow(stage)
-	case "staging":
-		return ui.Cyan(stage)
-	case "stable":
-		return ui.Green(stage)
-	case "revoked":
-		return ui.Red(stage)
+func isHALSourceCategory(cat string) bool {
+	switch cat {
+	case "chip", "arch", "driver", "crypto":
+		return true
 	default:
-		return stage
-	}
-}
-
-// formatStatus renders the staging status and feedback for table display.
-func formatStatus(status, feedback string) string {
-	if status == "" {
-		return ui.Gray("—")
-	}
-	switch status {
-	case "accepted":
-		return ui.Green("accepted")
-	case "rejected":
-		text := ui.Red("rejected")
-		if feedback != "" {
-			text += " " + ui.Gray("("+feedback+")")
-		}
-		return text
-	default:
-		return status
-	}
-}
-
-func gitWorktreeDirty(dir string) bool {
-	// #nosec G204 -- fixed "git" executable with "-C" and filepath.Abs-resolved directory; no shell.
-	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
-	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(string(out)) != ""
 }
 
-// warnIfDirtyGit checks if the directory is a git repo with uncommitted changes.
-func warnIfDirtyGit(dir string) error {
-	if gitWorktreeDirty(dir) {
-		ui.Warn("Uncommitted changes detected in %s", dir)
-		confirmed, err := ui.Confirm("Publish anyway?", false)
-		if err != nil || !confirmed {
-			return fmt.Errorf("aborted: uncommitted changes in working tree")
+func checkManifestDependencies(pkgDir, cat string) error {
+	raw, err := os.ReadFile(filepath.Join(pkgDir, cat+".toml"))
+	if err != nil {
+		return fmt.Errorf("read %s.toml: %w", cat, err)
+	}
+
+	var parsed struct {
+		Arch         string            `toml:"arch"`
+		Chip         string            `toml:"chip"`
+		Drivers      []string          `toml:"drivers"`
+		Crypto       []string          `toml:"crypto"`
+		Dependencies map[string]string `toml:"dependencies"`
+	}
+	if decErr := toml.Unmarshal(raw, &parsed); decErr != nil {
+		return fmt.Errorf("parse %s.toml dependencies: %w", cat, decErr)
+	}
+
+	cache, err := registry.OpenForProject(pkgDir, paths.IsDevMode())
+	if err != nil {
+		return fmt.Errorf("open registry for dependency check: %w", err)
+	}
+	if !cache.IsInitialized() {
+		return nil
+	}
+	idx, err := cache.LoadIndex()
+	if err != nil {
+		return fmt.Errorf("load registry index for dependency check: %w", err)
+	}
+	if idx == nil {
+		return nil
+	}
+
+	var refs []struct {
+		cat string
+		ref string
+	}
+	if parsed.Arch != "" {
+		refs = append(refs, struct{ cat, ref string }{"arch", parsed.Arch})
+	}
+	if parsed.Chip != "" {
+		refs = append(refs, struct{ cat, ref string }{"chip", parsed.Chip})
+	}
+	for _, d := range parsed.Drivers {
+		refs = append(refs, struct{ cat, ref string }{"driver", d})
+	}
+	for _, cr := range parsed.Crypto {
+		refs = append(refs, struct{ cat, ref string }{"crypto", cr})
+	}
+	for depName, depVer := range parsed.Dependencies {
+		full := depName
+		if depVer != "" && depVer != "*" {
+			full = depName + "@" + depVer
+		}
+		refs = append(refs, struct{ cat, ref string }{"driver", full})
+	}
+
+	for _, item := range refs {
+		name, _, parseErr := installer.ParsePackageRef(item.ref)
+		if parseErr != nil {
+			return fmt.Errorf("invalid manifest dependency reference %q: %w", item.ref, parseErr)
+		}
+		if _, found := findIndexEntry(idx, item.cat, name); !found {
+			ui.Warn("Dependency %s/%s not present in synchronized local index", item.cat, sanitizeDisplay(name))
 		}
 	}
 	return nil
 }
 
-func readRootManifestFile(root *os.Root, name string) ([]byte, error) {
-	const maxManifestBytes = 1 << 20
-	f, err := root.Open(name)
-	if err != nil {
-		return nil, err
+func newPublishStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status <job-id>",
+		Short: "Check the ingestion status of a package validation job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			jobID, err := strconv.ParseInt(strings.TrimSpace(args[0]), 10, 64)
+			if err != nil || jobID <= 0 {
+				return fmt.Errorf("invalid job ID %q: expected positive integer", args[0])
+			}
+
+			ctx, cancel := commandContext(cmd, defaultCmdTimeout)
+			defer cancel()
+
+			client := apiclient.New()
+			job, err := client.GetPublishJob(ctx, jobID)
+			if err != nil {
+				return fmt.Errorf("get publish job %d: %w", jobID, err)
+			}
+
+			printPublishJob(job)
+			return nil
+		},
 	}
-	data, readErr := io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
-	closeErr := f.Close()
-	if readErr != nil {
-		return nil, readErr
-	}
-	if closeErr != nil {
-		return nil, closeErr
-	}
-	if len(data) > maxManifestBytes {
-		return nil, fmt.Errorf("manifest %s exceeds %d bytes", name, maxManifestBytes)
-	}
-	return data, nil
 }
 
-// detectPackageName attempts to read the package name from a manifest file.
-func detectPackageName(dir string) string {
-	manifests := []string{
-		"driver_manifest.json",
-		"crypto_manifest.json",
-		"chip_manifest.json",
-		"arch_manifest.json",
-		"toolchain_manifest.json",
-		"integration_manifest.json",
+func printPublishJob(job *apiclient.PublishJob) {
+	if job == nil {
+		return
 	}
-
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return ""
+	ui.Info("Job %d: status=%s package=%s@%s",
+		job.ID,
+		sanitizeDisplay(job.Status),
+		sanitizeDisplay(job.PackageName),
+		sanitizeDisplay(job.PackageVersion))
+	if job.ErrorSummary != nil && *job.ErrorSummary != "" {
+		ui.Warn("Summary: %s", sanitizeDisplay(*job.ErrorSummary))
 	}
-	defer func() { _ = root.Close() }()
-
-	for _, mf := range manifests {
-		data, err := readRootManifestFile(root, mf)
-		if err != nil {
-			continue
-		}
-		var parsed struct {
-			Name string `json:"name"`
-		}
-		if json.Unmarshal(data, &parsed) == nil && strings.TrimSpace(parsed.Name) != "" {
-			return strings.TrimSpace(parsed.Name)
-		}
+	if job.ErrorMessage != nil && *job.ErrorMessage != "" {
+		ui.Warn("Error:   %s", sanitizeDisplay(*job.ErrorMessage))
 	}
-	return ""
 }
 
-// checkManifestDependencies parses package dependencies and validates them against the registry.
-func checkManifestDependencies(ctx context.Context, dir string, client *apiclient.Client) error {
-	manifests := []string{
-		"driver_manifest.json",
-		"crypto_manifest.json",
-		"chip_manifest.json",
-		"arch_manifest.json",
-		"toolchain_manifest.json",
-		"integration_manifest.json",
-	}
+func newPublishSearchCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "search <query>",
+		Short: "Search published packages in the remote Toob Registry",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := commandContext(cmd, defaultCmdTimeout)
+			defer cancel()
 
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return fmt.Errorf("cannot open package directory %s: %w", dir, err)
-	}
-	defer func() { _ = root.Close() }()
-
-	var data []byte
-	var foundManifest string
-	for _, mf := range manifests {
-		if d, readErr := readRootManifestFile(root, mf); readErr == nil {
-			data = d
-			foundManifest = mf
-			break
-		}
-	}
-
-	if data == nil {
-		return nil
-	}
-
-	var m struct {
-		Dependencies map[string]string `json:"dependencies"`
-	}
-	if err := json.Unmarshal(data, &m); err != nil {
-		return fmt.Errorf("failed to parse %s: %w", foundManifest, err)
-	}
-
-	if len(m.Dependencies) == 0 {
-		return nil
-	}
-
-	ui.Step("Checking package dependencies...")
-	cache := registry.NewCache("")
-	idx, cacheErr := cache.LoadIndex()
-
-	for depName, depVerConstraint := range m.Dependencies {
-		exists := false
-
-		// 1. Check local registry index cache
-		if cacheErr == nil && idx != nil {
-			if _, ok := idx.Chips[depName]; ok {
-				exists = true
+			client := apiclient.New()
+			resp, err := client.Search(ctx, args[0])
+			if err != nil {
+				return fmt.Errorf("search registry: %w", err)
 			}
-			if _, ok := idx.Archs[depName]; ok {
-				exists = true
-			}
-			if _, ok := idx.Toolchains[depName]; ok {
-				exists = true
-			}
-			if _, ok := idx.Integrations[depName]; ok {
-				exists = true
-			}
-			if _, ok := idx.Drivers[depName]; ok {
-				exists = true
-			}
-			if _, ok := idx.Crypto[depName]; ok {
-				exists = true
-			}
-		}
 
-		// 2. Check remote API via search if not found locally
-		if !exists {
-			resp, err := client.Search(ctx, depName)
-			if err == nil && resp != nil && resp.Count > 0 {
-				for _, p := range resp.Results {
-					if p.Name == depName {
-						exists = true
-						break
-					}
+			if resp == nil || len(resp.Results) == 0 {
+				ui.Info("No matching packages found.")
+				return nil
+			}
+
+			for _, p := range resp.Results {
+				ui.Info("%-12s %-28s %-12s %-16s %s",
+					sanitizeDisplay(p.Category),
+					sanitizeDisplay(p.Name),
+					sanitizeDisplay(p.Version),
+					sanitizeDisplay(p.Author),
+					truncateRunes(p.Description, 47))
+			}
+			return nil
+		},
+	}
+}
+
+func newPublishPromoteCmd() *cobra.Command {
+	var wait bool
+
+	c := &cobra.Command{
+		Use:   "promote <pkg>@<version>",
+		Short: "Promote a dev-stage package version into Firecracker staging validation",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name, ver, err := installer.ParsePackageRef(args[0])
+			if err != nil {
+				return err
+			}
+			if ver == "" {
+				return errors.New("version is required (<pkg>@<version>)")
+			}
+
+			client := apiclient.New()
+			var promResp *apiclient.PromoteResponse
+			if err := withStepUp(cmd, client, func(ctx context.Context) error {
+				var promErr error
+				promResp, promErr = client.Promote(ctx, name, ver)
+				return promErr
+			}); err != nil {
+				return fmt.Errorf("promote package: %w", err)
+			}
+
+			ui.Success("Submitted %s@%s for promotion (job=%d, status=%s)",
+				sanitizeDisplay(name), sanitizeDisplay(ver), promResp.JobID, sanitizeDisplay(promResp.Status))
+
+			if wait && promResp.JobID > 0 {
+				waitCtx, waitCancel := commandContext(cmd, 5*defaultCmdTimeout)
+				defer waitCancel()
+				finalJob, streamErr := client.StreamPublishJob(waitCtx, promResp.JobID, func(j *apiclient.PublishJob) error {
+					ui.Step("Job %d: %s", j.ID, sanitizeDisplay(j.Status))
+					return nil
+				})
+				if streamErr != nil {
+					return fmt.Errorf("stream validation job %d: %w", promResp.JobID, streamErr)
+				}
+				printPublishJob(finalJob)
+				if finalJob != nil && strings.EqualFold(finalJob.Status, "failed") {
+					return fmt.Errorf("promotion validation job %d failed", finalJob.ID)
 				}
 			}
-		}
-
-		if !exists {
-			ui.Warn("Dependency %s@%s not found in registry (missing or not yet stable).", depName, depVerConstraint)
-		} else {
-			// Query specific package details to check for revocation
-			cleanVer := strings.TrimLeft(depVerConstraint, "^~>=< ")
-			if cleanVer != "" {
-				pkgResp, err := client.GetPackage(ctx, depName, cleanVer)
-				if err == nil && pkgResp != nil {
-					switch pkgResp.Stage {
-					case "revoked":
-						ui.Warn("Dependency %s@%s matches a REVOKED version in the registry.", depName, depVerConstraint)
-					case "archived":
-						ui.Info("Dependency %s@%s is archived in the registry.", depName, depVerConstraint)
-					}
-				}
-			}
-		}
+			return nil
+		},
 	}
-	return nil
+
+	c.Flags().BoolVar(&wait, "wait", false, "Wait for Firecracker validation job completion via SSE stream")
+	return c
 }
 
-func init() {
-	registryPublishCmd.Flags().Bool("promote", false, "Automatically promote to testing after upload")
-	registryPublishCmd.Flags().Bool("skip-git-check", false, "Skip the uncommitted changes warning")
+func newPublishUnpublishCmd() *cobra.Command {
+	var yes bool
 
-	registryCmd.AddCommand(registryPublishCmd)
-	registryCmd.AddCommand(registryUnpublishCmd)
-	registryCmd.AddCommand(registryPromoteCmd)
-	registryCmd.AddCommand(registryMineCmd)
-	registryCmd.AddCommand(registrySearchCmd)
-	registryCmd.AddCommand(registryCheckCmd)
-	registryCmd.AddCommand(registryCleanCmd)
+	c := &cobra.Command{
+		Use:   "unpublish <pkg>@<version>",
+		Short: "Unpublish (yank) a dev-stage package version from the registry",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name, ver, err := installer.ParsePackageRef(args[0])
+			if err != nil {
+				return err
+			}
+			if ver == "" {
+				return errors.New("version is required (<pkg>@<version>)")
+			}
+
+			if err := confirmIrreversible(yes, fmt.Sprintf("Unpublish %s@%s from the registry?", name, ver)); err != nil {
+				return err
+			}
+
+			client := apiclient.New()
+			var res *apiclient.UnpublishResponse
+			if err := withStepUp(cmd, client, func(ctx context.Context) error {
+				var unpubErr error
+				res, unpubErr = client.Unpublish(ctx, name, ver)
+				return unpubErr
+			}); err != nil {
+				return fmt.Errorf("unpublish package: %w", err)
+			}
+
+			ui.Success("Unpublished %s@%s (status=%s)", sanitizeDisplay(res.Name), sanitizeDisplay(res.Version), sanitizeDisplay(res.Status))
+			return nil
+		},
+	}
+
+	c.Flags().BoolVarP(&yes, "yes", "y", false, "Confirm without interactive prompt")
+	return c
 }

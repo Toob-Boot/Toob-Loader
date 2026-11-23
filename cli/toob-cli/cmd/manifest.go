@@ -1,186 +1,156 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/toob-boot/toob/internal/buildrunner"
+	"github.com/toob-boot/toob/internal/lockfile"
 	"github.com/toob-boot/toob/internal/manifest"
 	"github.com/toob-boot/toob/internal/paths"
-	"github.com/toob-boot/toob/internal/resolve"
+	"github.com/toob-boot/toob/internal/registry"
+	"github.com/toob-boot/toob/internal/ui"
 )
 
-var (
-	manifestToml         string
-	manifestHardware     string
-	manifestChipManifest string
-	manifestCoreDir      string
-	manifestDriverDirs   []string
-	manifestCryptoDirs   []string
-	manifestArchDir      string
-	manifestSoCDir       string
-	manifestOutDir       string
-)
+func newManifestCmd() *cobra.Command {
+	var (
+		manifestFlag string
+		tomlFlag     string
+		outDir       string
+		profile      string
+		halRoot      string
+		coreDir      string
+		integration  string
+		registrySpec string
+		locked       bool
+		dev          bool
+		mock         []string
+	)
 
-func appendExistingDir(dst []string, dir string) []string {
-	if dir == "" || slices.Contains(dst, dir) {
-		return dst
-	}
-	if info, err := os.Stat(dir); err == nil && info.IsDir() {
-		return append(dst, dir)
-	}
-	return dst
-}
+	c := &cobra.Command{
+		Use:   "manifest",
+		Short: "Generate declarative CMake, linker, and header files from device.toml",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, cancel := commandContext(cmd, 5*defaultCmdTimeout)
+			defer cancel()
 
-func runManifestCompile(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("could not determine working directory: %w", err)
-	}
-	compilerRoot, err := paths.FindProjectRoot(cwd)
-	if err != nil {
-		return fmt.Errorf("could not find project root: %w", err)
-	}
-
-	dt, err := manifest.ParseToml(manifestToml)
-	if err != nil {
-		return err
-	}
-
-	sdk := resolve.LocateSDK(cwd, compilerRoot)
-	resolvedCoreDir := manifestCoreDir
-	if resolvedCoreDir == "" {
-		if _, statErr := os.Stat(filepath.Join(sdk.Core, "hal_contract.json")); statErr == nil {
-			resolvedCoreDir = sdk.Core
-		}
-	}
-
-	resolvedArchDir := manifestArchDir
-	resolvedCryptoDirs := slices.Clone(manifestCryptoDirs)
-	sourceDirs := []string{sdk.Bootloader}
-	sourceDirs = appendExistingDir(sourceDirs, sdk.Recovery)
-	sourceDirs = appendExistingDir(sourceDirs, sdk.LibToob)
-	if manifestChipManifest != "" {
-		chipDir := filepath.Dir(manifestChipManifest)
-		sourceDirs = append(sourceDirs, chipDir)
-		if resolvedArchDir == "" || manifestSoCDir == "" || len(resolvedCryptoDirs) == 0 {
-			if raw, readErr := os.ReadFile(manifestChipManifest); readErr == nil {
-				var cm manifest.ChipManifest
-				if json.Unmarshal(raw, &cm) == nil {
-					halRoot := filepath.Join(chipDir, "..", "..")
-					if resolvedArchDir == "" && cm.Arch != "" {
-						cand := filepath.Join(halRoot, "arch", filepath.FromSlash(cm.Arch))
-						if info, statErr := os.Stat(cand); statErr == nil && info.IsDir() {
-							resolvedArchDir = cand
-						}
-						sourceDirs = appendExistingDir(sourceDirs, cand)
-					}
-					if manifestSoCDir == "" {
-						for _, inc := range cm.Includes {
-							if strings.HasPrefix(filepath.ToSlash(inc), "soc/") {
-								sourceDirs = appendExistingDir(sourceDirs, filepath.Join(halRoot, "soc"))
-								break
-							}
-						}
-					}
-					if len(resolvedCryptoDirs) == 0 {
-						var cmBackend, cmHash, cmPqc string
-						if cm.Crypto != nil {
-							cmBackend, cmHash, cmPqc = cm.Crypto.Backend, cm.Crypto.Hash, cm.Crypto.Pqc
-						}
-						for _, sel := range []struct{ slot, name string }{
-							{"backend", firstNonEmpty(dt.Crypto.Backend, cmBackend)},
-							{"hash", firstNonEmpty(dt.Crypto.Hash, cmHash)},
-							{"pqc", firstNonEmpty(dt.Crypto.Pqc, cmPqc)},
-						} {
-							if sel.name == "" || strings.EqualFold(sel.name, "none") {
-								continue
-							}
-							for _, cand := range []string{
-								filepath.Join(cwd, "toobloader", "hal", "crypto", filepath.FromSlash(sel.name)),
-								filepath.Join(cwd, "toobloader", "hal", "crypto", sel.slot, filepath.FromSlash(sel.name)),
-								filepath.Join(halRoot, "crypto", sel.slot, filepath.FromSlash(sel.name)),
-								filepath.Join(halRoot, "crypto", filepath.FromSlash(sel.name)),
-							} {
-								if _, statErr := os.Stat(filepath.Join(cand, "crypto_manifest.json")); statErr == nil {
-									if !slices.Contains(resolvedCryptoDirs, cand) {
-										resolvedCryptoDirs = append(resolvedCryptoDirs, cand)
-									}
-									break
-								}
-							}
-						}
-					}
-				}
+			chosenManifest := manifestFlag
+			if chosenManifest == "" {
+				chosenManifest = tomlFlag
 			}
-		}
-	}
-	if resolvedArchDir != "" && !slices.Contains(sourceDirs, resolvedArchDir) {
-		sourceDirs = append(sourceDirs, resolvedArchDir)
-	}
-	if manifestSoCDir != "" && !slices.Contains(sourceDirs, manifestSoCDir) {
-		sourceDirs = append(sourceDirs, manifestSoCDir)
-	}
-	for _, drv := range manifestDriverDirs {
-		if drv != "" && !slices.Contains(sourceDirs, drv) {
-			sourceDirs = append(sourceDirs, drv)
-		}
-	}
-	for _, cdir := range resolvedCryptoDirs {
-		if cdir != "" && !slices.Contains(sourceDirs, cdir) {
-			sourceDirs = append(sourceDirs, cdir)
-		}
+
+			root, manifestPath, err := buildrunner.ResolveWorkspaceAndManifest(chosenManifest)
+			if err != nil {
+				return fmt.Errorf("resolve workspace and manifest: %w", err)
+			}
+
+			dt, err := manifest.ParseToml(manifestPath)
+			if err != nil {
+				return fmt.Errorf("parse manifest %s: %w", manifestPath, err)
+			}
+
+			lockPath := paths.LockfilePath(root)
+			lf, lockErr := lockfile.Load(lockPath)
+			if lockErr != nil {
+				if locked || !os.IsNotExist(lockErr) {
+					return fmt.Errorf("load lockfile %s: %w", lockPath, lockErr)
+				}
+				lf = nil
+			}
+
+			devMode := dev || paths.IsDevMode()
+			remoteReg, localReg, err := buildrunner.ResolveRegistryOverride(registrySpec, root, devMode)
+			if err != nil {
+				return err
+			}
+
+			var cache *registry.Cache
+			if localReg != "" {
+				cache, err = registry.OpenForProject(localReg, true)
+			} else {
+				cache, err = registry.OpenForProject(root, devMode)
+			}
+			if err != nil {
+				return fmt.Errorf("open registry: %w", err)
+			}
+
+			idx, err := cache.LoadIndex()
+			if err != nil {
+				return fmt.Errorf("load registry index: %w", err)
+			}
+
+			resolvedCore := coreDir
+			if resolvedCore == "" {
+				sdkVer, selErr := buildrunner.SelectCoreSDKVersion(dt, lf, idx, locked)
+				if selErr != nil {
+					return fmt.Errorf("select Core SDK version: %w", selErr)
+				}
+				dir, _, sdkErr := buildrunner.EnsureCoreSDK(ctx, buildrunner.CoreSDKOptions{
+					ProjectRoot: root,
+					Version:     sdkVer,
+					RegistryURL: remoteReg,
+					Index:       idx,
+					Lock:        lf,
+					DevMode:     devMode,
+					Locked:      locked,
+				})
+				if sdkErr != nil {
+					return fmt.Errorf("ensure Core SDK: %w", sdkErr)
+				}
+				resolvedCore = dir
+			}
+
+			if outDir == "" {
+				outDir = filepath.Join(root, "build", "generated")
+			}
+
+			_, inputs, err := buildrunner.PrepareManifestInputs(
+				root,
+				dt,
+				lf,
+				cache,
+				idx,
+				resolvedCore,
+				halRoot,
+				profile,
+				integration,
+				mock,
+				cmd.Flags().Changed("mock"),
+				locked,
+				outDir,
+			)
+			if err != nil {
+				return fmt.Errorf("prepare manifest inputs: %w", err)
+			}
+
+			mctx, err := manifest.Load(inputs)
+			if err != nil {
+				return fmt.Errorf("validate build manifest context: %w", err)
+			}
+
+			if _, err := manifest.Generate(mctx); err != nil {
+				return fmt.Errorf("generate manifest artifacts: %w", err)
+			}
+
+			ui.Success("Generated manifest artifacts in %s", outDir)
+			return nil
+		},
 	}
 
-	ctx, err := manifest.Load(manifest.Inputs{
-		Device:           dt,
-		HardwarePath:     manifestHardware,
-		ChipManifestPath: manifestChipManifest,
-		CoreDir:          resolvedCoreDir,
-		ArchDir:          resolvedArchDir,
-		DriverDirs:       manifestDriverDirs,
-		CryptoDirs:       resolvedCryptoDirs,
-		SourceDirs:       sourceDirs,
-		OutDir:           manifestOutDir,
-	})
-	if err != nil {
-		return fmt.Errorf("manifest compiler failed: %w", err)
-	}
-	if _, err := manifest.Generate(ctx); err != nil {
-		return fmt.Errorf("manifest compiler failed: %w", err)
-	}
-	return nil
-}
-
-var manifestCmd = &cobra.Command{
-	Use:    "manifest",
-	Short:  "Compile device.toml into headers and ld scripts",
-	Hidden: true,
-	RunE:   runManifestCompile,
-}
-
-var manifestCompileCmd = &cobra.Command{
-	Use:   "compile",
-	Short: "Compile device.toml into headers and ld scripts",
-	RunE:  runManifestCompile,
-}
-
-func init() {
-	manifestCmd.PersistentFlags().StringVar(&manifestToml, "toml", "device.toml", "Path to device.toml")
-	manifestCmd.PersistentFlags().StringVar(&manifestHardware, "hardware", "", "Path to hardware.json")
-	manifestCmd.PersistentFlags().StringVar(&manifestChipManifest, "chip-manifest", "", "Path to chip_manifest.json")
-	manifestCmd.PersistentFlags().StringVar(&manifestCoreDir, "core-dir", "", "Core SDK directory containing hal_contract.json (auto-detected if omitted)")
-	manifestCmd.PersistentFlags().StringSliceVar(&manifestDriverDirs, "driver-dir", nil, "Driver package directory containing a driver_manifest.json (repeatable)")
-	manifestCmd.PersistentFlags().StringSliceVar(&manifestCryptoDirs, "crypto-dir", nil, "Crypto package directory containing a crypto_manifest.json (repeatable)")
-	manifestCmd.PersistentFlags().StringVar(&manifestArchDir, "arch-dir", "", "Architecture package directory")
-	manifestCmd.PersistentFlags().StringVar(&manifestSoCDir, "soc-dir", "", "SoC package directory")
-	manifestCmd.PersistentFlags().StringVar(&manifestOutDir, "outdir", "build/generated", "Output directory for headers and ld scripts")
-	_ = manifestCmd.MarkPersistentFlagRequired("hardware")
-
-	manifestCmd.AddCommand(manifestCompileCmd)
-	rootCmd.AddCommand(manifestCmd)
+	c.Flags().StringVarP(&manifestFlag, "manifest", "m", "", "Path to device.toml or toob.toml")
+	c.Flags().StringVar(&tomlFlag, "toml", "", "Alias for --manifest")
+	c.Flags().StringVarP(&outDir, "out-dir", "o", "", "Output directory for generated files (default: <project>/build/generated)")
+	c.Flags().StringVarP(&profile, "profile", "p", "dev", "Build profile (dev or production)")
+	c.Flags().StringVar(&halRoot, "hal-root", "", "Override local HAL packages root")
+	c.Flags().StringVar(&coreDir, "core-dir", "", "Override Core SDK source directory")
+	c.Flags().StringVar(&integration, "integration", "", "Override integration package name[@version]")
+	c.Flags().StringVar(&registrySpec, "registry", "", "Override registry URL or local directory")
+	c.Flags().BoolVar(&locked, "locked", false, "Require strict lockfile parity")
+	c.Flags().BoolVar(&dev, "dev", false, "Use local development registry paths")
+	c.Flags().StringSliceVar(&mock, "mock", nil, "Hardware mock overrides")
+	return c
 }

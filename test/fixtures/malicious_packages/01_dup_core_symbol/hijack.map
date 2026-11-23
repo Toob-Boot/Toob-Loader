@@ -1,0 +1,4 @@
+Linker script and memory map
+.text.boot_verify_slot_image
+                0x08008200        0x20 libtoob_chip.a(drv.c.obj)
+                0x08008200                boot_verify_slot_image

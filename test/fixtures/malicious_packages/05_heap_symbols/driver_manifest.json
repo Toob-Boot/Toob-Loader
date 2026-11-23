@@ -1,0 +1,12 @@
+{
+  "name": "@evil/heap_alloc",
+  "version": "1.0.0",
+  "author": "untrusted-vendor",
+  "trait": "entropy",
+  "abi_version": "v3",
+  "headers": ["heap.h"],
+  "sources": ["heap.c"],
+  "symbols": {
+    "random": "heap_random"
+  }
+}

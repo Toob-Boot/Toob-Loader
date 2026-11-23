@@ -1,175 +1,120 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/toob-boot/toob/internal/apiclient"
-	"github.com/toob-boot/toob/internal/paths"
+
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-var flagDoctorDev bool
+const doctorProbeTimeout = 5 * time.Second
 
-var doctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Check system environment and dependencies for Toob",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if flagDoctorDev {
-			_ = os.Setenv("TOOB_DEV", "1")
-		}
-		ensureBuildToolsOnPath()
-		ui.Header("Toob Environment Doctor")
-
-		type doctorCheck struct {
-			name        string
-			command     string
-			args        []string
-			optional    bool
-			solution    string
-			autoFixCmd  string
-			autoFixArgs []string
-			autoFixDesc string
-		}
-
-		checks := []doctorCheck{
-			{"Git", "git", []string{"--version"}, false, "Install Git from https://git-scm.com/", "", nil, ""},
-			{"CMake", "cmake", []string{"--version"}, false, "Install CMake (e.g. via brew, apt, or choco)", "", nil, ""},
-			{"Ninja", "ninja", []string{"--version"}, false, "Install Ninja build system", "", nil, ""},
-			{"Python", "python", []string{"--version"}, false, "Install Python 3", "", nil, ""},
-			{"Docker", "docker", []string{"--version"}, true, "Optional for containerized builds", "", nil, ""},
-		}
-
-		allPassed := true
-		var failedFixable []doctorCheck
-
-		fmt.Fprintln(os.Stderr)
-		for _, check := range checks {
-			path, err := exec.LookPath(check.command)
-			if err != nil {
-				if check.optional {
-					ui.CheckItem(false, true, check.name, check.solution)
-				} else {
-					ui.CheckItem(false, false, check.name, check.solution)
-					allPassed = false
-				}
-				if check.autoFixCmd != "" {
-					failedFixable = append(failedFixable, check)
-				}
-				continue
-			}
-
-			out, err := exec.Command(path, check.args...).CombinedOutput()
-			if err != nil {
-				errMsg := strings.TrimSpace(string(out))
-				if len(errMsg) > 60 {
-					errMsg = errMsg[:57] + "..."
-				}
-				ui.CheckItem(false, false, check.name, fmt.Sprintf("Found at %s, but failed: %s", path, errMsg))
-				allPassed = false
-				if check.autoFixCmd != "" {
-					failedFixable = append(failedFixable, check)
-				}
-				continue
-			}
-
-			version := strings.Split(strings.TrimSpace(string(out)), "\n")[0]
-			if len(version) > 40 {
-				version = version[:37] + "..."
-			}
-			ui.CheckItem(true, false, check.name, version)
-		}
-
-		// --- Registry Connectivity Checks (Gap 16) ---
-		fmt.Fprintln(os.Stderr)
-		ui.Step("Checking registry connectivity...")
-
-		regDir, _ := paths.RegistryDir()
-		hasLocalReg := false
-		if _, err := os.Stat(filepath.Join(regDir, "registry.json")); err == nil {
-			hasLocalReg = true
-			ui.CheckItem(true, false, "Local Registry", fmt.Sprintf("available at %s", regDir))
-		}
-
-		client := apiclient.New()
-
-		// Ping the API
-		_, revErr := client.GetRevision(cmd_defaultCtx())
-		if revErr != nil {
-			if hasLocalReg {
-				ui.CheckItem(false, true, "Remote Registry API", fmt.Sprintf("offline (%v) - using local registry", revErr))
-			} else {
-				ui.CheckItem(false, false, "Registry API", fmt.Sprintf("unreachable: %v", revErr))
-				allPassed = false
-			}
-		} else {
-			ui.CheckItem(true, false, "Registry API", client.BaseURL)
-		}
-
-		// Auth key check
-		if client.HasToken() {
-			_, authErr := client.MyPackages(cmd_defaultCtx())
-			if authErr != nil {
-				ui.CheckItem(false, true, "Auth Token", fmt.Sprintf("invalid or expired: %v", authErr))
-			} else {
-				login := apiclient.GetLogin()
-				detail := "valid"
-				if login != "" {
-					detail = fmt.Sprintf("valid (@%s)", login)
-				}
-				ui.CheckItem(true, false, "Auth Token", detail)
-			}
-		} else {
-			ui.CheckItem(false, true, "Auth Token", "not configured (run 'toob login')")
-		}
-
-		ui.Divider()
-		if allPassed {
-			ui.Success("System is ready for Toob development!")
-			return nil
-		}
-
-		ui.Warn("Missing dependencies detected.")
-
-		if len(failedFixable) > 0 {
-			fmt.Fprintln(os.Stderr)
-			ui.Info("Toob can attempt to automatically resolve:")
-			for _, check := range failedFixable {
-				ui.Muted("  %s: %s", check.name, check.autoFixDesc)
-			}
-			fmt.Fprint(os.Stderr, "\n  Run auto-resolver? [Y/n]: ")
-
-			reader := bufio.NewReader(os.Stdin)
-			response, _ := reader.ReadString('\n')
-			response = strings.TrimSpace(strings.ToLower(response))
-
-			if response == "" || response == "y" || response == "yes" {
-				fmt.Fprintln(os.Stderr)
-				for _, check := range failedFixable {
-					ui.Step("Fixing %s...", check.name)
-					fixCmd := exec.Command(check.autoFixCmd, check.autoFixArgs...)
-					fixCmd.Stdout = os.Stdout
-					fixCmd.Stderr = os.Stderr
-					if err := fixCmd.Run(); err != nil {
-						ui.Error("Failed to fix %s: %v", check.name, err)
-					} else {
-						ui.Success("Fixed %s", check.name)
-					}
-				}
-				ui.Divider()
-				ui.Tip("Run 'toob doctor' again to verify.")
-			}
-		}
-
-		return nil
-	},
+type doctorToolProbe struct {
+	label    string
+	bins     []string
+	args     []string
+	required bool
 }
 
-func init() {
-	doctorCmd.Flags().BoolVar(&flagDoctorDev, "dev", false, "Development mode: check local registry and SDK auto-discovery")
+func newDoctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Check host toolchain, build tools, Python, and container runtime availability",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			probes := []doctorToolProbe{
+				{label: "CMake", bins: []string{"cmake"}, args: []string{"--version"}, required: true},
+				{label: "Ninja", bins: []string{"ninja"}, args: []string{"--version"}, required: true},
+				{label: "Git", bins: []string{"git"}, args: []string{"--version"}, required: true},
+				{label: "Python", bins: []string{"python3", "python"}, args: []string{"--version"}, required: false},
+				{label: "Docker", bins: []string{"docker"}, args: []string{"--version"}, required: false},
+			}
+
+			failedRequired := 0
+			for _, probe := range probes {
+				foundPath, versionLine := runDoctorProbe(cmd, probe)
+				switch {
+				case foundPath != "":
+					ui.Success("%-10s OK   %s (%s)", probe.label, foundPath, sanitizeDisplay(versionLine))
+				case probe.required:
+					failedRequired++
+					ui.Error("%-10s MISS required build tool not found in PATH", probe.label)
+				default:
+					ui.Warn("%-10s OPT  not found (optional)", probe.label)
+				}
+			}
+
+			crossCompilers := []string{"arm-none-eabi-gcc", "riscv32-unknown-elf-gcc", "xtensa-esp32-elf-gcc", "gcc", "clang"}
+			compilerFound := false
+			for _, cc := range crossCompilers {
+				p, ver := probeExecutable(cmd, cc, "--version")
+				if p != "" {
+					compilerFound = true
+					ui.Success("%-10s OK   %s (%s)", "Compiler", p, sanitizeDisplay(ver))
+				}
+			}
+			if !compilerFound {
+				ui.Warn("No C compiler found on PATH (cached/containerized toolchains may still work)")
+			}
+
+			if failedRequired > 0 {
+				return fmt.Errorf("doctor check failed: %d required host tool(s) missing", failedRequired)
+			}
+
+			ui.Success("Host environment check passed.")
+			return nil
+		},
+	}
+}
+
+func runDoctorProbe(cmd *cobra.Command, probe doctorToolProbe) (string, string) {
+	for _, bin := range probe.bins {
+		p, ver := probeExecutable(cmd, bin, probe.args...)
+		if p != "" {
+			return p, ver
+		}
+	}
+	return "", ""
+}
+
+func probeExecutable(cmd *cobra.Command, bin string, args ...string) (string, string) {
+	resolved, err := exec.LookPath(bin)
+	if err != nil {
+		return "", ""
+	}
+	if isWindowsStoreStub(resolved) {
+		return "", ""
+	}
+
+	ctx, cancel := commandContext(cmd, doctorProbeTimeout)
+	defer cancel()
+
+	proc := exec.CommandContext(ctx, resolved, args...)
+	out, err := proc.CombinedOutput()
+	if err != nil {
+		return "", ""
+	}
+	line := strings.TrimSpace(string(out))
+	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
+		line = line[:nl]
+	}
+	return resolved, strings.TrimSpace(line)
+}
+
+func isWindowsStoreStub(binPath string) bool {
+	clean := filepath.Clean(binPath)
+	info, err := os.Lstat(clean)
+	if err != nil {
+		return true
+	}
+	if info.Size() == 0 && strings.Contains(strings.ToLower(clean), "windowsapps") {
+		return true
+	}
+	return false
 }

@@ -2,11 +2,7 @@ package cmd
 
 import (
 	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -14,674 +10,688 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/Toob-Boot/Toob-Loader/toob-go-lib/build"
-	"github.com/Toob-Boot/Toob-Loader/toob-go-lib/tbm1"
 	"github.com/spf13/cobra"
-	"github.com/toob-boot/toob/internal/paths"
-	"github.com/toob-boot/toob/internal/provision"
+
+	build "github.com/Toob-Boot/Toob-Loader/toob-go-lib/build"
+	"github.com/Toob-Boot/Toob-Loader/toob-go-lib/tbm1"
+	"github.com/toob-boot/toob/internal/signing"
 	"github.com/toob-boot/toob/internal/ui"
 )
 
-const (
-	toobImageHeaderLen  = 20
-	toobImageMagic      = 0x544F4F42 // "TOOB"
-	toobStage1SVNMagic  = 0x31534254 // "TBS1"
-	ed25519SignatureLen = 64
-)
+func newSignCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "sign",
+		Short: "Sign firmware images, TBM1 manifests, Stage-0/OTA bundles, TCC1 commands, and KDMs",
+	}
 
-var (
-	signMockFlag     bool
-	signKeyFileFlag  string
-	signKeyHexFlag   string
-	signOutFlag      string
-	signEntryFlag    uint32
-	stage1SVNFlag    uint32
-	signChipFlag     string
-	signHardwareFlag string
-
-	bundleDeviceFlag    string
-	bundleBaseFlag      string
-	bundleBaseSVNFlag   uint32
-	bundleCompressFlag  bool
-	bundleRDeltaOldFlag string
-	bundleTrailerFlag   bool
-	bundleVendorFlag    uint16
-	bundleProductFlag   uint16
-	bundleHWRevMinFlag  uint16
-	bundleHWRevMaxFlag  uint16
-	bundleSVNFlag       uint32
-	bundleVerMajorFlag  uint16
-	bundleVerMinorFlag  uint16
-	bundleVerPatchFlag  uint16
-	bundleKeyIndexFlag  uint8
-)
-
-var signCmd = &cobra.Command{
-	Use:   "sign",
-	Short: "Sign firmware manifests, bundles, images, or generate signing keys",
-	Long: `The sign command signs TBM1 update manifests and bundles with Ed25519 signatures,
-packs BootROM Stage 0 images declaratively from hardware.json, prepends bootloader
-image headers, and generates cryptographic keypairs.
-
-When --mock is passed, the RFC 8032 Test Vector 1 development key is used,
-which matches the default public key built into the efuse_mock hardware driver.`,
+	c.AddCommand(
+		newSignManifestCmd(),
+		newSignImageCmd(),
+		newSignStage0Cmd(),
+		newSignStage1Cmd(),
+		newSignBundleCmd(),
+		newSignKeygenCmd(),
+		newSignTCC1Cmd(),
+		newSignKDMCmd(),
+	)
+	return c
 }
 
-var signManifestCmd = &cobra.Command{
-	Use:   "manifest <manifest.bin>",
-	Short: "Sign a TBM1 v2 manifest package",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		inPath := args[0]
-		data, err := os.ReadFile(inPath)
-		if err != nil {
-			return fmt.Errorf("read manifest file: %w", err)
-		}
-		if len(data) < ed25519SignatureLen {
-			return errors.New("manifest data is too short")
-		}
-
-		signer, err := resolveSigner()
-		if err != nil {
-			return err
-		}
-
-		sig, err := tbm1.SignBlock(data, signer)
-		if err != nil {
-			return fmt.Errorf("sign manifest block: %w", err)
-		}
-
-		signedData := make([]byte, len(data))
-		copy(signedData, data)
-		copy(signedData[len(signedData)-ed25519SignatureLen:], sig)
-
-		outPath := inPath
-		if signOutFlag != "" {
-			outPath = signOutFlag
-		}
-
-		if err := os.WriteFile(outPath, signedData, 0644); err != nil {
-			return fmt.Errorf("write signed manifest: %w", err)
-		}
-
-		pubKeyHex := hex.EncodeToString(signer.Public())
-		ui.Success("Signed TBM1 manifest -> %s", outPath)
-		ui.Tip("Signer Public Key (Slot 0): %s", pubKeyHex)
-		return nil
-	},
+func registerKeyFlags(c *cobra.Command, keyFile, keyHex *string, mock *bool) {
+	c.Flags().StringVarP(keyFile, "key-file", "k", "", "Path to Ed25519 private key file (hex or PEM/PKCS#8)")
+	c.Flags().StringVar(keyHex, "key-hex", "", "Raw Ed25519 private key in hex")
+	c.Flags().BoolVar(mock, "mock", false, "Sign using deterministic development mock root key (DEV ONLY)")
+	c.MarkFlagsMutuallyExclusive("mock", "key-file", "key-hex")
 }
 
-func validateToobImage(label string, b []byte) error {
-	if len(b) <= toobImageHeaderLen {
-		return fmt.Errorf("%s (%d bytes) is too small to contain a 20-byte Toob image header and payload", label, len(b))
+func newSignManifestCmd() *cobra.Command {
+	var (
+		inPath  string
+		outPath string
+		keyFile string
+		keyHex  string
+		mock    bool
+	)
+
+	c := &cobra.Command{
+		Use:   "manifest [in] [out]",
+		Short: "Sign an unsigned TBM1 v2 manifest block",
+		Args:  cobra.MaximumNArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if inPath == "" && len(args) >= 1 {
+				inPath = args[0]
+			}
+			if outPath == "" && len(args) >= 2 {
+				outPath = args[1]
+			}
+			if inPath == "" {
+				return errors.New("input manifest path is required (--in or positional argument)")
+			}
+			if outPath == "" {
+				outPath = inPath
+			}
+
+			signer, err := signing.LoadSigner(signing.KeySource{
+				Mock:    mock,
+				KeyFile: keyFile,
+				KeyHex:  keyHex,
+			})
+			if err != nil {
+				return err
+			}
+			defer signer.Zeroise()
+
+			pubHex, err := signing.SignManifest(inPath, outPath, signer)
+			if err != nil {
+				return fmt.Errorf("sign manifest: %w", err)
+			}
+
+			ui.Success("Signed TBM1 manifest -> %s (pubkey=%s)", outPath, shortID(pubHex, 16))
+			return nil
+		},
 	}
-	if uint64(len(b)) > math.MaxUint32 {
-		return fmt.Errorf("%s exceeds uint32 size limit", label)
-	}
-	if gotMagic := binary.LittleEndian.Uint32(b[0:4]); gotMagic != toobImageMagic {
-		return fmt.Errorf("%s is missing the 'TOOB' image header magic (got 0x%08X, want 0x%08X); run 'toob sign image' first",
-			label, gotMagic, toobImageMagic)
-	}
-	if hdrSize := binary.LittleEndian.Uint32(b[4:8]); hdrSize != uint32(len(b)) {
-		return fmt.Errorf("%s header image_size (%d) does not match file length (%d)", label, hdrSize, len(b))
-	}
-	return nil
+
+	c.Flags().StringVarP(&inPath, "in", "i", "", "Input unsigned manifest block path")
+	c.Flags().StringVarP(&outPath, "out", "o", "", "Output signed manifest block path")
+	registerKeyFlags(c, &keyFile, &keyHex, &mock)
+	return c
 }
 
-func isRemappableExecModel(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "xip_remap", "bank_swap", "relocatable":
-		return true
-	}
-	return false
+func newSignImageCmd() *cobra.Command {
+	return newSignImageCommand("image", "Sign a raw firmware/bootloader binary with a Toob image header", "app")
 }
 
-func loadOptionalChipManifestForDevice(chip string) *build.ChipManifest {
-	hwPath, err := resolveChipHardwareJSON(chip, "")
+func newSignStage1Cmd() *cobra.Command {
+	return newSignImageCommand("stage1", "Sign a Stage-1 bootloader binary image", "stage1")
+}
+
+func newSignImageCommand(use, short, defaultRole string) *cobra.Command {
+	var (
+		inPath            string
+		outPath           string
+		payloadPath       string
+		chip              string
+		hardwarePath      string
+		headerOffset      uint32
+		entryRaw          string
+		entryPoint        uint32
+		roleStr           string
+		stage1SVN         uint32
+		execModel         string
+		baseFingerprint   string
+		requireBaseDigest bool
+		keyFile           string
+		keyHex            string
+		mock              bool
+		keyIndex          uint8
+		unsigned          bool
+	)
+
+	c := &cobra.Command{
+		Use:   use + " [in]",
+		Short: short,
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if inPath == "" && len(args) == 1 {
+				inPath = args[0]
+			}
+			if inPath == "" {
+				return errors.New("input binary path is required (--in or positional argument)")
+			}
+			if outPath == "" {
+				outPath = inPath + ".signed"
+			}
+
+			role, err := signing.ParseImageRole(roleStr)
+			if err != nil {
+				return err
+			}
+			if unsigned {
+				if role.IsStage1() {
+					return fmt.Errorf("--unsigned is not permitted for Stage-1 role %s", role)
+				}
+				if mock || strings.TrimSpace(keyFile) != "" || strings.TrimSpace(keyHex) != "" {
+					return errors.New("--unsigned cannot be combined with --mock, --key-file, or --key-hex")
+				}
+				if keyIndex != 0 {
+					return errors.New("--unsigned cannot be combined with non-zero --key-index")
+				}
+			}
+
+			var hdrOffPtr *uint32
+			if cmd.Flags().Changed("header-offset") {
+				hdrOffPtr = &headerOffset
+			}
+
+			if rawEntry := strings.TrimSpace(entryRaw); rawEntry != "" {
+				trimmed := strings.TrimRight(rawEntry, "uUlL")
+				entryVal, entryErr := build.ParseU64Literal(trimmed)
+				if entryErr != nil {
+					return fmt.Errorf("invalid --entry %q: %w", entryRaw, entryErr)
+				}
+				if entryVal > math.MaxUint32 {
+					return fmt.Errorf("--entry %q exceeds 32-bit unsigned range", entryRaw)
+				}
+				entryPoint = uint32(entryVal)
+				if hdrOffPtr == nil &&
+					strings.TrimSpace(chip) == "" &&
+					strings.TrimSpace(hardwarePath) == "" &&
+					entryPoint >= signing.ToobImageHeaderLen &&
+					entryPoint <= 0x1000 &&
+					entryPoint%4 == 0 {
+					off := entryPoint
+					hdrOffPtr = &off
+				}
+			}
+
+			if role.IsStage1() && !cmd.Flags().Changed("stage1-svn") {
+				stage1SVN = 1
+			}
+
+			var baseFP *[32]byte
+			if baseFingerprint != "" {
+				decoded, decErr := decodeHexBytes32(baseFingerprint, "base-fingerprint")
+				if decErr != nil {
+					return decErr
+				}
+				var arr [32]byte
+				copy(arr[:], decoded)
+				baseFP = &arr
+			}
+
+			var payload []byte
+			if payloadPath != "" {
+				payload, err = os.ReadFile(filepath.Clean(payloadPath))
+				if err != nil {
+					return fmt.Errorf("read payload %s: %w", payloadPath, err)
+				}
+			}
+
+			var signer tbm1.Signer
+			if !unsigned {
+				localSigner, loadErr := signing.LoadSigner(signing.KeySource{
+					Mock:    mock,
+					KeyFile: keyFile,
+					KeyHex:  keyHex,
+				})
+				if loadErr != nil {
+					return loadErr
+				}
+				defer localSigner.Zeroise()
+				signer = localSigner
+			}
+
+			res, err := signing.SignImage(signing.ImageOptions{
+				InPath:                 inPath,
+				OutPath:                outPath,
+				Payload:                payload,
+				Chip:                   chip,
+				HardwarePath:           hardwarePath,
+				HeaderOffset:           hdrOffPtr,
+				EntryPoint:             entryPoint,
+				Role:                   role,
+				Stage1SVN:              stage1SVN,
+				ExecModel:              execModel,
+				BaseFingerprint:        baseFP,
+				RequireBaseFingerprint: requireBaseDigest,
+				KeyIndex:               keyIndex,
+				Unsigned:               unsigned,
+			}, signer)
+			if err != nil {
+				return fmt.Errorf("sign image: %w", err)
+			}
+
+			if unsigned {
+				ui.Success("Built unsigned %s image -> %s (%d bytes)", res.Role, res.OutPath, res.ImageSize)
+			} else {
+				ui.Success("Signed %s image -> %s (%d bytes)", res.Role, res.OutPath, res.ImageSize)
+			}
+			return nil
+		},
+	}
+
+	c.Flags().StringVarP(&inPath, "in", "i", "", "Input raw binary path")
+	c.Flags().StringVarP(&outPath, "out", "o", "", "Output signed binary path")
+	c.Flags().StringVar(&payloadPath, "payload", "", "Optional explicit raw payload file")
+	c.Flags().StringVar(&chip, "chip", "", "Target chip identifier (for declarative header offset resolution)")
+	c.Flags().StringVar(&hardwarePath, "hardware", "", "Path to declarative hardware.json")
+	c.Flags().Uint32Var(&headerOffset, "header-offset", 0, "Override Toob image header byte offset")
+	c.Flags().StringVar(&entryRaw, "entry", "", "Image entry offset/address (hex or decimal; implies --header-offset on XIP when no --chip/--hardware/--header-offset is set)")
+	c.Flags().Uint32Var(&entryPoint, "entry-point", 0, "Override image entrypoint address")
+	c.MarkFlagsMutuallyExclusive("entry", "entry-point")
+	c.Flags().StringVar(&roleStr, "role", defaultRole, "Image role (app, recovery, stage1, stage1a, stage1b, netcore)")
+	c.Flags().Uint32Var(&stage1SVN, "stage1-svn", 0, "Stage-1 security version number")
+	c.Flags().StringVar(&execModel, "exec-model", "", "Execution model override (xip or ram)")
+	c.Flags().StringVar(&baseFingerprint, "base-fingerprint", "", "Expected 32-byte SHA-256 base fingerprint hex")
+	c.Flags().BoolVar(&requireBaseDigest, "require-base-fingerprint", false, "Require base fingerprint matching")
+	c.Flags().Uint8Var(&keyIndex, "key-index", 0, "OTP root key slot index recorded in TSIG trailer")
+	c.Flags().BoolVar(&unsigned, "unsigned", false, "Build non-Stage-1 image header without TSIG signature trailer (DEV/TEST ONLY)")
+	registerKeyFlags(c, &keyFile, &keyHex, &mock)
+	c.MarkFlagsMutuallyExclusive("unsigned", "mock", "key-file", "key-hex")
+	return c
+}
+
+func newSignStage0Cmd() *cobra.Command {
+	var (
+		elfPath      string
+		outPath      string
+		chip         string
+		hardwarePath string
+		packagesDir  string
+	)
+
+	c := &cobra.Command{
+		Use:   "stage0 [elf]",
+		Short: "Pack a Stage-0 ELF with declarative bootrom headers",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if elfPath == "" && len(args) == 1 {
+				elfPath = args[0]
+			}
+			if elfPath == "" {
+				return errors.New("input Stage-0 ELF path is required (--elf or positional argument)")
+			}
+			if outPath == "" {
+				return errors.New("--out is required")
+			}
+
+			res, err := signing.PackStage0(signing.Stage0Options{
+				ELFPath:      elfPath,
+				OutPath:      outPath,
+				Chip:         chip,
+				HardwarePath: hardwarePath,
+				PackagesDir:  packagesDir,
+			})
+			if err != nil {
+				return fmt.Errorf("pack Stage-0 image: %w", err)
+			}
+
+			ui.Success("Packed Stage-0 image -> %s (%d bytes)", res.OutPath, res.Size)
+			return nil
+		},
+	}
+
+	c.Flags().StringVarP(&elfPath, "elf", "i", "", "Input Stage-0 ELF path")
+	c.Flags().StringVarP(&outPath, "out", "o", "", "Output Stage-0 packed binary path (required)")
+	c.Flags().StringVar(&chip, "chip", "", "Target chip identifier")
+	c.Flags().StringVar(&hardwarePath, "hardware", "", "Path to hardware.json")
+	c.Flags().StringVar(&packagesDir, "packages-dir", "", "Override HAL packages directory")
+	return c
+}
+
+func newSignBundleCmd() *cobra.Command {
+	var (
+		opts           signing.BundleOptions
+		roleStr        string
+		target         uint8
+		reverseOldPath string
+		sbomDigestHex  string
+		deviceBindHex  string
+		keyFile        string
+		keyHex         string
+		mock           bool
+	)
+
+	c := &cobra.Command{
+		Use:   "bundle [installed-bin] [out-bundle]",
+		Short: "Pack and sign an OTA/recovery TBM1 v2 bundle",
+		Args:  cobra.MaximumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if opts.InstalledPath == "" && len(args) >= 1 {
+				opts.InstalledPath = args[0]
+			}
+			if opts.OutPath == "" && len(args) >= 2 {
+				opts.OutPath = args[1]
+			}
+			if opts.InstalledPath == "" {
+				return errors.New("input installed image is required (--in or positional argument)")
+			}
+			if opts.OutPath == "" {
+				return errors.New("output bundle path is required (--out or positional argument)")
+			}
+
+			role, err := signing.ParseImageRole(roleStr)
+			if err != nil {
+				return err
+			}
+			opts.Role = role
+
+			if cmd.Flags().Changed("target-slot") {
+				opts.TargetSlot = &target
+			}
+			if reverseOldPath != "" {
+				revData, readErr := os.ReadFile(filepath.Clean(reverseOldPath))
+				if readErr != nil {
+					return fmt.Errorf("read reverse-delta base %s: %w", reverseOldPath, readErr)
+				}
+				opts.ReverseOld = revData
+			}
+			if sbomDigestHex != "" {
+				sbomBytes, decErr := decodeHexBytes32(sbomDigestHex, "sbom-digest")
+				if decErr != nil {
+					return decErr
+				}
+				opts.SBOMDigest = sbomBytes
+			}
+			if deviceBindHex != "" {
+				bindBytes, decErr := decodeHexBytes32(deviceBindHex, "device-bind")
+				if decErr != nil {
+					return decErr
+				}
+				opts.DeviceBind = bindBytes
+			}
+
+			signer, err := signing.LoadSigner(signing.KeySource{
+				Mock:    mock,
+				KeyFile: keyFile,
+				KeyHex:  keyHex,
+			})
+			if err != nil {
+				return err
+			}
+			defer signer.Zeroise()
+
+			res, err := signing.SignBundle(opts, signer)
+			if err != nil {
+				return fmt.Errorf("sign bundle: %w", err)
+			}
+
+			ui.Success("Signed TBM1 bundle -> %s (%d bytes, slot=%d)", res.OutPath, len(res.Data), res.TargetSlot)
+			return nil
+		},
+	}
+
+	c.Flags().StringVarP(&opts.InstalledPath, "in", "i", "", "Path to signed installed binary")
+	c.Flags().StringVar(&opts.InstalledPath, "installed", "", "Alias for --in")
+	c.Flags().StringVarP(&opts.OutPath, "out", "o", "", "Output bundle path")
+	c.Flags().StringVar(&roleStr, "role", "app", "Target image role (app, recovery, stage1a, stage1b, netcore)")
+	c.Flags().Uint8Var(&target, "target-slot", 0, "Target flash slot index override")
+	c.Flags().StringVar(&opts.BasePath, "base", "", "Optional base binary for delta compression")
+	c.Flags().Uint32Var(&opts.BaseSVN, "base-svn", 0, "Base firmware SVN for delta updates")
+	c.Flags().BoolVar(&opts.Compress, "compress", true, "Enable Heatshrink compression in TBM1 trailer")
+	c.Flags().StringVar(&reverseOldPath, "reverse-old", "", "Path to old image for reverse-delta recovery generation")
+	c.Flags().StringVarP(&opts.DeviceTomlPath, "manifest", "m", "", "Path to device.toml for declarative layout parameters")
+	c.Flags().StringVar(&opts.Chip, "chip", "", "Target chip identifier")
+	c.Flags().StringVar(&opts.HardwarePath, "hardware", "", "Path to hardware.json")
+	c.Flags().StringVar(&opts.CoreDir, "core-dir", "", "Override Core SDK path")
+	c.Flags().Uint32Var(&opts.SectorSize, "sector-size", 0, "Flash sector size override")
+	c.Flags().Uint32Var(&opts.StagingBudget, "staging-budget", 0, "Staging partition size budget override")
+	c.Flags().StringVar(&opts.TransportProvider, "transport", "", "Transport mode override")
+	c.Flags().BoolVar(&opts.Flat, "flat", false, "Emit flat TBM1 container instead of trailer layout")
+	c.Flags().Uint16Var(&opts.VendorID, "vendor-id", 0, "16-bit vendor ID")
+	c.Flags().Uint16Var(&opts.ProductID, "product-id", 0, "16-bit product ID")
+	c.Flags().Uint16Var(&opts.HWRevMin, "hw-rev-min", 0, "Minimum hardware revision")
+	c.Flags().Uint16Var(&opts.HWRevMax, "hw-rev-max", 0, "Maximum hardware revision")
+	c.Flags().Uint8Var(&opts.KeyIndex, "key-index", 0, "Signing key slot index")
+	c.Flags().Uint32Var(&opts.KeyEpoch, "key-epoch", 0, "Signing key anti-rollback epoch")
+	c.Flags().Uint32Var(&opts.SVN, "svn", 0, "Application security version number")
+	c.Flags().Uint32Var(&opts.Stage1SVN, "stage1-svn", 0, "Minimum required Stage-1 SVN")
+	c.Flags().Uint32Var(&opts.BuildNumber, "build-number", 0, "Monotonic build number")
+	c.Flags().Uint16Var(&opts.VerMajor, "ver-major", 0, "Semantic major version")
+	c.Flags().Uint16Var(&opts.VerMinor, "ver-minor", 0, "Semantic minor version")
+	c.Flags().Uint16Var(&opts.VerPatch, "ver-patch", 0, "Semantic patch version")
+	c.Flags().Uint16Var(&opts.BootRetryLimit, "boot-retry-limit", 0, "Boot attempt limit before rollback")
+	c.Flags().StringVar(&sbomDigestHex, "sbom-digest", "", "Hex SHA-256 digest of attached SBOM")
+	c.Flags().StringVar(&deviceBindHex, "device-bind", "", "Hex device binding ID (32 bytes)")
+	c.Flags().StringVar(&opts.PQCAlgo, "pqc-algo", "", "Post-quantum signature algorithm (e.g. ml_dsa_65)")
+	c.Flags().StringVar(&opts.PQCPubkeyPath, "pqc-pubkey", "", "Path to PQC public key binary")
+	c.Flags().StringVar(&opts.PQCSigPath, "pqc-sig", "", "Path to PQC detached signature binary")
+	registerKeyFlags(c, &keyFile, &keyHex, &mock)
+	return c
+}
+
+func newSignKeygenCmd() *cobra.Command {
+	var (
+		privOut   string
+		pubOut    string
+		overwrite bool
+	)
+
+	c := &cobra.Command{
+		Use:   "keygen",
+		Short: "Generate a fresh Ed25519 root/release signing keypair",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			pubHex, err := signing.GenerateKeypair(privOut, pubOut, overwrite)
+			if err != nil {
+				return fmt.Errorf("generate signing keypair: %w", err)
+			}
+			ui.Success("Generated Ed25519 keypair:")
+			ui.Info("Private key: %s (mode 0600, never printed)", privOut)
+			ui.Info("Public key:  %s", pubOut)
+			ui.Info("Pubkey hex:  %s", pubHex)
+			return nil
+		},
+	}
+
+	c.Flags().StringVar(&privOut, "priv", "toob-signing.priv.hex", "Private key output path")
+	c.Flags().StringVar(&pubOut, "pub", "toob-signing.pub.hex", "Public key output path")
+	c.Flags().BoolVar(&overwrite, "overwrite", false, "Overwrite existing key files")
+	return c
+}
+
+func newSignTCC1Cmd() *cobra.Command {
+	tccCmd := &cobra.Command{
+		Use:   "tcc1",
+		Short: "Sign and verify TCC1 cloud commands",
+	}
+
+	var (
+		cmdCode     uint8
+		flags       uint16
+		counterMin  uint32
+		issuedAt    uint32
+		deviceIDHex string
+		paramsHex   string
+		outPath     string
+		keyFile     string
+		keyHex      string
+		mock        bool
+	)
+
+	signCmd := &cobra.Command{
+		Use:   "sign",
+		Short: "Sign a TCC1 command frame",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if outPath == "" {
+				return errors.New("--out is required")
+			}
+
+			var devID [32]byte
+			if deviceIDHex != "" {
+				dec, decErr := decodeHexBytes32(deviceIDHex, "device-id")
+				if decErr != nil {
+					return decErr
+				}
+				copy(devID[:], dec)
+			}
+
+			var params []byte
+			if paramsHex != "" {
+				dec, decErr := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(paramsHex), "0x"))
+				if decErr != nil {
+					return fmt.Errorf("invalid --params-hex: %w", decErr)
+				}
+				params = dec
+			}
+
+			signer, err := signing.LoadSigner(signing.KeySource{
+				Mock:    mock,
+				KeyFile: keyFile,
+				KeyHex:  keyHex,
+			})
+			if err != nil {
+				return err
+			}
+			defer signer.Zeroise()
+
+			frame, err := signing.SignCloudCommand(signing.TCC1Options{
+				Command:    signing.CloudCommand(cmdCode),
+				Flags:      flags,
+				CounterMin: counterMin,
+				IssuedAt:   issuedAt,
+				DeviceID:   devID,
+				Params:     params,
+			}, signer)
+			if err != nil {
+				return fmt.Errorf("sign TCC1 command: %w", err)
+			}
+			if err := os.WriteFile(filepath.Clean(outPath), frame, 0o600); err != nil {
+				return fmt.Errorf("write TCC1 frame %s: %w", outPath, err)
+			}
+			ui.Success("Signed TCC1 command frame -> %s (%d bytes)", outPath, len(frame))
+			return nil
+		},
+	}
+
+	signCmd.Flags().StringVarP(&outPath, "out", "o", "", "Output signed TCC1 frame path (required)")
+	signCmd.Flags().Uint8Var(&cmdCode, "command", 0, "TCC1 command opcode")
+	signCmd.Flags().Uint16Var(&flags, "flags", 0, "TCC1 flags field")
+	signCmd.Flags().Uint32Var(&counterMin, "counter-min", 0, "Monotonic minimum sequence counter")
+	signCmd.Flags().Uint32Var(&issuedAt, "issued-at", 0, "Unix timestamp when command was issued")
+	signCmd.Flags().StringVar(&deviceIDHex, "device-id", "", "Target 32-byte device ID hex")
+	signCmd.Flags().StringVar(&paramsHex, "params-hex", "", "Optional hex-encoded command parameter bytes")
+	registerKeyFlags(signCmd, &keyFile, &keyHex, &mock)
+
+	var (
+		inPath    string
+		pubKeyHex string
+	)
+	verifyCmd := &cobra.Command{
+		Use:   "verify",
+		Short: "Verify a TCC1 command frame signature",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			frame, err := os.ReadFile(filepath.Clean(inPath))
+			if err != nil {
+				return fmt.Errorf("read TCC1 frame %s: %w", inPath, err)
+			}
+			pub, err := parseEd25519PubHex(pubKeyHex)
+			if err != nil {
+				return err
+			}
+			if err := signing.VerifyCloudCommand(frame, pub); err != nil {
+				return fmt.Errorf("verify TCC1 command: %w", err)
+			}
+			ui.Success("TCC1 signature valid (%s)", inPath)
+			return nil
+		},
+	}
+	verifyCmd.Flags().StringVarP(&inPath, "in", "i", "", "Input TCC1 frame path (required)")
+	verifyCmd.Flags().StringVar(&pubKeyHex, "pubkey", "", "Ed25519 public key hex (required)")
+	_ = verifyCmd.MarkFlagRequired("in")
+	_ = verifyCmd.MarkFlagRequired("pubkey")
+
+	tccCmd.AddCommand(signCmd, verifyCmd)
+	return tccCmd
+}
+
+func newSignKDMCmd() *cobra.Command {
+	kdmCmd := &cobra.Command{
+		Use:   "kdm",
+		Short: "Sign and verify Key Delegation Manifests (KDM)",
+	}
+
+	var (
+		seqNum         uint32
+		delegatePubHex string
+		outPath        string
+		keyFile        string
+		keyHex         string
+		mock           bool
+	)
+
+	signCmd := &cobra.Command{
+		Use:   "sign",
+		Short: "Sign a Key Delegation Manifest",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if outPath == "" {
+				return errors.New("--out is required")
+			}
+			newPub, err := decodeHexBytes32(delegatePubHex, "delegate-pubkey")
+			if err != nil {
+				return err
+			}
+
+			signer, err := signing.LoadSigner(signing.KeySource{
+				Mock:    mock,
+				KeyFile: keyFile,
+				KeyHex:  keyHex,
+			})
+			if err != nil {
+				return err
+			}
+			defer signer.Zeroise()
+
+			blob, err := signing.SignKDM(signing.KDMOptions{
+				SequenceNumber: seqNum,
+				NewCloudPubkey: newPub,
+			}, signer)
+			if err != nil {
+				return fmt.Errorf("sign KDM: %w", err)
+			}
+			if err := os.WriteFile(filepath.Clean(outPath), blob, 0o600); err != nil {
+				return fmt.Errorf("write KDM %s: %w", outPath, err)
+			}
+			ui.Success("Signed KDM -> %s (%d bytes)", outPath, len(blob))
+			return nil
+		},
+	}
+
+	signCmd.Flags().StringVarP(&outPath, "out", "o", "", "Output KDM file path (required)")
+	signCmd.Flags().StringVar(&delegatePubHex, "delegate-pubkey", "", "Delegated Ed25519 public key hex (required)")
+	signCmd.Flags().Uint32Var(&seqNum, "sequence", 0, "Monotonic key delegation sequence number")
+	registerKeyFlags(signCmd, &keyFile, &keyHex, &mock)
+	_ = signCmd.MarkFlagRequired("delegate-pubkey")
+
+	var (
+		inPath    string
+		pubKeyHex string
+	)
+	verifyCmd := &cobra.Command{
+		Use:   "verify",
+		Short: "Verify a Key Delegation Manifest",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			blob, err := os.ReadFile(filepath.Clean(inPath))
+			if err != nil {
+				return fmt.Errorf("read KDM %s: %w", inPath, err)
+			}
+			pub, err := parseEd25519PubHex(pubKeyHex)
+			if err != nil {
+				return err
+			}
+			if err := signing.VerifyKDM(blob, pub); err != nil {
+				return fmt.Errorf("verify KDM: %w", err)
+			}
+			ui.Success("KDM signature valid (%s)", inPath)
+			return nil
+		},
+	}
+	verifyCmd.Flags().StringVarP(&inPath, "in", "i", "", "Input KDM file path (required)")
+	verifyCmd.Flags().StringVar(&pubKeyHex, "pubkey", "", "Root Ed25519 public key hex (required)")
+	_ = verifyCmd.MarkFlagRequired("in")
+	_ = verifyCmd.MarkFlagRequired("pubkey")
+
+	kdmCmd.AddCommand(signCmd, verifyCmd)
+	return kdmCmd
+}
+
+func parseEd25519PubHex(raw string) (ed25519.PublicKey, error) {
+	b, err := decodeHexBytes32(raw, "pubkey")
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	cmPath := filepath.Join(filepath.Dir(hwPath), "chip_manifest.json")
-	raw, err := os.ReadFile(cmPath)
-	if err != nil {
-		return nil
-	}
-	var cm build.ChipManifest
-	if json.Unmarshal(raw, &cm) != nil {
-		return nil
-	}
-	return &cm
+	return ed25519.PublicKey(b), nil
 }
 
-func validateBundleAgainstDevice(cmd *cobra.Command, dt *build.DeviceToml, devicePath string) (vendorID, productID, hwRevMin, hwRevMax uint16, err error) {
-	if dt.Identity.VendorID == 0 || dt.Identity.VendorID == 0xFFFF {
-		return 0, 0, 0, 0, fmt.Errorf("%s must define a valid non-zero [identity] vendor_id", devicePath)
+func decodeHexBytes32(raw, label string) ([]byte, error) {
+	cleaned := strings.TrimPrefix(strings.TrimSpace(raw), "0x")
+	b, err := hex.DecodeString(cleaned)
+	if err != nil || len(b) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("--%s must be %d hex characters (%d bytes)", label, ed25519.PublicKeySize*2, ed25519.PublicKeySize)
 	}
-	if dt.Identity.ProductID == 0 || dt.Identity.ProductID == 0xFFFF {
-		return 0, 0, 0, 0, fmt.Errorf("%s must define a valid non-zero [identity] product_id", devicePath)
-	}
-
-	vendorID = dt.Identity.VendorID
-	if cmd.Flags().Changed("vendor") {
-		if bundleVendorFlag != dt.Identity.VendorID {
-			return 0, 0, 0, 0, fmt.Errorf("--vendor (0x%04X) does not match %s [identity] vendor_id (0x%04X)",
-				bundleVendorFlag, devicePath, dt.Identity.VendorID)
-		}
-		vendorID = bundleVendorFlag
-	}
-
-	productID = dt.Identity.ProductID
-	if cmd.Flags().Changed("product") {
-		if bundleProductFlag != dt.Identity.ProductID {
-			return 0, 0, 0, 0, fmt.Errorf("--product (0x%04X) does not match %s [identity] product_id (0x%04X)",
-				bundleProductFlag, devicePath, dt.Identity.ProductID)
-		}
-		productID = bundleProductFlag
-	}
-
-	hwRevMin = dt.Identity.HwRev
-	if cmd.Flags().Changed("hw-rev-min") {
-		hwRevMin = bundleHWRevMinFlag
-	}
-	hwRevMax = dt.Identity.HwRev
-	if cmd.Flags().Changed("hw-rev-max") {
-		hwRevMax = bundleHWRevMaxFlag
-	}
-	if dt.Identity.HwRev < hwRevMin || dt.Identity.HwRev > hwRevMax {
-		return 0, 0, 0, 0, fmt.Errorf("%s [identity] hw_rev (%d) falls outside [--hw-rev-min=%d .. --hw-rev-max=%d]",
-			devicePath, dt.Identity.HwRev, hwRevMin, hwRevMax)
-	}
-
-	cm := loadOptionalChipManifestForDevice(dt.Device.Chip)
-	var caps *build.SlotCapabilities
-	if cm != nil {
-		caps = cm.SlotCapabilities
-	}
-
-	transport := strings.ToLower(strings.TrimSpace(dt.BootConfig.TransportProvider))
-	if transport == "" && caps != nil {
-		switch {
-		case caps.SlotCount >= 2 && isRemappableExecModel(caps.ExecModel):
-			transport = "pointer"
-		case caps.SlotCount >= 2:
-			transport = "oneway"
-		case caps.HasScratch:
-			transport = "swapscratch"
-		default:
-			transport = "swapmove"
-		}
-	}
-	backup := strings.ToLower(strings.TrimSpace(dt.BootConfig.BackupMode))
-	if transport == "oneway" && backup == "" {
-		backup = "full"
-	}
-
-	if bundleBaseFlag != "" {
-		if !dt.Partitions.EnableDeltas {
-			return 0, 0, 0, 0, fmt.Errorf("refusing to sign forward-delta bundle: partitions.enable_deltas is false in %s", devicePath)
-		}
-		if dt.Features.Delta != nil && !*dt.Features.Delta {
-			return 0, 0, 0, 0, fmt.Errorf("refusing to sign forward-delta bundle: features.delta is false in %s", devicePath)
-		}
-		if dt.Partitions.ScratchSize > 0 && dt.Partitions.ScratchSize < dt.Partitions.AppSize {
-			return 0, 0, 0, 0, fmt.Errorf("refusing to sign forward-delta bundle: partitions.scratch_size (%d) < partitions.app_size (%d) in %s",
-				dt.Partitions.ScratchSize, dt.Partitions.AppSize, devicePath)
-		}
-		if transport != "" && transport != "pointer" && caps != nil && !caps.HasScratch && dt.Partitions.ScratchSize == 0 {
-			return 0, 0, 0, 0, fmt.Errorf("refusing to sign forward-delta bundle [HIGH-33]: transport '%s' on chip '%s' has no scratch partition",
-				transport, dt.Device.Chip)
-		}
-	}
-
-	if bundleCompressFlag {
-		if dt.Features.Compression != nil && !*dt.Features.Compression {
-			return 0, 0, 0, 0, fmt.Errorf("refusing to sign compressed bundle: features.compression is false in %s", devicePath)
-		}
-		hasAllocatedScratch := dt.Partitions.ScratchSize > 0 ||
-			(dt.Partitions.EnableDeltas && transport != "" && transport != "pointer" && (caps == nil || caps.HasScratch))
-		if transport == "oneway" && backup == "full" && !hasAllocatedScratch {
-			return 0, 0, 0, 0, fmt.Errorf("refusing to sign compressed bundle [HIGH-33]: oneway transport with full backup and no scratch partition rejects compressed streams in %s",
-				devicePath)
-		}
-	}
-
-	if transport == "oneway" && backup == "reverse_delta" && bundleRDeltaOldFlag == "" {
-		return 0, 0, 0, 0, fmt.Errorf("refusing to sign bundle: boot_config.backup_mode = 'reverse_delta' in %s requires --rdelta-old <previous.toob>",
-			devicePath)
-	}
-
-	return vendorID, productID, hwRevMin, hwRevMax, nil
-}
-
-var signBundleCmd = &cobra.Command{
-	Use:   "bundle <image.toob>",
-	Short: "Assemble and Ed25519-sign a complete TBM1 v2 update bundle",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if bundleBaseFlag != "" && bundleCompressFlag {
-			return errors.New("--base (TDS1 forward delta) and --compress (Heatshrink) are mutually exclusive")
-		}
-		if cmd.Flags().Changed("base-svn") && bundleBaseFlag == "" {
-			return errors.New("--base-svn requires --base <base.toob>")
-		}
-
-		vendorID := bundleVendorFlag
-		productID := bundleProductFlag
-		hwRevMin := bundleHWRevMinFlag
-		hwRevMax := bundleHWRevMaxFlag
-
-		var dt *build.DeviceToml
-		if bundleDeviceFlag != "" {
-			var err error
-			dt, err = build.ParseToml(bundleDeviceFlag)
-			if err != nil {
-				return fmt.Errorf("parse --device manifest %s: %w", bundleDeviceFlag, err)
-			}
-			vendorID, productID, hwRevMin, hwRevMax, err = validateBundleAgainstDevice(cmd, dt, bundleDeviceFlag)
-			if err != nil {
-				return err
-			}
-		}
-
-		if vendorID == 0 || vendorID == 0xFFFF {
-			return errors.New("--vendor must be non-zero and not 0xFFFF (reserved)")
-		}
-		if productID == 0 || productID == 0xFFFF {
-			return errors.New("--product must be non-zero and not 0xFFFF (reserved)")
-		}
-		if hwRevMin > hwRevMax {
-			return fmt.Errorf("--hw-rev-min (%d) must not exceed --hw-rev-max (%d)", hwRevMin, hwRevMax)
-		}
-
-		inPath := args[0]
-		installed, err := os.ReadFile(inPath)
-		if err != nil {
-			return fmt.Errorf("read installed image: %w", err)
-		}
-		if err := validateToobImage("installed image", installed); err != nil {
-			return err
-		}
-
-		signer, err := resolveSigner()
-		if err != nil {
-			return err
-		}
-
-		var baseBytes []byte
-		if bundleBaseFlag != "" {
-			baseBytes, err = os.ReadFile(bundleBaseFlag)
-			if err != nil {
-				return fmt.Errorf("read --base image: %w", err)
-			}
-			if err := validateToobImage("--base image", baseBytes); err != nil {
-				return err
-			}
-		}
-
-		var rdeltaOldBytes []byte
-		if bundleRDeltaOldFlag != "" {
-			rdeltaOldBytes, err = os.ReadFile(bundleRDeltaOldFlag)
-			if err != nil {
-				return fmt.Errorf("read --rdelta-old image: %w", err)
-			}
-			if err := validateToobImage("--rdelta-old image", rdeltaOldBytes); err != nil {
-				return err
-			}
-		}
-
-		if dt != nil && dt.Partitions.AppSize > 0 {
-			appBudget := uint64(dt.Partitions.AppSize)
-			if uint64(len(installed)) > appBudget {
-				return fmt.Errorf("installed image (%d bytes) exceeds partitions.app_size (%d bytes) in %s",
-					len(installed), dt.Partitions.AppSize, bundleDeviceFlag)
-			}
-			if uint64(len(baseBytes)) > appBudget {
-				return fmt.Errorf("--base image (%d bytes) exceeds partitions.app_size (%d bytes) in %s",
-					len(baseBytes), dt.Partitions.AppSize, bundleDeviceFlag)
-			}
-			if uint64(len(rdeltaOldBytes)) > appBudget {
-				return fmt.Errorf("--rdelta-old image (%d bytes) exceeds partitions.app_size (%d bytes) in %s",
-					len(rdeltaOldBytes), dt.Partitions.AppSize, bundleDeviceFlag)
-			}
-		}
-
-		bundle, err := tbm1.PackBundle(tbm1.PackOptions{
-			Installed:     installed,
-			TargetSlot:    tbm1.SlotApp,
-			Base:          baseBytes,
-			BaseSVN:       bundleBaseSVNFlag,
-			Compress:      bundleCompressFlag,
-			ReverseOld:    rdeltaOldBytes,
-			TrailerLayout: bundleTrailerFlag,
-			VendorID:      vendorID,
-			ProductID:     productID,
-			HWRevMin:      hwRevMin,
-			HWRevMax:      hwRevMax,
-			SVN:           bundleSVNFlag,
-			VerMajor:      bundleVerMajorFlag,
-			VerMinor:      bundleVerMinorFlag,
-			VerPatch:      bundleVerPatchFlag,
-			KeyIndex:      bundleKeyIndexFlag,
-		}, signer)
-		if err != nil {
-			return err
-		}
-
-		outPath := inPath + ".tbm1"
-		if signOutFlag != "" {
-			outPath = signOutFlag
-		}
-		if err := os.WriteFile(outPath, bundle, 0644); err != nil {
-			return fmt.Errorf("write TBM1 bundle: %w", err)
-		}
-
-		ui.Success("Packed & signed TBM1 bundle (%d bytes) -> %s", len(bundle), outPath)
-		ui.Tip("SVN: %d, Signer Public Key: %s", bundleSVNFlag, hex.EncodeToString(signer.Public()))
-		return nil
-	},
-}
-
-var signImageCmd = &cobra.Command{
-	Use:   "image <app.bin>",
-	Short: "Prepend Toob image header to an application binary",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		inPath := args[0]
-		rawBin, err := os.ReadFile(inPath)
-		if err != nil {
-			return fmt.Errorf("read app binary: %w", err)
-		}
-		if len(rawBin) == 0 {
-			return errors.New("application binary is empty")
-		}
-		if uint64(len(rawBin)) > math.MaxUint32-toobImageHeaderLen-3 {
-			return errors.New("application binary exceeds uint32 image_size limit")
-		}
-
-		if pad := (4 - (len(rawBin) % 4)) % 4; pad > 0 {
-			padded := make([]byte, len(rawBin)+pad)
-			copy(padded, rawBin)
-			for i := len(rawBin); i < len(padded); i++ {
-				padded[i] = 0xFF
-			}
-			rawBin = padded
-		}
-
-		entryOffset := uint32(toobImageHeaderLen)
-		if cmd.Flags().Changed("entry") {
-			if signEntryFlag < toobImageHeaderLen {
-				return fmt.Errorf("--entry (0x%X) must not point inside the 20-byte Toob image header (>= 0x14)", signEntryFlag)
-			}
-			entryOffset = signEntryFlag
-		}
-
-		header := make([]byte, toobImageHeaderLen)
-		totalSize := uint32(toobImageHeaderLen + len(rawBin))
-		binary.LittleEndian.PutUint32(header[0:4], toobImageMagic)
-		binary.LittleEndian.PutUint32(header[4:8], totalSize)
-		binary.LittleEndian.PutUint32(header[8:12], entryOffset)
-
-		fp := sha256.Sum256(rawBin)
-		copy(header[12:20], fp[:8])
-
-		combined := make([]byte, 0, int(totalSize))
-		combined = append(combined, header...)
-		combined = append(combined, rawBin...)
-
-		outPath := inPath + ".toob"
-		if signOutFlag != "" {
-			outPath = signOutFlag
-		}
-
-		if err := os.WriteFile(outPath, combined, 0644); err != nil {
-			return fmt.Errorf("write tagged image: %w", err)
-		}
-
-		ui.Success("Prepend Toob header (20 bytes) -> %s", outPath)
-		ui.Tip("Total image size: %d bytes, Entry offset: 0x%08X", totalSize, entryOffset)
-		return nil
-	},
-}
-
-var signKeygenCmd = &cobra.Command{
-	Use:   "keygen",
-	Short: "Generate a new Ed25519 signing keypair",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		pub, priv, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			return fmt.Errorf("generate key: %w", err)
-		}
-
-		seed := priv.Seed()
-		seedHex := hex.EncodeToString(seed)
-		pubHex := hex.EncodeToString(pub)
-
-		if signOutFlag != "" {
-			if err := os.WriteFile(signOutFlag, []byte(seedHex+"\n"), 0600); err != nil {
-				return fmt.Errorf("save private key: %w", err)
-			}
-			ui.Success("Saved private key seed -> %s", signOutFlag)
-		}
-
-		fmt.Println("==================================================")
-		fmt.Println("   New Ed25519 Signing Keypair Generated")
-		fmt.Println("==================================================")
-		fmt.Printf("Seed (Secret Key, 32B): %s\n", seedHex)
-		fmt.Printf("Public Key (eFuse Slot): %s\n", pubHex)
-		fmt.Println("==================================================")
-		ui.Tip("Keep the seed confidential. Burn the public key into eFuse slot 0.")
-		return nil
-	},
-}
-
-func resolveSigner() (tbm1.Signer, error) {
-	if signMockFlag {
-		seedBytes, _ := hex.DecodeString(provision.MockRootPrivateKeySeedHex)
-		priv := ed25519.NewKeyFromSeed(seedBytes)
-		return tbm1.NewLocalSigner(priv)
-	}
-
-	if signKeyHexFlag != "" {
-		trimmed := strings.TrimSpace(signKeyHexFlag)
-		keyBytes, err := hex.DecodeString(trimmed)
-		if err != nil {
-			return nil, fmt.Errorf("invalid hex in --key-hex: %w", err)
-		}
-		if len(keyBytes) == 32 {
-			priv := ed25519.NewKeyFromSeed(keyBytes)
-			return tbm1.NewLocalSigner(priv)
-		} else if len(keyBytes) == 64 {
-			return tbm1.NewLocalSigner(ed25519.PrivateKey(keyBytes))
-		}
-		return nil, fmt.Errorf("private key hex must be 32 bytes (seed) or 64 bytes (full), got %d bytes", len(keyBytes))
-	}
-
-	if signKeyFileFlag != "" {
-		content, err := os.ReadFile(signKeyFileFlag)
-		if err != nil {
-			return nil, fmt.Errorf("read key file: %w", err)
-		}
-		trimmed := strings.TrimSpace(string(content))
-		keyBytes, err := hex.DecodeString(trimmed)
-		if err == nil && (len(keyBytes) == 32 || len(keyBytes) == 64) {
-			if len(keyBytes) == 32 {
-				return tbm1.NewLocalSigner(ed25519.NewKeyFromSeed(keyBytes))
-			}
-			return tbm1.NewLocalSigner(ed25519.PrivateKey(keyBytes))
-		}
-		if len(content) == 32 {
-			return tbm1.NewLocalSigner(ed25519.NewKeyFromSeed(content))
-		} else if len(content) == 64 {
-			return tbm1.NewLocalSigner(ed25519.PrivateKey(content))
-		}
-		return nil, errors.New("key file must contain 32 or 64 raw bytes, or 64/128 hex characters")
-	}
-
-	return nil, errors.New("must specify --mock, --key-file, or --key-hex to sign")
-}
-
-var signStage1Cmd = &cobra.Command{
-	Use:   "stage1 <toob_stage1.bin>",
-	Short: "Prepend Toob header and append Ed25519 signature for a Stage 1 bank",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		inPath := args[0]
-		rawBin, err := os.ReadFile(inPath)
-		if err != nil {
-			return fmt.Errorf("read stage1 binary: %w", err)
-		}
-		if len(rawBin) == 0 {
-			return errors.New("stage1 binary is empty")
-		}
-		if !cmd.Flags().Changed("entry") {
-			return errors.New("--entry (Stage 1 execution address, e.g. 0x40390000 or 0x40820000) is required")
-		}
-		if signEntryFlag < toobImageHeaderLen {
-			return fmt.Errorf("--entry (0x%X) must be a valid Stage 1 execution address (>= 0x14)", signEntryFlag)
-		}
-		if uint64(len(rawBin)) > math.MaxUint32-toobImageHeaderLen-ed25519SignatureLen-3 {
-			return errors.New("stage1 binary exceeds uint32 image_size limit")
-		}
-
-		if pad := (4 - (len(rawBin) % 4)) % 4; pad > 0 {
-			padded := make([]byte, len(rawBin)+pad)
-			copy(padded, rawBin)
-			for i := len(rawBin); i < len(padded); i++ {
-				padded[i] = 0xFF
-			}
-			rawBin = padded
-		}
-
-		signer, err := resolveSigner()
-		if err != nil {
-			return err
-		}
-
-		header := make([]byte, toobImageHeaderLen)
-		binary.LittleEndian.PutUint32(header[0:4], toobImageMagic)
-		binary.LittleEndian.PutUint32(header[4:8], uint32(len(rawBin)))
-		binary.LittleEndian.PutUint32(header[8:12], signEntryFlag)
-		binary.LittleEndian.PutUint32(header[12:16], toobStage1SVNMagic)
-		binary.LittleEndian.PutUint32(header[16:20], stage1SVNFlag)
-
-		msg := make([]byte, 0, toobImageHeaderLen+len(rawBin)+ed25519SignatureLen)
-		msg = append(msg, header...)
-		msg = append(msg, rawBin...)
-
-		digest := sha256.Sum256(msg)
-		sig, err := signer.Sign(digest[:])
-		if err != nil {
-			return fmt.Errorf("sign stage1 digest: %w", err)
-		}
-		msg = append(msg, sig...)
-
-		outPath := inPath + ".signed"
-		if signOutFlag != "" {
-			outPath = signOutFlag
-		}
-		if err := os.WriteFile(outPath, msg, 0644); err != nil {
-			return fmt.Errorf("write signed stage1: %w", err)
-		}
-
-		ui.Success("Signed Stage 1 bank (%d bytes) -> %s", len(msg), outPath)
-		ui.Tip("Entry: 0x%08X, SVN: %d, Signer Public Key: %s", signEntryFlag, stage1SVNFlag, hex.EncodeToString(signer.Public()))
-		return nil
-	},
-}
-
-func resolveChipHardwareJSON(chip, explicitPath string) (string, error) {
-	if explicitPath != "" {
-		return explicitPath, nil
-	}
-	chipNorm := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(chip)), "-", "")
-	if chipNorm == "" {
-		return "", errors.New("specify either --hardware <path/to/hardware.json> or --chip <chip>")
-	}
-
-	if regDir, err := paths.RegistryDir(); err == nil && regDir != "" {
-		cand := filepath.Join(regDir, "chips", chipNorm, "hardware.json")
-		if _, statErr := os.Stat(cand); statErr == nil {
-			return cand, nil
-		}
-	}
-	if cwd, err := os.Getwd(); err == nil {
-		curr := cwd
-		for {
-			cand := filepath.Join(curr, "toob-infra", "registry", "packages", "chips", chipNorm, "hardware.json")
-			if _, statErr := os.Stat(cand); statErr == nil {
-				return cand, nil
-			}
-			parent := filepath.Dir(curr)
-			if parent == curr {
-				break
-			}
-			curr = parent
-		}
-	}
-	return "", fmt.Errorf("cannot locate hardware.json for chip %q (pass --hardware explicitly or set TOOB_REGISTRY_DIR)", chip)
-}
-
-var signStage0Cmd = &cobra.Command{
-	Use:     "stage0 <toob_stage0.elf>",
-	Aliases: []string{"esp-stage0"},
-	Short:   "Pack a Stage 0 ELF into a BootROM-loadable image driven by hardware.json",
-	Args:    cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		inPath := args[0]
-		hwPath, err := resolveChipHardwareJSON(signChipFlag, signHardwareFlag)
-		if err != nil {
-			return err
-		}
-		img, err := build.PackStage0FromHardwareJSON(inPath, hwPath)
-		if err != nil {
-			return err
-		}
-		outPath := inPath + ".rom.bin"
-		if signOutFlag != "" {
-			outPath = signOutFlag
-		}
-		if err := os.WriteFile(outPath, img, 0644); err != nil {
-			return fmt.Errorf("write Stage 0 BootROM image: %w", err)
-		}
-		ui.Success("Packed Stage 0 BootROM image (%d bytes, %s) -> %s", len(img), filepath.Base(hwPath), outPath)
-		return nil
-	},
-}
-
-func init() {
-	signCmd.PersistentFlags().BoolVar(&signMockFlag, "mock", false, "Use RFC 8032 TV1 test key matching efuse_mock")
-	signCmd.PersistentFlags().StringVar(&signKeyFileFlag, "key-file", "", "Path to private key or seed file")
-	signCmd.PersistentFlags().StringVar(&signKeyHexFlag, "key-hex", "", "Hex-encoded 32-byte seed or 64-byte private key")
-	signCmd.PersistentFlags().StringVarP(&signOutFlag, "out", "o", "", "Output path for the signed artifact")
-
-	signImageCmd.Flags().Uint32Var(&signEntryFlag, "entry", 0, "Execution entry point offset in image (default 20)")
-	signStage1Cmd.Flags().Uint32Var(&signEntryFlag, "entry", 0, "Execution entry point address for Stage 1")
-	signStage1Cmd.Flags().Uint32Var(&stage1SVNFlag, "svn", 1, "Authenticated Stage 1 Security Version Number (SVN)")
-	signStage0Cmd.Flags().StringVar(&signChipFlag, "chip", "", "Target chip package name (resolves chips/<chip>/hardware.json)")
-	signStage0Cmd.Flags().StringVar(&signHardwareFlag, "hardware", "", "Explicit path to hardware.json")
-
-	signBundleCmd.Flags().StringVar(&bundleDeviceFlag, "device", "", "Optional path to device.toml for sign-time identity, budget, and transport coherence checks")
-	signBundleCmd.Flags().StringVar(&bundleBaseFlag, "base", "", "Base firmware image (.toob) to emit a TDS1 forward delta")
-	signBundleCmd.Flags().Uint32Var(&bundleBaseSVNFlag, "base-svn", 0, "Expected installed base SVN when emitting a TDS1 forward delta")
-	signBundleCmd.Flags().BoolVar(&bundleCompressFlag, "compress", false, "Compress primary image with Heatshrink (mutually exclusive with --base)")
-	signBundleCmd.Flags().StringVar(&bundleRDeltaOldFlag, "rdelta-old", "", "Previous firmware image (.toob) to embed Region 6 TDS1 reverse delta")
-	signBundleCmd.Flags().BoolVar(&bundleTrailerFlag, "trailer", true, "Emit Zero-Copy TrailerLayout bundle")
-	signBundleCmd.Flags().Uint16Var(&bundleVendorFlag, "vendor", 0x0001, "Device vendor_id")
-	signBundleCmd.Flags().Uint16Var(&bundleProductFlag, "product", 0x0042, "Device product_id")
-	signBundleCmd.Flags().Uint16Var(&bundleHWRevMinFlag, "hw-rev-min", 1, "Minimum hw_rev")
-	signBundleCmd.Flags().Uint16Var(&bundleHWRevMaxFlag, "hw-rev-max", 1, "Maximum hw_rev")
-	signBundleCmd.Flags().Uint32Var(&bundleSVNFlag, "svn", 1, "Security Version Number (SVN)")
-	signBundleCmd.Flags().Uint16Var(&bundleVerMajorFlag, "ver-major", 1, "Firmware major version")
-	signBundleCmd.Flags().Uint16Var(&bundleVerMinorFlag, "ver-minor", 0, "Firmware minor version")
-	signBundleCmd.Flags().Uint16Var(&bundleVerPatchFlag, "ver-patch", 0, "Firmware patch version")
-	signBundleCmd.Flags().Uint8Var(&bundleKeyIndexFlag, "key-index", 0, "Root public key slot index")
-
-	signCmd.AddCommand(signManifestCmd)
-	signCmd.AddCommand(signBundleCmd)
-	signCmd.AddCommand(signImageCmd)
-	signCmd.AddCommand(signStage1Cmd)
-	signCmd.AddCommand(signStage0Cmd)
-	signCmd.AddCommand(signKeygenCmd)
-
-	rootCmd.AddCommand(signCmd)
+	return b, nil
 }
