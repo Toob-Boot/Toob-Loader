@@ -61,7 +61,8 @@ static inline bool wal_intent_is_security_bearing(uint32_t intent) {
 #define WAL_TMR_VERSION_6 6
 #define WAL_TMR_VERSION_7 7
 #define WAL_TMR_VERSION_8 8
-#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_8
+#define WAL_TMR_VERSION_9 9
+#define WAL_TMR_VERSION_CURRENT WAL_TMR_VERSION_9
 
 #define WAL_TMR_PENDING_META_BIT 0x80U
 #define WAL_TMR_KEY_INDEX_MASK 0x7FU
@@ -120,8 +121,8 @@ typedef struct {
   uint32_t active_nonce_lo;
   uint32_t active_nonce_hi;
 
-  /* P4 Deprecated: KDM is now quorum-stored via boot_rstore */
-  uint32_t _deprecated_kdm_sequence;
+  /* v9: Reclaimed monotonic KDM sequence floor anchored in K4-authenticated TMR */
+  uint32_t kdm_seq_floor;
   uint32_t _deprecated_active_kdm_slot;
 
   /* --- v2-Felder (Phase 7a: Self-Anti-Rollback) --- */
@@ -253,5 +254,10 @@ boot_status_t boot_journal_flush_tmr(const boot_platform_t *platform);
  */
 boot_status_t boot_journal_reconstruct_aux_heal(const boot_platform_t *platform,
                                                 wal_entry_payload_t *out_heal, bool *out_found);
+
+/**
+ * @brief Zeroizes static K4 journal key material and cached WAL/TMR state before handoff.
+ */
+void boot_journal_zeroize_secrets(void);
 
 #endif /* BOOT_JOURNAL_H */

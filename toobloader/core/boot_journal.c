@@ -65,6 +65,7 @@ static wal_entry_state_t classify_entry(const wal_entry_aligned_t *e, uint8_t er
   return WAL_E_CORRUPT;
 }
 
+#if defined(TOOB_ALLOW_LEGACY_WAL_MIGRATION) && TOOB_ALLOW_LEGACY_WAL_MIGRATION
 static void migrate_v1_tmr(wal_tmr_payload_t *dst, const wal_tmr_payload_v1_t *src) {
   boot_secure_zeroize(dst, sizeof(wal_tmr_payload_t));
   dst->struct_version = WAL_TMR_VERSION_CURRENT;
@@ -79,10 +80,11 @@ static void migrate_v1_tmr(wal_tmr_payload_t *dst, const wal_tmr_payload_v1_t *s
   dst->swap_buffer_erase_counter = src->swap_buffer_erase_counter;
   dst->active_nonce_lo = src->active_nonce_lo;
   dst->active_nonce_hi = src->active_nonce_hi;
-  dst->_deprecated_kdm_sequence = src->kdm_sequence;
+  dst->kdm_seq_floor = src->kdm_sequence;
   dst->_deprecated_active_kdm_slot = src->active_kdm_slot;
   dst->stage1_svn = BOOT_STAGE1_SVN;
 }
+#endif
 
 static void upgrade_tmr_payload(wal_tmr_payload_t *tmr) {
   if (tmr->struct_version < WAL_TMR_VERSION_2) {
@@ -203,6 +205,38 @@ static boot_status_t compute_entry_mac(const boot_platform_t *platform,
   return s;
 }
 
+static boot_status_t verify_security_entry_mac(const boot_platform_t *platform,
+                                               const wal_entry_payload_t *entry, uint32_t seq_id,
+                                               uint32_t entry_offset) {
+  if (!wal_intent_is_security_bearing(entry->intent)) {
+    return BOOT_OK;
+  }
+  BOOT_SECURE_REQUIRE(journal_key_valid, { return BOOT_ERR_VERIFY; });
+
+  uint8_t exp_mac[WAL_CHAIN_TAG_BYTES];
+  boot_secure_zeroize(exp_mac, sizeof(exp_mac));
+  boot_status_t mac_st =
+      compute_entry_mac(platform, journal_key, entry, seq_id, entry_offset, exp_mac);
+  boot_status_t mac_ok =
+      (mac_st == BOOT_OK)
+          ? constant_time_memcmp_glitch_safe(exp_mac, (const uint8_t *)&entry->transfer_bitmap[4],
+                                             WAL_CHAIN_TAG_BYTES)
+          : BOOT_ERR_VERIFY;
+  boot_secure_zeroize(exp_mac, sizeof(exp_mac));
+  BOOT_SECURE_REQUIRE(mac_ok == BOOT_OK, { return BOOT_ERR_VERIFY; });
+  return BOOT_OK;
+}
+
+static bool classify_valid_entry_glitch_safe(const wal_entry_aligned_t *entry, uint8_t erased_val) {
+  wal_entry_state_t cls = classify_entry(entry, erased_val);
+  bool entry_valid = false;
+  if (cls == WAL_E_VALID) {
+    BOOT_SECURE_REQUIRE(cls == WAL_E_VALID, { entry_valid = false; });
+    entry_valid = (classify_entry(entry, erased_val) == WAL_E_VALID);
+  }
+  return entry_valid;
+}
+
 static int tmr_majority_vote_idx(const wal_tmr_payload_t *c, int n) {
   size_t sz = sizeof(wal_tmr_payload_t);
   if (n >= 2 && constant_time_memcmp_glitch_safe((const uint8_t *)&c[0], (const uint8_t *)&c[1],
@@ -316,11 +350,23 @@ static boot_status_t rotate_to_sector(const boot_platform_t *p, uint32_t idx, ui
   wh.data.sequence_id = seq;
   wh.data.erase_count = next_erase;
   wh.data.tmr_data = *tmr;
-  if (journal_key_valid && wh.data.tmr_data.chain_entry_count > 0u) {
-    uint32_t efuse_epoch = 0;
-    (void)boot_read_monotonic_counter_safe(p, &efuse_epoch);
-    (void)compute_tmr_mac(p, journal_key, &wh.data.tmr_data, efuse_epoch,
-                          wh.data.tmr_data.chain_tag);
+  BOOT_SECURE_REQUIRE(journal_key_valid, {
+    boot_secure_zeroize(&wh, sizeof(wh));
+    return BOOT_ERR_VERIFY;
+  });
+  uint32_t efuse_epoch = 0U;
+  boot_status_t ctr_st = boot_read_monotonic_counter_safe(p, &efuse_epoch);
+  if (ctr_st != BOOT_OK && ctr_st != BOOT_ERR_NOT_SUPPORTED) {
+    boot_secure_zeroize(&wh, sizeof(wh));
+    return BOOT_ERR_VERIFY;
+  }
+  if (wh.data.tmr_data.chain_entry_count == 0U) {
+    wh.data.tmr_data.chain_entry_count = 1U;
+  }
+  s = compute_tmr_mac(p, journal_key, &wh.data.tmr_data, efuse_epoch, wh.data.tmr_data.chain_tag);
+  if (s != BOOT_OK) {
+    boot_secure_zeroize(&wh, sizeof(wh));
+    return s;
   }
   wh.data.header_crc32 = sector_hdr_crc(&wh.data);
 
@@ -451,17 +497,20 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
   }
 
   /* 1b. K4: Derive device-bound journal key BEFORE TMR verification */
-  journal_key_valid = false;
-  boot_secure_zeroize(journal_key, sizeof(journal_key));
-  if (boot_derive_journal_key(platform, journal_key) == BOOT_OK) {
-    journal_key_valid = true;
+  boot_journal_zeroize_secrets();
+  boot_status_t key_stat = boot_derive_journal_key(platform, journal_key);
+  if (key_stat != BOOT_OK) {
+    boot_journal_zeroize_secrets();
+    return key_stat;
   }
+  journal_key_valid = true;
 
   /* 2. Scan all sectors for highest sequence */
   uint32_t highest_seq = 0;
   int32_t highest_idx = -1;
   bool migration_required = false;
   wal_sector_header_aligned_t cached_winner __attribute__((aligned(8)));
+  boot_secure_zeroize(&cached_winner, sizeof(cached_winner));
   {
     wal_sector_header_aligned_t hdr __attribute__((aligned(8)));
     for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
@@ -478,6 +527,36 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
 
   /* 3. Factory Blank Initialization or Majority Vote Recovery */
   if (highest_idx == -1) {
+    uint32_t efuse_epoch = 0U;
+    boot_status_t ctr_stat = boot_read_monotonic_counter_safe(platform, &efuse_epoch);
+    if (ctr_stat != BOOT_OK && ctr_stat != BOOT_ERR_NOT_SUPPORTED) {
+      boot_journal_zeroize_secrets();
+      return BOOT_ERR_VERIFY;
+    }
+    if (ctr_stat == BOOT_OK && efuse_epoch > 0U) {
+      boot_journal_zeroize_secrets();
+      return BOOT_ERR_VERIFY;
+    }
+
+    if (platform->keystore != NULL && platform->keystore->read_dslc != NULL) {
+      uint8_t dslc_buf[32] __attribute__((aligned(8)));
+      size_t dslc_len = sizeof(dslc_buf);
+      boot_secure_zeroize(dslc_buf, sizeof(dslc_buf));
+      boot_status_t dslc_stat = platform->keystore->read_dslc(dslc_buf, &dslc_len);
+      if (dslc_stat == BOOT_OK) {
+        if (dslc_len == 0U || dslc_len > sizeof(dslc_buf) || dslc_buf[0] != 0x00U) {
+          boot_secure_zeroize(dslc_buf, sizeof(dslc_buf));
+          boot_journal_zeroize_secrets();
+          return BOOT_ERR_VERIFY;
+        }
+      } else if (dslc_stat != BOOT_ERR_NOT_SUPPORTED) {
+        boot_secure_zeroize(dslc_buf, sizeof(dslc_buf));
+        boot_journal_zeroize_secrets();
+        return BOOT_ERR_VERIFY;
+      }
+      boot_secure_zeroize(dslc_buf, sizeof(dslc_buf));
+    }
+
     active_wal_index = 0;
     boot_secure_zeroize(&current_active_header, sizeof(current_active_header));
     current_active_header.sector_magic = WAL_ABI_VERSION_MAGIC;
@@ -485,17 +564,18 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     current_active_header.erase_count = 1;
     current_active_header.tmr_data.struct_version = WAL_TMR_VERSION_CURRENT;
     current_active_header.tmr_data.populated_size = WAL_TMR_POPULATED_SIZE;
+    current_active_header.tmr_data.chain_entry_count = 1U;
 
-    if (journal_key_valid) {
-      uint32_t efuse_epoch = 0;
-      (void)boot_read_monotonic_counter_safe(platform, &efuse_epoch);
-      current_active_header.tmr_data.chain_entry_count = 1u;
-      (void)compute_tmr_mac(platform, journal_key, &current_active_header.tmr_data, efuse_epoch,
-                            current_active_header.tmr_data.chain_tag);
+    boot_status_t mac_stat = compute_tmr_mac(platform, journal_key, &current_active_header.tmr_data,
+                                             efuse_epoch, current_active_header.tmr_data.chain_tag);
+    if (mac_stat != BOOT_OK) {
+      boot_journal_zeroize_secrets();
+      return mac_stat;
     }
 
     boot_status_t er_stat = smart_erase_sector(platform, 0);
     if (er_stat != BOOT_OK) {
+      boot_journal_zeroize_secrets();
       return er_stat;
     }
 
@@ -509,6 +589,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     if (boot_flash_write_guarded(platform->flash, wal_sector_addrs[0], (const uint8_t *)&write_hdr,
                                  sizeof(write_hdr)) != BOOT_OK) {
       boot_secure_zeroize(&write_hdr, sizeof(write_hdr));
+      boot_journal_zeroize_secrets();
       return BOOT_ERR_FLASH;
     }
     boot_secure_zeroize(&write_hdr, sizeof(write_hdr));
@@ -518,6 +599,7 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     bool legacy_migration = false;
     migration_required = false;
     if (cached_winner.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+#if defined(TOOB_ALLOW_LEGACY_WAL_MIGRATION) && TOOB_ALLOW_LEGACY_WAL_MIGRATION
       const wal_sector_header_v1_t *legacy_hdr =
           (const wal_sector_header_v1_t *)&cached_winner.data;
 
@@ -530,6 +612,11 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
       current_active_header.header_crc32 = sector_hdr_crc(&current_active_header);
       legacy_migration = true;
       migration_required = true;
+#else
+      boot_secure_zeroize(&cached_winner, sizeof(cached_winner));
+      boot_journal_zeroize_secrets();
+      return BOOT_ERR_ABI_MISMATCH;
+#endif
     } else {
       current_active_header = cached_winner.data;
     }
@@ -557,14 +644,22 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
         for (uint32_t i = 0; i < TOOB_WAL_SECTORS; i++) {
           if (read_header(platform, i, &hdr) && hdr.data.sequence_id == target_seq) {
             if (hdr.data.sector_magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+#if defined(TOOB_ALLOW_LEGACY_WAL_MIGRATION) && TOOB_ALLOW_LEGACY_WAL_MIGRATION
               const wal_sector_header_v1_t *legacy_shdr = (const wal_sector_header_v1_t *)&hdr.data;
               wal_tmr_payload_t converted_tmr;
               migrate_v1_tmr(&converted_tmr, &legacy_shdr->tmr_data);
               tmr_candidates[num_candidates++] = converted_tmr;
+              found_contiguous = true;
+#else
+              boot_secure_zeroize(&hdr, sizeof(hdr));
+              boot_secure_zeroize(tmr_candidates, sizeof(tmr_candidates));
+              boot_journal_zeroize_secrets();
+              return BOOT_ERR_ABI_MISMATCH;
+#endif
             } else {
               tmr_candidates[num_candidates++] = hdr.data.tmr_data;
+              found_contiguous = true;
             }
-            found_contiguous = true;
             break;
           }
         }
@@ -582,22 +677,33 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
     boot_secure_zeroize(tmr_candidates, sizeof(tmr_candidates));
 
     /* K4: Authenticate persisted TMR BEFORE any struct_version upgrade so an
-     * offline SPI attacker cannot downgrade struct_version to skip K4 MAC! */
-    if (!legacy_migration && journal_key_valid &&
-        current_active_header.tmr_data.chain_entry_count > 0u) {
-      uint32_t efuse_epoch = 0;
-      (void)boot_read_monotonic_counter_safe(platform, &efuse_epoch);
+     * offline SPI attacker cannot downgrade struct_version or zero chain_entry_count
+     * to skip K4 MAC verification. */
+    if (!legacy_migration) {
+      BOOT_SECURE_REQUIRE(
+          journal_key_valid && current_active_header.tmr_data.chain_entry_count > 0U, {
+            boot_journal_zeroize_secrets();
+            return BOOT_ERR_VERIFY;
+          });
+
+      uint32_t efuse_epoch = 0U;
+      boot_status_t ctr_stat = boot_read_monotonic_counter_safe(platform, &efuse_epoch);
+      if (ctr_stat != BOOT_OK && ctr_stat != BOOT_ERR_NOT_SUPPORTED) {
+        boot_journal_zeroize_secrets();
+        return BOOT_ERR_VERIFY;
+      }
+
       uint8_t exp_tag[WAL_CHAIN_TAG_BYTES];
       boot_status_t mac_st = compute_tmr_mac(platform, journal_key, &current_active_header.tmr_data,
                                              efuse_epoch, exp_tag);
       bool tag_ok = (mac_st == BOOT_OK && constant_time_memcmp_glitch_safe(
                                               exp_tag, current_active_header.tmr_data.chain_tag,
                                               WAL_CHAIN_TAG_BYTES) == BOOT_OK);
-      if (!tag_ok && efuse_epoch > 0u) {
+      if (!tag_ok && efuse_epoch > 0U) {
         /* Brownout tolerance right after a +1 OTP monotonic advance */
         uint8_t prev_tag[WAL_CHAIN_TAG_BYTES];
         if (compute_tmr_mac(platform, journal_key, &current_active_header.tmr_data,
-                            efuse_epoch - 1u, prev_tag) == BOOT_OK &&
+                            efuse_epoch - 1U, prev_tag) == BOOT_OK &&
             constant_time_memcmp_glitch_safe(prev_tag, current_active_header.tmr_data.chain_tag,
                                              WAL_CHAIN_TAG_BYTES) == BOOT_OK) {
           tag_ok = true;
@@ -606,30 +712,48 @@ boot_status_t boot_journal_init(const boot_platform_t *platform) {
         boot_secure_zeroize(prev_tag, sizeof(prev_tag));
       }
       boot_secure_zeroize(exp_tag, sizeof(exp_tag));
-      BOOT_SECURE_REQUIRE(tag_ok, { return BOOT_ERR_VERIFY; });
+      BOOT_SECURE_REQUIRE(tag_ok, {
+        boot_journal_zeroize_secrets();
+        return BOOT_ERR_VERIFY;
+      });
     }
 
+    wal_tmr_payload_t mig_tmr = current_active_header.tmr_data;
     if (!legacy_migration &&
         current_active_header.tmr_data.struct_version < WAL_TMR_VERSION_CURRENT) {
-      upgrade_tmr_payload(&current_active_header.tmr_data);
+      upgrade_tmr_payload(&mig_tmr);
       migration_required = true;
+    } else if (migration_required) {
+      mig_tmr.chain_entry_count =
+          (mig_tmr.chain_entry_count == 0U) ? 1U : (mig_tmr.chain_entry_count + 1U);
     }
+
+    /* 4. ECC-Safe Frontier Scan */
+    cached_write_offset =
+        scan_for_frontier_linear(platform, wal_sector_addrs[active_wal_index],
+                                 wal_sector_sizes[active_wal_index], platform->flash->erased_value);
+
+    wal_initialized = true;
+
+    if (migration_required) {
+      boot_status_t mig_stat = boot_journal_update_tmr(platform, &mig_tmr);
+      if (mig_stat != BOOT_OK) {
+        boot_secure_zeroize(&mig_tmr, sizeof(mig_tmr));
+        boot_journal_zeroize_secrets();
+        return mig_stat;
+      }
+    }
+    boot_secure_zeroize(&mig_tmr, sizeof(mig_tmr));
+    persisted_tmr_data = current_active_header.tmr_data;
+    return BOOT_OK;
   }
 
-  /* 4. ECC-Safe Frontier Scan */
+  /* 4. ECC-Safe Frontier Scan (factory-blank path) */
   cached_write_offset =
       scan_for_frontier_linear(platform, wal_sector_addrs[active_wal_index],
                                wal_sector_sizes[active_wal_index], platform->flash->erased_value);
 
   wal_initialized = true;
-
-  if (migration_required) {
-    boot_status_t mig_stat = boot_journal_update_tmr(platform, &current_active_header.tmr_data);
-    if (mig_stat != BOOT_OK) {
-      return mig_stat;
-    }
-  }
-
   persisted_tmr_data = current_active_header.tmr_data;
   return BOOT_OK;
 }
@@ -656,7 +780,7 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
     return BOOT_ERR_STATE;
   }
 
-  memset(out_state, 0, sizeof(wal_entry_payload_t));
+  boot_secure_zeroize(out_state, sizeof(wal_entry_payload_t));
   if (out_net_accum) {
     *out_net_accum = 0;
   }
@@ -704,9 +828,7 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
         continue;
       }
 
-      bool entry_valid = true;
-      BOOT_SECURE_REQUIRE(classify_entry(&entry, platform->flash->erased_value) == WAL_E_VALID,
-                          { entry_valid = false; });
+      bool entry_valid = classify_valid_entry_glitch_safe(&entry, platform->flash->erased_value);
       if (!entry_valid) {
         boot_secure_zeroize(&entry, sizeof(entry));
         continue;
@@ -714,22 +836,10 @@ boot_status_t boot_journal_reconstruct_txn(const boot_platform_t *platform,
 
       uint32_t intent = entry.data.intent;
 
-      /* K4: Authenticate security-bearing intents against offline SPI forgery/replay */
-      if (journal_key_valid && current_active_header.tmr_data.chain_entry_count > 0u &&
-          wal_intent_is_security_bearing(intent)) {
-        uint8_t exp_mac[WAL_CHAIN_TAG_BYTES];
-        boot_status_t mac_st = compute_entry_mac(platform, journal_key, &entry.data, search_seq,
-                                                 current_offset, exp_mac);
-        boot_status_t mac_ok =
-            (mac_st == BOOT_OK)
-                ? constant_time_memcmp_glitch_safe(
-                      exp_mac, (const uint8_t *)&entry.data.transfer_bitmap[4], WAL_CHAIN_TAG_BYTES)
-                : BOOT_ERR_VERIFY;
-        boot_secure_zeroize(exp_mac, sizeof(exp_mac));
-        if (mac_ok != BOOT_OK) {
-          boot_secure_zeroize(&entry, sizeof(entry));
-          return BOOT_ERR_VERIFY;
-        }
+      /* K4: Unconditionally authenticate security-bearing intents against offline SPI forgery/replay */
+      if (verify_security_entry_mac(platform, &entry.data, search_seq, current_offset) != BOOT_OK) {
+        boot_secure_zeroize(&entry, sizeof(entry));
+        return BOOT_ERR_VERIFY;
       }
 
       if (intent == WAL_INTENT_NET_SEARCH_ACCUM) {
@@ -848,12 +958,21 @@ boot_status_t boot_journal_append(const boot_platform_t *platform,
   memcpy(&entry.data, new_entry, sizeof(wal_entry_payload_t));
 
   entry.data.magic = WAL_ENTRY_MAGIC;
-  if (journal_key_valid && wal_intent_is_security_bearing(entry.data.intent)) {
+  if (wal_intent_is_security_bearing(entry.data.intent)) {
+    BOOT_SECURE_REQUIRE(journal_key_valid, {
+      boot_secure_zeroize(&entry, sizeof(entry));
+      return BOOT_ERR_VERIFY;
+    });
     uint8_t mac_tag[WAL_CHAIN_TAG_BYTES];
-    if (compute_entry_mac(platform, journal_key, &entry.data, current_active_header.sequence_id,
-                          target_offset, mac_tag) == BOOT_OK) {
-      memcpy(&entry.data.transfer_bitmap[4], mac_tag, WAL_CHAIN_TAG_BYTES);
+    boot_status_t mac_stat =
+        compute_entry_mac(platform, journal_key, &entry.data, current_active_header.sequence_id,
+                          target_offset, mac_tag);
+    if (mac_stat != BOOT_OK) {
+      boot_secure_zeroize(mac_tag, sizeof(mac_tag));
+      boot_secure_zeroize(&entry, sizeof(entry));
+      return mac_stat;
     }
+    memcpy(&entry.data.transfer_bitmap[4], mac_tag, WAL_CHAIN_TAG_BYTES);
     boot_secure_zeroize(mac_tag, sizeof(mac_tag));
   }
   entry.data.crc32_trailer = entry_crc(&entry.data);
@@ -899,6 +1018,7 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
   }
 
   bool magic_legacy = false;
+#if defined(TOOB_ALLOW_LEGACY_WAL_MIGRATION) && TOOB_ALLOW_LEGACY_WAL_MIGRATION
   {
     wal_sector_header_aligned_t hdr __attribute__((aligned(8)));
     if (read_header(platform, active_wal_index, &hdr)) {
@@ -908,6 +1028,7 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
     }
     boot_secure_zeroize(&hdr, sizeof(hdr));
   }
+#endif
 
   if (!magic_legacy && constant_time_memcmp_glitch_safe(
                            (const uint8_t *)&current_active_header.tmr_data,
@@ -931,17 +1052,25 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
     return BOOT_ERR_COUNTER_EXHAUSTED;
   }
 
+  BOOT_SECURE_REQUIRE(journal_key_valid, { return BOOT_ERR_VERIFY; });
+
   wal_tmr_payload_t tmr_to_write = *new_tmr;
   tmr_to_write.struct_version = WAL_TMR_VERSION_CURRENT;
   tmr_to_write.populated_size = WAL_TMR_POPULATED_SIZE;
 
-  if (journal_key_valid) {
-    uint32_t efuse_epoch = 0;
-    (void)boot_read_monotonic_counter_safe(platform, &efuse_epoch);
-    tmr_to_write.chain_entry_count =
-        (tmr_to_write.chain_entry_count == 0u) ? 1u : (tmr_to_write.chain_entry_count + 1u);
-    (void)compute_tmr_mac(platform, journal_key, &tmr_to_write, efuse_epoch,
-                          tmr_to_write.chain_tag);
+  uint32_t efuse_epoch = 0U;
+  boot_status_t ctr_stat = boot_read_monotonic_counter_safe(platform, &efuse_epoch);
+  if (ctr_stat != BOOT_OK && ctr_stat != BOOT_ERR_NOT_SUPPORTED) {
+    boot_secure_zeroize(&tmr_to_write, sizeof(tmr_to_write));
+    return BOOT_ERR_VERIFY;
+  }
+  tmr_to_write.chain_entry_count =
+      (tmr_to_write.chain_entry_count == 0U) ? 1U : (tmr_to_write.chain_entry_count + 1U);
+  boot_status_t tmr_mac_stat =
+      compute_tmr_mac(platform, journal_key, &tmr_to_write, efuse_epoch, tmr_to_write.chain_tag);
+  if (tmr_mac_stat != BOOT_OK) {
+    boot_secure_zeroize(&tmr_to_write, sizeof(tmr_to_write));
+    return tmr_mac_stat;
   }
 
   wal_entry_payload_t carry_txn __attribute__((aligned(8)));
@@ -979,12 +1108,17 @@ boot_status_t boot_journal_update_tmr(const boot_platform_t *platform,
       memcpy(&carry_entry.data, &carry_txn, sizeof(wal_entry_payload_t));
       carry_entry.data.magic = WAL_ENTRY_MAGIC;
       const uint32_t carry_off = (uint32_t)sizeof(wal_sector_header_aligned_t);
-      if (journal_key_valid && wal_intent_is_security_bearing(carry_entry.data.intent)) {
+      if (wal_intent_is_security_bearing(carry_entry.data.intent)) {
         uint8_t mac_tag[WAL_CHAIN_TAG_BYTES];
-        if (compute_entry_mac(platform, journal_key, &carry_entry.data, active_seq, carry_off,
-                              mac_tag) == BOOT_OK) {
-          memcpy(&carry_entry.data.transfer_bitmap[4], mac_tag, WAL_CHAIN_TAG_BYTES);
+        boot_status_t carry_mac_st = compute_entry_mac(platform, journal_key, &carry_entry.data,
+                                                       active_seq, carry_off, mac_tag);
+        if (carry_mac_st != BOOT_OK) {
+          boot_secure_zeroize(mac_tag, sizeof(mac_tag));
+          boot_secure_zeroize(&carry_entry, sizeof(carry_entry));
+          boot_secure_zeroize(&carry_txn, sizeof(carry_txn));
+          return carry_mac_st;
         }
+        memcpy(&carry_entry.data.transfer_bitmap[4], mac_tag, WAL_CHAIN_TAG_BYTES);
         boot_secure_zeroize(mac_tag, sizeof(mac_tag));
       }
       carry_entry.data.crc32_trailer = entry_crc(&carry_entry.data);
@@ -1085,28 +1219,16 @@ boot_status_t boot_journal_reconstruct_aux_heal(const boot_platform_t *platform,
         continue;
       }
 
-      if (classify_entry(&entry, platform->flash->erased_value) != WAL_E_VALID) {
+      if (!classify_valid_entry_glitch_safe(&entry, platform->flash->erased_value)) {
         boot_secure_zeroize(&entry, sizeof(entry));
         continue;
       }
 
       uint32_t intent = entry.data.intent;
 
-      if (journal_key_valid && current_active_header.tmr_data.chain_entry_count > 0U &&
-          wal_intent_is_security_bearing(intent)) {
-        uint8_t exp_mac[WAL_CHAIN_TAG_BYTES];
-        boot_status_t mac_st = compute_entry_mac(platform, journal_key, &entry.data, search_seq,
-                                                 current_offset, exp_mac);
-        boot_status_t mac_ok =
-            (mac_st == BOOT_OK)
-                ? constant_time_memcmp_glitch_safe(
-                      exp_mac, (const uint8_t *)&entry.data.transfer_bitmap[4], WAL_CHAIN_TAG_BYTES)
-                : BOOT_ERR_VERIFY;
-        boot_secure_zeroize(exp_mac, sizeof(exp_mac));
-        if (mac_ok != BOOT_OK) {
-          boot_secure_zeroize(&entry, sizeof(entry));
-          return BOOT_ERR_VERIFY;
-        }
+      if (verify_security_entry_mac(platform, &entry.data, search_seq, current_offset) != BOOT_OK) {
+        boot_secure_zeroize(&entry, sizeof(entry));
+        return BOOT_ERR_VERIFY;
       }
 
       if (intent == WAL_INTENT_NET_SEARCH_ACCUM || intent == WAL_INTENT_DOWNLOAD_CHECKPOINT ||
@@ -1136,4 +1258,16 @@ boot_status_t boot_journal_reconstruct_aux_heal(const boot_platform_t *platform,
   }
 
   return BOOT_OK;
+}
+
+void boot_journal_zeroize_secrets(void) {
+  journal_key_valid = false;
+  wal_initialized = false;
+  tmr_defer_enabled = false;
+  tmr_dirty = false;
+  cached_write_offset = 0U;
+  active_wal_index = 0U;
+  boot_secure_zeroize(journal_key, sizeof(journal_key));
+  boot_secure_zeroize(&persisted_tmr_data, sizeof(persisted_tmr_data));
+  boot_secure_zeroize(&current_active_header, sizeof(current_active_header));
 }

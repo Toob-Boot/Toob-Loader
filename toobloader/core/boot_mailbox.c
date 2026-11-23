@@ -35,6 +35,17 @@ static uint32_t mbx_slot_addr(uint32_t i) {
   return CHIP_MAILBOX_ABS_ADDR + i * CHIP_MAILBOX_SLOT_SIZE;
 }
 
+static inline bool mbx_seq_is_newer(uint32_t cand, uint32_t cur) {
+  if (cand == 0U) {
+    return false;
+  }
+  if (cur == 0U) {
+    return true;
+  }
+  uint32_t diff = (cand >= cur) ? (cand - cur) : ((UINT32_MAX - cur) + 1U + cand);
+  return (diff != 0U) && (diff < 0x80000000U);
+}
+
 /* Read one slot; return true and fill *out only if magic, version, flags + CRC validate. */
 static bool mbx_read_valid(const boot_platform_t *platform, uint32_t i, toob_mailbox_t *out) {
   boot_secure_zeroize(out, sizeof(*out));
@@ -43,7 +54,7 @@ static bool mbx_read_valid(const boot_platform_t *platform, uint32_t i, toob_mai
     return false;
   }
   if (out->magic != TOOB_MAILBOX_MAGIC || out->version != TOOB_MAILBOX_VERSION ||
-      out->_reserved != 0U) {
+      out->_reserved != 0U || out->seq == 0U) {
     return false;
   }
   if (out->request == TOOB_REQ_NONE || (out->request & (uint16_t)(~TOOB_REQ_ALL_MASK)) != 0U) {
@@ -56,14 +67,14 @@ static bool mbx_read_valid(const boot_platform_t *platform, uint32_t i, toob_mai
   return expect == out->crc32;
 }
 
-/* Take the valid slot with the highest seq. Returns true and fills *best if any. */
+/* Take the valid slot with the highest RFC-1982 seq. Returns true and fills *best if any. */
 static bool mbx_read_best(const boot_platform_t *platform, toob_mailbox_t *best) {
   bool have = false;
   toob_mailbox_t s;
 
   for (uint32_t i = 0U; i < TOOB_MAILBOX_SLOTS; i++) {
     if (mbx_read_valid(platform, i, &s)) {
-      if (!have || s.seq > best->seq) {
+      if (!have || mbx_seq_is_newer(s.seq, best->seq)) {
         *best = s;
         have = true;
       }
@@ -211,9 +222,9 @@ boot_status_t boot_mailbox_consume(const boot_platform_t *platform) {
     goto cleanup;
   }
 
-  /* Idempotency gate: apply only strictly-newer records (double-checked). */
-  bool is_new = (rec.seq > tmr.last_mbx_request_id);
-  BOOT_SECURE_REQUIRE(is_new == (rec.seq > tmr.last_mbx_request_id), {
+  /* Idempotency gate: apply only strictly-newer records (RFC-1982 wrap-safe, double-checked). */
+  bool is_new = mbx_seq_is_newer(rec.seq, tmr.last_mbx_request_id);
+  BOOT_SECURE_REQUIRE(is_new == mbx_seq_is_newer(rec.seq, tmr.last_mbx_request_id), {
     status = BOOT_ERR_INVALID_STATE;
     goto cleanup;
   });

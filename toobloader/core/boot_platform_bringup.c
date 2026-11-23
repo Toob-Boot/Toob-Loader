@@ -32,7 +32,7 @@ boot_status_t boot_platform_bringup(const boot_platform_t *p, const bringup_step
 
   for (size_t i = 0; i < n; i++) {
     const bringup_step_t *step = &steps[i];
-    boot_status_t status = BOOT_OK;
+    boot_status_t status = step->mandatory ? BOOT_ERR_STATE : BOOT_OK;
 
     switch (step->kind) {
     case BOOT_HAL_KIND_CLOCK:
@@ -97,6 +97,7 @@ boot_status_t boot_platform_bringup(const boot_platform_t *p, const bringup_step
     if (status != BOOT_OK) {
       if (step->mandatory) {
         boot_terminal_halt(p, status, step->panic_site);
+        return status;
       }
     }
   }

@@ -184,6 +184,19 @@ typedef struct {
 
 _Static_assert(sizeof(toob_image_header_t) == 20, "toob_image_header_t ABI Size Mismatch!");
 
+#define TOOB_IMG_SIG_MAGIC 0x54534947U /* "TSIG" */
+#define TOOB_IMG_SIG_FLAG_SHA256 0x01U
+
+typedef struct {
+  uint32_t magic;          /**< TOOB_IMG_SIG_MAGIC */
+  uint8_t key_index;       /**< OTP root key slot index (verified non-revoked) */
+  uint8_t flags;           /**< TOOB_IMG_SIG_FLAG_SHA256 */
+  uint16_t reserved;       /**< MUST be 0 */
+  uint8_t sig_ed25519[64]; /**< Ed25519(SHA-256(image[0 .. image_size - 72))) */
+} toob_img_sig_trailer_t;
+
+_Static_assert(sizeof(toob_img_sig_trailer_t) == 72, "toob_img_sig_trailer_t ABI Size Mismatch!");
+
 /* --- 4. OS-Boundary Structures (libtoob ABI) --- */
 
 /* Integriert die externe OS-Boundary, um struct-Redundanzen und ABI-Verletzungen zu eliminieren. */

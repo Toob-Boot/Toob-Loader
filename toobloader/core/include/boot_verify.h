@@ -14,6 +14,7 @@
 #define TOOB_BOOT_VERIFY_H
 
 #include "boot_hal.h"
+#include "boot_types.h"
 #include "generated_boot_config.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -62,5 +63,28 @@ typedef struct {
 boot_status_t boot_verify_manifest_envelope(const boot_platform_t *platform,
                                             const boot_verify_envelope_t *envelope,
                                             uint8_t *work_buffer, size_t work_buf_len);
+
+/**
+ * @brief Authenticates a flashed App, Recovery OS, or Backup slot image via TSIG trailer.
+ *
+ * Streams SHA-256 over [slot_addr .. slot_addr + image_size - 72) using `arena`,
+ * enforces constant-time non-revoked OTP key check on `trailer.key_index`, and
+ * verifies the Ed25519 signature stored in `toob_img_sig_trailer_t`.
+ * Zeroizes all keys, digests, and arena contents prior to return.
+ *
+ * Unsigned image bypass via TOOB_ALLOW_UNSIGNED_APP_BOOT is compile-time forbidden
+ * whenever TOOB_PROFILE_PRODUCTION is defined.
+ *
+ * @param platform  Boot HAL platform pointer
+ * @param slot_addr Absolute flash start address of the slot image
+ * @param slot_size Total slot size in bytes
+ * @param hdr       Previously parsed image header at slot_addr
+ * @param arena     Caller scratch buffer (>= 256 bytes)
+ * @param arena_len Size of `arena` in bytes
+ * @return BOOT_OK if valid (or bounds-valid under explicit non-prod bypass), else error.
+ */
+boot_status_t boot_verify_slot_image(const boot_platform_t *platform, uint32_t slot_addr,
+                                     uint32_t slot_size, const toob_image_header_t *hdr,
+                                     uint8_t *arena, size_t arena_len);
 
 #endif /* TOOB_BOOT_VERIFY_H */

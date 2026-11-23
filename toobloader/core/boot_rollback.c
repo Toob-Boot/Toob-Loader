@@ -33,6 +33,7 @@
 #include "boot_panic.h"
 #include "boot_secure_zeroize.h"
 #include "boot_swap.h"
+#include "boot_verify.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -67,8 +68,12 @@ boot_status_t boot_rollback_verify_svn(const boot_platform_t *platform, uint32_t
   }
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
-  uint32_t svn_cfi_seed = 0;
-  (void)boot_random_safe(platform, (uint8_t *)&svn_cfi_seed, sizeof(svn_cfi_seed));
+  uint32_t svn_cfi_seed = 0U;
+  boot_status_t rng_stat =
+      boot_random_safe(platform, (uint8_t *)&svn_cfi_seed, sizeof(svn_cfi_seed));
+  if (rng_stat != BOOT_OK) {
+    return (rng_stat == BOOT_ERR_NOT_SUPPORTED) ? BOOT_ERR_CRYPTO : rng_stat;
+  }
   boot_cfi_ctx_t svn_cfi_ctx;
   boot_cfi_init(svn_cfi_ctx, svn_cfi_seed);
   boot_cfi_add_expected(svn_cfi_ctx, 1);
@@ -216,8 +221,11 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform, uint
   }
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
-  uint32_t rv_cfi_seed = 0;
-  (void)boot_random_safe(platform, (uint8_t *)&rv_cfi_seed, sizeof(rv_cfi_seed));
+  uint32_t rv_cfi_seed = 0U;
+  boot_status_t rng_stat = boot_random_safe(platform, (uint8_t *)&rv_cfi_seed, sizeof(rv_cfi_seed));
+  if (rng_stat != BOOT_OK) {
+    return (rng_stat == BOOT_ERR_NOT_SUPPORTED) ? BOOT_ERR_CRYPTO : rng_stat;
+  }
   boot_cfi_ctx_t revert_cfi_ctx;
   boot_cfi_init(revert_cfi_ctx, rv_cfi_seed);
   boot_cfi_add_expected(revert_cfi_ctx, 1);
@@ -271,7 +279,8 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform, uint
     goto revert_cleanup;
   });
 
-  if (backup_header.image_size > CHIP_APP_SLOT_SIZE) {
+  if (backup_header.image_size > CHIP_APP_SLOT_SIZE ||
+      backup_header.image_size > CHIP_STAGING_SLOT_SIZE) {
     status = BOOT_ERR_FLASH_BOUNDS;
     goto revert_cleanup;
   }
@@ -280,6 +289,12 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform, uint
   if ((UINT32_MAX - CHIP_STAGING_SLOT_ABS_ADDR < backup_header.image_size) ||
       (UINT32_MAX - CHIP_APP_SLOT_ABS_ADDR < backup_header.image_size)) {
     status = BOOT_ERR_FLASH_BOUNDS;
+    goto revert_cleanup;
+  }
+
+  status = boot_verify_slot_image(platform, CHIP_STAGING_SLOT_ABS_ADDR, CHIP_STAGING_SLOT_SIZE,
+                                  &backup_header, arena, arena_len);
+  if (status != BOOT_OK) {
     goto revert_cleanup;
   }
 
@@ -470,14 +485,20 @@ boot_status_t boot_rollback_trigger_revert(const boot_platform_t *platform, uint
   /* 5. Telemetrie & Isolierter Rollback-Intent Abschluss
    * Signalisiert dem nächsten Reset, dass das Rescue-Image verankert ist und
    * die Failure-Counters wieder regulär anlaufen dürfen. */
-  if (physical_app_erases > 0) {
+  if (physical_app_erases > 0U) {
     wal_tmr_payload_t update_tmr __attribute__((aligned(8)));
     boot_secure_zeroize(&update_tmr, sizeof(update_tmr));
 
     if (boot_journal_get_tmr(platform, &update_tmr) == BOOT_OK) {
       update_tmr.app_slot_erase_counter += physical_app_erases;
-      (void)boot_journal_update_tmr(platform, &update_tmr);
+      boot_status_t tmr_st = boot_journal_update_tmr(platform, &update_tmr);
+      if (tmr_st != BOOT_OK) {
+        boot_secure_zeroize(&update_tmr, sizeof(update_tmr));
+        status = tmr_st;
+        goto revert_cleanup;
+      }
     }
+    boot_secure_zeroize(&update_tmr, sizeof(update_tmr));
   }
 
   revert_intent.magic = WAL_ENTRY_MAGIC;

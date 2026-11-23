@@ -210,7 +210,18 @@ typedef struct {
   boot_status_t (*set_protection_bits)(uint32_t bitmask);
   boot_status_t (*enable_secure_boot)(void);
   boot_status_t (*enable_flash_encryption)(void);
+
+  /* Append-only V3 extensions (NULL == unimplemented on legacy chips) */
+  boot_status_t (*read_device_secret)(uint8_t *buf, size_t max_len, size_t *out_len);
+  boot_status_t (*read_pqc_pubkey_hash)(uint8_t out_hash[32], uint8_t key_index);
 } keystore_hal_t;
+
+_Static_assert(offsetof(keystore_hal_t, enable_flash_encryption) <
+                   offsetof(keystore_hal_t, read_device_secret),
+               "keystore_hal_t ABI append-only order broken (read_device_secret)");
+_Static_assert(offsetof(keystore_hal_t, read_device_secret) <
+                   offsetof(keystore_hal_t, read_pqc_pubkey_hash),
+               "keystore_hal_t ABI append-only order broken (read_pqc_pubkey_hash)");
 
 #define TOOB_KEYSTORE_HAL_V3(init_, deinit_, read_pubkey_, read_dslc_, write_dslc_, ...) \
     { .abi_version = TOOB_HAL_ABI_V3,                                      \

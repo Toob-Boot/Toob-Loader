@@ -79,7 +79,11 @@ boot_status_t boot_energy_check_safe_update(const boot_platform_t *platform) {
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t energy_cfi_seed = 0U;
-  (void)boot_random_safe(platform, (uint8_t *)&energy_cfi_seed, sizeof(energy_cfi_seed));
+  boot_status_t rng_stat =
+      boot_random_safe(platform, (uint8_t *)&energy_cfi_seed, sizeof(energy_cfi_seed));
+  if (rng_stat != BOOT_OK) {
+    return (rng_stat == BOOT_ERR_NOT_SUPPORTED) ? BOOT_ERR_CRYPTO : rng_stat;
+  }
   boot_cfi_ctx_t energy_cfi_ctx;
   boot_cfi_init(energy_cfi_ctx, energy_cfi_seed);
 

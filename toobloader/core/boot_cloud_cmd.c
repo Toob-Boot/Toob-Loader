@@ -73,6 +73,43 @@ static const boot_rstore_desc_t kdm_rstore_desc = {.slot_addrs = kdm_slot_addrs,
                                                    .magic = KDM_RSTORE_MAGIC};
 
 /**
+ * @brief Verifies a KDM record against the active contiguous OTP root key.
+ */
+static boot_status_t verify_kdm_against_active_root(const boot_platform_t *platform,
+                                                    const toob_kdm_t *kdm) {
+  uint8_t active_idx = 0U;
+  boot_status_t stat = boot_otp_get_active_key_index(platform, &active_idx);
+  if (stat != BOOT_OK) {
+    return stat;
+  }
+
+  uint8_t root_pubkey[32] __attribute__((aligned(8)));
+  boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
+  if (platform->keystore->read_pubkey(root_pubkey, sizeof(root_pubkey), active_idx) != BOOT_OK) {
+    boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
+    return BOOT_ERR_NOT_FOUND;
+  }
+
+  if (verify_not_all_zeros_glitch_safe(root_pubkey, sizeof(root_pubkey)) != BOOT_OK ||
+      verify_not_all_zeros_glitch_safe(kdm->new_cloud_pubkey, sizeof(kdm->new_cloud_pubkey)) !=
+          BOOT_OK) {
+    boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
+    return BOOT_ERR_VERIFY;
+  }
+
+  boot_status_t sig_stat = platform->crypto->verify_signature(
+      (const uint8_t *)kdm, offsetof(toob_kdm_t, signature_ed25519), kdm->signature_ed25519,
+      root_pubkey);
+  boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
+
+  BOOT_SECURE_REQUIRE(sig_stat == BOOT_OK, { return BOOT_ERR_VERIFY; });
+  if (boot_secure_confirm(sig_stat) != BOOT_OK) {
+    return BOOT_ERR_VERIFY;
+  }
+  return BOOT_OK;
+}
+
+/**
  * @brief Lädt den aktiven Cloud-Public-Key via KDM Quorum-Store.
  *
  * Phase 4: Replaces the old A/B-Slot logic with boot_rstore_read.
@@ -84,37 +121,20 @@ static boot_status_t load_active_cloud_key(const boot_platform_t *platform, uint
     return BOOT_ERR_INVALID_ARG;
   }
 
+  wal_tmr_payload_t tmr;
+  boot_secure_zeroize(&tmr, sizeof(tmr));
+  bool has_tmr = (boot_journal_get_tmr(platform, &tmr) == BOOT_OK);
+  uint32_t tmr_kdm_floor = has_tmr ? tmr.kdm_seq_floor : 0U;
+  boot_secure_zeroize(&tmr, sizeof(tmr));
+
   /* Read KDM via 3-way quorum (with bounded opportunistic healing) */
   toob_kdm_t kdm;
   boot_secure_zeroize(&kdm, sizeof(kdm));
   boot_status_t stat = boot_rstore_read(platform, &kdm_rstore_desc, &kdm);
 
   if (stat == BOOT_OK) {
-    /* Root-Key für Signaturprüfung laden */
-    uint8_t root_pubkey[32] __attribute__((aligned(8)));
-    boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
-    if (!platform->keystore->read_pubkey ||
-        platform->keystore->read_pubkey(root_pubkey, sizeof(root_pubkey), 0U) != BOOT_OK) {
-      boot_secure_zeroize(&kdm, sizeof(kdm));
-      return BOOT_ERR_NOT_FOUND;
-    }
-
-    /* Zero-Key Forgery Defense */
-    if (verify_not_all_zeros_glitch_safe(root_pubkey, sizeof(root_pubkey)) != BOOT_OK) {
-      boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
-      boot_secure_zeroize(&kdm, sizeof(kdm));
-      return BOOT_ERR_VERIFY;
-    }
-
-    /* Verify KDM signature against Root Key */
-    boot_status_t sig_stat = platform->crypto->verify_signature(
-        (const uint8_t *)&kdm, offsetof(toob_kdm_t, signature_ed25519), kdm.signature_ed25519,
-        root_pubkey);
-    boot_secure_zeroize(root_pubkey, sizeof(root_pubkey));
-
-    if (boot_secure_confirm(sig_stat) == BOOT_OK &&
-        verify_not_all_zeros_glitch_safe(kdm.new_cloud_pubkey, sizeof(kdm.new_cloud_pubkey)) ==
-            BOOT_OK) {
+    if (kdm.sequence_number >= tmr_kdm_floor &&
+        verify_kdm_against_active_root(platform, &kdm) == BOOT_OK) {
       memcpy(out_pubkey, kdm.new_cloud_pubkey, sizeof(kdm.new_cloud_pubkey));
       *out_seq = kdm.sequence_number;
       boot_secure_zeroize(&kdm, sizeof(kdm));
@@ -124,15 +144,12 @@ static boot_status_t load_active_cloud_key(const boot_platform_t *platform, uint
     boot_secure_zeroize(&kdm, sizeof(kdm));
   }
 
-  /* Fallback auf eFuse-Slot 1 NUR erlaubt im Initial Provisioning State.
-   * P10 SECURITY FIX: Verhindert Downgrade-Attacken durch absichtliches
-   * Zerstören der Flash-Slots. Wenn das Gerät provisioniert ist (DSLC >
-   * 0), ist der Fallback verboten! */
+  /* Fallback auf eFuse-Slot 1 NUR erlaubt im Initial Provisioning State (DSLC == 0 und Floor == 0). */
   uint8_t dslc_val = 0U;
   size_t dslc_len = 1U;
-  if (platform->keystore->read_dslc &&
+  if (tmr_kdm_floor == 0U && platform->keystore->read_dslc &&
       platform->keystore->read_dslc(&dslc_val, &dslc_len) == BOOT_OK) {
-    if (dslc_val == 0x00U) {
+    if (dslc_len > 0U && dslc_val == 0x00U) {
       if (platform->keystore->read_pubkey &&
           platform->keystore->read_pubkey(out_pubkey, 32U, 1U) == BOOT_OK &&
           verify_not_all_zeros_glitch_safe(out_pubkey, 32U) == BOOT_OK) {
@@ -165,7 +182,12 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t cmd_cfi_seed = 0U;
-  (void)boot_random_safe(platform, (uint8_t *)&cmd_cfi_seed, sizeof(cmd_cfi_seed));
+  boot_status_t rng_stat =
+      boot_random_safe(platform, (uint8_t *)&cmd_cfi_seed, sizeof(cmd_cfi_seed));
+  if (rng_stat != BOOT_OK) {
+    final_status = (rng_stat == BOOT_ERR_NOT_SUPPORTED) ? BOOT_ERR_CRYPTO : rng_stat;
+    goto cleanup;
+  }
   boot_cfi_ctx_t cmd_cfi_ctx;
   boot_cfi_init(cmd_cfi_ctx, cmd_cfi_seed);
   boot_cfi_add_expected(cmd_cfi_ctx, CMD_CFI_SLOT_PARSE);
@@ -344,6 +366,8 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
   });
 
   /* 7. ROTATE_KEY: Atomic KDM Write (Module-Owner Principle) */
+  uint32_t accepted_kdm_seq = 0U;
+  bool update_kdm_floor = false;
   if ((toob_cloud_cmd_t)decoded.command == TOOB_CMD_ROTATE_KEY) {
     if (decoded.params == NULL || decoded.params_len != sizeof(toob_kdm_t)) {
       final_status = BOOT_ERR_INVALID_ARG;
@@ -354,30 +378,13 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
     memcpy(&new_kdm, decoded.params, sizeof(toob_kdm_t));
 
-    uint8_t rotate_root_key[32] __attribute__((aligned(8)));
-    boot_secure_zeroize(rotate_root_key, sizeof(rotate_root_key));
-    if (platform->keystore->read_pubkey(rotate_root_key, sizeof(rotate_root_key), 0U) != BOOT_OK ||
-        verify_not_all_zeros_glitch_safe(rotate_root_key, sizeof(rotate_root_key)) != BOOT_OK ||
-        verify_not_all_zeros_glitch_safe(new_kdm.new_cloud_pubkey,
-                                         sizeof(new_kdm.new_cloud_pubkey)) != BOOT_OK) {
-      boot_secure_zeroize(rotate_root_key, sizeof(rotate_root_key));
+    if (verify_kdm_against_active_root(platform, &new_kdm) != BOOT_OK) {
       boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
       final_status = BOOT_ERR_VERIFY;
       goto cleanup;
     }
 
-    boot_status_t kdm_sig = platform->crypto->verify_signature(
-        (const uint8_t *)&new_kdm, offsetof(toob_kdm_t, signature_ed25519),
-        new_kdm.signature_ed25519, rotate_root_key);
-    boot_secure_zeroize(rotate_root_key, sizeof(rotate_root_key));
-
-    if (boot_secure_confirm(kdm_sig) != BOOT_OK) {
-      boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
-      final_status = BOOT_ERR_VERIFY;
-      goto cleanup;
-    }
-
-    /* Anti-Replay: New KDM sequence must be > current */
+    /* Anti-Replay: New KDM sequence must be > max(rstore, K4-TMR floor). */
     uint32_t current_kdm_seq = 0U;
     toob_kdm_t current_kdm;
     boot_secure_zeroize(&current_kdm, sizeof(current_kdm));
@@ -386,12 +393,21 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
     }
     boot_secure_zeroize(&current_kdm, sizeof(current_kdm));
 
+    wal_tmr_payload_t floor_tmr;
+    boot_secure_zeroize(&floor_tmr, sizeof(floor_tmr));
+    if (boot_journal_get_tmr(platform, &floor_tmr) == BOOT_OK &&
+        floor_tmr.kdm_seq_floor > current_kdm_seq) {
+      current_kdm_seq = floor_tmr.kdm_seq_floor;
+    }
+    boot_secure_zeroize(&floor_tmr, sizeof(floor_tmr));
+
     if (new_kdm.sequence_number <= current_kdm_seq) {
       boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
       final_status = BOOT_ERR_DOWNGRADE;
       goto cleanup;
     }
 
+    accepted_kdm_seq = new_kdm.sequence_number;
     boot_status_t write_stat = boot_rstore_write(platform, &kdm_rstore_desc, &new_kdm);
     boot_secure_zeroize(&new_kdm, sizeof(new_kdm));
 
@@ -399,20 +415,27 @@ boot_status_t boot_cloud_cmd_evaluate_buffer(const boot_platform_t *platform,
       final_status = write_stat;
       goto cleanup;
     }
+    update_kdm_floor = true;
   }
 
   *out_cmd = (toob_cloud_cmd_t)decoded.command;
   final_status = BOOT_OK;
 
-  /* UPD-006: Persist accepted issued_at into TMR for future freshness checks. */
+  /* UPD-006 / HIGH-104: Persist accepted issued_at & KDM floor into K4-MAC'd TMR. */
   {
     wal_tmr_payload_t persist_tmr;
     boot_secure_zeroize(&persist_tmr, sizeof(persist_tmr));
     if (boot_journal_get_tmr(platform, &persist_tmr) == BOOT_OK) {
       persist_tmr.last_accepted_issued_at = decoded.issued_at;
+      if (update_kdm_floor && accepted_kdm_seq > persist_tmr.kdm_seq_floor) {
+        persist_tmr.kdm_seq_floor = accepted_kdm_seq;
+      }
       persist_tmr.struct_version = WAL_TMR_VERSION_CURRENT;
       persist_tmr.populated_size = WAL_TMR_POPULATED_SIZE;
-      (void)boot_journal_update_tmr(platform, &persist_tmr);
+      boot_status_t tmr_stat = boot_journal_update_tmr(platform, &persist_tmr);
+      if (tmr_stat != BOOT_OK) {
+        final_status = tmr_stat;
+      }
     }
     boot_secure_zeroize(&persist_tmr, sizeof(persist_tmr));
   }

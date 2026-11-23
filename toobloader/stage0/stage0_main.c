@@ -11,6 +11,7 @@
 
 #include "boot_fih.h"
 #include "boot_hal.h"
+#include "boot_merkle.h"
 #include "boot_platform_bringup.h"
 #include "boot_proof.h"
 #include "boot_secure_zeroize.h"
@@ -73,6 +74,9 @@ void __stack_chk_fail(
 #ifndef TOOB_ALLOW_DEV_BYPASS
 #define TOOB_ALLOW_DEV_BYPASS 0
 #endif
+#if defined(TOOB_PROFILE_PRODUCTION) && TOOB_ALLOW_DEV_BYPASS
+#error "TOOB_ALLOW_DEV_BYPASS forbidden in production!"
+#endif
 
 #ifndef BOOT_STAGE1_SVN
 #define BOOT_STAGE1_SVN 0U
@@ -100,7 +104,7 @@ extern uint32_t _stack_top;
 static void __attribute__((used, noinline, noreturn)) stage0_c_init(void);
 
 static void __attribute__((used, noinline, noreturn)) stage0_c_init(void) {
-  if (_sdata != _sidata) {
+  if (&_sdata[0] != &_sidata[0]) {
     const uint32_t *src = _sidata;
     uint32_t *dst = _sdata;
     while (dst < _edata) {
@@ -300,6 +304,111 @@ static bool stage0_is_ram_range_valid(uint32_t addr, uint32_t size) {
   return false;
 }
 
+static bool stage0_ranges_overlap(uintptr_t a_start, uintptr_t a_size, uintptr_t b_start,
+                                  uintptr_t b_size) {
+  if (a_size == 0U || b_size == 0U) {
+    return false;
+  }
+  if (UINTPTR_MAX - a_start < a_size || UINTPTR_MAX - b_start < b_size) {
+    return true;
+  }
+  uintptr_t a_end = a_start + a_size;
+  uintptr_t b_end = b_start + b_size;
+  return (a_start < b_end) && (b_start < a_end);
+}
+
+static uint32_t stage0_ram_load_addr(uint32_t entry_point) {
+  uint32_t load_addr = entry_point;
+#if defined(CHIP_IRAM_BASE) && defined(CHIP_IRAM_SIZE) && defined(CHIP_IRAM_DBUS_BASE)
+  if (entry_point >= (uint32_t)CHIP_IRAM_BASE &&
+      entry_point < ((uint32_t)CHIP_IRAM_BASE + (uint32_t)CHIP_IRAM_SIZE)) {
+    load_addr = (entry_point - (uint32_t)CHIP_IRAM_BASE) + (uint32_t)CHIP_IRAM_DBUS_BASE;
+  }
+#endif
+  return load_addr;
+}
+
+static bool stage0_is_target_ram_safe(uint32_t target_addr, uint32_t size) {
+  if (size == 0U || UINT32_MAX - target_addr < size) {
+    return false;
+  }
+#if !defined(__linux__) && !defined(__APPLE__) && !defined(_WIN32) && !defined(__CPROVER__) &&     \
+    !defined(TOOB_MOCK_TEST)
+  volatile uint8_t stack_probe = 0U;
+  uintptr_t sp_now = (uintptr_t)&stack_probe;
+  uintptr_t sdata_start = (uintptr_t)_sdata;
+  uintptr_t ebss_end = (uintptr_t)_ebss;
+  if (ebss_end > sdata_start && stage0_ranges_overlap((uintptr_t)target_addr, (uintptr_t)size,
+                                                      sdata_start, ebss_end - sdata_start)) {
+    return false;
+  }
+  uintptr_t stack_top = (uintptr_t)&_stack_top;
+  uintptr_t stack_lo = (sp_now > 2048U) ? (sp_now - 2048U) : 0U;
+  if (stack_top >= stack_lo && stage0_ranges_overlap((uintptr_t)target_addr, (uintptr_t)size,
+                                                     stack_lo, stack_top - stack_lo)) {
+    return false;
+  }
+#else
+  (void)stage0_ranges_overlap;
+#endif
+  return true;
+}
+
+static boot_status_t stage0_hash_ram_compute(const boot_platform_t *platform,
+                                             const toob_image_header_t *hdr, const uint8_t *ram_buf,
+                                             size_t ram_len, uint8_t *digest) {
+  if (!platform || !platform->crypto || !platform->crypto->hash_init ||
+      !platform->crypto->hash_update || !platform->crypto->hash_finish ||
+      !platform->crypto->get_hash_ctx_size || !hdr || !ram_buf || ram_len == 0U || !digest) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  if (platform->crypto->get_hash_ctx_size() > BOOT_MERKLE_MAX_CTX_SIZE) {
+    boot_secure_zeroize(digest, BOOT_MERKLE_HASH_LEN);
+    return BOOT_ERR_INVALID_ARG;
+  }
+
+  uint8_t hash_ctx[BOOT_MERKLE_MAX_CTX_SIZE] __attribute__((aligned(8)));
+  boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+
+  if (platform->crypto->hash_init(hash_ctx, sizeof(hash_ctx)) != BOOT_OK) {
+    boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+    boot_secure_zeroize(digest, BOOT_MERKLE_HASH_LEN);
+    return BOOT_ERR_CRYPTO;
+  }
+
+  if (platform->crypto->hash_update(hash_ctx, (const uint8_t *)hdr, sizeof(*hdr)) != BOOT_OK) {
+    boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+    boot_secure_zeroize(digest, BOOT_MERKLE_HASH_LEN);
+    return BOOT_ERR_CRYPTO;
+  }
+
+  size_t offset = 0U;
+  while (offset < ram_len) {
+    if (platform->wdt && platform->wdt->kick) {
+      platform->wdt->kick();
+    }
+    size_t step = (ram_len - offset > 128U) ? 128U : (ram_len - offset);
+    if (platform->crypto->hash_update(hash_ctx, ram_buf + offset, step) != BOOT_OK) {
+      boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+      boot_secure_zeroize(digest, BOOT_MERKLE_HASH_LEN);
+      return BOOT_ERR_CRYPTO;
+    }
+    offset += step;
+  }
+
+  size_t digest_len = BOOT_MERKLE_HASH_LEN;
+  boot_status_t fin_st = platform->crypto->hash_finish(hash_ctx, digest, &digest_len);
+  boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+
+  if (fin_st != BOOT_OK || digest_len != BOOT_MERKLE_HASH_LEN) {
+    boot_secure_zeroize(digest, BOOT_MERKLE_HASH_LEN);
+    return BOOT_ERR_CRYPTO;
+  }
+
+  return BOOT_OK;
+}
+
 static void dbg_putc(const boot_platform_t *platform, char c) {
   if (platform && platform->console && platform->console->putchar) {
     platform->console->putchar((char)c);
@@ -395,9 +504,17 @@ static bool stage0_try_boot_bank(const boot_platform_t *platform, uint32_t bank_
   }
 
   /* HIGH-26: Validate entry_point bounds & architectural alignment upfront */
-  if (stage0_is_ram_entry(hdr.entry_point)) {
+  const bool ram_payload = stage0_is_ram_entry(hdr.entry_point);
+  uint32_t ram_load_addr = 0U;
+  if (ram_payload) {
     if (!stage0_is_ram_range_valid(hdr.entry_point, hdr.image_size)) {
       dbg_puts(platform, "[S0] Bad RAM entry bounds!\r\n");
+      return false;
+    }
+    ram_load_addr = stage0_ram_load_addr(hdr.entry_point);
+    if (!stage0_is_target_ram_safe(hdr.entry_point, hdr.image_size) ||
+        !stage0_is_target_ram_safe(ram_load_addr, hdr.image_size)) {
+      dbg_puts(platform, "[S0] RAM target overlaps Stage 0!\r\n");
       return false;
     }
   } else {
@@ -433,16 +550,32 @@ static bool stage0_try_boot_bank(const boot_platform_t *platform, uint32_t bank_
 #endif
   }
 
-  /* 3. Hash computation (HIGH-30: fail-closed on any flash/crypto error) */
+  /* 3. Hash computation (RAM payloads copied once FIRST to prevent Flash->RAM TOCTOU) */
   uint8_t digest[32] __attribute__((aligned(8)));
+  uint8_t sig[64] __attribute__((aligned(8)));
   boot_secure_zeroize(digest, sizeof(digest));
-  if (stage0_hash_compute(platform, bank_addr, (uint32_t)sizeof(hdr) + hdr.image_size, digest) !=
-      BOOT_OK) {
-    dbg_puts(platform, "[S0] Hash compute failed!\r\n");
-    boot_secure_zeroize(pubkey, 32);
-    boot_secure_zeroize(digest, sizeof(digest));
-    return false;
+  boot_secure_zeroize(sig, sizeof(sig));
+  bool bank_ok = false;
+
+  if (ram_payload) {
+    if (platform->flash->read(bank_addr + (uint32_t)sizeof(hdr), (void *)(uintptr_t)ram_load_addr,
+                              hdr.image_size) != BOOT_OK) {
+      dbg_puts(platform, "[S0] RAM copy failed!\r\n");
+      goto fail_cleanup;
+    }
+    if (stage0_hash_ram_compute(platform, &hdr, (const uint8_t *)(uintptr_t)ram_load_addr,
+                                hdr.image_size, digest) != BOOT_OK) {
+      dbg_puts(platform, "[S0] Hash compute failed!\r\n");
+      goto fail_cleanup;
+    }
+  } else {
+    if (stage0_hash_compute(platform, bank_addr, (uint32_t)sizeof(hdr) + hdr.image_size, digest) !=
+        BOOT_OK) {
+      dbg_puts(platform, "[S0] Hash compute failed!\r\n");
+      goto fail_cleanup;
+    }
   }
+
   uint32_t digest_head = 0U;
   memcpy(&digest_head, digest, sizeof(digest_head));
   dbg_puts(platform, "[S0] Digest[0..3]: ");
@@ -450,20 +583,17 @@ static bool stage0_try_boot_bank(const boot_platform_t *platform, uint32_t bank_
   dbg_puts(platform, "\r\n");
 
   /* 4. Load signature */
-  uint8_t sig[64] __attribute__((aligned(8)));
   if (platform->flash->read(bank_addr + (uint32_t)sizeof(hdr) + hdr.image_size, sig, 64) !=
       BOOT_OK) {
     dbg_puts(platform, "[S0] Sig read failed!\r\n");
-    boot_secure_zeroize(pubkey, 32);
-    boot_secure_zeroize(digest, sizeof(digest));
-    return false;
+    goto fail_cleanup;
   }
 
   /* 5. Glitch-Resistant Ed25519 Verify */
-  int sig_ok = -1;
+  boot_status_t sig_ok = BOOT_ERR_VERIFY;
 #if TOOB_ALLOW_DEV_BYPASS
   if (is_dev_bypass) {
-    sig_ok = 0;
+    sig_ok = BOOT_OK;
   } else {
     sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
   }
@@ -471,21 +601,22 @@ static bool stage0_try_boot_bank(const boot_platform_t *platform, uint32_t bank_
   sig_ok = stage0_verify_signature(platform, sig, pubkey, digest);
 #endif
 
-  boot_secure_zeroize(pubkey, 32);
-  boot_secure_zeroize(digest, sizeof(digest));
-  boot_secure_zeroize(sig, 64);
-
-  if (sig_ok != 0) {
+  if (sig_ok != BOOT_OK) {
     dbg_puts(platform, "[S0] Signature verification FAILED!\r\n");
-    return false;
+    goto fail_cleanup;
   }
+
+  BOOT_SECURE_REQUIRE(sig_ok == BOOT_OK && boot_secure_confirm(sig_ok) == BOOT_OK,
+                      { goto fail_cleanup; });
+  BOOT_GLITCH_DELAY();
+  BOOT_SECURE_REQUIRE(sig_ok == BOOT_OK, { goto fail_cleanup; });
   dbg_puts(platform, "[S0] Signature verification PASSED!\r\n");
 
   /* 6. CRIT-29: Enforce authenticated Stage-1 Anti-Rollback floor */
   const uint32_t img_svn = (hdr.s1.svn_magic == TOOB_STAGE1_SVN_MAGIC) ? hdr.s1.stage1_svn : 0U;
   BOOT_SECURE_REQUIRE(img_svn >= svn_floor, {
     dbg_puts(platform, "[S0] Stage 1 SVN downgrade rejected!\r\n");
-    return false;
+    goto fail_cleanup;
   });
 
   /* K1-T2: Populate and seal the proof handle */
@@ -496,8 +627,16 @@ static bool stage0_try_boot_bank(const boot_platform_t *platform, uint32_t bank_
     out_proof->svn = img_svn;
     boot_proof_seal(out_proof, g_seal_key);
   }
+  bank_ok = true;
 
-  return true;
+fail_cleanup:
+  boot_secure_zeroize(pubkey, sizeof(pubkey));
+  boot_secure_zeroize(digest, sizeof(digest));
+  boot_secure_zeroize(sig, sizeof(sig));
+  if (!bank_ok && ram_payload) {
+    boot_secure_zeroize((void *)(uintptr_t)ram_load_addr, hdr.image_size);
+  }
+  return bank_ok;
 }
 
 int main(void) { /* NOLINT(misc-use-internal-linkage) */
@@ -570,10 +709,12 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
   /* 2. Single-pass 2-of-3 WAL TMR Quorum Scan + Tentative Crash Check */
   uint32_t wal_stage1_svn = 0U;
   uint32_t active_slot = stage0_read_wal_boot_meta(platform, &wal_stage1_svn);
+  if (wal_stage1_svn == UINT32_MAX) {
+    boot_panic(platform, BOOT_ERR_VERIFY);
+  }
   active_slot = stage0_evaluate_tentative(platform, active_slot);
 
-  /* CRIT-29: Effective Stage-1 Anti-Rollback floor (decoupled from shared
-   * cloud-command/app monotonic counter so cloud commands never brick Stage 1). */
+  /* CRIT-29 / Stage0Chain: Effective Stage-1 Anti-Rollback floor across WAL & HW monotonic counter. */
   const uint32_t cfg_stage1_svn = (uint32_t)BOOT_STAGE1_SVN;
   uint32_t svn_floor = (wal_stage1_svn > cfg_stage1_svn) ? wal_stage1_svn : cfg_stage1_svn;
 
@@ -590,39 +731,42 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
     active_slot = fallback_slot;
   }
 
-  /* Siegelprüfung direkt vor dem Jump */
-  if (boot_proof_verify(&proof, g_seal_key) != BOOT_OK) {
+  /* Glitch-hardened double seal verification immediately before handoff */
+  BOOT_SECURE_REQUIRE(boot_proof_verify(&proof, g_seal_key) == BOOT_OK, {
     boot_secure_zeroize(g_seal_key, sizeof(g_seal_key));
+    boot_secure_zeroize(&proof, sizeof(proof));
     dead_halt();
-  }
+  });
+  BOOT_GLITCH_DELAY();
+  BOOT_SECURE_REQUIRE(boot_proof_verify(&proof, g_seal_key) == BOOT_OK, {
+    boot_secure_zeroize(g_seal_key, sizeof(g_seal_key));
+    boot_secure_zeroize(&proof, sizeof(proof));
+    dead_halt();
+  });
   boot_secure_zeroize(g_seal_key, sizeof(g_seal_key));
 
-  /* If payload is linked for RAM execution, validate RAM destination bounds and copy */
+  /* RAM payload was already copied and verified in-place before Ed25519 check (zero TOCTOU). */
   const bool ram_payload = stage0_is_ram_entry(proof.entry_point);
-  uint32_t xip_target_pc = 0U;
+  uint32_t final_target_pc = 0U;
   if (ram_payload) {
-    if (!stage0_is_ram_range_valid(proof.entry_point, proof.image_size)) {
+    uint32_t load_addr = stage0_ram_load_addr(proof.entry_point);
+    if (!stage0_is_ram_range_valid(proof.entry_point, proof.image_size) ||
+        !stage0_is_target_ram_safe(proof.entry_point, proof.image_size) ||
+        !stage0_is_target_ram_safe(load_addr, proof.image_size)) {
+      boot_secure_zeroize(&proof, sizeof(proof));
       dead_halt();
     }
-    uint32_t load_addr = proof.entry_point;
-#if defined(CHIP_IRAM_BASE) && defined(CHIP_IRAM_SIZE) && defined(CHIP_IRAM_DBUS_BASE)
-    if (proof.entry_point >= (uint32_t)CHIP_IRAM_BASE &&
-        proof.entry_point < ((uint32_t)CHIP_IRAM_BASE + (uint32_t)CHIP_IRAM_SIZE)) {
-      load_addr = (proof.entry_point - (uint32_t)CHIP_IRAM_BASE) + (uint32_t)CHIP_IRAM_DBUS_BASE;
-    }
-#endif
-    if (platform->flash->read(proof.image_addr + (uint32_t)sizeof(toob_image_header_t),
-                              (void *)(uintptr_t)load_addr, proof.image_size) != BOOT_OK) {
-      dead_halt();
-    }
+    final_target_pc = proof.entry_point;
   } else {
     if (!stage0_compute_xip_entry(proof.image_addr, proof.image_size, proof.entry_point,
-                                  &xip_target_pc)) {
+                                  &final_target_pc)) {
+      boot_secure_zeroize(&proof, sizeof(proof));
       dead_halt();
     }
   }
+  boot_secure_zeroize(&proof, sizeof(proof));
 
-  /* Deinit Hardware (Schließt Flash/Crypto für S1-Isolation) */
+  /* Deinit Hardware (Schliesst Flash/Crypto fuer S1-Isolation) */
   if (platform->crypto && platform->crypto->deinit) {
     platform->crypto->deinit();
   }
@@ -652,11 +796,7 @@ int main(void) { /* NOLINT(misc-use-internal-linkage) */
 #endif
 
   __asm__ volatile("" ::: "memory");
-  if (ram_payload) {
-    jump_to_payload(proof.entry_point);
-  } else {
-    jump_to_payload(xip_target_pc);
-  }
+  jump_to_payload(final_target_pc);
 
   /* Fallback: jump_to_payload should never return */
   while (1) {

@@ -51,22 +51,24 @@ endif()
 # Apply strict compilation flags
 toob_apply_strict_flags(toob_recovery TRUE)
 
-# Include directories
+# Include directories (core headers always precede HAL/chip/third-party paths)
 target_include_directories(toob_recovery PRIVATE
-    ${CMAKE_SOURCE_DIR}/recovery
-    ${CMAKE_SOURCE_DIR}/common/include
-    ${CMAKE_SOURCE_DIR}/toobloader/core/include
-    ${CMAKE_SOURCE_DIR}/toobloader/core/utils/include
-    ${CMAKE_SOURCE_DIR}/sdk/libtoob/include
     ${CMAKE_BINARY_DIR}/generated
+    ${CMAKE_SOURCE_DIR}/common/include
+    ${TOOB_CORE_DIR}/include
+    ${TOOB_CORE_DIR}/utils/include
+    ${TOOB_SDK_DIR}/libtoob/include
+    ${CMAKE_SOURCE_DIR}/recovery
+)
+target_include_directories(toob_recovery SYSTEM AFTER PRIVATE
     ${TOOB_HAL_CHIP_DIR}
     ${TOOB_HAL_ROOT}
 )
 if(TOOB_RECOVERY_INCLUDES)
-    target_include_directories(toob_recovery PRIVATE ${TOOB_RECOVERY_INCLUDES})
+    target_include_directories(toob_recovery SYSTEM AFTER PRIVATE ${TOOB_RECOVERY_INCLUDES})
 endif()
 if(TOOB_RECOVERY_DRIVERS)
-    target_include_directories(toob_recovery PRIVATE ${TOOB_RECOVERY_DRIVERS})
+    target_include_directories(toob_recovery SYSTEM AFTER PRIVATE ${TOOB_RECOVERY_DRIVERS})
 endif()
 
 # Link modular libraries
@@ -182,12 +184,18 @@ endif()
 if(_REC_CRYPTO_SOURCES)
     add_library(toob_recovery_crypto_upstream STATIC ${_REC_CRYPTO_SOURCES})
     target_include_directories(toob_recovery_crypto_upstream PUBLIC
-        ${_REC_CRYPTO_INCLUDES}
+        ${CMAKE_BINARY_DIR}/generated
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
         ${TOOB_CORE_DIR}/utils/include
     )
-    set(_REC_UPSTREAM_CFLAGS -fno-lto -ffunction-sections -fdata-sections)
+    target_include_directories(toob_recovery_crypto_upstream SYSTEM AFTER PUBLIC
+        ${_REC_CRYPTO_INCLUDES}
+    )
+    set(_REC_UPSTREAM_CFLAGS -fno-lto -ffunction-sections -fdata-sections -fno-builtin -fstack-protector-strong)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        list(APPEND _REC_UPSTREAM_CFLAGS -fstack-usage)
+    endif()
     if(_REC_BACKEND_CFLAGS)
         list(APPEND _REC_UPSTREAM_CFLAGS ${_REC_BACKEND_CFLAGS})
     else()
@@ -205,11 +213,14 @@ if(_REC_CRYPTO_WRAPPERS)
     add_library(toob_recovery_crypto STATIC ${_REC_CRYPTO_WRAPPERS})
     target_compile_definitions(toob_recovery_crypto PRIVATE TOOB_RECOVERY_BUILD=1)
     target_include_directories(toob_recovery_crypto PUBLIC
-        ${_REC_CRYPTO_INCLUDES}
+        ${CMAKE_BINARY_DIR}/generated
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
-        ${CMAKE_BINARY_DIR}/generated
+        ${TOOB_CORE_DIR}/utils/include
         ${TOOB_SDK_DIR}/libtoob/include
+    )
+    target_include_directories(toob_recovery_crypto SYSTEM AFTER PUBLIC
+        ${_REC_CRYPTO_INCLUDES}
     )
     if(TARGET toob_recovery_crypto_upstream)
         target_link_libraries(toob_recovery_crypto PUBLIC toob_recovery_crypto_upstream)
@@ -267,11 +278,40 @@ if(NOT TOOB_ARCH STREQUAL "host")
         endif()
     endif()
 
-    if(_TOOB_HAS_RECOVERY_BUDGET)
+    set(_TOOB_RECOVERY_SIGN_ARGS "")
+    set(_TOOB_RECOVERY_SIGN_ENABLED TRUE)
+    string(TOLOWER "${TOOB_PROFILE}" _TOOB_REC_PROFILE_LOWER)
+    if(_TOOB_REC_PROFILE_LOWER STREQUAL "production")
+        if(DEFINED TOOB_RECOVERY_SIGNING_KEY_FILE AND NOT "${TOOB_RECOVERY_SIGNING_KEY_FILE}" STREQUAL "")
+            if(NOT EXISTS "${TOOB_RECOVERY_SIGNING_KEY_FILE}")
+                message(FATAL_ERROR
+                    "TOOB_RECOVERY_SIGNING_KEY_FILE does not exist: ${TOOB_RECOVERY_SIGNING_KEY_FILE}"
+                )
+            endif()
+            set(_TOOB_RECOVERY_SIGN_ARGS --key-file "${TOOB_RECOVERY_SIGNING_KEY_FILE}")
+        else()
+            set(_TOOB_RECOVERY_SIGN_ENABLED FALSE)
+            message(STATUS "Production build without TOOB_RECOVERY_SIGNING_KEY_FILE: produced unsigned toob_recovery.raw.bin; sign explicitly with 'toob sign image --key-file ...' before flashing.")
+        endif()
+    else()
+        if(DEFINED TOOB_RECOVERY_SIGNING_KEY_FILE AND NOT "${TOOB_RECOVERY_SIGNING_KEY_FILE}" STREQUAL "")
+            set(_TOOB_RECOVERY_SIGN_ARGS --key-file "${TOOB_RECOVERY_SIGNING_KEY_FILE}")
+        else()
+            set(_TOOB_RECOVERY_SIGN_ARGS --mock)
+        endif()
+    endif()
+
+    if(NOT _TOOB_RECOVERY_SIGN_ENABLED)
         add_custom_command(
             TARGET toob_recovery POST_BUILD
             COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_recovery> $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.raw.bin
-            COMMAND ${TOOB_CLI_PATH} sign image $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.raw.bin -o $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.bin
+            COMMENT "Generating raw Recovery OS binary toob_recovery.raw.bin (deferred explicit signing)..."
+        )
+    elseif(_TOOB_HAS_RECOVERY_BUDGET)
+        add_custom_command(
+            TARGET toob_recovery POST_BUILD
+            COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_recovery> $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.raw.bin
+            COMMAND ${TOOB_CLI_PATH} sign image ${_TOOB_RECOVERY_SIGN_ARGS} $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.raw.bin -o $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.bin
             COMMAND ${TOOB_CLI_PATH} budget --toml "${TOOB_DEVICE_MANIFEST}" --stage recovery --bin $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.bin
             COMMENT "Generating flashable Toob-tagged binary toob_recovery.bin and checking recovery flash budget..."
         )
@@ -279,7 +319,7 @@ if(NOT TOOB_ARCH STREQUAL "host")
         add_custom_command(
             TARGET toob_recovery POST_BUILD
             COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:toob_recovery> $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.raw.bin
-            COMMAND ${TOOB_CLI_PATH} sign image $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.raw.bin -o $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.bin
+            COMMAND ${TOOB_CLI_PATH} sign image ${_TOOB_RECOVERY_SIGN_ARGS} $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.raw.bin -o $<TARGET_FILE_DIR:toob_recovery>/toob_recovery.bin
             COMMENT "Generating flashable Toob-tagged binary toob_recovery.bin..."
         )
     endif()

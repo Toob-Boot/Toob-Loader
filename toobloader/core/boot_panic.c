@@ -32,11 +32,24 @@
 #include "boot_delay.h"
 #include "boot_fih.h"
 #include "boot_flash_guard.h"
+#include "boot_identity.h"
 #include "boot_journal.h"
 #include "boot_secure_zeroize.h"
 #include "generated_boot_config.h"
 #include <stddef.h>
 #include <string.h>
+
+#if defined(__has_attribute)
+#if __has_attribute(no_stack_protector)
+#define TOOB_PANIC_NO_SSP __attribute__((no_stack_protector))
+#else
+#define TOOB_PANIC_NO_SSP
+#endif
+#elif defined(__GNUC__) && (__GNUC__ >= 11)
+#define TOOB_PANIC_NO_SSP __attribute__((no_stack_protector))
+#else
+#define TOOB_PANIC_NO_SSP
+#endif
 
 /* P5 Exception: _Noreturn terminal state — arena grab is safe.
  * boot_terminal_halt never returns, so no subsequent arena user can be affected.
@@ -178,6 +191,28 @@ _Noreturn void boot_terminal_halt(const boot_platform_t *platform, boot_status_t
   }
 }
 
+static TOOB_PANIC_NO_SSP __attribute__((noinline)) void
+boot_panic_mix_stack_guard(const boot_platform_t *platform) {
+#if !defined(TOOB_MOCK_TEST) && !defined(TOOB_HOST_FUZZING) && !defined(_WIN32) &&                 \
+    !defined(__linux__) && !defined(__APPLE__) && !defined(__CPROVER__)
+  if (platform != NULL && platform->entropy != NULL && platform->entropy->random != NULL) {
+    uint8_t rnd[sizeof(uintptr_t)];
+    if (boot_random_safe(platform, rnd, sizeof(rnd)) == BOOT_OK) {
+      uintptr_t mix = 0U;
+      memcpy(&mix, rnd, sizeof(mix));
+      boot_secure_zeroize(rnd, sizeof(rnd));
+      uintptr_t updated = *(volatile const uintptr_t *)&__stack_chk_guard ^ mix;
+      if (updated == 0U) {
+        updated = (uintptr_t)0x5A3CC3A5U;
+      }
+      *(volatile uintptr_t *)&__stack_chk_guard = updated;
+    }
+  }
+#else
+  (void)platform;
+#endif
+}
+
 _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason) {
   /* Hard-Fault Exit, wenn der Platform-Pointer defekt ist */
   if (!platform || !platform->wdt) {
@@ -193,6 +228,8 @@ _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason)
       !platform->flash->get_sector_size) {
     boot_terminal_halt(platform, reason, SITE_COBS_SHIELD_FAIL);
   }
+
+  boot_panic_mix_stack_guard(platform);
 
   uint32_t failed_auth_attempts = 0;
 
@@ -235,7 +272,10 @@ session_reset:
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t panic_cfi_seed = 0U;
-  (void)boot_random_safe(platform, (uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed));
+  if (boot_random_safe(platform, (uint8_t *)&panic_cfi_seed, sizeof(panic_cfi_seed)) != BOOT_OK) {
+    boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+    enter_sos_loop(platform); /* Terminal: TRNG Broken */
+  }
   boot_cfi_ctx_t panic_cfi_ctx;
   boot_cfi_init(panic_cfi_ctx, panic_cfi_seed);
   boot_cfi_add_expected(panic_cfi_ctx, PANIC_CFI_SLOT_AUTH);
@@ -247,6 +287,7 @@ session_reset:
   size_t challenge_len = 32; /* Nonce Base Size */
 
   if (boot_random_safe(platform, challenge_buf, 32) != BOOT_OK) {
+    boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
     enter_sos_loop(platform); /* Terminal: TRNG Broken */
   }
 
@@ -265,18 +306,21 @@ session_reset:
       memcpy(challenge_buf + 32, temp_dslc, dslc_len);
     } else {
       dslc_len = 32; /* Fallback Zero-Padding */
-      memset(challenge_buf + 32, 0, 32);
+      boot_secure_zeroize(challenge_buf + 32U, 32U);
     }
   } else {
     dslc_len = 32;
-    memset(challenge_buf + 32, 0, 32);
+    boot_secure_zeroize(challenge_buf + 32U, 32U);
   }
   boot_secure_zeroize(temp_dslc, 64); /* O(1) Zeroize nach Kopie */
   challenge_len += dslc_len;
 
   /* Monotonic Timer zur Erleichterung für das Host-Tooling anfügen */
   uint32_t current_monotonic = 0U;
-  (void)boot_read_monotonic_counter_safe(platform, &current_monotonic);
+  if (boot_read_monotonic_counter_safe(platform, &current_monotonic) != BOOT_OK) {
+    boot_secure_zeroize(crypto_arena, BOOT_CRYPTO_ARENA_SIZE);
+    enter_sos_loop(platform);
+  }
 
   /* Exakte Speicher-Mappings (Vermeidet Cast-UBs) */
   memcpy(challenge_buf + challenge_len, &current_monotonic, sizeof(current_monotonic));
@@ -352,8 +396,11 @@ session_reset:
           uint8_t *root_pubkey = chunk_buf;
           boot_secure_zeroize(root_pubkey, 32);
 
+          uint8_t active_slot = 0U;
           if (platform->keystore->read_pubkey &&
-              platform->keystore->read_pubkey(root_pubkey, 32, 0) == BOOT_OK) {
+              boot_otp_get_active_key_index(platform, &active_slot) == BOOT_OK &&
+              platform->keystore->read_pubkey(root_pubkey, 32U, active_slot) == BOOT_OK &&
+              verify_not_all_zeros_glitch_safe(root_pubkey, 32U) == BOOT_OK) {
 
             if (platform->wdt && platform->wdt->kick) {
               platform->wdt->kick();
@@ -365,14 +412,23 @@ session_reset:
             }
 
             if (boot_secure_confirm(sig_stat) == BOOT_OK) {
-              auth_eval = BOOT_OK;
-
-              /* OTP Burn: Nach erfolgreicher Autorisierung Token entwerten */
-              if (platform->keystore->advance_monotonic_counter) {
-                platform->keystore->advance_monotonic_counter();
-                current_monotonic = safe_sequence_id;
+              /* OTP Burn: Must succeed before accepting token to prevent replay */
+              if (platform->keystore->advance_monotonic_counter != NULL) {
+                boot_status_t adv_stat = platform->keystore->advance_monotonic_counter();
+                if (boot_secure_confirm(adv_stat) == BOOT_OK) {
+                  current_monotonic = safe_sequence_id;
+                  failed_auth_attempts = 0U;
+                  if (platform->soc && platform->soc->write_rtc_backup) {
+                    (void)platform->soc->write_rtc_backup(RTC_SLOT_AUTH_ATTEMPTS, 0U);
+                  }
+                  auth_eval = BOOT_OK;
+                  boot_cfi_step(panic_cfi_ctx, PANIC_CFI_SLOT_AUTH);
+                } else {
+                  auth_eval = BOOT_ERR_VERIFY;
+                }
+              } else {
+                auth_eval = BOOT_ERR_VERIFY;
               }
-              boot_cfi_step(panic_cfi_ctx, PANIC_CFI_SLOT_AUTH);
             }
           }
           boot_secure_zeroize(root_pubkey, 32);
@@ -431,6 +487,7 @@ session_reset:
       boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
       size_t chunk_len = 0;
       bool chunk_received = false;
+      bool in_overflow_drain = false;
 
       while (!chunk_received) {
         if (platform->wdt && platform->wdt->kick) {
@@ -443,15 +500,21 @@ session_reset:
         }
 
         if (c == COBS_MARKER_END) {
+          if (in_overflow_drain) {
+            in_overflow_drain = false;
+            chunk_len = 0U;
+            continue;
+          }
           if (chunk_len > 0) {
             chunk_received = true;
           }
-        } else {
+        } else if (!in_overflow_drain) {
           if (chunk_len < PANIC_CHUNK_MAX_SIZE) {
             chunk_buf[chunk_len++] = c;
           } else {
             boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
             chunk_len = 0;
+            in_overflow_drain = true;
           }
         }
       }
@@ -530,6 +593,7 @@ session_reset:
     boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
     size_t chunk_len = 0;
     bool chunk_received = false;
+    bool in_overflow_drain = false;
 
     while (!chunk_received) {
       if (platform->wdt && platform->wdt->kick) {
@@ -542,16 +606,22 @@ session_reset:
       }
 
       if (c == COBS_MARKER_END) {
+        if (in_overflow_drain) {
+          in_overflow_drain = false;
+          chunk_len = 0U;
+          continue;
+        }
         if (chunk_len > 0) {
           chunk_received = true;
         }
-      } else {
+      } else if (!in_overflow_drain) {
         /* Dynamischer P10 Bounds Check via Macro */
         if (chunk_len < PANIC_CHUNK_MAX_SIZE) {
           chunk_buf[chunk_len++] = c;
         } else {
           boot_secure_zeroize(chunk_buf, PANIC_CHUNK_MAX_SIZE);
           chunk_len = 0; /* Frame overflow trap */
+          in_overflow_drain = true;
         }
       }
     }

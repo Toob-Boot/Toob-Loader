@@ -56,19 +56,28 @@ target_compile_definitions(toob_stage0 PRIVATE
 )
 
 if(TOOB_STAGE0_DEV_BYPASS)
+    if(_TOOB_PROFILE_LOWER STREQUAL "production")
+        message(FATAL_ERROR "SECURITY VIOLATION: TOOB_STAGE0_DEV_BYPASS=ON is forbidden in production profile.")
+    endif()
     message(WARNING "SECURITY WARNING: TOOB_STAGE0_DEV_BYPASS=ON permits unsigned Stage 1 boot when DSLC==0!")
     target_compile_definitions(toob_stage0 PRIVATE TOOB_ALLOW_DEV_BYPASS=1)
 else()
     target_compile_definitions(toob_stage0 PRIVATE TOOB_ALLOW_DEV_BYPASS=0)
 endif()
 
+if(TOOB_DOUBLE_VERIFY)
+    target_compile_definitions(toob_stage0 PRIVATE TOOB_DOUBLE_VERIFY=1)
+else()
+    target_compile_definitions(toob_stage0 PRIVATE TOOB_DOUBLE_VERIFY=0)
+endif()
+
 # 2. Core and generated headers
 target_include_directories(toob_stage0 PRIVATE
-    ${TOOB_STAGE0_DIR}/include
+    ${CMAKE_BINARY_DIR}/generated
     ${CMAKE_SOURCE_DIR}/common/include
     ${TOOB_CORE_DIR}/include
     ${TOOB_CORE_DIR}/utils/include
-    ${CMAKE_BINARY_DIR}/generated
+    ${TOOB_STAGE0_DIR}/include
 )
 
 # 3. Link static chip and crypto HAL libraries

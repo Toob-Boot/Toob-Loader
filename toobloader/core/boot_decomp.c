@@ -36,6 +36,9 @@ boot_status_t boot_decomp_apply(const boot_platform_t *platform, uint32_t src_ad
   if (expected_installed_size == 0U || expected_installed_size > dest_max_size) {
     return BOOT_ERR_FLASH_BOUNDS;
   }
+  if (src_size > (size_t)UINT32_MAX || src_size > (size_t)(UINT32_MAX - src_addr)) {
+    return BOOT_ERR_FLASH_BOUNDS;
+  }
 
   boot_status_t status = BOOT_OK;
 
@@ -48,19 +51,20 @@ boot_status_t boot_decomp_apply(const boot_platform_t *platform, uint32_t src_ad
   boot_secure_zeroize(arena, arena_len);
   heatshrink_decoder_reset(hsd);
 
-  uint32_t read_cap =
-      (uint32_t)(((size_t)HEATSHRINK_DECODER_INPUT_BUFFER_SIZE(hsd) + 7U) & ~((size_t)7U));
-  if (read_cap == 0U) {
-    read_cap = 8U;
+  size_t read_cap_sz = ((size_t)HEATSHRINK_DECODER_INPUT_BUFFER_SIZE(hsd) + 7U) & ~((size_t)7U);
+  if (read_cap_sz == 0U) {
+    read_cap_sz = 8U;
   }
-
-  if (hsd_size + read_cap + 64U > arena_len) {
+  if (read_cap_sz > (size_t)UINT32_MAX || hsd_size + read_cap_sz + 64U > arena_len) {
     return BOOT_ERR_INVALID_STATE;
   }
+  uint32_t read_cap = (uint32_t)read_cap_sz;
 
   uint8_t *read_buf = arena + hsd_size;
   uint8_t *write_buf = arena + hsd_size + read_cap;
-  uint32_t raw_write_cap = (uint32_t)(arena_len - hsd_size - read_cap);
+  size_t raw_write_cap_sz = arena_len - hsd_size - read_cap_sz;
+  uint32_t raw_write_cap =
+      (raw_write_cap_sz > (size_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)raw_write_cap_sz;
 
   boot_stream_writer_t writer;
   status = boot_stream_writer_init(&writer, platform, dest_addr, expected_installed_size, write_buf,
@@ -85,6 +89,11 @@ boot_status_t boot_decomp_apply(const boot_platform_t *platform, uint32_t src_ad
       chunk = read_cap;
     }
 
+    if ((UINT32_MAX - src_addr) < read_off || (UINT32_MAX - (src_addr + read_off)) < chunk) {
+      status = BOOT_ERR_FLASH_BOUNDS;
+      goto cleanup;
+    }
+
     if (platform->flash->read(src_addr + read_off, read_buf, chunk) != BOOT_OK) {
       status = BOOT_ERR_FLASH_HW;
       goto cleanup;
@@ -95,7 +104,7 @@ boot_status_t boot_decomp_apply(const boot_platform_t *platform, uint32_t src_ad
       status = BOOT_ERR_VERIFY;
       goto cleanup;
     }
-    if (sunk == 0U) {
+    if (sunk == 0U || sunk > (size_t)chunk) {
       status = BOOT_ERR_INVALID_STATE;
       goto cleanup;
     }
@@ -105,8 +114,13 @@ boot_status_t boot_decomp_apply(const boot_platform_t *platform, uint32_t src_ad
       goto cleanup;
     }
 
-    read_off += (uint32_t)sunk;
-    rem -= (uint32_t)sunk;
+    uint32_t sunk_u32 = (uint32_t)sunk;
+    if ((UINT32_MAX - read_off) < sunk_u32) {
+      status = BOOT_ERR_FLASH_BOUNDS;
+      goto cleanup;
+    }
+    read_off += sunk_u32;
+    rem -= sunk_u32;
   }
 
   heatshrink_decoder_finish(hsd);

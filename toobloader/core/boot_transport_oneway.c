@@ -33,6 +33,7 @@
 #include "boot_secure_zeroize.h"
 #include "boot_swap.h"
 #include "boot_tbm1.h"
+#include "boot_verify.h"
 #include "generated_boot_config.h"
 #include <stddef.h>
 #include <string.h>
@@ -53,8 +54,14 @@ static boot_status_t finish_and_clean(const boot_platform_t *p, wal_entry_payloa
 static boot_status_t resolve_staging_rdelta(const boot_platform_t *platform, uint32_t hint_offset,
                                             tbm1_rdelta_desc_t *out_rdesc,
                                             uint32_t *out_rdelta_addr, uint32_t *out_base_addr,
-                                            uint32_t *out_base_size,
-                                            toob_tds_header_t *out_tds_hdr) {
+                                            uint32_t *out_base_size, toob_tds_header_t *out_tds_hdr,
+                                            uint8_t *arena, size_t arena_len) {
+  if (!platform || !platform->flash || !platform->flash->read || !out_rdesc || !out_rdelta_addr ||
+      !out_base_addr || !out_base_size || !arena ||
+      arena_len < (size_t)(TBM1_FIXED_LEN + TBM1_SIG_LEN)) {
+    return BOOT_ERR_INVALID_ARG;
+  }
+
   const uint32_t stg_base = CHIP_STAGING_SLOT_ABS_ADDR;
   const uint32_t stg_size = CHIP_STAGING_SLOT_SIZE;
   if (UINT32_MAX - stg_base < stg_size) {
@@ -96,70 +103,111 @@ static boot_status_t resolve_staging_rdelta(const boot_platform_t *platform, uin
   if (st != BOOT_OK) {
     return st;
   }
-  if (hdr.magic != TBM1_MAGIC || hdr.fixed_len != TBM1_FIXED_LEN ||
-      hdr.total_len < (uint32_t)(TBM1_FIXED_LEN + TBM1_SIG_LEN) ||
-      hdr.total_len > (stg_end - tbm1_addr) ||
-      compute_boot_crc32((const uint8_t *)&hdr, TBM1_CRC_LEN) != hdr.fixed_crc32) {
+
+  const size_t staging_rem = (size_t)(stg_end - tbm1_addr);
+  if (tbm1_precheck((const uint8_t *)&hdr, staging_rem) != TBM1_OK || hdr.total_len > arena_len) {
     boot_secure_zeroize(&hdr, sizeof(hdr));
-    return BOOT_ERR_NOT_FOUND;
+    return BOOT_ERR_VERIFY;
+  }
+  uint32_t total_len = hdr.total_len;
+  boot_secure_zeroize(&hdr, sizeof(hdr));
+
+  boot_secure_zeroize(arena, arena_len);
+  st = platform->flash->read(tbm1_addr, arena, total_len);
+  if (st != BOOT_OK) {
+    boot_secure_zeroize(arena, arena_len);
+    return st;
   }
 
-  const bool is_trailer = ((hdr.flags_critical & TBM1_CRIT_TRAILER_LAYOUT) != 0U);
-  const uint32_t payload_base = is_trailer ? stg_base : tbm1_addr;
+  uint32_t chunk_offs[TBM1_MAX_IMAGES];
+  if (tbm1_validate(arena, total_len, staging_rem, chunk_offs) != TBM1_OK) {
+    boot_secure_zeroize(arena, arena_len);
+    return BOOT_ERR_VERIFY;
+  }
 
-  const tbm1_region_t *r = tbm1_find_region(&hdr, TBM1_REGION_REVERSE_DELTA);
+  const tbm1_header_t *auth_hdr = (const tbm1_header_t *)arena;
+  const uint8_t *sig_ptr = arena + auth_hdr->total_len - TBM1_SIG_LEN;
+#if TOOB_PQC_ENABLED
+  const tbm1_region_t *pqc_sig = tbm1_find_region(auth_hdr, TBM1_REGION_PQC_SIGNATURE);
+  const tbm1_region_t *pqc_key = tbm1_find_region(auth_hdr, TBM1_REGION_PQC_PUBKEY);
+#endif
+  boot_verify_envelope_t envelope = {
+      .manifest_flash_addr = tbm1_addr,
+      .manifest_size = tbm1_signed_len(auth_hdr),
+      .signature_ed25519 = sig_ptr,
+      .key_index = auth_hdr->key_index,
+#if TOOB_PQC_ENABLED
+      .pqc_hybrid_active = (pqc_sig != NULL && pqc_key != NULL),
+      .signature_pqc = (pqc_sig != NULL) ? arena + pqc_sig->off : NULL,
+      .signature_pqc_len = (pqc_sig != NULL) ? pqc_sig->len : 0U,
+      .pubkey_pqc = (pqc_key != NULL) ? arena + pqc_key->off : NULL,
+      .pubkey_pqc_len = (pqc_key != NULL) ? pqc_key->len : 0U,
+#endif
+  };
+
+  boot_status_t verify_st = boot_verify_manifest_envelope(platform, &envelope, arena, arena_len);
+  BOOT_SECURE_REQUIRE(verify_st == BOOT_OK, {
+    boot_secure_zeroize(arena, arena_len);
+    return (verify_st != BOOT_OK) ? verify_st : BOOT_ERR_VERIFY;
+  });
+
+  tbm1_header_t verified_hdr __attribute__((aligned(8)));
+  memcpy(&verified_hdr, arena, sizeof(verified_hdr));
+
+  const tbm1_region_t *r = tbm1_find_region(&verified_hdr, TBM1_REGION_REVERSE_DELTA);
   if (r == NULL || r->len < sizeof(tbm1_rdelta_desc_t) || r->off < TBM1_FIXED_LEN ||
-      r->off > (hdr.total_len - TBM1_SIG_LEN - (uint32_t)sizeof(tbm1_rdelta_desc_t))) {
-    boot_secure_zeroize(&hdr, sizeof(hdr));
+      r->off > (verified_hdr.total_len - TBM1_SIG_LEN - (uint32_t)sizeof(tbm1_rdelta_desc_t))) {
+    boot_secure_zeroize(&verified_hdr, sizeof(verified_hdr));
+    boot_secure_zeroize(arena, arena_len);
     return BOOT_ERR_NOT_FOUND;
   }
 
   boot_secure_zeroize(out_rdesc, sizeof(*out_rdesc));
-  st = platform->flash->read(tbm1_addr + r->off, out_rdesc, sizeof(*out_rdesc));
-  if (st != BOOT_OK) {
-    boot_secure_zeroize(&hdr, sizeof(hdr));
-    return st;
-  }
+  memcpy(out_rdesc, arena + r->off, sizeof(*out_rdesc));
+  boot_secure_zeroize(arena, arena_len);
+
+  const bool is_trailer = ((verified_hdr.flags_critical & TBM1_CRIT_TRAILER_LAYOUT) != 0U);
+  const uint32_t payload_base = is_trailer ? stg_base : tbm1_addr;
 
   if (out_rdesc->delta_alg != TBM1_DELTA_TDS1 ||
       out_rdesc->stored_size < (uint32_t)(sizeof(toob_tds_header_t) + sizeof(toob_tds_instr_t)) ||
       out_rdesc->restored_size <= sizeof(toob_image_header_t) ||
       out_rdesc->restored_size > CHIP_APP_SLOT_SIZE ||
       UINT32_MAX - payload_base < out_rdesc->data_off) {
-    boot_secure_zeroize(&hdr, sizeof(hdr));
+    boot_secure_zeroize(&verified_hdr, sizeof(verified_hdr));
     return BOOT_ERR_VERIFY;
   }
 
   uint32_t rdelta_addr = payload_base + out_rdesc->data_off;
   if (rdelta_addr < stg_base || rdelta_addr >= stg_end ||
       out_rdesc->stored_size > (stg_end - rdelta_addr)) {
-    boot_secure_zeroize(&hdr, sizeof(hdr));
+    boot_secure_zeroize(&verified_hdr, sizeof(verified_hdr));
     return BOOT_ERR_VERIFY;
   }
 
   uint32_t base_addr = 0U;
   uint32_t base_size = 0U;
-  if (hdr.image_count > 0U && hdr.images[0].compression_alg == TBM1_COMP_NONE &&
-      hdr.images[0].delta_alg == TBM1_DELTA_NONE) {
-    if (UINT32_MAX - payload_base < hdr.images[0].data_off) {
-      boot_secure_zeroize(&hdr, sizeof(hdr));
+  if (verified_hdr.image_count > 0U && verified_hdr.images[0].compression_alg == TBM1_COMP_NONE &&
+      verified_hdr.images[0].delta_alg == TBM1_DELTA_NONE) {
+    if (UINT32_MAX - payload_base < verified_hdr.images[0].data_off) {
+      boot_secure_zeroize(&verified_hdr, sizeof(verified_hdr));
       return BOOT_ERR_VERIFY;
     }
-    uint32_t img0_addr = payload_base + hdr.images[0].data_off;
+    uint32_t img0_addr = payload_base + verified_hdr.images[0].data_off;
     if (img0_addr < stg_base || img0_addr >= stg_end ||
-        hdr.images[0].installed_size > (stg_end - img0_addr)) {
-      boot_secure_zeroize(&hdr, sizeof(hdr));
+        verified_hdr.images[0].installed_size > (stg_end - img0_addr)) {
+      boot_secure_zeroize(&verified_hdr, sizeof(verified_hdr));
       return BOOT_ERR_VERIFY;
     }
     base_addr = img0_addr;
-    base_size = hdr.images[0].installed_size;
+    base_size = verified_hdr.images[0].installed_size;
   } else {
 #if defined(CHIP_SCRATCH_SLOT_SIZE) && (CHIP_SCRATCH_SLOT_SIZE > 0)
     base_addr = CHIP_SCRATCH_SLOT_ABS_ADDR;
     base_size = CHIP_SCRATCH_SLOT_SIZE;
 #endif
   }
-  boot_secure_zeroize(&hdr, sizeof(hdr));
+  boot_secure_zeroize(&verified_hdr, sizeof(verified_hdr));
 
   toob_tds_header_t tds_hdr __attribute__((aligned(8)));
   boot_secure_zeroize(&tds_hdr, sizeof(tds_hdr));
@@ -215,8 +263,6 @@ static boot_status_t oneway_apply(const boot_platform_t *platform, const slot_ca
   /* Verify-before-destruction gate. */
   BOOT_SECURE_REQUIRE(txn->src_verified, { return BOOT_ERR_VERIFY; });
 
-  TOOB_TXN_SET_TRANSPORT(open_txn, TOOB_TRANSPORT_ID_ONEWAY);
-
   boot_status_t status = BOOT_OK;
   uint32_t dest_erases = 0, backup_erases = 0;
   const uint32_t phase = open_txn->transfer_bitmap[TOOB_TB_SLOT_PHASE];
@@ -232,7 +278,7 @@ static boot_status_t oneway_apply(const boot_platform_t *platform, const slot_ca
     uint32_t rbase_size = 0U;
 
     status = resolve_staging_rdelta(platform, open_txn->offset, &rdesc, &rdelta_addr, &rbase_addr,
-                                    &rbase_size, &tds_hdr);
+                                    &rbase_size, &tds_hdr, arena, arena_len);
     if (status != BOOT_OK) {
       boot_secure_zeroize(&rdesc, sizeof(rdesc));
       boot_secure_zeroize(&tds_hdr, sizeof(tds_hdr));
@@ -296,6 +342,7 @@ static boot_status_t oneway_apply(const boot_platform_t *platform, const slot_ca
     boot_secure_zeroize(&tds_hdr, sizeof(tds_hdr));
 
     /* Transition directly to DEPLOY without physical flash backup */
+    TOOB_TXN_SET_TRANSPORT(open_txn, TOOB_TRANSPORT_ID_ONEWAY);
     open_txn->transfer_bitmap[TOOB_TB_SLOT_PHASE] = TOOB_PHASE_ONEWAY_DEPLOY;
     open_txn->delta_chunk_id = 0;
     status = boot_journal_append(platform, open_txn);
@@ -305,6 +352,7 @@ static boot_status_t oneway_apply(const boot_platform_t *platform, const slot_ca
   }
 #elif TOOB_ONEWAY_BACKUP_MODE == TOOB_ONEWAY_BACKUP_NONE
   if (phase != TOOB_PHASE_ONEWAY_DEPLOY) {
+    TOOB_TXN_SET_TRANSPORT(open_txn, TOOB_TRANSPORT_ID_ONEWAY);
     open_txn->transfer_bitmap[TOOB_TB_SLOT_PHASE] = TOOB_PHASE_ONEWAY_DEPLOY;
     open_txn->delta_chunk_id = 0;
     status = boot_journal_append(platform, open_txn);
@@ -333,6 +381,7 @@ static boot_status_t oneway_apply(const boot_platform_t *platform, const slot_ca
     boot_secure_zeroize(old_hdr_buf, sizeof(old_hdr_buf));
     boot_secure_zeroize(&old_hdr, sizeof(old_hdr));
 
+    TOOB_TXN_SET_TRANSPORT(open_txn, TOOB_TRANSPORT_ID_ONEWAY);
     boot_allowed_region_t wl_backup[1] = {{txn->backup_addr, txn->backup_region_size}};
     status = boot_swap_copy_region_resumable(platform, txn->dest_addr, txn->backup_addr, backup_len,
                                              TOOB_PHASE_ONEWAY_BACKUP, open_txn, wl_backup, 1,
@@ -353,6 +402,7 @@ static boot_status_t oneway_apply(const boot_platform_t *platform, const slot_ca
 #endif
 
   /* ---- Phase 2: DEPLOY (src -> dest) ---- */
+  TOOB_TXN_SET_TRANSPORT(open_txn, TOOB_TRANSPORT_ID_ONEWAY);
   {
     boot_allowed_region_t wl_dest[1] = {{txn->dest_addr, txn->dest_region_size}};
     status = boot_swap_copy_region_resumable(platform, txn->src_addr, txn->dest_addr, txn->length,
@@ -416,7 +466,7 @@ static boot_status_t oneway_rollback(const boot_platform_t *platform, const slot
   uint32_t rbase_addr = 0U;
   uint32_t rbase_size = 0U;
   boot_status_t status = resolve_staging_rdelta(platform, rb_txn.offset, &rdesc, &rdelta_addr,
-                                                &rbase_addr, &rbase_size, NULL);
+                                                &rbase_addr, &rbase_size, NULL, arena, arena_len);
   if (status != BOOT_OK) {
     boot_secure_zeroize(&rb_txn, sizeof(rb_txn));
     return status;
@@ -526,10 +576,17 @@ static boot_status_t oneway_rollback(const boot_platform_t *platform, const slot
     return BOOT_ERR_NOT_FOUND;
   });
   uint32_t restore_len = bkup_hdr.image_size;
-  boot_secure_zeroize(&bkup_hdr, sizeof(bkup_hdr));
 
   if (restore_len > txn->dest_region_size || restore_len > txn->backup_region_size) {
+    boot_secure_zeroize(&bkup_hdr, sizeof(bkup_hdr));
     return BOOT_ERR_FLASH_BOUNDS;
+  }
+
+  boot_status_t verify_stat = boot_verify_slot_image(
+      platform, txn->backup_addr, txn->backup_region_size, &bkup_hdr, arena, arena_len);
+  boot_secure_zeroize(&bkup_hdr, sizeof(bkup_hdr));
+  if (verify_stat != BOOT_OK) {
+    return verify_stat;
   }
 
   /* Reconstruct live WAL entry so brownouts mid-rollback resume cleanly. */

@@ -16,6 +16,7 @@
 #include <string.h>
 
 extern uint32_t toob_lib_crc32(const uint8_t *data, size_t length);
+extern uint32_t recovery_get_tick_ms(void);
 
 #define SOH 0x01
 #define EOT 0x04
@@ -27,6 +28,13 @@ extern uint32_t toob_lib_crc32(const uint8_t *data, size_t length);
 #define XMODEM_DATA_SIZE 128U
 #define XMODEM_PACKET_PAYLOAD_SIZE (1U + 1U + XMODEM_DATA_SIZE + 2U) /* block_num + inv_block_num + data + crc */
 #define XMODEM_TAIL_WINDOW_SIZE (2U * XMODEM_DATA_SIZE)              /* 256B two-block sliding window (MED-22) */
+#define RECOVERY_MAX_TOTAL_ERRORS 64U
+#define RECOVERY_RX_IDLE_TIMEOUT_MS 60000U
+
+static uint32_t elapsed_ms_since(uint32_t now_ms, uint32_t then_ms) {
+    return (now_ms >= then_ms) ? (now_ms - then_ms)
+                               : ((UINT32_MAX - then_ms) + 1U + now_ms);
+}
 
 static uint16_t crc16_ccitt(const uint8_t *data, size_t length) {
     uint16_t crc = 0;
@@ -143,7 +151,7 @@ int recovery_main(void) {
     union {
         uint8_t manifest_buf[640];
         uint8_t tail_window[XMODEM_TAIL_WINDOW_SIZE];
-    } rx_stage __attribute__((aligned(8)));
+    } rx_stage __attribute__((aligned(8))) = { .manifest_buf = { 0U } };
     uint32_t tail_len = 0U;
     uint32_t bytes_buffered = 0U;
     uint8_t expected_packet = 1U;
@@ -151,7 +159,6 @@ int recovery_main(void) {
     bool ota_started = false;
     bool trailer_mode = false;
     toob_ota_ctx_t ota_ctx;
-    memset(&rx_stage, 0, sizeof(rx_stage));
     status = toob_ota_ctx_init(&ota_ctx);
     if (status != TOOB_OK) {
         recovery_system_reboot();
@@ -159,10 +166,23 @@ int recovery_main(void) {
 
     recovery_serial_print("[REC] flashing...\r\n");
 
+    uint32_t total_errors = 0U;
+    uint32_t last_activity_ms = recovery_get_tick_ms();
+
     while (1) {
+        if (elapsed_ms_since(recovery_get_tick_ms(), last_activity_ms) >= RECOVERY_RX_IDLE_TIMEOUT_MS) {
+            recovery_serial_print("[REC] rx timeout\r\n");
+            recovery_system_reboot();
+        }
+
         if (c != SOH && c != EOT && c != CAN) {
             toob_status_t rd_stat = recovery_serial_getchar(&c, 1000);
             if (rd_stat != TOOB_OK) {
+                total_errors++;
+                if (total_errors >= RECOVERY_MAX_TOTAL_ERRORS) {
+                    recovery_serial_print("[REC] rx abort\r\n");
+                    recovery_system_reboot();
+                }
                 recovery_serial_putchar(NAK);
                 continue;
             }
@@ -177,6 +197,11 @@ int recovery_main(void) {
             recovery_system_reboot();
         }
         if (c != SOH) {
+            total_errors++;
+            if (total_errors >= RECOVERY_MAX_TOTAL_ERRORS) {
+                recovery_serial_print("[REC] rx abort\r\n");
+                recovery_system_reboot();
+            }
             recovery_serial_putchar(NAK);
             c = 0;
             continue;
@@ -185,6 +210,11 @@ int recovery_main(void) {
         /* Read the remaining 132 bytes of the XMODEM packet */
         toob_status_t rd_payload = read_bytes(packet_payload, XMODEM_PACKET_PAYLOAD_SIZE, 1000);
         if (rd_payload != TOOB_OK) {
+            total_errors++;
+            if (total_errors >= RECOVERY_MAX_TOTAL_ERRORS) {
+                recovery_serial_print("[REC] rx abort\r\n");
+                recovery_system_reboot();
+            }
             recovery_serial_putchar(NAK);
             c = 0;
             continue;
@@ -278,9 +308,15 @@ int recovery_main(void) {
                     }
                 }
             }
+            last_activity_ms = recovery_get_tick_ms();
             expected_packet++;
             recovery_serial_putchar(ACK);
         } else {
+            total_errors++;
+            if (total_errors >= RECOVERY_MAX_TOTAL_ERRORS) {
+                recovery_serial_print("[REC] rx abort\r\n");
+                recovery_system_reboot();
+            }
             if (val_ok && block_num == (uint8_t)(expected_packet - 1U)) {
                 recovery_serial_putchar(ACK);
             } else {
@@ -359,16 +395,12 @@ int recovery_main(void) {
         }
     }
 
-    /* 7. Finalize OTA & set recovery resolved (cumulative mailbox v2 preserves both!) */
+    /* 7. Finalize OTA (writes WAL_INTENT_UPDATE_PENDING pointing to staged manifest).
+     * Recovery resolution is withheld until Stage 1 cryptographically verifies
+     * and applies the staged image on reboot. */
     status = toob_ota_finalize(&ota_ctx);
     if (status != TOOB_OK) {
         recovery_serial_print("[REC] finalize fail\r\n");
-        recovery_system_reboot();
-    }
-
-    status = toob_recovery_resolved();
-    if (status != TOOB_OK) {
-        recovery_serial_print("[REC] resolve fail\r\n");
         recovery_system_reboot();
     }
 

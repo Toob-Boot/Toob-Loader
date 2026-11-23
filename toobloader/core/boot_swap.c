@@ -21,6 +21,13 @@
 #include "generated_boot_config.h"
 #include <string.h>
 
+#ifndef TOOB_TA1_STRICT_NO_CRC_SKIP
+#define TOOB_TA1_STRICT_NO_CRC_SKIP 1
+#endif
+#if defined(TOOB_PROFILE_PRODUCTION) && !TOOB_TA1_STRICT_NO_CRC_SKIP
+#error "TOOB_TA1_STRICT_NO_CRC_SKIP=0 forbidden in production!"
+#endif
+
 _Static_assert(BOOT_CRYPTO_ARENA_SIZE >= 512,
                "Crypto Arena is too small for chunked flash operations!");
 _Static_assert(BOOT_OK == 0x55AA55AA, "Glitch-Defense requires high-Hamming-distance BOOT_OK");
@@ -640,6 +647,7 @@ TOOB_IRAM_ATTR boot_status_t boot_swap_apply(const boot_platform_t *platform, ui
         goto swap_cleanup;
       }
 
+#if !TOOB_TA1_STRICT_NO_CRC_SKIP
       if (crc_src == crc_dest) {
         bool is_identical = false;
         status = boot_swap_blocks_identical(platform, current_dest, current_src, block_size,
@@ -652,6 +660,7 @@ TOOB_IRAM_ATTR boot_status_t boot_swap_apply(const boot_platform_t *platform, ui
           continue;
         }
       }
+#endif
 
       if (open_txn != NULL) {
         open_txn->delta_chunk_id = current_offset;
@@ -670,70 +679,74 @@ TOOB_IRAM_ATTR boot_status_t boot_swap_apply(const boot_platform_t *platform, ui
       crc_dest = open_txn->transfer_bitmap[1];
     }
 
-    uint32_t phys_src = 0U;
-    uint32_t phys_dest = 0U;
-    uint32_t phys_scratch = 0U;
+    bool run_phase_a = true;
+    bool run_phase_b = true;
+    bool run_phase_c = true;
 
-    status =
-        boot_crc32_flash_stream(platform, current_src, block_size, &phys_src, arena, arena_len);
-    if (status != BOOT_OK) {
-      goto swap_cleanup;
-    }
+    if (is_resuming_this_chunk) {
+      uint32_t phys_src = 0U;
+      uint32_t phys_dest = 0U;
+      uint32_t phys_scratch = 0U;
 
-    status =
-        boot_crc32_flash_stream(platform, current_dest, block_size, &phys_dest, arena, arena_len);
-    if (status != BOOT_OK) {
-      goto swap_cleanup;
-    }
-
-    status = boot_crc32_flash_stream(platform, current_scratch, block_size, &phys_scratch, arena,
-                                     arena_len);
-    if (status != BOOT_OK) {
-      goto swap_cleanup;
-    }
-
-    bool dest_has_src = (phys_dest == crc_src);
-    bool src_has_dest = (phys_src == crc_dest);
-    bool scratch_has_dest = (phys_scratch == crc_dest);
-    bool dest_has_dest = (phys_dest == crc_dest);
-    bool src_has_src = (phys_src == crc_src);
-
-    bool run_phase_a = true, run_phase_b = true, run_phase_c = true;
-
-    if (dest_has_src && src_has_dest) {
-      current_offset += (uint32_t)block_size;
-      continue;
-    }
-
-    if (dest_has_src && !src_has_dest) {
-      if (!scratch_has_dest) {
-        status = BOOT_ERR_FLASH_HW;
+      status =
+          boot_crc32_flash_stream(platform, current_src, block_size, &phys_src, arena, arena_len);
+      if (status != BOOT_OK) {
         goto swap_cleanup;
       }
-      run_phase_a = false;
-      run_phase_b = false;
-      run_phase_c = true;
-    } else if (!dest_has_src) {
-      if (scratch_has_dest) {
-        if (!src_has_src) {
+
+      status =
+          boot_crc32_flash_stream(platform, current_dest, block_size, &phys_dest, arena, arena_len);
+      if (status != BOOT_OK) {
+        goto swap_cleanup;
+      }
+
+      status = boot_crc32_flash_stream(platform, current_scratch, block_size, &phys_scratch, arena,
+                                       arena_len);
+      if (status != BOOT_OK) {
+        goto swap_cleanup;
+      }
+
+      bool dest_has_src = (phys_dest == crc_src);
+      bool src_has_dest = (phys_src == crc_dest);
+      bool scratch_has_dest = (phys_scratch == crc_dest);
+      bool dest_has_dest = (phys_dest == crc_dest);
+      bool src_has_src = (phys_src == crc_src);
+
+      if (dest_has_src && src_has_dest) {
+        current_offset += (uint32_t)block_size;
+        continue;
+      }
+
+      if (dest_has_src && !src_has_dest) {
+        if (!scratch_has_dest) {
           status = BOOT_ERR_FLASH_HW;
           goto swap_cleanup;
         }
         run_phase_a = false;
-        run_phase_b = true;
+        run_phase_b = false;
         run_phase_c = true;
-      } else {
-        if (!dest_has_dest || !src_has_src) {
-          status = BOOT_ERR_FLASH_HW;
-          goto swap_cleanup;
+      } else if (!dest_has_src) {
+        if (scratch_has_dest) {
+          if (!src_has_src) {
+            status = BOOT_ERR_FLASH_HW;
+            goto swap_cleanup;
+          }
+          run_phase_a = false;
+          run_phase_b = true;
+          run_phase_c = true;
+        } else {
+          if (!dest_has_dest || !src_has_src) {
+            status = BOOT_ERR_FLASH_HW;
+            goto swap_cleanup;
+          }
+          run_phase_a = true;
+          run_phase_b = true;
+          run_phase_c = true;
         }
-        run_phase_a = true;
-        run_phase_b = true;
-        run_phase_c = true;
+      } else {
+        status = BOOT_ERR_INVALID_STATE;
+        goto swap_cleanup;
       }
-    } else {
-      status = BOOT_ERR_INVALID_STATE;
-      goto swap_cleanup;
     }
 
     boot_allowed_region_t whitelist[3] = {{CHIP_APP_SLOT_ABS_ADDR, CHIP_APP_SLOT_SIZE},
@@ -1136,11 +1149,12 @@ boot_status_t boot_swap_copy_region_resumable(const boot_platform_t *p, uint32_t
     }
 
     uint32_t crc_src = 0U;
-    uint32_t crc_dst = 0U;
     status = boot_crc32_flash_stream(p, src, block, &crc_src, arena, arena_len);
     if (status != BOOT_OK) {
       return status;
     }
+#if !TOOB_TA1_STRICT_NO_CRC_SKIP
+    uint32_t crc_dst = 0U;
     status = boot_crc32_flash_stream(p, dst, block, &crc_dst, arena, arena_len);
     if (status != BOOT_OK) {
       return status;
@@ -1157,6 +1171,7 @@ boot_status_t boot_swap_copy_region_resumable(const boot_platform_t *p, uint32_t
         continue;
       }
     }
+#endif
 
     txn->delta_chunk_id = offset;
     txn->transfer_bitmap[TOOB_TB_SLOT_PHASE] = phase_magic;

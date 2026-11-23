@@ -11,6 +11,7 @@
  */
 
 #include "boot_crc32.h"
+#include "boot_ct_utils.h"
 #include "boot_fih.h"
 #include "boot_flash_guard.h"
 #include "boot_hal.h"
@@ -64,6 +65,7 @@ static void stage0_scan_wal_quorum(const boot_platform_t *platform, uint32_t *ou
     bool valid = false;
 
     if (magic == WAL_ABI_VERSION_MAGIC_LEGACY) {
+#if defined(TOOB_ALLOW_LEGACY_WAL_MIGRATION) && TOOB_ALLOW_LEGACY_WAL_MIGRATION
       const wal_sector_header_v1_t *legacy_hdr = (const wal_sector_header_v1_t *)&hdr.data;
       uint32_t calc_crc = compute_boot_crc32((const uint8_t *)legacy_hdr,
                                              offsetof(wal_sector_header_v1_t, header_crc32));
@@ -72,6 +74,9 @@ static void stage0_scan_wal_quorum(const boot_platform_t *platform, uint32_t *ou
       bank = (legacy_hdr->tmr_data.active_stage1_bank == 0U) ? 0U : 1U;
       svn = 0U;
       valid = true;
+#else
+      goto next_sector;
+#endif
     } else if (magic == WAL_ABI_VERSION_MAGIC_CURRENT) {
       uint32_t calc_crc = compute_boot_crc32((const uint8_t *)&hdr.data,
                                              offsetof(wal_sector_header_t, header_crc32));
@@ -140,6 +145,7 @@ uint32_t stage0_read_wal_boot_meta(const boot_platform_t *platform, uint32_t *ou
   uint32_t bank = 0U;
   uint32_t svn = 0U;
   stage0_scan_wal_quorum(platform, &bank, &svn);
+
   if (out_svn != NULL) {
     *out_svn = svn;
   }

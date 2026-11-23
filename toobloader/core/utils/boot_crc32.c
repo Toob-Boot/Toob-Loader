@@ -172,20 +172,52 @@ boot_status_t boot_random_safe(const boot_platform_t *platform, uint8_t *buf, si
   if (!platform || !platform->entropy || !platform->entropy->random) {
     return BOOT_ERR_NOT_SUPPORTED;
   }
+  if (buf == NULL || len == 0U) {
+    return BOOT_ERR_INVALID_ARG;
+  }
 
   boot_status_t stat = platform->entropy->random(buf, len);
   if (stat != BOOT_OK) {
+    boot_secure_zeroize(buf, len);
     return stat;
   }
 
   uint8_t or_acc = 0x00U;
   uint8_t and_acc = 0xFFU;
+  bool all_same = (len > 1U);
+  const uint8_t first = buf[0];
+  size_t cur_consec = 1U;
+  size_t max_consec = 1U;
+  bool constant_stride = (len >= 8U);
+  const uint8_t stride = (len > 1U) ? (uint8_t)(buf[1] - buf[0]) : 0U;
+
   for (size_t i = 0U; i < len; i++) {
     or_acc |= buf[i];
     and_acc &= buf[i];
+    if (i > 0U) {
+      if (buf[i] != first) {
+        all_same = false;
+      }
+      if ((uint8_t)(buf[i] - buf[i - 1U]) != stride) {
+        constant_stride = false;
+      }
+      if (buf[i] == buf[i - 1U]) {
+        cur_consec++;
+        if (cur_consec > max_consec) {
+          max_consec = cur_consec;
+        }
+      } else {
+        cur_consec = 1U;
+      }
+    }
   }
 
-  if (or_acc == 0x00U || and_acc == 0xFFU) {
+  /* Reject stuck-at 0x00/0xFF, uniform repeating bytes, constant linear stride,
+   * and SP 800-90B Repetition Count Test failure (>= 8 identical consecutive
+   * bytes on >= 16-byte draws). */
+  if (or_acc == 0x00U || and_acc == 0xFFU || all_same || constant_stride ||
+      (len >= 16U && max_consec >= 8U)) {
+    boot_secure_zeroize(buf, len);
     return BOOT_ERR_CRYPTO;
   }
 

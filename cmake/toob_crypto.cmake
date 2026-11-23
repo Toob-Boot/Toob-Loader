@@ -100,14 +100,20 @@ if(_CRYPTO_ALL_SOURCES)
     add_library(toob_crypto_upstream STATIC ${_CRYPTO_ALL_SOURCES})
 
     target_include_directories(toob_crypto_upstream PUBLIC
-        ${_CRYPTO_ALL_INCLUDES}
+        ${CMAKE_BINARY_DIR}/generated
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
         ${TOOB_CORE_DIR}/utils/include
     )
+    target_include_directories(toob_crypto_upstream SYSTEM AFTER PUBLIC
+        ${_CRYPTO_ALL_INCLUDES}
+    )
 
-    # Apply per-slot compiler flags
-    set(_CRYPTO_UPSTREAM_CFLAGS -fno-lto -ffunction-sections -fdata-sections)
+    # Apply per-slot compiler flags with SSP and no-builtin hardening
+    set(_CRYPTO_UPSTREAM_CFLAGS -fno-lto -ffunction-sections -fdata-sections -fno-builtin -fstack-protector-strong)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        list(APPEND _CRYPTO_UPSTREAM_CFLAGS -fstack-usage)
+    endif()
     if(TOOB_CRYPTO_BACKEND_ENABLED AND DEFINED TOOB_CRYPTO_BACKEND_CFLAGS)
         list(APPEND _CRYPTO_UPSTREAM_CFLAGS ${TOOB_CRYPTO_BACKEND_CFLAGS})
     else()
@@ -142,11 +148,14 @@ if(_CRYPTO_ALL_WRAPPERS)
     endif()
 
     target_include_directories(toob_crypto PUBLIC
-        ${_CRYPTO_ALL_INCLUDES}
+        ${CMAKE_BINARY_DIR}/generated
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
-        ${CMAKE_BINARY_DIR}/generated
+        ${TOOB_CORE_DIR}/utils/include
         ${TOOB_SDK_DIR}/libtoob/include
+    )
+    target_include_directories(toob_crypto SYSTEM AFTER PUBLIC
+        ${_CRYPTO_ALL_INCLUDES}
     )
 
     # Link upstream into the wrapper

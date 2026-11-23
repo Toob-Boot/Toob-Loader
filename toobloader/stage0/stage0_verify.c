@@ -14,14 +14,14 @@
 #include "boot_types.h"
 #include "stage0_crypto.h"
 
-int stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig,
-                            const uint8_t *pubkey, const uint8_t *msg_digest) {
+boot_status_t stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig,
+                                      const uint8_t *pubkey, const uint8_t *msg_digest) {
   volatile uint32_t shield_1 = (uint32_t)BOOT_ERR_VERIFY;
   volatile uint32_t shield_2 = (uint32_t)BOOT_ERR_CRYPTO;
 
 #if defined(TOOB_STAGE0_VERIFY_MODE_HASH_ONLY)
-#if !defined(TOOB_ALLOW_DEV_BYPASS)
-#error "HASH_ONLY mode requires TOOB_ALLOW_DEV_BYPASS — do NOT ship in production!"
+#if !defined(TOOB_ALLOW_DEV_BYPASS) || !TOOB_ALLOW_DEV_BYPASS || defined(TOOB_PROFILE_PRODUCTION)
+#error "HASH_ONLY mode requires non-production TOOB_ALLOW_DEV_BYPASS!"
 #endif
   (void)sig;
   (void)pubkey;
@@ -33,11 +33,19 @@ int stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig,
 #else
   if (!platform || !platform->crypto || !platform->crypto->verify_signature || !sig || !pubkey ||
       !msg_digest) {
-    return -1;
+    return BOOT_ERR_INVALID_ARG;
   }
 
   boot_status_t raw_st =
       platform->crypto->verify_signature(msg_digest, BOOT_MERKLE_HASH_LEN, sig, pubkey);
+#if defined(TOOB_DOUBLE_VERIFY) && TOOB_DOUBLE_VERIFY
+  BOOT_GLITCH_DELAY();
+  boot_status_t raw_st_2 =
+      platform->crypto->verify_signature(msg_digest, BOOT_MERKLE_HASH_LEN, sig, pubkey);
+  BOOT_SECURE_REQUIRE(raw_st == BOOT_OK && raw_st_2 == BOOT_OK, { return BOOT_ERR_VERIFY; });
+#else
+  BOOT_SECURE_REQUIRE(raw_st == BOOT_OK, { return BOOT_ERR_VERIFY; });
+#endif
   if (raw_st == BOOT_OK) {
     shield_1 = (uint32_t)raw_st;
   }
@@ -47,9 +55,9 @@ int stage0_verify_signature(const boot_platform_t *platform, const uint8_t *sig,
   }
 #endif
 
-  if (shield_1 == (uint32_t)BOOT_OK && shield_2 == (uint32_t)BOOT_OK && shield_1 == shield_2 &&
-      boot_secure_confirm((boot_status_t)shield_2) == BOOT_OK) {
-    return 0;
-  }
-  return -1;
+  BOOT_SECURE_REQUIRE(shield_1 == (uint32_t)BOOT_OK && shield_2 == (uint32_t)BOOT_OK &&
+                          shield_1 == shield_2 &&
+                          boot_secure_confirm((boot_status_t)shield_2) == BOOT_OK,
+                      { return BOOT_ERR_VERIFY; });
+  return BOOT_OK;
 }

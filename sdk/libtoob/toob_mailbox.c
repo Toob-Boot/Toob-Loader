@@ -62,6 +62,17 @@ static inline uint32_t slot_addr(uint32_t i) {
   return CHIP_MAILBOX_ABS_ADDR + i * CHIP_MAILBOX_SLOT_SIZE;
 }
 
+static inline bool mbx_seq_is_newer(uint32_t cand, uint32_t cur) {
+  if (cand == 0U) {
+    return false;
+  }
+  if (cur == 0U) {
+    return true;
+  }
+  uint32_t diff = (cand >= cur) ? (cand - cur) : ((UINT32_MAX - cur) + 1U + cand);
+  return (diff != 0U) && (diff < 0x80000000U);
+}
+
 /**
  * @brief Read one slot and distinguish valid record vs invalid data vs flash I/O error.
  */
@@ -78,7 +89,7 @@ static mbx_slot_state_t slot_read_valid(uint32_t i, toob_mailbox_t *out,
     return MBX_SLOT_IO_ERR;
   }
 
-  if (out->magic != TOOB_MAILBOX_MAGIC) {
+  if (out->magic != TOOB_MAILBOX_MAGIC || out->seq == 0U) {
     toob_secure_zeroize(out, sizeof(*out));
     return MBX_SLOT_INVALID;
   }
@@ -121,8 +132,10 @@ static toob_status_t mailbox_put(toob_req_t req, uint32_t tbm1_addr, uint64_t no
 
   toob_mailbox_t rec;
   uint32_t best_seq = 0U;
+  bool have_best = false;
   uint32_t target = 0U;
   uint32_t target_seq = 0U;
+  bool target_is_valid = false;
   bool target_set = false;
 
   for (uint32_t i = 0U; i < TOOB_MAILBOX_SLOTS; i++) {
@@ -135,22 +148,29 @@ static toob_status_t mailbox_put(toob_req_t req, uint32_t tbm1_addr, uint64_t no
       return io_err;
     }
 
-    uint32_t seq = (st == MBX_SLOT_VALID) ? rec.seq : 0U;
-    if (st == MBX_SLOT_VALID && rec.seq > best_seq) {
-      best_seq = rec.seq;
-    }
-    if (!target_set || seq < target_seq) {
-      target_set = true;
-      target_seq = seq;
-      target = i;
+    if (st == MBX_SLOT_VALID) {
+      if (!have_best || mbx_seq_is_newer(rec.seq, best_seq)) {
+        best_seq = rec.seq;
+        have_best = true;
+      }
+      if (!target_set || (target_is_valid && mbx_seq_is_newer(target_seq, rec.seq))) {
+        target_set = true;
+        target_is_valid = true;
+        target_seq = rec.seq;
+        target = i;
+      }
+    } else {
+      if (!target_set || target_is_valid) {
+        target_set = true;
+        target_is_valid = false;
+        target_seq = 0U;
+        target = i;
+      }
     }
     toob_secure_zeroize(&rec, sizeof(rec));
   }
 
-  if (best_seq == 0xFFFFFFFFU) {
-    toob_os_unlock();
-    return TOOB_ERR_COUNTER_EXHAUSTED;
-  }
+  uint32_t next_seq = (best_seq == UINT32_MAX) ? 1U : (best_seq + 1U);
 
   /* Compute cumulative session payload before committing to flash. */
   uint16_t next_flags = (uint16_t)(s_session_flags | (uint16_t)req);
@@ -166,7 +186,7 @@ static toob_status_t mailbox_put(toob_req_t req, uint32_t tbm1_addr, uint64_t no
   m.magic     = TOOB_MAILBOX_MAGIC;
   m.version   = TOOB_MAILBOX_VERSION;
   m.request   = next_flags;
-  m.seq       = best_seq + 1U;
+  m.seq       = next_seq;
   m.tbm1_addr = next_tbm1_addr;
   m.nonce     = next_confirm_nonce;
   m.crc32     = toob_lib_crc32((const uint8_t *)&m, TOOB_MAILBOX_CRC_LEN);

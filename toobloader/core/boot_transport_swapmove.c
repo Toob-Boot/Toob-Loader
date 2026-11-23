@@ -56,9 +56,17 @@
 #include "boot_journal.h"
 #include "boot_secure_zeroize.h"
 #include "boot_swap.h"
+#include "boot_verify.h"
 #include "generated_boot_config.h"
 #include <stddef.h>
 #include <string.h>
+
+#ifndef TOOB_TA1_STRICT_NO_CRC_SKIP
+#define TOOB_TA1_STRICT_NO_CRC_SKIP 1
+#endif
+#if defined(TOOB_PROFILE_PRODUCTION) && !TOOB_TA1_STRICT_NO_CRC_SKIP
+#error "TOOB_TA1_STRICT_NO_CRC_SKIP=0 forbidden in production!"
+#endif
 
 #define SM_MAX_LOOPS 100000u
 
@@ -166,9 +174,14 @@ static boot_status_t swapmove_apply(const boot_platform_t *platform, const slot_
   c.wl = wl;
   c.wl_n = 2;
 
-  TOOB_TXN_SET_TRANSPORT(open_txn, (TOOB_TRANSPORT_PROVIDER == TOOB_TRANSPORT_SWAPOFFSET)
-                                       ? TOOB_TRANSPORT_ID_SWAPOFFSET
-                                       : TOOB_TRANSPORT_ID_SWAPMOVE);
+  const uint8_t my_id = (TOOB_TRANSPORT_PROVIDER == TOOB_TRANSPORT_SWAPOFFSET)
+                            ? TOOB_TRANSPORT_ID_SWAPOFFSET
+                            : TOOB_TRANSPORT_ID_SWAPMOVE;
+  if (open_txn->transport_id == my_id && open_txn->transfer_bitmap[TOOB_TB_SLOT_PHASE] == 0U &&
+      open_txn->delta_chunk_id >= txn->length) {
+    return BOOT_OK;
+  }
+  TOOB_TXN_SET_TRANSPORT(open_txn, my_id);
 
   boot_status_t status = BOOT_OK;
   uint32_t guard = 0;
@@ -199,14 +212,30 @@ static boot_status_t swapmove_apply(const boot_platform_t *platform, const slot_
       if (status != BOOT_OK) {
         goto cleanup;
       }
-      uint32_t crc_dst = sm_crc(&c, dst, &status);
-      if (status != BOOT_OK) {
-        goto cleanup;
+      if (in_move) {
+        bool moved_identical = false;
+        status = boot_swap_blocks_identical(c.p, src, dst, c.sec, &moved_identical, c.arena,
+                                            c.arena_len);
+        if (status != BOOT_OK) {
+          goto cleanup;
+        }
+        if (moved_identical) {
+          i--;
+          continue;
+        }
       }
-      if (crc_src == crc_dst) {
-        i--;
-        continue;
-      } /* step already done (resume) */
+#if !TOOB_TA1_STRICT_NO_CRC_SKIP
+      else {
+        uint32_t crc_dst = sm_crc(&c, dst, &status);
+        if (status != BOOT_OK) {
+          goto cleanup;
+        }
+        if (crc_src == crc_dst) {
+          i--;
+          continue;
+        }
+      }
+#endif
 
       open_txn->transfer_bitmap[TOOB_TB_SLOT_PHASE] = TOOB_PHASE_SWAPMOVE_MOVE;
       open_txn->delta_chunk_id = (uint32_t)i;
@@ -241,8 +270,10 @@ static boot_status_t swapmove_apply(const boot_platform_t *platform, const slot_
       uint32_t p_n = c.P + (i + 1u) * c.sec;
       uint32_t s_i = c.S + i * c.sec;
 
-      uint32_t cs, cp;
-      if (have_wal_crcs && open_txn->delta_chunk_id == i) {
+      uint32_t cs = 0U;
+      uint32_t cp = 0U;
+      bool chunk_resumed = (have_wal_crcs && open_txn->delta_chunk_id == i);
+      if (chunk_resumed) {
         cs = open_txn->transfer_bitmap[TOOB_TB_SLOT_AUX0];
         cp = open_txn->transfer_bitmap[TOOB_TB_SLOT_AUX1];
       } else {
@@ -266,22 +297,33 @@ static boot_status_t swapmove_apply(const boot_platform_t *platform, const slot_
       }
       have_wal_crcs = false;
 
-      /* Sub-step deduction from content (see file header). */
-      uint32_t crc_pi = sm_crc(&c, p_i, &status);
-      if (status != BOOT_OK) {
-        goto cleanup;
-      }
-      if (crc_pi != cs) { /* (a) pending: erase P[i], copy S[i] -> P[i] */
+      if (chunk_resumed) {
+        /* Sub-step deduction from content ONLY on brownout resume of this chunk. */
+        uint32_t crc_pi = sm_crc(&c, p_i, &status);
+        if (status != BOOT_OK) {
+          goto cleanup;
+        }
+        if (crc_pi != cs) {
+          status = sm_move_sector(&c, s_i, p_i, cs, &c.p_erases);
+          if (status != BOOT_OK) {
+            goto cleanup;
+          }
+        }
+        uint32_t crc_si = sm_crc(&c, s_i, &status);
+        if (status != BOOT_OK) {
+          goto cleanup;
+        }
+        if (crc_si != cp) {
+          status = sm_move_sector(&c, p_n, s_i, cp, &c.s_erases);
+          if (status != BOOT_OK) {
+            goto cleanup;
+          }
+        }
+      } else {
         status = sm_move_sector(&c, s_i, p_i, cs, &c.p_erases);
         if (status != BOOT_OK) {
           goto cleanup;
         }
-      }
-      uint32_t crc_si = sm_crc(&c, s_i, &status);
-      if (status != BOOT_OK) {
-        goto cleanup;
-      }
-      if (crc_si != cp) { /* (b) pending: erase S[i], copy P[i+1] -> S[i] */
         status = sm_move_sector(&c, p_n, s_i, cp, &c.s_erases);
         if (status != BOOT_OK) {
           goto cleanup;
@@ -353,11 +395,18 @@ static boot_status_t swapmove_rollback(const boot_platform_t *platform, const sl
   });
 
   uint32_t restore_len = backup_hdr.image_size;
-  boot_secure_zeroize(&backup_hdr, sizeof(backup_hdr));
 
   if (restore_len > txn->dest_region_size || restore_len > txn->src_region_size ||
       UINT32_MAX - txn->src_addr < restore_len || UINT32_MAX - txn->dest_addr < restore_len) {
+    boot_secure_zeroize(&backup_hdr, sizeof(backup_hdr));
     return BOOT_ERR_FLASH_BOUNDS;
+  }
+
+  boot_status_t verify_stat = boot_verify_slot_image(platform, txn->src_addr, txn->src_region_size,
+                                                     &backup_hdr, arena, arena_len);
+  boot_secure_zeroize(&backup_hdr, sizeof(backup_hdr));
+  if (verify_stat != BOOT_OK) {
+    return verify_stat;
   }
 
   wal_entry_payload_t rb_txn __attribute__((aligned(8)));

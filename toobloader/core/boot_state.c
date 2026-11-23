@@ -824,10 +824,19 @@ static boot_status_t stage_check_binding(update_ctx_t *ctx) {
     }
 
     uint8_t dslc_buf[32] __attribute__((aligned(8)));
-    size_t dslc_len = 32;
-    if (!ctx->platform->keystore || !ctx->platform->keystore->read_dslc ||
-        ctx->platform->keystore->read_dslc(dslc_buf, &dslc_len) != BOOT_OK) {
+    boot_secure_zeroize(dslc_buf, sizeof(dslc_buf));
+    size_t dslc_len = sizeof(dslc_buf);
+    if (!ctx->platform->keystore || !ctx->platform->keystore->read_dslc) {
       return BOOT_ERR_NOT_SUPPORTED;
+    }
+    boot_status_t dslc_stat = ctx->platform->keystore->read_dslc(dslc_buf, &dslc_len);
+    if (dslc_stat != BOOT_OK) {
+      boot_secure_zeroize(dslc_buf, sizeof(dslc_buf));
+      return BOOT_ERR_NOT_SUPPORTED;
+    }
+    if (dslc_len == 0U || dslc_len > sizeof(dslc_buf)) {
+      boot_secure_zeroize(dslc_buf, sizeof(dslc_buf));
+      return BOOT_ERR_VERIFY;
     }
 
     const uint8_t *bind_ptr = ctx->arena + bind_reg->off;
@@ -851,8 +860,23 @@ static boot_status_t stage_check_binding(update_ctx_t *ctx) {
 }
 
 /* --------------------------------------------------------------------------
- * Stage ROUTE: Staging Header → Cross-Chip Raw/Decomp/Delta Branching
+ * Stage ROUTE: Staging Header -> Cross-Chip Raw/Decomp/Delta Branching
  * -------------------------------------------------------------------------- */
+static bool txn_staging_mutated_by_swap(const wal_entry_payload_t *txn) {
+  if (txn == NULL) {
+    return false;
+  }
+  const uint32_t phase = txn->transfer_bitmap[TOOB_TB_SLOT_PHASE];
+  if ((txn->transfer_bitmap[2] == 0xAA55AA55U) || (phase == TOOB_PHASE_SWAPMOVE_SWAP)) {
+    return true;
+  }
+  const uint8_t tr = txn->transport_id;
+  const bool is_inplace_swap = (tr == TOOB_TRANSPORT_ID_SWAPSCRATCH) ||
+                               (tr == TOOB_TRANSPORT_ID_SWAPMOVE) ||
+                               (tr == TOOB_TRANSPORT_ID_SWAPOFFSET);
+  return is_inplace_swap && (phase == 0U) && (txn->delta_chunk_id > 0U);
+}
+
 static boot_status_t stage_route(update_ctx_t *ctx) {
   uint32_t inactive_base = 0U;
   uint32_t inactive_size = 0U;
@@ -962,7 +986,7 @@ static boot_status_t stage_route(update_ctx_t *ctx) {
 
     return BOOT_OK;
 #else
-    if (ctx->open_txn->transport_id != 0U) {
+    if (txn_staging_mutated_by_swap(ctx->open_txn)) {
       if (ctx->primary_image->installed_size > CHIP_APP_SLOT_SIZE) {
         return BOOT_ERR_FLASH_BOUNDS;
       }
@@ -1292,11 +1316,9 @@ static boot_status_t stage_apply_delta(update_ctx_t *ctx) {
  * Stage APPLY RAW: Merkle-Verify des Staging-Slots
  * -------------------------------------------------------------------------- */
 static boot_status_t stage_apply_raw(update_ctx_t *ctx) {
-#ifndef TOOB_MOCK_TEST
-  if (ctx->open_txn->transport_id != 0U) {
+  if (txn_staging_mutated_by_swap(ctx->open_txn)) {
     return BOOT_OK;
   }
-#endif
   size_t aligned_offset = (ctx->tbm1_total_len + 7U) & ~((size_t)7U);
 
   if (aligned_offset >= ctx->arena_len) {
@@ -1799,7 +1821,12 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
 
   /* P10 CFI Randomisierung: Tokens zur Laufzeit aus TRNG ableiten */
   uint32_t state_cfi_seed = 0U;
-  (void)boot_random_safe(platform, (uint8_t *)&state_cfi_seed, sizeof(state_cfi_seed));
+  boot_status_t rng_stat =
+      boot_random_safe(platform, (uint8_t *)&state_cfi_seed, sizeof(state_cfi_seed));
+  if (rng_stat != BOOT_OK) {
+    boot_secure_zeroize(target_out, sizeof(boot_target_config_t));
+    return (rng_stat == BOOT_ERR_NOT_SUPPORTED) ? BOOT_ERR_CRYPTO : rng_stat;
+  }
   boot_cfi_ctx_t state_cfi_ctx;
   boot_cfi_init(state_cfi_ctx, state_cfi_seed);
   boot_cfi_add_expected(state_cfi_ctx, STATE_CFI_SLOT_1);
@@ -1944,8 +1971,11 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
          (open_txn.expected_nonce ^ combined_nonce) == 0ULL) ||
         intent_is_recovery;
 
-    volatile uint32_t auth_verdict = BOOT_OK;
-    BOOT_SECURE_REQUIRE(auth_ok, { auth_verdict = BOOT_ERR_VERIFY; });
+    volatile uint32_t auth_verdict = BOOT_ERR_VERIFY;
+    if (auth_ok) {
+      auth_verdict = BOOT_OK;
+    }
+    BOOT_SECURE_REQUIRE(auth_ok && (auth_verdict == BOOT_OK), { auth_verdict = BOOT_ERR_VERIFY; });
 
     if (auth_verdict != BOOT_OK) {
       /* MALICIOUS OR CORRUPT AUTHORIZATION! Preserve tentative TXN_COMMIT if an
@@ -2068,6 +2098,7 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
 
   if (update_was_pending && open_txn.intent == (uint32_t)WAL_INTENT_TXN_COMMIT) {
     current_tmr.boot_failure_counter = 0U;
+    target_out->boot_recovery_os = false;
     target_out->observed_failure_count = 0U;
     target_out->rollback_occurred = false;
   }
@@ -2149,6 +2180,17 @@ boot_status_t boot_state_run(const boot_platform_t *platform, boot_target_config
     core_status = BOOT_ERR_NOT_FOUND;
     goto state_cleanup;
   });
+
+  const uint32_t slot_sizes[3] = {(uint32_t)CHIP_APP_SLOT_SIZE, (uint32_t)CHIP_STAGING_SLOT_SIZE,
+                                  (uint32_t)CHIP_RECOVERY_OS_SIZE};
+  const uint8_t size_idx = target_out->boot_recovery_os ? 2U : ((resolved_slot != 0U) ? 1U : 0U);
+  const uint32_t boot_slot_size = slot_sizes[size_idx];
+
+  core_status =
+      boot_verify_slot_image(platform, slot_addr, boot_slot_size, &app_header, arena, arena_len);
+  if (core_status != BOOT_OK) {
+    goto state_cleanup;
+  }
 
   target_out->proof.image_addr = slot_addr;
   target_out->proof.image_size = app_header.image_size;

@@ -84,6 +84,7 @@ function(toob_apply_strict_flags TARGET_NAME ALLOW_STACK_PROTECTOR)
 
     # P10 Bare-Metal Linker Protection (cross-compilation only, excluded on host SIL):
     if(NOT TOOB_ARCH STREQUAL "host")
+        # GNU ld rejects multiple strong symbol definitions by default; -Wl,--allow-multiple-definition is banned.
         target_link_options(${TARGET_NAME} PRIVATE
             -nostartfiles
             -Wl,-Map=${TARGET_NAME}.map
@@ -91,6 +92,9 @@ function(toob_apply_strict_flags TARGET_NAME ALLOW_STACK_PROTECTOR)
         target_compile_options(${TARGET_NAME} PRIVATE
             -fno-builtin        # Prevent GCC from silently linking libc built-ins (e.g. memcpy, printf)
         )
+        if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+            target_compile_options(${TARGET_NAME} PRIVATE -fstack-usage)
+        endif()
     endif()
 
     if(ALLOW_STACK_PROTECTOR)
@@ -99,24 +103,57 @@ function(toob_apply_strict_flags TARGET_NAME ALLOW_STACK_PROTECTOR)
 endfunction()
 
 # ------------------------------------------------------------------------------
-# 3.5 Hardware Mock Options (Must precede cmake/toob_*.cmake includes)
+# 3.5 Hardware Mock & Profile Security Options (Must precede cmake/toob_*.cmake)
 # ------------------------------------------------------------------------------
 
-# Generic Hardware Mock TU-Selection (P10 Anti-Brick)
-# The Toob Package Manager resolves mock vs. real driver translation units per
-# trait in toob_config.cmake. TOOB_MOCK_HW indicates whether any mock TU is active.
+option(TOOB_DOUBLE_VERIFY "Enable double-execution of Ed25519 verification for fault-injection resistance" ON)
+if(TOOB_DOUBLE_VERIFY)
+    add_compile_definitions(TOOB_DOUBLE_VERIFY=1)
+else()
+    add_compile_definitions(TOOB_DOUBLE_VERIFY=0)
+endif()
+
 if(NOT DEFINED TOOB_PROFILE)
     set(TOOB_PROFILE "dev" CACHE STRING "Build profile (dev or production)")
 else()
     set(TOOB_PROFILE "${TOOB_PROFILE}" CACHE STRING "Build profile (dev or production)" FORCE)
 endif()
+string(TOLOWER "${TOOB_PROFILE}" _TOOB_PROFILE_LOWER)
 
-option(TOOB_MOCK_EFUSES "Legacy alias for TOOB_MOCK_HW" ON)
-if(NOT DEFINED TOOB_MOCK_HW)
-    set(TOOB_MOCK_HW ${TOOB_MOCK_EFUSES} CACHE BOOL "Use mock hardware driver TUs in dev profile")
+if(_TOOB_PROFILE_LOWER STREQUAL "production")
+    option(TOOB_MOCK_EFUSES "Legacy alias for TOOB_MOCK_HW" OFF)
+    if(NOT DEFINED TOOB_MOCK_HW)
+        set(TOOB_MOCK_HW OFF CACHE BOOL "Use mock hardware driver TUs in dev profile")
+    else()
+        set(TOOB_MOCK_HW ${TOOB_MOCK_HW} CACHE BOOL "Use mock hardware driver TUs in dev profile" FORCE)
+    endif()
+
+    if(TOOB_MOCK_HW OR TOOB_MOCK_EFUSES)
+        message(FATAL_ERROR "SECURITY VIOLATION: TOOB_PROFILE=production forbids mock hardware drivers (TOOB_MOCK_HW / TOOB_MOCK_EFUSES).")
+    endif()
+    if(TOOB_MOCK_TEST)
+        message(FATAL_ERROR "SECURITY VIOLATION: TOOB_PROFILE=production forbids TOOB_MOCK_TEST.")
+    endif()
+    if(TOOB_STAGE0_DEV_BYPASS)
+        message(FATAL_ERROR "SECURITY VIOLATION: TOOB_PROFILE=production forbids TOOB_STAGE0_DEV_BYPASS.")
+    endif()
+    if(TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION)
+        message(FATAL_ERROR "SECURITY VIOLATION: TOOB_PROFILE=production forbids TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION.")
+    endif()
+
+    add_compile_definitions(
+        TOOB_PROFILE_PRODUCTION=1
+        TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION=0
+    )
 else()
-    set(TOOB_MOCK_HW ${TOOB_MOCK_HW} CACHE BOOL "Use mock hardware driver TUs in dev profile" FORCE)
+    option(TOOB_MOCK_EFUSES "Legacy alias for TOOB_MOCK_HW" ON)
+    if(NOT DEFINED TOOB_MOCK_HW)
+        set(TOOB_MOCK_HW ${TOOB_MOCK_EFUSES} CACHE BOOL "Use mock hardware driver TUs in dev profile")
+    else()
+        set(TOOB_MOCK_HW ${TOOB_MOCK_HW} CACHE BOOL "Use mock hardware driver TUs in dev profile" FORCE)
+    endif()
 endif()
+
 if(TOOB_MOCK_HW)
     add_compile_definitions(TOOB_MOCK_HW=1 TOOB_MOCK_EFUSES=1)
 endif()
@@ -149,13 +186,16 @@ add_executable(toob_stage1 $<TARGET_OBJECTS:toob_stage1_entry>)
 toob_apply_strict_flags(toob_stage1 TRUE)
 
 # 5.3 Architecture-Specific P10 Constraints and Core Libraries
+# Core static library precedes HAL/chip and crypto archives so core symbols cannot be hijacked.
+target_link_libraries(toob_stage1 PRIVATE toob_core)
 if(TARGET toob_chip)
     target_link_libraries(toob_stage1 PRIVATE toob_chip)
 endif()
-target_link_libraries(toob_stage1 PRIVATE toob_core)
-
+if(TARGET toob_crypto)
+    target_link_libraries(toob_stage1 PRIVATE toob_crypto)
+endif()
 if(TARGET toob_crypto_upstream)
-    target_link_libraries(toob_stage1 PRIVATE toob_crypto toob_crypto_upstream)
+    target_link_libraries(toob_stage1 PRIVATE toob_crypto_upstream)
 endif()
 
 # 5.4 Linker Script Integration
@@ -190,12 +230,15 @@ if(NOT TOOB_ARCH STREQUAL "host")
     if(TOOB_STAGE1_USES_GENERATED_LD AND EXISTS "${CMAKE_BINARY_DIR}/generated/flash_layout_stage1b.ld")
         add_executable(toob_stage1b $<TARGET_OBJECTS:toob_stage1_entry>)
         toob_apply_strict_flags(toob_stage1b TRUE)
+        target_link_libraries(toob_stage1b PRIVATE toob_core)
         if(TARGET toob_chip)
             target_link_libraries(toob_stage1b PRIVATE toob_chip)
         endif()
-        target_link_libraries(toob_stage1b PRIVATE toob_core)
+        if(TARGET toob_crypto)
+            target_link_libraries(toob_stage1b PRIVATE toob_crypto)
+        endif()
         if(TARGET toob_crypto_upstream)
-            target_link_libraries(toob_stage1b PRIVATE toob_crypto toob_crypto_upstream)
+            target_link_libraries(toob_stage1b PRIVATE toob_crypto_upstream)
         endif()
         target_link_options(toob_stage1b PRIVATE -T${CMAKE_BINARY_DIR}/generated/flash_layout_stage1b.ld -L${CMAKE_BINARY_DIR}/generated)
         set_target_properties(toob_stage1b PROPERTIES LINK_DEPENDS "${CMAKE_BINARY_DIR}/generated/flash_layout_stage1b.ld")

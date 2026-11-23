@@ -9,9 +9,22 @@ extern "C" {
 #endif
 
 /**
+ * @brief Resolves the highest contiguous non-revoked OTP Root Public Key slot.
+ *
+ * Double-reads every OTP slot in [0, TOOB_MAX_OTP_SLOTS) and verifies both
+ * populated slot integrity (non-zero/non-0xFF and read-back agreement) and a
+ * contiguous blank tail (no holes after the first BOOT_ERR_NOT_FOUND).
+ *
+ * @param platform Hardware abstraction layer pointers.
+ * @param out_idx  Output pointer receiving the active OTP key slot index.
+ * @return         BOOT_OK on valid contiguous table, BOOT_ERR_VERIFY on fault/hole.
+ */
+boot_status_t boot_otp_get_active_key_index(const boot_platform_t *platform, uint8_t *out_idx);
+
+/**
  * @brief Derives the cryptographic Device-ID from hardware secrets.
  *
- * Mathematically binds the hardware UID, the burned Root Public Key,
+ * Mathematically binds the hardware UID, the burned Root Public Key (slot 0),
  * and a domain separator string into a 32-byte SHA-256 digest.
  * Operates entirely zero-allocation via iterative hashing.
  *
@@ -24,12 +37,11 @@ boot_status_t boot_derive_device_id(const boot_platform_t *platform, uint8_t out
 /**
  * @brief Derives a 16-byte device-bound journal key via KDF.
  *
- * Uses H(chip_uid ‖ root_pubkey ‖ "toob-journal-key-v1"), truncated
- * to 16 bytes. The key is used by the WAL chain mechanism (K4) to
- * compute device-bound chain tags over security-bearing journal entries.
- *
- * On chips without fuse secrets the binding degrades to
- * chip_uid + root_pubkey only (documented in security_model.md).
+ * When keystore->read_device_secret is present, derives
+ * H(device_secret || chip_uid || active_pubkey || "toob-journal-key-v2")[0:16].
+ * Chips without a hardware device secret require explicit
+ * TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION (v1 fallback) and otherwise fail
+ * closed with BOOT_ERR_NOT_SUPPORTED.
  *
  * @param platform Hardware abstraction layer pointers.
  * @param out_key  16-byte output buffer for the journal key.

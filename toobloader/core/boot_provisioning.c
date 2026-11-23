@@ -28,6 +28,7 @@
 #include "boot_features.h"
 #include "boot_fih.h"
 #include "boot_flash_guard.h"
+#include "boot_journal.h"
 #include "boot_panic.h"
 #include "boot_secure_zeroize.h"
 #include "generated_boot_config.h"
@@ -130,8 +131,12 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform, uint8_t *a
 
     uint32_t computed_crc = compute_boot_crc32(rx_buf, payload_len);
 
-    bool crc_ok = true;
-    BOOT_SECURE_REQUIRE(received_crc == computed_crc, { crc_ok = false; });
+    bool crc_ok = false;
+    if (boot_secure_confirm((received_crc == computed_crc) ? BOOT_OK : BOOT_ERR_VERIFY) ==
+        BOOT_OK) {
+      crc_ok = true;
+    }
+    BOOT_SECURE_REQUIRE(crc_ok && (received_crc == computed_crc), { crc_ok = false; });
     if (!crc_ok) {
       send_status(platform, tx_buf, BOOT_ERR_VERIFY);
       continue;
@@ -171,6 +176,13 @@ _Noreturn void boot_provisioning_run(const boot_platform_t *platform, uint8_t *a
       if (cmd_payload_len != 1U || cmd_payload[0] == 0x00U || cmd_payload[0] == 0xFFU ||
           !platform->provisioning->write_dslc) {
         result = BOOT_ERR_INVALID_ARG;
+        break;
+      }
+      /* Format K4 genesis WAL while DSLC is still 0x00 before burning non-zero DSLC. */
+      boot_status_t wal_stat = boot_journal_init(platform);
+      boot_journal_zeroize_secrets();
+      if (boot_secure_confirm(wal_stat) != BOOT_OK) {
+        result = (wal_stat != BOOT_OK) ? wal_stat : BOOT_ERR_VERIFY;
         break;
       }
       result = platform->provisioning->write_dslc(&cmd_payload[0], 1U);

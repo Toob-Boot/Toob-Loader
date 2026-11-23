@@ -189,6 +189,134 @@ static bool is_target_whitelisted(uint32_t target_addr, uint32_t size,
   return false;
 }
 
+static boot_status_t verify_component_digest_at_addr(const boot_platform_t *platform,
+                                                     const boot_component_t *comp,
+                                                     uint32_t base_addr, uint8_t *hash_ctx,
+                                                     size_t ctx_size, uint8_t *stream_buf,
+                                                     size_t stream_len) {
+  if (!platform->flash->read || !platform->crypto->hash_init || !platform->crypto->hash_update ||
+      !platform->crypto->hash_finish) {
+    return BOOT_ERR_NOT_SUPPORTED;
+  }
+  if ((UINT32_MAX - base_addr) < comp->image_size) {
+    return BOOT_ERR_FLASH_BOUNDS;
+  }
+
+  if (comp->chunk_size > 0U) {
+    uint32_t expected_chunks = comp->image_size / comp->chunk_size +
+                               ((comp->image_size % comp->chunk_size != 0U) ? 1U : 0U);
+    if (comp->num_chunks != expected_chunks || (UINT32_MAX / 32U) < comp->num_chunks ||
+        (UINT32_MAX - comp->chunk_hashes_flash_addr) < (comp->num_chunks * 32U)) {
+      return BOOT_ERR_INVALID_ARG;
+    }
+
+    uint32_t verified_bytes = 0U;
+    for (uint32_t c_idx = 0U; c_idx < comp->num_chunks; c_idx++) {
+      uint32_t chunk_len = (comp->image_size - verified_bytes > comp->chunk_size)
+                               ? comp->chunk_size
+                               : (comp->image_size - verified_bytes);
+
+      uint8_t exp_hash[32] __attribute__((aligned(8)));
+      uint8_t calc_hash[32] __attribute__((aligned(8)));
+      boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+      boot_secure_zeroize(calc_hash, sizeof(calc_hash));
+
+      /* Load expected digest into local RAM before hashing to prevent TOCTOU */
+      if (platform->flash->read(comp->chunk_hashes_flash_addr + (c_idx * 32U), exp_hash, 32U) !=
+          BOOT_OK) {
+        boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+        return BOOT_ERR_FLASH_HW;
+      }
+
+      boot_secure_zeroize(hash_ctx, ctx_size);
+      if (platform->crypto->hash_init(hash_ctx, ctx_size) != BOOT_OK) {
+        boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+        return BOOT_ERR_CRYPTO;
+      }
+
+      uint32_t chunk_off = 0U;
+      while (chunk_off < chunk_len) {
+        if (platform->wdt && platform->wdt->kick) {
+          platform->wdt->kick();
+        }
+        size_t step =
+            ((chunk_len - chunk_off) > stream_len) ? stream_len : (size_t)(chunk_len - chunk_off);
+        if (platform->flash->read(base_addr + verified_bytes + chunk_off, stream_buf, step) !=
+            BOOT_OK) {
+          boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+          return BOOT_ERR_FLASH_HW;
+        }
+        if (platform->crypto->hash_update(hash_ctx, stream_buf, step) != BOOT_OK) {
+          boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+          return BOOT_ERR_CRYPTO;
+        }
+        chunk_off += (uint32_t)step;
+      }
+
+      size_t d_len = sizeof(calc_hash);
+      if (platform->crypto->hash_finish(hash_ctx, calc_hash, &d_len) != BOOT_OK || d_len != 32U) {
+        boot_secure_zeroize(calc_hash, sizeof(calc_hash));
+        boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+        return BOOT_ERR_CRYPTO;
+      }
+
+      boot_status_t match = constant_time_memcmp_glitch_safe(calc_hash, exp_hash, 32U);
+      boot_secure_zeroize(calc_hash, sizeof(calc_hash));
+      boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+      BOOT_SECURE_REQUIRE(match == BOOT_OK, { return BOOT_ERR_VERIFY; });
+
+      verified_bytes += chunk_len;
+    }
+    return BOOT_OK;
+  }
+
+  uint8_t exp_hash[32] __attribute__((aligned(8)));
+  uint8_t final_hash[32] __attribute__((aligned(8)));
+  memcpy(exp_hash, comp->expected_hash, 32U);
+  boot_secure_zeroize(final_hash, sizeof(final_hash));
+
+  boot_secure_zeroize(hash_ctx, ctx_size);
+  if (platform->crypto->hash_init(hash_ctx, ctx_size) != BOOT_OK) {
+    boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+    return BOOT_ERR_CRYPTO;
+  }
+
+  uint32_t hashed_len = 0U;
+  while (hashed_len < comp->image_size) {
+    if (platform->wdt && platform->wdt->kick) {
+      platform->wdt->kick();
+    }
+    size_t step = ((comp->image_size - hashed_len) > stream_len)
+                      ? stream_len
+                      : (size_t)(comp->image_size - hashed_len);
+
+    if (platform->flash->read(base_addr + hashed_len, stream_buf, step) != BOOT_OK) {
+      boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+      return BOOT_ERR_FLASH_HW;
+    }
+
+    if (platform->crypto->hash_update(hash_ctx, stream_buf, step) != BOOT_OK) {
+      boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+      return BOOT_ERR_CRYPTO;
+    }
+    hashed_len += (uint32_t)step;
+  }
+
+  size_t d_len = sizeof(final_hash);
+  if (platform->crypto->hash_finish(hash_ctx, final_hash, &d_len) != BOOT_OK || d_len != 32U) {
+    boot_secure_zeroize(final_hash, sizeof(final_hash));
+    boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+    return BOOT_ERR_CRYPTO;
+  }
+
+  boot_status_t match = constant_time_memcmp_glitch_safe(final_hash, exp_hash, 32U);
+  boot_secure_zeroize(final_hash, sizeof(final_hash));
+  boot_secure_zeroize(exp_hash, sizeof(exp_hash));
+  BOOT_SECURE_REQUIRE(match == BOOT_OK, { return BOOT_ERR_VERIFY; });
+
+  return BOOT_OK;
+}
+
 boot_status_t boot_multiimage_apply(const boot_platform_t *platform, uint32_t staging_base,
                                     const boot_component_t *components, uint32_t num_components,
                                     const boot_allowed_region_t *whitelist, uint32_t num_regions,
@@ -212,7 +340,10 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform, uint32_t st
   }
 
   uint32_t mi_cfi_seed = 0U;
-  (void)boot_random_safe(platform, (uint8_t *)&mi_cfi_seed, sizeof(mi_cfi_seed));
+  boot_status_t rnd_st = boot_random_safe(platform, (uint8_t *)&mi_cfi_seed, sizeof(mi_cfi_seed));
+  if (rnd_st != BOOT_OK) {
+    return rnd_st;
+  }
   boot_cfi_ctx_t multi_cfi_ctx;
   boot_cfi_init(multi_cfi_ctx, mi_cfi_seed);
   boot_cfi_add_expected(multi_cfi_ctx, MI_CFI_SLOT_BOUNDS);
@@ -225,6 +356,8 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform, uint32_t st
   boot_status_t final_status = BOOT_ERR_VERIFY;
 
   bool bounds_violation = false;
+  bool id_violation = false;
+  uint32_t seen_comp_ids = 0U;
   for (uint32_t i = 0; i < num_components; i++) {
     if (!is_target_whitelisted(components[i].target_addr, components[i].image_size, whitelist,
                                num_regions)) {
@@ -236,9 +369,24 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform, uint32_t st
       bounds_violation = true;
       break;
     }
+    if (components[i].image_size > 0U) {
+      if (components[i].component_id >= 32U) {
+        id_violation = true;
+        break;
+      }
+      uint32_t cid_mask = 1U << components[i].component_id;
+      if ((seen_comp_ids & cid_mask) != 0U) {
+        id_violation = true;
+        break;
+      }
+      seen_comp_ids |= cid_mask;
+    }
   }
 
   BOOT_SECURE_REQUIRE(!bounds_violation, { return BOOT_ERR_FLASH_BOUNDS; });
+  if (id_violation) {
+    return BOOT_ERR_INVALID_ARG;
+  }
 
   boot_cfi_step(multi_cfi_ctx, MI_CFI_SLOT_BOUNDS);
 
@@ -280,6 +428,14 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform, uint32_t st
       continue;
     }
 
+    /* Verify-Before-Commit: stream-verify staging payload before erasing/programming destination. */
+    final_status =
+        verify_component_digest_at_addr(platform, &comp, staging_base + comp.staging_offset,
+                                        hash_ctx, ctx_size, stream_buf, half_stream);
+    if (final_status != BOOT_OK) {
+      goto multi_cleanup;
+    }
+
     uint32_t src_crc = 0;
     final_status = boot_crc32_flash_stream(platform, staging_base + comp.staging_offset,
                                            comp.image_size, &src_crc, stream_buf, half_stream);
@@ -301,114 +457,11 @@ boot_status_t boot_multiimage_apply(const boot_platform_t *platform, uint32_t st
       goto multi_cleanup;
     }
 
-    /* 5. Read-Back SHA-256 Verifikation: TBM1 v2 Per-Chunk Hashes oder Legacy Whole-Image Hash */
-    if (comp.chunk_size > 0) {
-      uint32_t expected_chunks =
-          comp.image_size / comp.chunk_size + ((comp.image_size % comp.chunk_size != 0u) ? 1u : 0u);
-      if (comp.num_chunks != expected_chunks || UINT32_MAX / 32u < comp.num_chunks ||
-          UINT32_MAX - comp.chunk_hashes_flash_addr < comp.num_chunks * 32u) {
-        final_status = BOOT_ERR_INVALID_ARG;
-        goto multi_cleanup;
-      }
-
-      uint32_t verified_bytes = 0;
-      for (uint32_t c_idx = 0; c_idx < comp.num_chunks; c_idx++) {
-        uint32_t chunk_len = (comp.image_size - verified_bytes > comp.chunk_size)
-                                 ? comp.chunk_size
-                                 : (comp.image_size - verified_bytes);
-
-        boot_secure_zeroize(hash_ctx, ctx_size);
-        if (platform->crypto->hash_init(hash_ctx, ctx_size) != BOOT_OK) {
-          final_status = BOOT_ERR_CRYPTO;
-          goto multi_cleanup;
-        }
-
-        uint32_t chunk_off = 0;
-        while (chunk_off < chunk_len) {
-          if (platform->wdt && platform->wdt->kick) {
-            platform->wdt->kick();
-          }
-          size_t step =
-              (chunk_len - chunk_off > half_stream) ? half_stream : (size_t)(chunk_len - chunk_off);
-          if (platform->flash->read(comp.target_addr + verified_bytes + chunk_off, stream_buf,
-                                    step) != BOOT_OK) {
-            final_status = BOOT_ERR_FLASH_HW;
-            goto multi_cleanup;
-          }
-          if (platform->crypto->hash_update(hash_ctx, stream_buf, step) != BOOT_OK) {
-            final_status = BOOT_ERR_CRYPTO;
-            goto multi_cleanup;
-          }
-          chunk_off += (uint32_t)step;
-        }
-
-        uint8_t calc_hash[32] __attribute__((aligned(8)));
-        uint8_t exp_hash[32] __attribute__((aligned(8)));
-        size_t d_len = 32;
-        if (platform->crypto->hash_finish(hash_ctx, calc_hash, &d_len) != BOOT_OK || d_len != 32) {
-          boot_secure_zeroize(calc_hash, sizeof(calc_hash));
-          final_status = BOOT_ERR_CRYPTO;
-          goto multi_cleanup;
-        }
-        if (platform->flash->read(comp.chunk_hashes_flash_addr + c_idx * 32u, exp_hash, 32u) !=
-            BOOT_OK) {
-          boot_secure_zeroize(calc_hash, sizeof(calc_hash));
-          boot_secure_zeroize(exp_hash, sizeof(exp_hash));
-          final_status = BOOT_ERR_FLASH_HW;
-          goto multi_cleanup;
-        }
-
-        boot_status_t match = constant_time_memcmp_glitch_safe(calc_hash, exp_hash, 32u);
-        boot_secure_zeroize(calc_hash, sizeof(calc_hash));
-        boot_secure_zeroize(exp_hash, sizeof(exp_hash));
-        BOOT_SECURE_REQUIRE(match == BOOT_OK, {
-          final_status = BOOT_ERR_VERIFY;
-          goto multi_cleanup;
-        });
-
-        verified_bytes += chunk_len;
-      }
-    } else {
-      boot_secure_zeroize(hash_ctx, ctx_size);
-      if (platform->crypto->hash_init(hash_ctx, ctx_size) != BOOT_OK) {
-        final_status = BOOT_ERR_CRYPTO;
-        goto multi_cleanup;
-      }
-
-      uint32_t hashed_len = 0;
-      while (hashed_len < comp.image_size) {
-        if (platform->wdt && platform->wdt->kick) {
-          platform->wdt->kick();
-        }
-        size_t step = (comp.image_size - hashed_len > half_stream) ? half_stream
-                                                                   : (comp.image_size - hashed_len);
-
-        if (platform->flash->read(comp.target_addr + hashed_len, stream_buf, step) != BOOT_OK) {
-          final_status = BOOT_ERR_FLASH_HW;
-          goto multi_cleanup;
-        }
-
-        if (platform->crypto->hash_update(hash_ctx, stream_buf, step) != BOOT_OK) {
-          final_status = BOOT_ERR_CRYPTO;
-          goto multi_cleanup;
-        }
-        hashed_len += (uint32_t)step;
-      }
-
-      uint8_t final_hash[32] __attribute__((aligned(8)));
-      size_t d_len = 32;
-      if (platform->crypto->hash_finish(hash_ctx, final_hash, &d_len) != BOOT_OK || d_len != 32) {
-        boot_secure_zeroize(final_hash, sizeof(final_hash));
-        final_status = BOOT_ERR_CRYPTO;
-        goto multi_cleanup;
-      }
-
-      boot_status_t match = constant_time_memcmp_glitch_safe(final_hash, comp.expected_hash, 32);
-      boot_secure_zeroize(final_hash, sizeof(final_hash));
-      BOOT_SECURE_REQUIRE(match == BOOT_OK, {
-        final_status = BOOT_ERR_VERIFY;
-        goto multi_cleanup;
-      });
+    /* Post-write read-back SHA-256 verification against destination slot */
+    final_status = verify_component_digest_at_addr(platform, &comp, comp.target_addr, hash_ctx,
+                                                   ctx_size, stream_buf, half_stream);
+    if (final_status != BOOT_OK) {
+      goto multi_cleanup;
     }
 
     open_txn->transfer_bitmap[bitmap_idx] |= bit_mask;

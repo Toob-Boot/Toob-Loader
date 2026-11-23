@@ -214,8 +214,9 @@ static boot_status_t verify_ghost_base(sdvm_t *s, const uint8_t *fingerprint) {
   boot_secure_zeroize(w->write_buf, w->write_cap);
 
   size_t dlen = sizeof(computed);
-  if (p->crypto->hash_finish(hash_ctx, computed, &dlen) != BOOT_OK) {
+  if (p->crypto->hash_finish(hash_ctx, computed, &dlen) != BOOT_OK || dlen != 32U) {
     boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
+    boot_secure_zeroize(computed, sizeof(computed));
     return BOOT_ERR_CRYPTO;
   }
   boot_secure_zeroize(hash_ctx, sizeof(hash_ctx));
@@ -246,7 +247,10 @@ boot_status_t boot_delta_apply(const boot_platform_t *platform, uint32_t delta_a
   boot_status_t status = BOOT_OK;
 
   uint32_t cfi_seed = 0U;
-  (void)boot_random_safe(platform, (uint8_t *)&cfi_seed, sizeof(cfi_seed));
+  status = boot_random_safe(platform, (uint8_t *)&cfi_seed, sizeof(cfi_seed));
+  if (status != BOOT_OK) {
+    return status;
+  }
   boot_cfi_ctx_t cfi;
   boot_cfi_init(cfi, cfi_seed);
   boot_cfi_add_expected(cfi, DELTA_CFI_SLOT_HDR);

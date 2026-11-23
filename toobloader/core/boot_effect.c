@@ -9,6 +9,13 @@
 #include "generated_boot_config.h"
 #include <string.h>
 
+#ifndef TOOB_TA1_STRICT_NO_CRC_SKIP
+#define TOOB_TA1_STRICT_NO_CRC_SKIP 1
+#endif
+#if defined(TOOB_PROFILE_PRODUCTION) && !TOOB_TA1_STRICT_NO_CRC_SKIP
+#error "TOOB_TA1_STRICT_NO_CRC_SKIP=0 forbidden in production!"
+#endif
+
 static boot_status_t effect_write_skip_erased(const flash_hal_t *flash, uint32_t dst,
                                               const uint8_t *buf, uint32_t len) {
   uint32_t align = (flash->write_align > 0U) ? flash->write_align : 1U;
@@ -116,6 +123,7 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform, const flash_e
     }
     BOOT_SECURE_REQUIRE(allowed, { return BOOT_ERR_FLASH_BOUNDS; });
 
+#if !TOOB_TA1_STRICT_NO_CRC_SKIP
     /* 2. Idempotenz-Check: Ist der Soll-Zustand bereits erreicht? */
     uint32_t cur_crc = 0;
     boot_status_t crc_stat =
@@ -123,6 +131,7 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform, const flash_e
     if (crc_stat == BOOT_OK && cur_crc == fx[i].post_crc) {
       continue; /* Bereits im Sollzustand (Zero-Wear Skip) */
     }
+#endif
 
     /* 3. Operation ausführen */
     boot_status_t op_stat = BOOT_OK;
@@ -194,10 +203,10 @@ boot_status_t boot_effect_execute(const boot_platform_t *platform, const flash_e
 
     /* 4. Read-Back & Verification */
     uint32_t verify_crc = 0;
-    crc_stat =
+    boot_status_t verify_crc_stat =
         boot_crc32_flash_stream(platform, fx[i].dst, fx[i].len, &verify_crc, arena, arena_len);
-    if (crc_stat != BOOT_OK) {
-      return crc_stat;
+    if (verify_crc_stat != BOOT_OK) {
+      return verify_crc_stat;
     }
     BOOT_SECURE_REQUIRE(verify_crc == fx[i].post_crc, { return BOOT_ERR_FLASH_HW; });
   }

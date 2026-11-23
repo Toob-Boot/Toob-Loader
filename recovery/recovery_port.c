@@ -88,8 +88,17 @@ toob_status_t toob_os_sha256_update(toob_os_sha256_ctx_t* ctx, const uint8_t* da
 
 toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_hash[32]) {
     (void)ctx;
-    memset(out_hash, 0, 32);
+    volatile uint8_t *p = (volatile uint8_t *)out_hash;
+    for (size_t i = 0U; i < 32U; i++) {
+        p[i] = 0U;
+    }
     return TOOB_OK;
+}
+
+uint32_t recovery_get_tick_ms(void);
+
+uint32_t recovery_get_tick_ms(void) {
+    return 0U;
 }
 
 #else
@@ -103,6 +112,16 @@ toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_has
 #define REC_GETCHAR_SLICE_MS  250U
 
 static const boot_platform_t *g_platform = NULL;
+
+uint32_t recovery_get_tick_ms(void);
+
+uint32_t recovery_get_tick_ms(void) {
+    if (g_platform != NULL && g_platform->clock != NULL &&
+        g_platform->clock->get_tick_ms != NULL) {
+        return g_platform->clock->get_tick_ms();
+    }
+    return 0U;
+}
 
 static inline void recovery_wdt_kick(void) {
     if (g_platform && g_platform->wdt && g_platform->wdt->kick) {
@@ -258,6 +277,19 @@ toob_status_t toob_os_sha256_finalize(toob_os_sha256_ctx_t* ctx, uint8_t out_has
 #endif
 }
 
+#if defined(__has_attribute)
+#if __has_attribute(no_stack_protector)
+#define TOOB_REC_NO_SSP __attribute__((no_stack_protector))
+#endif
+#endif
+#ifndef TOOB_REC_NO_SSP
+#if defined(__GNUC__) && (__GNUC__ >= 11) && !defined(__clang__)
+#define TOOB_REC_NO_SSP __attribute__((no_stack_protector))
+#else
+#define TOOB_REC_NO_SSP
+#endif
+#endif
+
 #if !defined(TOOB_MOCK_TEST) && !defined(TOOB_HOST_FUZZING) && \
     !defined(_WIN32) && !defined(__linux__) && !defined(__APPLE__) && \
     !defined(__CPROVER__)
@@ -275,12 +307,44 @@ _Noreturn void boot_panic(const boot_platform_t *platform, boot_status_t reason)
 _Noreturn void boot_terminal_halt(const boot_platform_t *platform, boot_status_t reason, uint16_t site_id);
 void toob_ecc_trap(void);
 void boot_secure_zeroize(void *v, size_t n);
+int recovery_main(void);
 
-boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *target, const uint32_t seal_key[4]) {
+static TOOB_REC_NO_SSP __attribute__((noinline)) void recovery_seed_stack_guard(
+    const boot_platform_t *platform) {
+#if !defined(TOOB_MOCK_TEST) && !defined(TOOB_HOST_FUZZING) && \
+    !defined(_WIN32) && !defined(__linux__) && !defined(__APPLE__) && \
+    !defined(__CPROVER__)
+    uintptr_t mixed = __stack_chk_guard ^ 0xA55A3C96U;
+    if (platform != NULL && platform->entropy != NULL &&
+        platform->entropy->random != NULL) {
+        uint8_t rnd[sizeof(uintptr_t)];
+        if (platform->entropy->random(rnd, sizeof(rnd)) == BOOT_OK) {
+            uintptr_t rnd_word = 0U;
+            memcpy(&rnd_word, rnd, sizeof(rnd_word));
+            mixed ^= rnd_word;
+            boot_secure_zeroize(rnd, sizeof(rnd));
+        }
+    }
+    if (platform != NULL && platform->clock != NULL &&
+        platform->clock->get_tick_ms != NULL) {
+        uint32_t ticks = platform->clock->get_tick_ms();
+        mixed ^= ((uintptr_t)ticks << 16) ^ (uintptr_t)ticks;
+    }
+    mixed ^= (uintptr_t)(const void *)platform;
+    if (mixed == 0U) {
+        mixed = 0x3EC07E51U;
+    }
+    __stack_chk_guard = mixed;
+#else
+    (void)platform;
+#endif
+}
+
+TOOB_REC_NO_SSP boot_status_t boot_main(const boot_platform_t *platform, boot_target_config_t *target, const uint32_t seal_key[4]) {
     g_platform = platform;
+    recovery_seed_stack_guard(platform);
     (void)target;
     (void)seal_key;
-    extern int recovery_main(void);
     (void)recovery_main();
     recovery_system_reboot();
 }

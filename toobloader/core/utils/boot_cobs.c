@@ -128,20 +128,26 @@ boot_status_t boot_cobs_recv_frame(const boot_platform_t *platform, uint8_t *buf
     return BOOT_ERR_INVALID_ARG;
   }
 
-  size_t rx_len = 0;
+  size_t rx_len = 0U;
+  bool in_overflow_drain = false;
 
   while (1) {
     if (platform->wdt && platform->wdt->kick) {
       platform->wdt->kick();
     }
 
-    uint8_t c;
+    uint8_t c = 0U;
     if (platform->console->getchar(&c, 100) != BOOT_OK) {
       continue;
     }
 
     if (c == COBS_MARKER_END) {
-      if (rx_len > 0) {
+      if (in_overflow_drain) {
+        in_overflow_drain = false;
+        rx_len = 0U;
+        continue;
+      }
+      if (rx_len > 0U) {
         *out_len = rx_len;
         return BOOT_OK;
       }
@@ -149,12 +155,17 @@ boot_status_t boot_cobs_recv_frame(const boot_platform_t *platform, uint8_t *buf
       continue;
     }
 
+    if (in_overflow_drain) {
+      continue;
+    }
+
     if (rx_len < buf_max) {
       buf[rx_len++] = c;
     } else {
-      /* Overflow Defense: Buffer vernichten und auf nächsten Sync warten */
+      /* Overflow Defense: Wipe buffer and drain remaining bytes until next 0x00 delimiter */
       boot_secure_zeroize(buf, buf_max);
-      rx_len = 0;
+      rx_len = 0U;
+      in_overflow_drain = true;
     }
   }
 }

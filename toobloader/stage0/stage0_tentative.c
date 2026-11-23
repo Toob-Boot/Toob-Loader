@@ -16,8 +16,6 @@
 #include "stage0_crypto.h"
 #include <stddef.h>
 
-extern TOOB_NOINIT toob_handoff_t toob_handoff_state;
-
 uint32_t stage0_evaluate_tentative(const boot_platform_t *platform, uint32_t current_slot) {
   if (!platform || !platform->clock || !platform->clock->get_reset_reason) {
     return current_slot;

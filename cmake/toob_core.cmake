@@ -48,8 +48,10 @@ add_custom_target(generate_manifest
 )
 
 
-# Optional double-execution of Ed25519 verification for fault-injection resistance.
-option(TOOB_DOUBLE_VERIFY "Enable double-execution of Ed25519 for highest fault resistance (~+30ms)" OFF)
+# Double-execution of Ed25519 verification defaults ON for fault-injection resistance.
+if(NOT DEFINED TOOB_DOUBLE_VERIFY)
+    option(TOOB_DOUBLE_VERIFY "Enable double-execution of Ed25519 verification for fault resistance" ON)
+endif()
 
 # ------------------------------------------------------------------------------
 # 2a. Toob-Boot Utilities (Algorithms & Helper Modules)
@@ -88,6 +90,12 @@ toob_apply_strict_flags(toob_utils TRUE)
 add_dependencies(toob_utils generate_manifest)
 if(TOOB_ARCH STREQUAL "host")
     target_compile_definitions(toob_utils PUBLIC TOOB_MOCK_TEST)
+endif()
+
+if(TOOB_DOUBLE_VERIFY)
+    target_compile_definitions(toob_utils PRIVATE TOOB_DOUBLE_VERIFY=1)
+else()
+    target_compile_definitions(toob_utils PRIVATE TOOB_DOUBLE_VERIFY=0)
 endif()
 
 # ------------------------------------------------------------------------------
@@ -130,17 +138,19 @@ endif()
 
 if(TOOB_DOUBLE_VERIFY)
     target_compile_definitions(toob_core PRIVATE TOOB_DOUBLE_VERIFY=1)
+else()
+    target_compile_definitions(toob_core PRIVATE TOOB_DOUBLE_VERIFY=0)
 endif()
 
 # ------------------------------------------------------------------------------
 # 3. Include Paths, Linking & Hardening
 # ------------------------------------------------------------------------------
 
-target_include_directories(toob_core PUBLIC 
-    ${CMAKE_SOURCE_DIR}/common/include
-    ${TOOB_CORE_DIR}/include 
-    ${TOOB_UTILS_DIR}/include
+target_include_directories(toob_core PUBLIC
     ${CMAKE_BINARY_DIR}/generated
+    ${CMAKE_SOURCE_DIR}/common/include
+    ${TOOB_CORE_DIR}/include
+    ${TOOB_UTILS_DIR}/include
     ${TOOB_SDK_DIR}/libtoob/include
 )
 
@@ -159,12 +169,14 @@ if(TOOB_ARCH STREQUAL "host")
 endif()
 if(TOOB_DOUBLE_VERIFY)
     target_compile_definitions(toob_stage1_entry PRIVATE TOOB_DOUBLE_VERIFY=1)
+else()
+    target_compile_definitions(toob_stage1_entry PRIVATE TOOB_DOUBLE_VERIFY=0)
 endif()
 target_include_directories(toob_stage1_entry PUBLIC
+    ${CMAKE_BINARY_DIR}/generated
     ${CMAKE_SOURCE_DIR}/common/include
     ${TOOB_CORE_DIR}/include
     ${TOOB_UTILS_DIR}/include
-    ${CMAKE_BINARY_DIR}/generated
     ${TOOB_SDK_DIR}/libtoob/include
 )
 toob_apply_strict_flags(toob_stage1_entry TRUE)

@@ -46,10 +46,9 @@ static inline uint32_t ceil_div_u32(uint32_t a, uint32_t b) {
  * against physical staging capacity to prevent OOB reads during hashing.
  * -------------------------------------------------------------------------- */
 tbm1_reject_t tbm1_precheck(const uint8_t *buf, size_t staging_cap) {
-  /* Null / alignment guard. The header is read via a (tbm1_header_t *) cast;
-   * a misaligned or null buffer is a hard-fault risk on ARMv6-M (M0/M0+).
-   * Cheap belt-and-suspenders even though the struct is `packed`. */
-  if (buf == NULL || ((uintptr_t)buf & (sizeof(uint32_t) - 1u)) != 0u) {
+  /* Null / 8-byte alignment guard: required by tbm1_header_t and 8-byte
+   * aligned region payloads (such as TBM1_REGION_REVERSE_DELTA descriptors). */
+  if (buf == NULL || ((uintptr_t)buf & 7u) != 0u) {
     return TBM1_BAD_ALIGN;
   }
 
@@ -110,6 +109,9 @@ tbm1_reject_t tbm1_precheck(const uint8_t *buf, size_t staging_cap) {
  * directory sorted by region offset, or valid manifests are rejected here.
  * -------------------------------------------------------------------------- */
 tbm1_reject_t tbm1_validate_regions(const tbm1_header_t *h) {
+  if (h == NULL || ((uintptr_t)h & 7u) != 0u) {
+    return TBM1_BAD_ALIGN;
+  }
   size_t sig_start = tbm1_signed_len(h);
   if (sig_start == 0) {
     return TBM1_BAD_TOTAL_LEN;
@@ -167,6 +169,12 @@ tbm1_reject_t tbm1_validate_regions(const tbm1_header_t *h) {
  * out_off must point to an array of at least TBM1_MAX_IMAGES uint32_t.
  * -------------------------------------------------------------------------- */
 tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap, uint32_t *out_off) {
+  if (h == NULL || ((uintptr_t)h & 7u) != 0u) {
+    return TBM1_BAD_ALIGN;
+  }
+  if (out_off == NULL) {
+    return TBM1_BAD_IMAGE_FIELD;
+  }
   if (h->image_count < 1 || h->image_count > TBM1_MAX_IMAGES) {
     return TBM1_BAD_IMAGE_COUNT;
   }
@@ -178,6 +186,9 @@ tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap, u
   /* HW compatibility gate (compile-time device identity).
    * A production build MUST define TOOB_DEVICE_PRODUCT_ID (see boot_tbm1.h),
    * otherwise this check is compiled out and firmware ships without gating. */
+#if defined(TOOB_PROFILE_PRODUCTION) && (TOOB_DEVICE_PRODUCT_ID == 0xFFFFU)
+#error "TOOB_DEVICE_PRODUCT_ID must be defined to a concrete product ID in production builds!"
+#endif
 #if TOOB_DEVICE_PRODUCT_ID != 0xFFFFU
 #if TOOB_DEVICE_VENDOR_ID != 0xFFFFU
   if (h->vendor_id != TOOB_DEVICE_VENDOR_ID) {
@@ -203,7 +214,7 @@ tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap, u
     const tbm1_image_desc_t *d = &h->images[i];
 
     /* --- chunk math (overflow-safe ceiling) --- */
-    if (d->chunk_size == 0u) {
+    if (d->chunk_size == 0u || d->installed_size == 0u) {
       return TBM1_BAD_CHUNK_MATH;
     }
     if (d->num_chunks != ceil_div_u32(d->installed_size, d->chunk_size)) {
@@ -241,7 +252,8 @@ tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap, u
     }
     if (i > 0) {
       const tbm1_image_desc_t *prev = &h->images[i - 1];
-      if (d->data_off < prev->data_off + prev->stored_size) {
+      if (UINT32_MAX - prev->data_off < prev->stored_size ||
+          d->data_off < prev->data_off + prev->stored_size) {
         return TBM1_BAD_PAYLOAD_LAYOUT;
       }
     }
@@ -265,6 +277,14 @@ tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap, u
   /* --- Region 6: Reverse-Delta Validation --- */
   const tbm1_region_t *rdelta = tbm1_find_region(h, TBM1_REGION_REVERSE_DELTA);
   if (rdelta != NULL) {
+    size_t sig_start = tbm1_signed_len(h);
+    if (sig_start == 0U || rdelta->off > (uint32_t)sig_start ||
+        rdelta->len > (uint32_t)sig_start - rdelta->off) {
+      return TBM1_BAD_REGION_BOUNDS;
+    }
+    if ((rdelta->off & 7u) != 0u || ((((uintptr_t)h + (uintptr_t)rdelta->off) & 7u) != 0u)) {
+      return TBM1_BAD_REGION_ALIGN;
+    }
     if (rdelta->len == 0 || (rdelta->len % sizeof(tbm1_rdelta_desc_t)) != 0) {
       return TBM1_BAD_RDELTA;
     }
@@ -292,7 +312,8 @@ tbm1_reject_t tbm1_validate_images(const tbm1_header_t *h, size_t staging_cap, u
       if ((size_t)rd->data_off >= staging_cap) {
         return TBM1_BAD_RDELTA;
       }
-      if ((size_t)rd->stored_size > staging_cap - (size_t)rd->data_off) {
+      if ((size_t)rd->stored_size > staging_cap - (size_t)rd->data_off ||
+          UINT32_MAX - rd->data_off < rd->stored_size) {
         return TBM1_BAD_RDELTA;
       }
       if (rd->restored_size == 0) {

@@ -21,12 +21,15 @@ endif()
 # Host SIL has no bare-metal architecture sources; guard target creation.
 if(ARCH_SOURCES)
     add_library(toob_arch STATIC ${ARCH_SOURCES})
-    target_include_directories(toob_arch PUBLIC 
-        ${TOOB_HAL_ARCH_DIR}/include
+    target_include_directories(toob_arch PUBLIC
+        ${CMAKE_BINARY_DIR}/generated
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
-        ${CMAKE_BINARY_DIR}/generated
+        ${TOOB_CORE_DIR}/utils/include
         ${TOOB_SDK_DIR}/libtoob/include
+    )
+    target_include_directories(toob_arch SYSTEM AFTER PUBLIC
+        ${TOOB_HAL_ARCH_DIR}/include
     )
 endif()
 
@@ -144,21 +147,23 @@ endif()
 if(FLAT_BOM_SOURCES)
     add_library(toob_chip STATIC ${FLAT_BOM_SOURCES})
 
-    # Expose bootloader core and generated interfaces to the chip HAL layer
-    target_include_directories(toob_chip PUBLIC 
-        ${TOOB_HAL_CHIP_DIR}
-        ${TOOB_HAL_ROOT}
-        ${FLAT_BOM_INCLUDES}
+    # Expose bootloader core and generated interfaces before third-party/HAL include paths
+    target_include_directories(toob_chip PUBLIC
+        ${CMAKE_BINARY_DIR}/generated
         ${CMAKE_SOURCE_DIR}/common/include
         ${TOOB_CORE_DIR}/include
         ${TOOB_CORE_DIR}/utils/include
-        ${CMAKE_BINARY_DIR}/generated
         ${TOOB_SDK_DIR}/libtoob/include
+    )
+    target_include_directories(toob_chip SYSTEM AFTER PUBLIC
+        ${TOOB_HAL_CHIP_DIR}
+        ${TOOB_HAL_ROOT}
+        ${FLAT_BOM_INCLUDES}
         ${TOOB_CRYPTO_BACKEND_DIR}
         ${TOOB_CRYPTO_HASH_DIR}
     )
     if(DEFINED TOOB_CRYPTO_PQC_DIR AND NOT "${TOOB_CRYPTO_PQC_DIR}" STREQUAL "")
-        target_include_directories(toob_chip PUBLIC ${TOOB_CRYPTO_PQC_DIR})
+        target_include_directories(toob_chip SYSTEM AFTER PUBLIC ${TOOB_CRYPTO_PQC_DIR})
     endif()
     if(TOOB_CHIP STREQUAL "sandbox")
         target_include_directories(toob_chip PUBLIC test/mocks)

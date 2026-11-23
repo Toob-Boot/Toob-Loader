@@ -33,15 +33,25 @@ does not weaken A2, and vice versa. The effective floor is `max(A1, A2)`.
 
 ## §3 — Journal Chain Mechanics (K4)
 
-### 3.1 Device-Bound Key
+### 3.1 Device-Bound Key & Active OTP Root Resolution
 
-The journal key `k_journal` is derived as:
+On every boot, the active Root Public Key slot is discovered by double-reading all
+contiguous provisioned OTP slots `0 .. TOOB_MAX_OTP_SLOTS - 1` (`boot_otp_get_active_key_index`),
+enforcing a blank tail (`Stage0Chain.v all_blank_tail`) and rejecting all-zero/all-`0xFF`
+keys or read-back discrepancies.
+
+When `keystore->read_device_secret` is implemented (HAL V3 append-only extension),
+the journal key `k_journal` is derived as:
 
 ```
-k_journal = H(chip_uid ‖ root_pubkey ‖ "toob-journal-key-v1")[0:16]
+k_journal = H(device_secret || chip_uid || active_root_pubkey || "toob-journal-key-v2")[0:16]
 ```
 
-This key is **unique per device** and deterministic (re-derivable on every boot).
+Chips without hardware fuse secrets fail closed with `BOOT_ERR_NOT_SUPPORTED` unless
+compiled explicitly with the chip capability flag `TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION=1`
+(which selects `"toob-journal-key-v1"` without `device_secret` and is documented as `L-2`).
+All static K4 secrets (`journal_key` and cached TMR state) are zeroized via
+`boot_journal_zeroize_secrets()` prior to handoff.
 
 ### 3.2 Chain Tag Computation
 
@@ -79,7 +89,7 @@ is detected once the eFuse epoch has advanced.
 | Limitation | Impact | Mitigation |
 |---|---|---|
 | **L-1** Within the same eFuse epoch, a full WAL replay is undetectable. | An attacker who can write flash and knows `k_journal` can replay a complete old WAL state. | The eFuse counter is the only monotone anchor; it is intentionally burned sparingly. |
-| **L-2** On chips without protected key storage, `k_journal` degrades. | The key binding reduces to `H(chip_uid ‖ root_pubkey ‖ ...)` — detectable only by actors without code execution. | Documented degradation, not a silent failure. |
+| **L-2** On chips without protected key storage (`read_device_secret == NULL`) and explicit `TOOB_ALLOW_PUBLIC_JOURNAL_KEY_DEGRADATION=1`, `k_journal` degrades. | The key binding reduces to `H(chip_uid ‖ active_root_pubkey ‖ "toob-journal-key-v1")` — no silent degradation occurs without the explicit capability flag. | Explicit chip capability gating (`BOOT_ERR_NOT_SUPPORTED` default). |
 | **L-3** Chain tag is 128 bits (truncated SHA-256). | Collision resistance is 2^64 (birthday bound). | Sufficient for the embedded threat model; full 256-bit tags would exceed TMR reserved space. |
 
 ---
@@ -98,3 +108,34 @@ The A1 and A2 defense lines are architecturally independent:
 3. **Combined floor**: `boot_rollback_verify_svn` checks both lines
    independently. The effective SVN floor is `max(WAL_svn, eFuse_epoch)`.
    A downgrade is rejected if *either* line fails.
+
+---
+
+## §6 — Fail-Closed WAL Initialization & Hardening Guarantees
+
+- **Deployed Blank-WAL Wipe Rejection**: When no valid WAL sector exists (`highest_idx == -1`), `boot_journal_init` fails closed (`BOOT_ERR_VERIFY`) if hardware `efuse_epoch > 0` or `dslc != 0x00` (or if either hardware read fails with an unexpected error), preventing flash-wipe reset attacks on provisioned devices.
+- **No Unauthenticated `chain_entry_count == 0` / Legacy Bypasses**: K4 TMR MAC verification and `WAL_INTENT_*` MAC checks run unconditionally once `boot_derive_journal_key` succeeds. Legacy V1 WAL magic (`WAL_ABI_VERSION_MAGIC_LEGACY`) is rejected (`BOOT_ERR_ABI_MISMATCH`) unless `TOOB_ALLOW_LEGACY_WAL_MIGRATION=1` is compiled explicitly.
+- **Reclaimed KDM Floor (`kdm_seq_floor`)**: `wal_tmr_payload_t` (`WAL_TMR_VERSION_9`, 112B) anchors `kdm_seq_floor` inside the K4-authenticated TMR payload so `boot_cloud_cmd` rejects KDM quorum rollback below the last ratified sequence number.
+
+---
+
+## §7 — Authenticated Slot Execution & Rollback (`TSIG`)
+
+- Every booted slot image (Normal App, Recovery OS) and backup/rollback source (`boot_rollback`, `swapmove`, `oneway`) is authenticated by `boot_verify_slot_image` over the 72-byte `toob_img_sig_trailer_t` (`TOOB_IMG_SIG_MAGIC = "TSIG"`, SHA-256 digest over `[0 .. image_size - 72)`, non-revoked OTP slot check, and Ed25519 signature) prior to proof sealing (`boot_proof_seal`) or slot restoration.
+- `TOOB_ALLOW_UNSIGNED_APP_BOOT` is compile-time forbidden when `TOOB_PROFILE_PRODUCTION` is defined.
+- Reverse-delta descriptors in `boot_transport_oneway` (`resolve_staging_rdelta`) authenticate the full TBM1 manifest via `boot_verify_manifest_envelope` (not `fixed_crc32` alone) before inspecting descriptor fields.
+- `stage_apply_raw` verifies the Staging Merkle tree unconditionally unless the K4 WAL transaction explicitly records that a bidirectional chunk swap (`SWAPSCRATCH` `0xAA55AA55U` or `TOOB_PHASE_SWAPMOVE_SWAP`) has already modified Staging in-place; final slot `TSIG` verification still executes prior to handoff.
+
+---
+
+## §8 — PQC Public-Key Pinning & Stage 0 RAM-First Verification
+
+- **PQC Pubkey Pinning**: When `TOOB_PQC_ENABLED` hybrid verification is active, `boot_verify_manifest_envelope` hashes the envelope-embedded `pubkey_pqc` with SHA-256 and verifies a constant-time match against `keystore->read_pqc_pubkey_hash(expected, key_index)` or compile-time `TOOB_PINNED_PQC_PUBKEY_SHA256`, failing closed if neither anchor is provisioned.
+- **Stage 0 RAM-First Copy & Hardware Counter Floor**: Stage 0 validates RAM destinations against `.data`/`.bss` (`_sdata.._ebss`) and the active stack guard window, copies RAM payloads once into target SRAM prior to hashing and Ed25519 signature verification (eliminating Flash-to-RAM TOCTOU), and enforces `boot_read_monotonic_counter_safe` alongside `stage1_svn`.
+
+---
+
+## §9 — Runtime Entropy Health & CRC-32 Skip Policy
+
+- `boot_random_safe` enforces stuck-at `0x00`/`0xFF`, uniform-byte, constant linear stride (`len >= 8`), and NIST SP 800-90B repetition-count (`>= 8` consecutive equal bytes on `len >= 16`) checks, zeroizing the buffer on failure. Callers propagate errors fail-closed.
+- `TOOB_TA1_STRICT_NO_CRC_SKIP` defaults to `1` (and `0` is compile-time forbidden under `TOOB_PROFILE_PRODUCTION`), eliminating pre-write CRC-32 collision skips in `boot_effect`, `boot_swap`, and `boot_transport_swapmove`, while gating 3-sector chunk tearing deduction strictly on `is_resuming_this_chunk`.
